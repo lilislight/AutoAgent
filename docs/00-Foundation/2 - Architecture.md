@@ -15,8 +15,10 @@ flowchart TD
     InputAdapter[Input Adapter]
     Invocation[Invocation]
     Runtime[Runtime]
+    WorkflowExecutor[WorkflowExecutor]
     Scheduler[Scheduler]
-    Kernel[Kernel]
+    NodeExecutor[NodeExecutor]
+    StateManager[StateManager]
     Optimizer[Optimizer]
     RuntimeSession[(Runtime Session)]
     RuntimeRun[(Runtime Run)]
@@ -32,16 +34,21 @@ flowchart TD
     WorkflowIR -->|program structure| Runtime
     Runtime -->|lookup/create by session key| RuntimeSession
     Runtime -->|creates per invocation| RuntimeRun
+    Runtime -->|starts or resumes run| WorkflowExecutor
 
     WorkflowIR -->|static graph and policies| Scheduler
     RuntimeSession -.->|durable context| Scheduler
     RuntimeRun -.->|node/edge state| Scheduler
 
-    Scheduler -->|decides next action| Kernel
-    Kernel -->|invokes capability| Operator
-    Kernel -->|updates durable context| RuntimeSession
-    Kernel -->|updates run state/results| RuntimeRun
-    Kernel -->|continues scheduling loop| Scheduler
+    WorkflowExecutor -->|asks next action| Scheduler
+    Scheduler -->|returns dispatch/wait/complete/fail| WorkflowExecutor
+    WorkflowExecutor -->|dispatches selected nodes| NodeExecutor
+    NodeExecutor -->|invokes capability| Operator
+    Scheduler -->|proposes graph state changes| StateManager
+    NodeExecutor -->|proposes execution state changes| StateManager
+    WorkflowExecutor -->|applies changes through| StateManager
+    StateManager -->|updates durable context| RuntimeSession
+    StateManager -->|updates run state/results| RuntimeRun
 
     RuntimeSession -.->|runtime evidence| Optimizer
     RuntimeRun -.->|runtime evidence| Optimizer
@@ -54,7 +61,7 @@ Developers write Workflows. Developers may also register Operators to extend the
 set of computation capabilities available to the system.
 
 The Compiler transforms a Workflow into Workflow IR. Workflow IR is the static
-program structure used by Runtime, Scheduler, and Kernel.
+program structure used by Runtime, Scheduler, and NodeExecutor.
 
 External Input Adapters such as API handlers, Pub/Sub consumers, webhook
 listeners, cron schedulers, manual triggers, or other Workflows create
@@ -65,10 +72,10 @@ Runtime uses the session key to look up or create a Runtime Session. If no
 session key is provided, Runtime may generate a fresh key. Runtime then creates a
 Runtime Run for the invocation.
 
-The Scheduler reads Workflow IR, Runtime Session context, and Runtime Run state
-to decide what should happen next. The Kernel executes that decision, invokes
-Operators when needed, handles results or failures, updates Runtime Session and
-Runtime Run state, and returns control to the scheduling loop.
+WorkflowExecutor drives the run loop. Scheduler reads Workflow IR, Runtime
+Session context, and Runtime Run state to decide what should happen next.
+NodeExecutor executes selected nodes and invokes Operators when needed.
+StateManager applies and persists state changes from Scheduler and NodeExecutor.
 
 ## Runtime Session and Runtime Run Position
 
@@ -103,7 +110,7 @@ through the Workflow graph.
 ## Operator Extension Path
 
 Operators are reusable computation capabilities. A Workflow does not directly
-implement computation. Instead, its nodes reference Operators, and the Kernel
+implement computation. Instead, its nodes reference Operators, and NodeExecutor
 invokes those Operators during execution.
 
 This allows AutoAgent OS to treat LLMs, functions, tools, browsers, databases,

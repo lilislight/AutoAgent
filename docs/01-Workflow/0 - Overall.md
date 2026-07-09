@@ -10,7 +10,7 @@ A Workflow is the static program definition for AutoAgent OS.
 
 It describes executable structure, but it does not execute. Execution is handled
 later by Compiler, Input Adapter, Runtime Session, Runtime Run, Scheduler,
-Kernel, and Operators.
+NodeExecutor, and Operators.
 
 A Workflow should describe the program graph: what nodes exist, how they are
 connected, how data should flow, and which policies apply to schedulable steps.
@@ -87,16 +87,13 @@ enter the same program graph. For example, one entry may start from a full API
 request, another from a Pub/Sub event payload, and another from a manual
 reprocess command. Each invocation selects one entry node for that Runtime Run.
 
-The default first-version behavior should be:
+Version 1 behavior:
 
 ```text
 each invocation selects one entry node
 each invocation creates one Runtime Run
 session reuse is controlled by runtime session key
 ```
-
-Future designs may support starting multiple entry nodes from one invocation or
-resuming existing waiting runs from external callbacks.
 
 ## Exit
 

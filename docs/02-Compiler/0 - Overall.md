@@ -9,7 +9,8 @@ Workflow -> Compiler -> Workflow IR
 ```
 
 Workflow IR is the static runtime-readable program structure used by Scheduler
-and Kernel. It is not Runtime Session state and it is not Runtime Run state.
+and NodeExecutor. It is not Runtime Session state and it is not Runtime Run
+state.
 
 ## Position
 
@@ -79,13 +80,13 @@ Workflow IR must not contain runtime state:
 - resource usage
 - Scheduler decisions
 
-Those belong to Runtime Session, Runtime Run, Scheduler, Kernel, or runtime
-infrastructure.
+Those belong to Runtime Session, Runtime Run, Scheduler, NodeExecutor, or
+runtime infrastructure.
 
 ## Design Goal
 
 The Compiler should make runtime components simpler.
 
 Scheduler should not repeatedly derive graph structure from raw Workflow objects.
-Kernel should not parse authoring forms or loose capability strings. Runtime
-Session and Runtime Run should not store static graph information.
+NodeExecutor should not parse authoring forms or loose capability strings.
+Runtime Session and Runtime Run should not store static graph information.

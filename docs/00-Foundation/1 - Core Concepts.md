@@ -17,7 +17,8 @@ The goal is to provide OS-like architectural boundaries: Workflow defines the
 program, Compiler produces Workflow IR, Input Adapters turn outside-world events
 or calls into Workflow Invocations, Runtime Session stores durable execution
 state, Runtime Run stores one invocation's execution state, Scheduler decides the
-next step, Kernel executes Instructions, and Operators provide computation.
+next graph action, WorkflowExecutor drives the run loop, NodeExecutor executes
+nodes, StateManager persists state, and Operators provide computation.
 
 The first version should focus on executing one Workflow or a small number of
 Workflows reliably. It should not attempt to provide a full daemon runtime,
@@ -34,18 +35,20 @@ OS-like extensions.
 
 ### Level 1: Framework Core
 
-These are expected first-version capabilities:
+These are expected Version 1 capabilities:
 
 - Workflow execution through nodes and edges
 - Edge conditions
 - Basic join behavior
 - Basic routing behavior
+- Multiple Workflow entry nodes, with one selected entry per invocation
 - Workflow invocation with explicit input
 - Runtime Session lookup or creation by session key
 - One Runtime Run per invocation
 - Operator invocation
 - Runtime Context
-- Retry and timeout policy
+- Retry, timeout, and resource policy
+- Waiting nodes and resume through external events
 
 ### Level 2: Autonomous Runtime Extensions
 
@@ -54,10 +57,9 @@ These are important but can be designed after the core model is stable:
 - Optimizer patches
 - Nested Workflow through child Runtime Session or child Runtime Run
 - Dynamic map/fan-out
-- Human wait/resume
 - Checkpoint and recovery
-- Resource policy
-- External callbacks that resume existing sessions or waiting runs
+- Multiple coordinated entries sharing one Runtime Session state model
+- Same-session concurrent Runtime Runs with explicit context conflict handling
 
 ### Level 3: OS-like Advanced Features
 
@@ -77,7 +79,7 @@ A Workflow is the static program written by the developer.
 
 From the developer's perspective, using AutoAgent OS means writing a Workflow and
 letting the operating system execute it. The developer should not need to manage
-Kernel dispatch, runtime scheduling, state persistence, or execution recovery
+node dispatch, runtime scheduling, state persistence, or execution recovery
 inside the Workflow itself.
 
 A Workflow defines what the autonomous software can do. It may describe logic,
@@ -129,7 +131,7 @@ Workflow IR may contain:
 - Bindings: how inputs and outputs are connected.
 
 A node may contain an execution specification, but it is not itself a runtime
-command. Runtime commands are produced during execution by the Kernel based on
+command. Runtime work is produced during execution by WorkflowExecutor based on
 Scheduler decisions, Workflow IR, Runtime Session data, and Runtime Run state.
 
 Operating system analogy:
@@ -250,15 +252,14 @@ The Scheduler decides what should happen next.
 It reads the Workflow IR, Runtime Session, and Runtime Run, then decides which
 node, transition, or runtime action should happen next.
 
-The Scheduler does not execute computation directly. It produces execution
-decisions for the Kernel.
+The Scheduler does not execute computation directly. It produces scheduling
+decisions for WorkflowExecutor.
 
 A Scheduler may consider run state, ready nodes, completed nodes, failed nodes,
-edge conditions, runtime context, events, policies, and resource constraints.
+edge conditions, runtime context, events, and graph policies.
 
-Conceptually, the Scheduler is separate from the Kernel because scheduling
-strategy may vary. In implementation, the Scheduler may be an internal component
-of the Kernel.
+Conceptually, the Scheduler is separate from NodeExecutor because graph
+readiness and node execution are different responsibilities.
 
 Operating system analogy:
 
@@ -266,24 +267,28 @@ Operating system analogy:
 OS scheduler -> AutoAgent OS Scheduler
 ```
 
-## Kernel
+## WorkflowExecutor and NodeExecutor
 
-The Kernel executes and controls runtime execution.
+WorkflowExecutor drives a Runtime Run.
 
-It receives decisions from the Scheduler and performs the system-level work
-required to execute them. The Kernel is responsible for enforcing runtime rules,
-materializing executable Instructions, dispatching execution, handling results or
-failures, updating Runtime Session and Runtime Run state, and returning the
-system to the Scheduler for the next decision.
+It receives decisions from Scheduler, applies proposed state changes through
+StateManager, dispatches selected nodes to NodeExecutor, and stops when the run
+waits, completes, or fails.
 
-An Instruction is a runtime command executable by the Kernel. It may represent an
-Operator call, waiting for an event, creating a checkpoint, suspending a run,
-committing a state update, or other system-level action.
+NodeExecutor executes selected Workflow nodes. It prepares node input from
+Workflow IR and Runtime Context, checks execution policies, invokes Operators or
+system capabilities, and returns state changes for completion, failure, or
+waiting.
+
+StateManager is the only component that applies and persists runtime state
+changes. Scheduler and NodeExecutor should return proposed changes rather than
+mutating Runtime Run objects directly.
 
 Operating system analogy:
 
 ```text
-OS kernel -> AutoAgent OS Kernel
+Program runner / execution engine -> WorkflowExecutor
+Device or process executor -> NodeExecutor
 ```
 
 ## Operator
@@ -310,10 +315,10 @@ From the operating system's perspective, an LLM and a function are both
 Operators. One may be probabilistic and the other deterministic, but both are
 managed through the same computation model.
 
-Invoking an Operator is one kind of Kernel Instruction. The Kernel prepares the
-runtime input, dispatches the Operator, receives the result, and writes the
-result back into Runtime Session or Runtime Run state according to the compiled
-bindings.
+Invoking an Operator is one kind of node execution. NodeExecutor prepares the
+runtime input, dispatches the Operator, receives the result, and returns state
+changes that write results back into Runtime Session or Runtime Run state
+according to compiled bindings.
 
 Operating system analogy:
 
@@ -326,10 +331,11 @@ Device / executable computation capability -> Operator
 A Workflow node is a management boundary, not a line-of-code boundary.
 
 AutoAgent OS should not force every small program step through Scheduler and
-Kernel. Ordinary implementation details should stay inside Operators. A step
-should become a node when the system benefits from managing it independently,
-such as for retry, timeout, failure routing, observability, parallelism, human
-approval, expensive execution, external side effects, or optimizer patches.
+NodeExecutor. Ordinary implementation details should stay inside Operators. A
+step should become a node when the system benefits from managing it
+independently, such as for retry, timeout, failure routing, observability,
+parallelism, human approval, expensive execution, external side effects, or
+optimizer patches.
 
 This keeps the framework from turning ordinary function calls into unnecessarily
 heavy runtime scheduling work.

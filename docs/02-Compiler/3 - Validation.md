@@ -130,8 +130,9 @@ Routing policies may also require graph-specific checks, such as whether
 
 Loops are valid Workflow structure.
 
-Workflow IR should not store cycle metadata unless Scheduler or Kernel directly
-needs it. The Compiler should analyze loops internally and reject dead loops.
+Workflow IR should not store cycle metadata unless Scheduler or NodeExecutor
+directly needs it. The Compiler should analyze loops internally and reject dead
+loops.
 
 A loop is invalid when it is statically clear that it cannot leave the cyclic
 region.
@@ -145,8 +146,8 @@ valid: loop has a conditional edge that can leave the loop
 valid: retry/revision loop can route to an exit or failure path
 ```
 
-The first implementation can be conservative. If the Compiler cannot prove a loop
-is safe, it should produce a diagnostic.
+The Version 1 Compiler is conservative. If it cannot prove a loop is safe, it
+should produce a diagnostic.
 
 ## Target Validation
 
@@ -158,10 +159,3 @@ Examples:
 - dynamic map is declared but unsupported
 - resource policy is declared but resource accounting is unavailable
 - nested Workflow capability is declared but child execution is unavailable
-
-## Open Questions
-
-- Which warnings should strict mode promote to errors?
-- Should unresolved context paths be errors or warnings?
-- How much schema compatibility can be checked statically?
-- Should target validation live in Compiler or Runtime admission control?

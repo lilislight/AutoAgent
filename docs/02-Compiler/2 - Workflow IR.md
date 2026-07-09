@@ -2,7 +2,8 @@
 
 Workflow IR is the static compiled representation of a Workflow.
 
-It is the runtime-readable program structure consumed by Scheduler and Kernel.
+It is the runtime-readable program structure consumed by Scheduler and
+NodeExecutor.
 It does not contain Runtime Session or Runtime Run state.
 
 ## Workflow Model vs Workflow IR
@@ -107,7 +108,7 @@ class IRNode:
     metadata: dict[str, Any] = field(default_factory=dict)
 ```
 
-Scheduler mainly uses join/routing/entry/exit fields. Kernel mainly uses
+Scheduler mainly uses join/routing/entry/exit fields. NodeExecutor mainly uses
 capability, input plan, output bindings, and execution policies.
 
 ## IREdge
@@ -159,7 +160,7 @@ capability registry, or Workflow registry.
 
 ## InputPlan
 
-`InputPlan` describes how Kernel should build node input at runtime.
+`InputPlan` describes how NodeExecutor should build node input at runtime.
 
 ```python
 @dataclass(frozen=True)

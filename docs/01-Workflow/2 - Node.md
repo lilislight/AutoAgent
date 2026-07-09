@@ -3,7 +3,8 @@
 This document defines the canonical Node data model.
 
 A Node is a static execution unit inside a Workflow. It describes a schedulable
-step, but runtime execution is controlled by Scheduler and Kernel.
+step, but runtime execution is controlled by Scheduler, WorkflowExecutor, and
+NodeExecutor.
 
 ## Python Model
 
@@ -142,13 +143,13 @@ Examples that usually should stay inside an Operator:
 - request construction
 - local parsing that does not need separate retry or observability
 
-AutoAgent OS should not force every function call through Scheduler and Kernel.
-Workflow nodes should expose the steps worth managing at the OS layer.
+AutoAgent OS should not force every function call through Scheduler and
+NodeExecutor. Workflow nodes should expose the steps worth managing at the OS
+layer.
 
 ## NodePolicy
 
-`NodePolicy` groups optional runtime policies. The container is designed for
-forward compatibility; the first implementation can support only a subset.
+`NodePolicy` groups runtime policies used by Scheduler and NodeExecutor.
 
 ```python
 @dataclass(frozen=True)
@@ -222,16 +223,27 @@ class TimeoutPolicy:
 
 ### ResourcePolicy
 
-Declares resource limits or requirements. Exact resource semantics are deferred.
+Declares resource limits or requirements.
 
 ```python
 @dataclass(frozen=True)
 class ResourcePolicy:
+    max_invocations: int | None = None
     max_tokens: int | None = None
     max_cost: float | None = None
+    max_duration: str | None = None
     max_memory_mb: int | None = None
     requires_gpu: bool | None = None
 ```
+
+`RetryPolicy.max_attempts` controls retries after failed attempts.
+`ResourcePolicy.max_invocations` controls how many times a node may execute in a
+run, which matters for loops. These are separate because retry attempts and loop
+invocations are different execution behaviors.
+
+Resource exhaustion should be represented at runtime as node `failed` with a
+structured error code such as `RESOURCE_EXHAUSTED`. Scheduler can then process
+that failure through ordinary fallback edges or workflow failure policy.
 
 ## Failure and Completion Semantics
 
@@ -255,8 +267,8 @@ node failed -> continue anyway
 node timed out -> retry or error branch
 ```
 
-This keeps failure handling visible to Scheduler and Kernel instead of hiding it
-inside an exit policy.
+This keeps failure handling visible to Scheduler and the execution layer instead
+of hiding it inside an exit policy.
 
 ## Data Flow
 
@@ -272,11 +284,3 @@ nodes.<node_id>.output
 A Runtime Session may also hold durable cross-run context such as conversation
 history. A Runtime Run should keep the node and edge state for one invocation's pass
 through the Workflow graph.
-
-## Open Questions
-
-- Should `CapabilityRef` include namespace or provider?
-- Should `entry` support explicit `False`?
-- Should `output_binding` support multiple bindings?
-- Which NodePolicy fields are part of v0.1?
-- Should failure handling prefer explicit edges or a small node failure policy?

@@ -17,8 +17,8 @@ Examples:
 - durable external correlation ids
 
 Session context should be written intentionally through compiled output bindings
-or explicit Kernel/runtime APIs. It should not become an unstructured dump of all
-node outputs.
+or explicit runtime APIs. It should not become an unstructured dump of all node
+outputs.
 
 ## Run Context
 
@@ -32,8 +32,8 @@ Examples:
 - run result fields
 - branch-local data
 
-Run context is safe for Scheduler and Kernel to use without leaking state across
-separate invocations.
+Run context is safe for Scheduler and NodeExecutor to use without leaking state
+across separate invocations.
 
 ## Path Shape
 
@@ -52,7 +52,8 @@ Input plans read from these paths. Output bindings write to these paths.
 
 ## Read and Write Rules
 
-Kernel should build node input from Workflow IR input plans and Runtime Context.
+NodeExecutor should build node input from Workflow IR input plans and Runtime
+Context.
 
 Operators should receive explicit input values. They should not freely mutate the
 whole session unless the node capability is intentionally designed for that.

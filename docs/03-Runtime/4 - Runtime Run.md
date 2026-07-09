@@ -46,6 +46,7 @@ class RuntimeRun:
     ready_queue: list[str] = field(default_factory=list)
     running_nodes: set[str] = field(default_factory=set)
     waiting_nodes: set[str] = field(default_factory=set)
+    transition_queue: list["NodeTransitionRef"] = field(default_factory=list)
 
     result: dict[str, Any] | None = None
     error: "RuntimeErrorInfo | None" = None
@@ -62,15 +63,65 @@ class NodeRuntimeState:
     node_id: str
     status: str
     attempts: int = 0
+    invocations: int = 0
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     error: "RuntimeErrorInfo | None" = None
+    resource_usage: "ResourceUsage | None" = None
     started_at: str | None = None
     finished_at: str | None = None
 ```
 
-Common statuses include `pending`, `ready`, `running`, `completed`, `failed`,
-`skipped`, `waiting`, `cancelled`, and `timed_out`.
+Common statuses include:
+
+| Status | Meaning |
+| --- | --- |
+| `pending` | Node exists in the run but is not ready. |
+| `ready` | Dependencies are satisfied and the node may dispatch. |
+| `running` | Node has been dispatched to NodeExecutor. |
+| `waiting` | Node waits for an external event, callback, timer, or human input. |
+| `completed` | Node completed successfully. |
+| `failed` | Node failed, including retry exhaustion, resource exhaustion, or timeout. |
+| `skipped` | Node was not selected by graph routing. |
+| `cancelled` | Node was stopped because the run or branch was cancelled. |
+
+Version 1 represents timeout as `failed` with error code `TIMEOUT`.
+
+## Node Transition Queue
+
+`transition_queue` records nodes whose outgoing graph transitions still need to
+be processed by Scheduler.
+
+```python
+@dataclass(frozen=True)
+class NodeTransitionRef:
+    node_id: str
+    status: str
+    attempt: int
+```
+
+StateManager appends to this queue when a node reaches a status that can trigger
+outgoing edges, such as `completed`, `failed`, or timeout-as-failed.
+
+Scheduler consumes this queue by proposing state changes that evaluate outgoing
+edges, select routes, satisfy joins, and mark downstream nodes ready.
+
+## Resource Usage
+
+NodeExecutor should record resource usage reported by Operators or execution
+infrastructure.
+
+```python
+@dataclass
+class ResourceUsage:
+    tokens: int = 0
+    cost: float = 0.0
+    duration_ms: int = 0
+    memory_mb: int | None = None
+```
+
+Resource exhaustion should normally be represented as `failed` with a structured
+error code such as `RESOURCE_EXHAUSTED`, not as a separate status.
 
 ## Edge State
 
@@ -84,7 +135,8 @@ class EdgeRuntimeState:
     reason: str | None = None
 ```
 
-Scheduler updates edge state when it evaluates conditions and routing policies.
+Scheduler proposes edge state updates when it evaluates conditions and routing
+policies. StateManager applies and persists those updates.
 
 ## Completion
 

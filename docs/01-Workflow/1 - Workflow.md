@@ -66,11 +66,31 @@ Optional human-readable description.
 ### policy
 
 Optional Workflow-level policy placeholder. Detailed WorkflowPolicy design is
-deferred.
+mostly deferred.
 
 Workflow-level policy should not be used to model long-running external
 listeners. API handlers, Pub/Sub consumers, webhook listeners, and schedulers are
 input-adapter-layer components.
+
+The first concrete Workflow-level policy should include unhandled branch failure
+behavior.
+
+```python
+@dataclass(frozen=True)
+class WorkflowPolicy:
+    failure: "FailurePolicy | None" = None
+
+
+@dataclass(frozen=True)
+class FailurePolicy:
+    mode: Literal["fail_fast", "continue_active_branches"] = "fail_fast"
+```
+
+`fail_fast` means an unhandled required branch failure fails the Runtime Run and
+cancels other active branches.
+
+`continue_active_branches` records the unhandled failure but allows other active
+branches to finish before the run reaches a final failed or partial result state.
 
 ### labels
 
@@ -128,10 +148,3 @@ workflow = Workflow(
     edges=[],
 )
 ```
-
-## Open Questions
-
-- Should Workflow version be semantic version, content hash, or both?
-- What should WorkflowPolicy include in the first implementation?
-- Should labels remain on Workflow or move to a registry-level index model?
-- Should Workflow support explicit source-level entry declarations beyond node entry markers?

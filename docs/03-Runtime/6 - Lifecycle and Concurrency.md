@@ -15,9 +15,9 @@ created -> ready -> running -> completed
 ```
 
 `waiting` means the run cannot make progress until an external event, timer,
-human decision, or callback arrives. Future designs may resume waiting runs
-without creating a new run, but the first design can keep this explicit and
-limited.
+human decision, or callback arrives. A waiting node persists enough correlation
+data for AutoAgent App to receive an external event, mark the node completed or
+failed, append a transition, and continue the same Runtime Run.
 
 ## Session Lifecycle
 
@@ -35,7 +35,7 @@ for future invocations with the same session key.
 
 ## Default Concurrency Policy
 
-The first design should use a conservative rule:
+Version 1 uses a conservative rule:
 
 ```text
 same Runtime Session -> at most one active run by default
@@ -45,8 +45,9 @@ different Runtime Sessions -> may run in parallel
 This prevents two runs in the same conversation or task context from racing to
 update shared session context.
 
-A future policy may allow controlled parallel runs in the same session if the
-Workflow declares safe context partitions or conflict handling.
+Coordinated same-session concurrency is a roadmap item. Until that model is
+defined, one Runtime Session should serialize active Runtime Runs even when
+different invocations select different entry nodes.
 
 ## Same Node, Different Runs
 

@@ -6,7 +6,7 @@ Runtime executes compiled Workflow IR through Runtime Sessions and Runtime Runs.
 It does not own Workflow authoring and it does not compile Workflow structure.
 
 ```text
-Input Adapter -> Workflow Invocation -> Runtime -> Scheduler -> Kernel -> Operator
+Input Adapter -> Workflow Invocation -> Runtime -> WorkflowExecutor -> Scheduler / NodeExecutor -> Operator
 ```
 
 ## Purpose
@@ -15,7 +15,7 @@ Runtime is the execution stage of AutoAgent OS.
 
 It receives a Workflow Invocation, selects a Workflow IR version, finds or
 creates a Runtime Session, creates a Runtime Run, and drives that run through
-Scheduler and Kernel until the run reaches a terminal state.
+WorkflowExecutor until the run reaches a terminal state.
 
 Runtime should make the execution boundary explicit:
 
@@ -23,8 +23,8 @@ Runtime should make the execution boundary explicit:
 - Workflow Invocations are single calls.
 - Runtime Sessions are durable context containers.
 - Runtime Runs are one pass through the Workflow graph.
-- Scheduler decides what can run next.
-- Kernel executes selected node work.
+- Scheduler decides graph progress and dispatchable nodes.
+- NodeExecutor executes selected node work.
 
 ## Core Flow
 
@@ -33,8 +33,8 @@ Workflow Invocation
     -> load Workflow IR
     -> find or create Runtime Session
     -> create Runtime Run
-    -> enqueue selected entry node
-    -> scheduler/kernel loop
+    -> mark selected entry node ready
+    -> WorkflowExecutor loop
     -> persist run result and session context
 ```
 
@@ -64,7 +64,7 @@ Runtime should not:
 - decide authoring-time validation rules
 - implement Operator business logic
 - replace Scheduler's node selection logic
-- replace Kernel's node execution logic
+- replace NodeExecutor's node execution logic
 
 Runtime should:
 
@@ -73,7 +73,7 @@ Runtime should:
 - manage run creation and lifecycle
 - persist node, edge, context, and event state
 - enforce admission and concurrency rules
-- call Scheduler and Kernel with the correct state
+- call WorkflowExecutor with the correct state
 - expose run results, failures, and observability events
 
 ## First-Version Rule

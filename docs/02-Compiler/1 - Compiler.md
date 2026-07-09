@@ -104,9 +104,3 @@ Compilation problems should be returned as diagnostics.
 
 Exceptions should be reserved for infrastructure failures, invalid compiler
 configuration, or compiler implementation bugs.
-
-## Open Questions
-
-- Should `CompileResult` include partial IR when errors exist?
-- Should warning-to-error behavior be configurable per diagnostic code?
-- Should capability descriptors be cached with a Workflow package?

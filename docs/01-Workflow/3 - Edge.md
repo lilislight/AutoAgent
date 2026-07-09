@@ -121,11 +121,3 @@ Branch:       A -> B if condition, A -> C if condition
 Fallback:     A -> B if completed, A -> C if failed
 Loop:         B -> A if revise, B -> C if done
 ```
-
-## Open Questions
-
-- Should Edge id be required or compiler-generated when missing?
-- What condition expression language should be used?
-- Should priority live on Edge, RoutingPolicy, or compiled edge order?
-- Should hyperedges be supported, or should relationships remain binary?
-- Should future versions add explicit loop constructs, or should loops remain ordinary edges plus conditions?

@@ -3,9 +3,9 @@
 Runtime is the service boundary for executing Workflow IR.
 
 It accepts invocations, manages sessions and runs, persists state, and delegates
-scheduling and node execution to Scheduler and Kernel.
+scheduling and node execution to WorkflowExecutor.
 
-## Interface Sketch
+## Interface
 
 ```python
 from __future__ import annotations
@@ -17,8 +17,7 @@ from dataclasses import dataclass
 class Runtime:
     ir_store: "WorkflowIRStore"
     state_store: "RuntimeStateStore"
-    scheduler: "Scheduler"
-    kernel: "Kernel"
+    workflow_executor: "WorkflowExecutor"
 
     def invoke(self, invocation: "WorkflowInvocation") -> "RuntimeRunHandle":
         workflow_ir = self.ir_store.load(
@@ -34,8 +33,6 @@ class Runtime:
         return RuntimeRunHandle(run_id=run.id, session_id=session.id)
 ```
 
-This is an interface shape, not a final implementation commitment.
-
 ## Responsibilities
 
 Runtime should coordinate the execution stage:
@@ -46,45 +43,23 @@ Runtime should coordinate the execution stage:
 - create Runtime Runs
 - initialize run state from the selected entry node
 - persist lifecycle transitions and events
-- call Scheduler for next decisions
-- call Kernel for selected node execution
+- call WorkflowExecutor to drive the run
 - expose run handles, results, errors, and traces
 
-## Scheduler and Kernel Loop
+## Execution Delegation
 
-Runtime owns the loop boundary, while Scheduler and Kernel own their own logic.
+Runtime admits invocations and creates sessions and runs. WorkflowExecutor owns
+the run loop and coordinates Scheduler, NodeExecutor, and StateManager.
 
-```python
-def run_until_blocked_or_done(workflow_ir, session, run):
-    while run.lifecycle in {"ready", "running"}:
-        decision = scheduler.next(workflow_ir, session, run)
-
-        if decision.kind == "execute_node":
-            result = kernel.execute(workflow_ir, session, run, decision.node_id)
-            runtime_state_store.apply(result.state_changes)
-            continue
-
-        if decision.kind == "wait":
-            runtime_state_store.mark_waiting(run, decision.reason)
-            break
-
-        if decision.kind == "complete":
-            runtime_state_store.complete_run(run, decision.result)
-            break
-
-        if decision.kind == "fail":
-            runtime_state_store.fail_run(run, decision.error)
-            break
-```
-
-Runtime persists changes around the loop so a run can be inspected, retried,
-resumed, or recovered after process failure.
+Runtime persists state through the configured state store so a run can be
+inspected, retried, resumed, or recovered after process failure.
 
 ## Runtime Stage
 
 The Runtime stage is the whole execution environment around a Workflow IR. It
-includes Runtime API, state store, session/run lifecycle, Scheduler, Kernel,
-Operator execution, event log, and recovery mechanisms.
+includes Runtime API, state store, session/run lifecycle, WorkflowExecutor,
+Scheduler, NodeExecutor, Operator execution, event log, and recovery mechanisms.
 
 The `Runtime` object is the coordinator inside that stage. It should stay thin
-enough that Scheduler decisions and Kernel execution remain separately testable.
+enough that WorkflowExecutor, Scheduler decisions, and NodeExecutor execution
+remain separately testable.

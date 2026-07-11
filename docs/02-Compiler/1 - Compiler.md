@@ -66,12 +66,13 @@ when no explicit entry exists.
 
 ## Capability Resolution
 
-The Compiler resolves `CapabilityRef` through registries instead of owning those
-registries directly.
+The Compiler turns source node capabilities into executable bindings. Direct
+Python callables can be bound directly. String capability references are resolved
+through the configured capability resolver.
 
 ```python
 class CapabilityResolver:
-    def resolve(self, ref: "CapabilityRef") -> "CapabilityDescriptor":
+    def resolve(self, capability: str) -> "CapabilityDescriptor":
         ...
 ```
 
@@ -87,9 +88,7 @@ The Compiler needs static descriptors, not live runtime Operator instances.
 ```python
 @dataclass(frozen=True)
 class CapabilityDescriptor:
-    kind: str
     name: str
-    version: str | None = None
     input_schema: "Schema | None" = None
     output_schema: "Schema | None" = None
     deterministic: bool | None = None

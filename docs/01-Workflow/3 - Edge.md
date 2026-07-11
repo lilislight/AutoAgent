@@ -17,12 +17,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Edge:
-    id: str
-    from_node: str
-    to_node: str
+    id: str | None
+    from_node: str | "Node"
+    to_node: str | "Node"
 
     condition: "Condition | None" = None
-    labels: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 ```
 
@@ -30,16 +29,15 @@ class Edge:
 
 ### id
 
-Unique edge identifier inside a Workflow. It is useful for diagnostics,
-visualization, optimizer patches, runtime history, and debugging.
+Optional edge identifier inside a Workflow. Compiler assigns one when omitted.
 
 ### from_node
 
-Source node id.
+Source node reference. It may be a node id string or a `Node` object.
 
 ### to_node
 
-Target node id.
+Target node reference. It may be a node id string or a `Node` object.
 
 ### condition
 
@@ -57,10 +55,9 @@ nodes.call_model.status == "failed"
 context.approval == "approved"
 ```
 
-### labels / metadata
+### metadata
 
-Labels are small string key-value annotations. Metadata is non-semantic auxiliary
-data for tooling or integrations.
+Metadata is non-semantic auxiliary data for tooling or integrations.
 
 ## Evaluation
 

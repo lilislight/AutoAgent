@@ -84,7 +84,7 @@ The IR does not need to record whether a flag was explicit or inferred.
 
 ## Stage 5: Resolve Capabilities
 
-Resolve each `CapabilityRef` to a static descriptor.
+Compile each node capability into a runtime executable binding.
 
 Outputs:
 
@@ -93,9 +93,7 @@ Outputs:
 
 Diagnostics:
 
-- unknown capability kind
 - missing capability
-- missing version
 - incomplete descriptor
 
 ## Stage 6: Compile Conditions

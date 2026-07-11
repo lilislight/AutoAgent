@@ -2,9 +2,9 @@
 
 This document defines the Operator module.
 
-Operators are reusable computation capabilities. Workflow nodes reference
-capabilities through stable ids, and NodeExecutor invokes the resolved
-capability when executing selected nodes.
+Operators are reusable computation capabilities. Workflow nodes may carry direct
+Python functions or string capability references, and NodeExecutor invokes the
+compiled executable capability.
 
 ## Purpose
 
@@ -12,34 +12,26 @@ Operators keep implementation details out of Workflow graph structure while
 still giving AutoAgent OS a unified execution boundary.
 
 ```text
-Workflow Node -> CapabilityRef -> CapabilityDescriptor -> capability execution
+Workflow Node -> capability -> compiled executable binding -> capability execution
 ```
 
 A node should reference an Operator when the computation can be treated as one
 managed execution step. Small helper logic should usually remain inside an
 Operator instead of becoming separate Workflow nodes.
 
-## Capability Kinds
+## Capability References
 
-Workflow nodes use `CapabilityRef` to reference executable capabilities.
+Workflow nodes use direct functions when possible. They use string references or
+when the capability must be resolved by name.
 
 ```python
-@dataclass(frozen=True)
-class CapabilityRef:
-    kind: Literal["operator", "system", "workflow"]
-    name: str
-    version: str | None = None
+Node(capability=create_repo)
+Node(capability="wait_human_input")
 ```
 
-Capability kinds:
-
-| Kind | Meaning |
-| --- | --- |
-| `operator` | Application or integration computation, such as LLM calls, functions, browsers, databases, shell commands, or MCP tools. |
-| `system` | Runtime control capability that requires AutoAgent runtime participation. |
-| `workflow` | Nested Workflow executed as a child execution unit. |
-
-Most capabilities should be Operators.
+System capabilities, nested Workflows, and externally registered Operators are
+all resolved through the same capability reference mechanism when they are not
+provided as direct callables.
 
 ## Operator Families
 
@@ -74,8 +66,8 @@ def fetch_issue(issue_id: int) -> dict:
 app.register_operator(fetch_issue)
 ```
 
-Registration should provide enough static information for Compiler to validate
-node capability references before execution.
+Registration is only needed for referenced capabilities that are not already
+stored on a node as direct callables.
 
 ## Execution Boundary
 

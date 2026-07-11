@@ -2,7 +2,7 @@
 
 This document defines the static descriptor used by Compiler and NodeExecutor.
 
-Compiler resolves a node `CapabilityRef` to a `CapabilityDescriptor`. The
+Compiler may resolve a node string capability to a `CapabilityDescriptor`. The
 descriptor is static metadata. It is not one runtime execution.
 
 ## Model
@@ -10,9 +10,8 @@ descriptor is static metadata. It is not one runtime execution.
 ```python
 @dataclass(frozen=True)
 class CapabilityDescriptor:
-    kind: Literal["operator", "system", "workflow"]
     name: str
-    version: str | None = None
+    version: str | int | None = None
 
     input_schema: "Schema | None" = None
     output_schema: "Schema | None" = None

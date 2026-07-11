@@ -18,15 +18,14 @@ from typing import Any
 class Workflow:
     """Static workflow program definition."""
 
-    id: str
-    version: str
-    nodes: list["Node"]
-    edges: list["Edge"]
+    id: str | None = None
+    version: str | int | None = None
+    nodes: list["Node"] = field(default_factory=list)
+    edges: list["Edge"] = field(default_factory=list)
 
     name: str | None = None
     description: str | None = None
     policy: "WorkflowPolicy | None" = None
-    labels: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 ```
 
@@ -34,13 +33,13 @@ class Workflow:
 
 ### id
 
-Stable Workflow identifier used by registries, Compiler, Runtime, Optimizer, and
-external references.
+Optional stable Workflow identifier used by registries, Compiler, Runtime,
+Optimizer, and external references. Compiler assigns one when omitted.
 
 ### version
 
-Immutable version identifier. Once a Workflow is compiled or executed, changes
-should produce a new version.
+Optional version identifier. Compiler assigns an initial version when omitted.
+Optimizer patches or semantic changes may produce a new version.
 
 ### nodes
 
@@ -92,10 +91,6 @@ cancels other active branches.
 `continue_active_branches` records the unhandled failure but allows other active
 branches to finish before the run reaches a final failed or partial result state.
 
-### labels
-
-Small string key-value pairs for indexing, filtering, and management.
-
 ### metadata
 
 Non-semantic auxiliary data for tooling, visualization, debugging, optimizer
@@ -143,8 +138,5 @@ workflow = Workflow(
     id="github_issue_triage",
     version="1.0.0",
     name="GitHub Issue Triage",
-    labels={"domain": "github"},
-    nodes=[],
-    edges=[],
 )
 ```

@@ -17,39 +17,36 @@ Builder/loader output is Workflow. Compiler output is Workflow IR.
 
 ## Python API
 
-Python authoring may pass objects instead of loose capability strings. Capabilities may be decorated functions, Operator objects, system capability objects, or Workflow objects.
+Python authoring may pass functions directly, or use string references for
+system/external capabilities.
 
 ```python
-from autoagent import Workflow, operator
+from autoagent import Edge, Workflow
 
 
-@operator(id="github.fetch_issue")
 def fetch_issue(ticket_id: str) -> dict:
     ...
 
 
-@operator(id="llm.classify_issue")
 def classify_issue(issue: dict) -> dict:
     ...
 
 
-workflow = Workflow(id="github_issue_triage", version="1.0.0")
+workflow = Workflow()
 
-fetch = workflow.node(
-    id="fetch_issue",
-    capability=fetch_issue,
+fetch = workflow.add_node(
+    fetch_issue,
     entry=True,
 )
 
-classify = workflow.node(
-    id="classify_issue",
-    capability=classify_issue,
-)
+classify = workflow.add_node(classify_issue)
 
-workflow.edge(from_node=fetch, to_node=classify)
+workflow.add_edge(Edge(from_node=fetch, to_node=classify))
 ```
 
-The Python API may accept flexible authoring inputs, but the canonical Node model stores normalized `CapabilityRef`. Passing a function is authoring sugar; the builder resolves it to a stable capability reference, usually through an explicit `@operator(id=...)` registration.
+The Python API stores direct functions as node capabilities. String references
+remain useful for system capabilities, YAML/JSON loading, and UI-authored
+workflows.
 
 ## Workflow Visualization
 
@@ -67,7 +64,9 @@ Workflow and does not replace Compiler validation.
 
 ## YAML
 
-YAML uses string capability references because it cannot carry Python objects. The loader normalizes those strings into `CapabilityRef`. The Compiler later resolves the reference through the appropriate registry, such as the Operator registry for `operator:*`, the system capability registry for `system:*`, or the Workflow registry for `workflow:*`.
+YAML uses string capability references because it cannot carry Python objects.
+The compiler resolves those references through the configured execution
+environment when needed.
 
 ```yaml
 id: github_issue_triage
@@ -145,7 +144,7 @@ YAML/JSON loading pipeline:
 
 1. Parse source into raw dictionaries.
 2. Validate required fields.
-3. Normalize capability references.
+3. Normalize capability strings.
 4. Create Node and Edge objects.
 5. Apply simple defaults.
 6. Validate basic structure.
@@ -169,7 +168,6 @@ class WorkflowSpecLoader:
             name=raw.get("name"),
             description=raw.get("description"),
             policy=self.load_policy(raw.get("policy")),
-            labels=raw.get("labels", {}),
             metadata=raw.get("metadata", {}),
             nodes=nodes,
             edges=edges,

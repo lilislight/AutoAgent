@@ -11,21 +11,15 @@ NodeExecutor.
 ```python
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
-
-
-@dataclass(frozen=True)
-class CapabilityRef:
-    kind: Literal["operator", "system", "workflow"]
-    name: str
-    version: str | None = None
+from typing import Any
 
 
 @dataclass(frozen=True)
 class Node:
-    id: str
-    capability: CapabilityRef
+    id: str | None
+    capability: Callable[..., Any] | str
 
     name: str | None = None
     description: str | None = None
@@ -34,7 +28,6 @@ class Node:
     output_binding: "OutputBinding | None" = None
     entry: bool | None = None
     policy: "NodePolicy | None" = None
-    labels: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 ```
 
@@ -46,29 +39,13 @@ Unique node identifier inside a Workflow.
 
 ### capability
 
-Capability requested by the node. The canonical Node model stores a normalized
-`CapabilityRef`, not a Python function object and not a runtime Instruction.
+Capability requested by the node. It may be a Python callable or a simple string
+reference.
 
-Python authoring may allow a developer to pass a decorated function, Operator
-object, system capability object, or Workflow object directly. That is authoring
-sugar. The builder must normalize it into `CapabilityRef` before producing the
-canonical Workflow.
-
-YAML/JSON authoring uses string references such as `operator:github.fetch_issue`.
-Those strings must resolve through a registry during compilation.
-
-Capability kinds:
-
-| kind | Meaning |
-| --- | --- |
-| `operator` | Reusable computation capability such as LLM, function, browser, database, shell, or MCP service. Resolved through the Operator registry. |
-| `system` | System capability such as wait event, return, checkpoint, suspend, resume, or spawn child execution. Resolved through the system capability registry. |
-| `workflow` | Nested Workflow capability executed through child execution. Resolved through the Workflow registry. |
-
-For Python functions, the first design should prefer explicitly decorated or
-registered Operators with stable ids. Automatically deriving ids from raw Python
-function names may be convenient for prototypes, but it is less stable for
-serialized Workflows.
+Python authoring should prefer direct functions for local capabilities. YAML,
+JSON, UI-authored workflows, system capabilities, and externally registered
+capabilities may use string references. The compiler resolves string references
+only when execution requires a lookup.
 
 External listeners such as API servers, Pub/Sub consumers, webhook listeners, and
 cron schedulers are Input Adapters in the input adapter layer. They are not
@@ -108,10 +85,9 @@ trigger or listener.
 
 Optional node-level runtime policy container.
 
-### labels / metadata
+### metadata
 
-Labels are small string key-value annotations. Metadata is non-semantic auxiliary
-data for tooling or integrations.
+Metadata is non-semantic auxiliary data for tooling or integrations.
 
 ## Node Granularity
 

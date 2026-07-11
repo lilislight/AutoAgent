@@ -34,7 +34,7 @@ control flow. ToolSet defines LLM-visible tools.
 @dataclass(frozen=True)
 class ToolRef:
     name: str
-    capability: CapabilityRef
+    capability: Callable[..., Any] | str
     description: str | None = None
     input_schema: "Schema | None" = None
 

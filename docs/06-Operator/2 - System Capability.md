@@ -3,8 +3,8 @@
 This document defines the boundary between Operators and system capabilities.
 
 A system capability is a runtime control capability. It is still referenced by a
-normal Workflow node through `CapabilityRef`, but its execution requires special
-AutoAgent runtime participation.
+normal Workflow node through a string capability name, but its execution
+requires special AutoAgent runtime participation.
 
 ## Operator vs System Capability
 
@@ -72,8 +72,9 @@ Operators.
 
 ## Registry
 
-System capabilities should be resolved through a System Capability registry.
+System capabilities should be resolved through the configured execution
+environment.
 
-Compiler uses the registry for static descriptors. NodeExecutor uses the
-resolved descriptor to call the system capability handler and receive state
-changes.
+Compiler may use that environment for static descriptors. NodeExecutor uses the
+compiled executable binding to call the system capability handler and receive
+state changes.

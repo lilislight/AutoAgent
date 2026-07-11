@@ -140,23 +140,19 @@ class IREdge:
 
 ## ResolvedCapability
 
-The source Workflow stores a `CapabilityRef`. Workflow IR stores a resolved
-capability.
-
-Python authoring may pass a function or Operator object, but the builder
-normalizes it into `CapabilityRef` before compilation.
+The source Workflow stores a callable or string capability. Workflow IR stores a
+resolved capability binding that NodeExecutor can invoke.
 
 ```python
 @dataclass(frozen=True)
 class ResolvedCapability:
-    kind: str
     name: str
-    version: str | None
     descriptor: "CapabilityDescriptor"
+    handler: "Callable[..., Any] | None" = None
 ```
 
-The Compiler resolves capabilities through registries: Operator registry, system
-capability registry, or Workflow registry.
+The Compiler binds direct callables without registry lookup. String capabilities
+are resolved through the configured execution environment.
 
 ## InputPlan
 

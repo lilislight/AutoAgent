@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Callable, Iterable
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -145,29 +146,85 @@ class TimeoutPolicy(BaseModel):
 
 
 class ResourcePolicy(BaseModel):
-    """Resource limits for node execution within one run."""
+    """Invocation-scoped resource limits for one workflow node.
+
+    These limits apply to the same node_id inside one workflow Invocation.
+    WorkflowExecutor checks node execution count before creating another
+    NodeExecution. NodeExecutor checks operator call count and accumulated
+    runtime while executing the node.
+    """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    max_invocations: int | None = Field(
+    max_node_executions_per_invocation: int | None = Field(
         default=None,
-        description="Maximum node invocations in one run.",
+        description=(
+            "Maximum NodeExecution records allowed for this node_id in one "
+            "Invocation. Used to stop runaway loops."
+        ),
     )
-    max_tokens: int | None = Field(
+    max_operator_calls_per_invocation: int | None = Field(
         default=None,
-        description="Maximum token usage in one run.",
+        description=(
+            "Maximum concrete OperatorCall records allowed for this node_id in "
+            "one Invocation. Retry, fallback, map, and replication all count."
+        ),
     )
-    max_cost: float | None = Field(
+    max_runtime_ms_per_invocation: int | None = Field(
         default=None,
-        description="Maximum cost in one run.",
+        description=(
+            "Maximum accumulated runtime in milliseconds for this node_id in "
+            "one Invocation."
+        ),
     )
-    max_tool_calls: int | None = Field(
-        default=None,
-        description="Maximum tool calls made by this node in one run.",
+
+
+class TimerPolicy(BaseModel):
+    """Delay rule applied before or after one logical node execution."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    delay_ms: int = Field(
+        description="Delay duration in milliseconds.",
     )
-    max_runtime_ms: int | None = Field(
+    mode: Literal["blocking", "waiting", "auto"] = Field(
+        default="auto",
+        description=(
+            "blocking sleeps inside the executor worker. waiting stores a "
+            "WaitingExecution and relies on a timer service to resume later. "
+            "auto lets executor/runtime choose, but compiler may warn when a "
+            "long delay would block a worker."
+        ),
+    )
+    position: Literal["before", "after"] = Field(
+        default="before",
+        description=(
+            "before delays before operator call. after delays after "
+            "operator completion but before the node transition is exposed to "
+            "scheduler."
+        ),
+    )
+
+
+class ReplicationPolicy(BaseModel):
+    """Run the same logical node input multiple times and aggregate outputs."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    count: int = Field(
+        description="How many OperatorCalls to create for one NodeExecution.",
+    )
+    output_aggregator: Callable[[list[Any]], Any] | None = Field(
         default=None,
-        description="Maximum accumulated node runtime in one run.",
+        description=(
+            "Required aggregation function for replication. It receives all "
+            "successful OperatorCall outputs and returns the final "
+            "NodeExecution.output consumed by downstream nodes."
+        ),
+    )
+    max_parallelism: int | None = Field(
+        default=None,
+        description="Maximum replica OperatorCalls this node may run concurrently.",
     )
 
 
@@ -199,4 +256,67 @@ class NodePolicy(BaseModel):
     resource: ResourcePolicy | None = Field(
         default=None,
         description="Resource limits for this node.",
+    )
+    timer: TimerPolicy | None = Field(
+        default=None,
+        description="Optional delay before or after this node execution.",
+    )
+    replication: ReplicationPolicy | None = Field(
+        default=None,
+        description=(
+            "Optional self-consistency/multi-sample policy. NodeExecutor runs "
+            "the operator multiple times inside one logical NodeExecution and "
+            "uses output_aggregator to produce the final output."
+        ),
+    )
+    max_concurrency: int | None = Field(
+        default=None,
+        description=(
+            "Maximum concurrent NodeExecutions or internal OperatorCalls "
+            "allowed for this node. NodeExecutor combines this with operator "
+            "limits and runtime global limits."
+        ),
+    )
+
+
+class MapPolicy(BaseModel):
+    """Fan out one selected edge over items derived from source node output."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    item_selector: Callable[[Any], Iterable[Any]] | None = Field(
+        default=None,
+        description=(
+            "Maps source NodeExecution.output into iterable target operator "
+            "inputs. When omitted, runtime treats the source output itself as "
+            "the iterable. Each selected item becomes one map_item "
+            "OperatorCall inside the target NodeExecution."
+        ),
+    )
+    output_aggregator: Callable[[list[Any]], Any] | None = Field(
+        default=None,
+        description=(
+            "Aggregates map item outputs into the target NodeExecution.output. "
+            "When omitted, outputs are collected into a list ordered by item "
+            "index."
+        ),
+    )
+    max_parallelism: int | None = Field(
+        default=None,
+        description="Maximum map item OperatorCalls to execute concurrently.",
+    )
+
+
+class EdgePolicy(BaseModel):
+    """Edge-level data movement policy."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    map: MapPolicy | None = Field(
+        default=None,
+        description=(
+            "Optional map/fan-out behavior. If present, this edge creates one "
+            "target NodeExecution whose NodeExecutor performs multiple "
+            "map_item OperatorCalls and aggregates their outputs."
+        ),
     )

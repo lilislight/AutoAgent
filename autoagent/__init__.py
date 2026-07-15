@@ -1,3 +1,4 @@
+from autoagent.app import AutoAgentApp
 from autoagent.workflow import (
     BackoffPolicy,
     CapabilityRef,
@@ -20,6 +21,7 @@ from autoagent.workflow import (
 )
 
 __all__ = [
+    "AutoAgentApp",
     "BackoffPolicy",
     "CapabilityRef",
     "CapabilitySelectionPolicy",

@@ -54,8 +54,8 @@ class Node(BaseModel):
     output_binding: OutputBinding | None = Field(
         default=None,
         description=(
-            "Optional function that returns output writes, such as context or "
-            "result fields. It should not mutate runtime state directly."
+            "Optional post-completion hook. Runtime passes a restricted context "
+            "that may mutate invocation data or session data only."
         ),
     )
     entry: bool | None = Field(

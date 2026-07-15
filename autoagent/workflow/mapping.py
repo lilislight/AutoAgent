@@ -5,4 +5,4 @@ from typing import Any
 
 
 InputMapping = Callable[..., Any]
-OutputBinding = Callable[..., dict[str, Any]]
+OutputBinding = Callable[..., Any]

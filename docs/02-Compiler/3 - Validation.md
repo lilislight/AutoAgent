@@ -99,6 +99,8 @@ input plans or output bindings.
 ## Condition Validation
 
 Edge conditions are runtime expressions, but the Compiler should prepare them.
+They use the same runtime data environment as node input mappings and must not
+be restricted to the source node's output.
 
 Rules:
 
@@ -106,6 +108,8 @@ Rules:
 - Unsafe operations must be rejected.
 - Referenced paths should be extracted.
 - Statically known node references should be checked.
+- Condition references should be validated with the same path and schema checks
+  used for input mappings when static information is available.
 
 The Compiler does not evaluate conditions against runtime data.
 

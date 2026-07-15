@@ -3,8 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from autoagent.compiler.constants import COMPILER_VERSION, WORKFLOW_IR_VERSION
 from autoagent.compiler.diagnostic import CompileResult, Diagnostic
 from autoagent.compiler.id_generation import (
     generate_edge_id,
@@ -22,26 +21,8 @@ from autoagent.workflow import (
 )
 
 
-class CompilerConfig(BaseModel):
-    """Workflow compiler configuration."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    ir_version: str = Field(
-        default="0.1",
-        description="Workflow IR schema version emitted by this compiler.",
-    )
-    compiler_version: str = Field(
-        default="0.1",
-        description="Compiler implementation version.",
-    )
-
-
 class WorkflowCompiler:
     """Compile Workflow source models into WorkflowIR."""
-
-    def __init__(self, config: CompilerConfig | None = None) -> None:
-        self.config = config or CompilerConfig()
 
     def compile(self, workflow: Workflow) -> CompileResult:
         diagnostics: list[Diagnostic] = []
@@ -63,7 +44,7 @@ class WorkflowCompiler:
             return CompileResult(diagnostics=diagnostics)
 
         graph = self._build_graph(nodes, edges)
-        self._validate_policies(nodes, graph, diagnostics)
+        self._validate_policies(nodes, edges, graph, diagnostics)
         entry_node_ids = self._infer_entry_node_ids(nodes, graph, diagnostics)
         exit_node_ids = self._infer_exit_node_ids(nodes, graph)
         self._mark_entry_exit_flags(nodes, entry_node_ids, exit_node_ids)
@@ -72,8 +53,8 @@ class WorkflowCompiler:
             return CompileResult(diagnostics=diagnostics)
 
         workflow_ir = WorkflowIR(
-            ir_version=self.config.ir_version,
-            compiler_version=self.config.compiler_version,
+            ir_version=WORKFLOW_IR_VERSION,
+            compiler_version=COMPILER_VERSION,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             nodes=nodes,
@@ -363,6 +344,7 @@ class WorkflowCompiler:
                 from_node=from_node,
                 to_node=to_node,
                 condition=edge.condition,
+                policy=edge.policy,
                 order=order,
                 metadata=edge.metadata,
             )
@@ -445,6 +427,7 @@ class WorkflowCompiler:
     def _validate_policies(
         self,
         nodes: dict[str, NodeIR],
+        edges: dict[str, EdgeIR],
         graph: GraphIR,
         diagnostics: list[Diagnostic],
     ) -> None:
@@ -556,24 +539,146 @@ class WorkflowCompiler:
                     )
                 )
 
+            if policy.timer is not None:
+                if policy.timer.delay_ms < 0:
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_TIMER_INVALID",
+                            severity="error",
+                            message="TimerPolicy delay_ms cannot be negative.",
+                            subject=node_id,
+                        )
+                    )
+                if (
+                    policy.timer.mode == "blocking"
+                    and policy.timer.delay_ms > 5000
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_TIMER_BLOCKING_LONG",
+                            severity="warning",
+                            message=(
+                                "Blocking timer longer than 5000ms can occupy an "
+                                "executor worker; consider mode='waiting'."
+                            ),
+                            subject=node_id,
+                        )
+                    )
+
+            if policy.replication is not None:
+                if policy.replication.count <= 0:
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_REPLICATION_INVALID",
+                            severity="error",
+                            message="ReplicationPolicy count must be positive.",
+                            subject=node_id,
+                        )
+                    )
+                if policy.replication.output_aggregator is None:
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_REPLICATION_INVALID",
+                            severity="error",
+                            message=(
+                                "ReplicationPolicy requires output_aggregator "
+                                "to produce the final NodeExecution output."
+                            ),
+                            subject=node_id,
+                        )
+                    )
+                elif not callable(policy.replication.output_aggregator):
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_REPLICATION_INVALID",
+                            severity="error",
+                            message="ReplicationPolicy output_aggregator must be callable.",
+                            subject=node_id,
+                        )
+                    )
+                if (
+                    policy.replication.max_parallelism is not None
+                    and policy.replication.max_parallelism <= 0
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_REPLICATION_INVALID",
+                            severity="error",
+                            message="ReplicationPolicy max_parallelism must be positive.",
+                            subject=node_id,
+                        )
+                    )
+
+            if policy.max_concurrency is not None and policy.max_concurrency <= 0:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_CONCURRENCY_INVALID",
+                        severity="error",
+                        message="NodePolicy max_concurrency must be positive.",
+                        subject=node_id,
+                    )
+                )
+
             if policy.resource is not None:
                 resource_values = {
-                    "max_invocations": policy.resource.max_invocations,
-                    "max_tokens": policy.resource.max_tokens,
-                    "max_cost": policy.resource.max_cost,
-                    "max_tool_calls": policy.resource.max_tool_calls,
-                    "max_runtime_ms": policy.resource.max_runtime_ms,
+                    "max_node_executions_per_invocation": (
+                        policy.resource.max_node_executions_per_invocation
+                    ),
+                    "max_operator_calls_per_invocation": (
+                        policy.resource.max_operator_calls_per_invocation
+                    ),
+                    "max_runtime_ms_per_invocation": (
+                        policy.resource.max_runtime_ms_per_invocation
+                    ),
                 }
                 for field_name, value in resource_values.items():
-                    if value is not None and value < 0:
+                    if value is not None and value <= 0:
                         diagnostics.append(
                             Diagnostic(
                                 code="POLICY_RESOURCE_INVALID",
                                 severity="error",
-                                message=f"ResourcePolicy {field_name} cannot be negative.",
+                                message=f"ResourcePolicy {field_name} must be positive.",
                                 subject=node_id,
                             )
                         )
+
+        for edge_id, edge in edges.items():
+            policy = edge.policy
+            if policy is None or policy.map is None:
+                continue
+
+            map_policy = policy.map
+            if map_policy.item_selector is not None and not callable(
+                map_policy.item_selector
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_MAP_INVALID",
+                        severity="error",
+                        message="MapPolicy item_selector must be callable.",
+                        subject=edge_id,
+                    )
+                )
+            if map_policy.output_aggregator is not None and not callable(
+                map_policy.output_aggregator
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_MAP_INVALID",
+                        severity="error",
+                        message="MapPolicy output_aggregator must be callable.",
+                        subject=edge_id,
+                    )
+                )
+            if map_policy.max_parallelism is not None and map_policy.max_parallelism <= 0:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_MAP_INVALID",
+                        severity="error",
+                        message="MapPolicy max_parallelism must be positive.",
+                        subject=edge_id,
+                    )
+                )
 
     def _has_errors(self, diagnostics: list[Diagnostic]) -> bool:
         return any(diagnostic.severity == "error" for diagnostic in diagnostics)

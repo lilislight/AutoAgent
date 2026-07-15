@@ -8,13 +8,17 @@ from autoagent.workflow import (
     CapabilityRef,
     CapabilitySelectionPolicy,
     Edge,
+    EdgePolicy,
     JoinPolicy,
+    MapPolicy,
     Node,
     NodePolicy,
     OperatorRef,
+    ReplicationPolicy,
     ResourcePolicy,
     RetryPolicy,
     SystemCommand,
+    TimerPolicy,
     TimeoutPolicy,
     Workflow,
 )
@@ -270,13 +274,95 @@ class WorkflowCompilerTests(unittest.TestCase):
         policy = NodePolicy(
             retry=RetryPolicy(max_attempts=2),
             timeout=TimeoutPolicy(timeout_ms=1000),
-            resource=ResourcePolicy(max_invocations=3),
+            resource=ResourcePolicy(max_node_executions_per_invocation=3),
         )
         workflow = Workflow(nodes=[Node(id="limited", capability=task, policy=policy)])
 
         workflow_ir = self.compile_ok(workflow)
 
         self.assertIs(policy, workflow_ir.nodes["limited"].policy)
+
+    def test_edge_map_policy_is_carried_into_edge_ir(self):
+        def select_items(output):
+            return output["items"]
+
+        def aggregate(outputs):
+            return {"items": outputs}
+
+        policy = EdgePolicy(
+            map=MapPolicy(
+                item_selector=select_items,
+                output_aggregator=aggregate,
+                max_parallelism=2,
+            )
+        )
+        workflow = Workflow(
+            nodes=[
+                Node(id="source", capability=task),
+                Node(id="target", capability=other_task),
+            ],
+            edges=[Edge(id="map_edge", from_node="source", to_node="target", policy=policy)],
+        )
+
+        workflow_ir = self.compile_ok(workflow)
+
+        self.assertIs(policy, workflow_ir.edges["map_edge"].policy)
+
+    def test_replication_policy_requires_output_aggregator(self):
+        result = WorkflowCompiler().compile(
+            Workflow(
+                nodes=[
+                    Node(
+                        id="sample",
+                        capability=task,
+                        policy=NodePolicy(replication=ReplicationPolicy(count=2)),
+                    )
+                ]
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(["POLICY_REPLICATION_INVALID"], self.diagnostic_codes(result))
+        self.assertIn("requires output_aggregator", result.diagnostics[0].message)
+
+    def test_timer_policy_long_blocking_delay_emits_warning_only(self):
+        workflow = Workflow(
+            nodes=[
+                Node(
+                    id="sleep",
+                    capability=task,
+                    policy=NodePolicy(timer=TimerPolicy(delay_ms=6000, mode="blocking")),
+                )
+            ]
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(["POLICY_TIMER_BLOCKING_LONG"], self.diagnostic_codes(result))
+        self.assertEqual("warning", result.diagnostics[0].severity)
+
+    def test_invalid_map_policy_emits_diagnostic(self):
+        workflow = Workflow(
+            nodes=[
+                Node(id="source", capability=task),
+                Node(id="target", capability=other_task),
+            ],
+            edges=[
+                Edge(
+                    id="map_edge",
+                    from_node="source",
+                    to_node="target",
+                    policy=EdgePolicy(map=MapPolicy(max_parallelism=0)),
+                )
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(["POLICY_MAP_INVALID"], self.diagnostic_codes(result))
+        self.assertEqual("map_edge", result.diagnostics[0].subject)
 
     def test_join_policy_validation_emits_diagnostics(self):
         cases = [
@@ -379,7 +465,11 @@ class WorkflowCompilerTests(unittest.TestCase):
             ),
             (
                 "resource",
-                NodePolicy(resource=ResourcePolicy(max_cost=-0.01)),
+                NodePolicy(
+                    resource=ResourcePolicy(
+                        max_operator_calls_per_invocation=-1,
+                    )
+                ),
                 "POLICY_RESOURCE_INVALID",
             ),
         ]
@@ -394,6 +484,31 @@ class WorkflowCompilerTests(unittest.TestCase):
                 self.assertIsNone(result.workflow_ir)
                 self.assertEqual([expected_code], self.diagnostic_codes(result))
                 self.assertEqual(name, result.diagnostics[0].subject)
+
+    def test_resource_policy_validation_covers_invocation_scope_limits(self):
+        cases = [
+            ResourcePolicy(max_node_executions_per_invocation=0),
+            ResourcePolicy(max_operator_calls_per_invocation=0),
+            ResourcePolicy(max_runtime_ms_per_invocation=0),
+        ]
+
+        for policy in cases:
+            with self.subTest(policy=policy):
+                result = WorkflowCompiler().compile(
+                    Workflow(
+                        nodes=[
+                            Node(
+                                id="limited",
+                                capability=task,
+                                policy=NodePolicy(resource=policy),
+                            )
+                        ]
+                    )
+                )
+
+                self.assertFalse(result.ok)
+                self.assertEqual(["POLICY_RESOURCE_INVALID"], self.diagnostic_codes(result))
+                self.assertEqual("limited", result.diagnostics[0].subject)
 
     def test_unsupported_capabilities_emit_diagnostics(self):
         cases = [

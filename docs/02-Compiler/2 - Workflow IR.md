@@ -208,8 +208,9 @@ class CompiledCondition:
     referenced_paths: tuple[str, ...] = ()
 ```
 
-Conditions are evaluated at runtime. The Compiler only parses, validates, and
-restricts them.
+Conditions are evaluated at runtime against the same data environment available
+to node input mappings. The Compiler only parses, validates, restricts them, and
+records referenced paths for scheduling and observability.
 
 ## Excluded Runtime State
 

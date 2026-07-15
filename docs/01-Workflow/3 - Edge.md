@@ -44,8 +44,11 @@ Target node reference. It may be a node id string or a `Node` object.
 Optional condition that determines whether the edge is satisfied. Missing
 condition means unconditional.
 
-Conditions may reference source node output, source node status, Runtime Context,
-event data, or other runtime state exposed by the expression environment.
+Conditions use the same runtime data environment as node `input_mapping`.
+They may reference Runtime Context, upstream node outputs and statuses,
+constants, invocation input payloads, event payloads, or other runtime data
+exposed by the expression environment. A condition is not limited to the source
+node's output.
 
 Examples:
 
@@ -53,7 +56,12 @@ Examples:
 nodes.classify.output.category == "bug"
 nodes.call_model.status == "failed"
 context.approval == "approved"
+input.issue.priority in ["p0", "p1"]
 ```
+
+Condition expressions only decide whether an edge is satisfied. They do not move
+data into the target node. Target input still comes from the target node's
+`input_mapping`, or from Compiler/builder inference when unambiguous.
 
 ### metadata
 

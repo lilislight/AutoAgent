@@ -98,7 +98,9 @@ Diagnostics:
 
 ## Stage 6: Compile Conditions
 
-Compile edge conditions into runtime-evaluable condition plans.
+Compile edge conditions into runtime-evaluable condition plans. Conditions use
+the same runtime data environment as node input mappings, but they compile to a
+boolean routing decision instead of a node input value.
 
 Outputs:
 

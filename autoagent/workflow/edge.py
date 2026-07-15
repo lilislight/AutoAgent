@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.workflow.node import Node
+from autoagent.workflow.policy import EdgePolicy
 
 
 class Edge(BaseModel):
@@ -37,6 +38,14 @@ class Edge(BaseModel):
         description=(
             "Optional bool condition for selecting this edge. It may be a "
             "callable or a string expression for compiler validation."
+        ),
+    )
+    policy: EdgePolicy | None = Field(
+        default=None,
+        description=(
+            "Optional edge-level policy such as map/fan-out behavior. Map "
+            "policy is evaluated after this edge is selected and before the "
+            "target node's logical NodeExecution completes."
         ),
     )
     metadata: dict[str, Any] = Field(

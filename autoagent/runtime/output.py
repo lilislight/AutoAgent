@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from autoagent.runtime.execution import NodeExecution
+from autoagent.runtime.readonly import to_read_only
 
 _MISSING = object()
 
@@ -77,7 +78,7 @@ class OutputContext:
                 node_execution_id=execution.id,
                 node_id=execution.node_id,
                 sequence=execution.sequence,
-                value=execution.output,
+                value=to_read_only(execution.output),
             )
             for execution in sorted(executions, key=lambda item: item.sequence)
             if execution.state == "completed"

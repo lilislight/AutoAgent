@@ -3,14 +3,19 @@ from __future__ import annotations
 import unittest
 from uuid import uuid4
 
-from autoagent.runtime import SchedulerContext
+from autoagent.runtime import EdgeActivation, SchedulerContext
 
 
 class SchedulerContextTests(unittest.TestCase):
     def test_ready_queue_drains_batch_and_respects_limit(self) -> None:
         scheduler = SchedulerContext()
         upstream = uuid4()
-        scheduler.enqueue_ready("a", source_execution_ids=(upstream,))
+        activation = EdgeActivation(
+            edge_id="edge_upstream_a",
+            source_node_id="upstream",
+            source_execution_id=upstream,
+        )
+        scheduler.enqueue_ready("a", activations=(activation,))
         scheduler.enqueue_ready("b")
         scheduler.enqueue_ready("c")
 
@@ -42,6 +47,26 @@ class SchedulerContextTests(unittest.TestCase):
         self.assertEqual(waiting.payload, {"request_id": "1"})
         self.assertEqual(scheduler.waiting_executions, {})
 
+    def test_active_wait_key_must_be_unique_within_invocation(self) -> None:
+        scheduler = SchedulerContext()
+        scheduler.add_waiting_execution(
+            wait_key="approval:1",
+            node_execution_id=uuid4(),
+            node_id="first",
+        )
+
+        with self.assertRaisesRegex(ValueError, "Duplicate active wait key"):
+            scheduler.add_waiting_execution(
+                wait_key="approval:1",
+                node_execution_id=uuid4(),
+                node_id="second",
+            )
+
+        self.assertEqual(
+            scheduler.waiting_executions["approval:1"].node_id,
+            "first",
+        )
+
     def test_transition_queue_drains_completed_states(self) -> None:
         scheduler = SchedulerContext()
         first = uuid4()
@@ -66,7 +91,19 @@ class SchedulerContextTests(unittest.TestCase):
     def test_scheduler_context_round_trips_current_cursor(self) -> None:
         scheduler = SchedulerContext()
         execution_id = uuid4()
-        scheduler.enqueue_ready("next", source_execution_ids=(execution_id,))
+        activation = EdgeActivation(
+            edge_id="edge_sleep_next",
+            source_node_id="sleep",
+            source_execution_id=execution_id,
+        )
+        scheduler.enqueue_ready("next", activations=(activation,))
+        scheduler.resolve_edge(
+            activation.edge_id,
+            state="selected",
+            activation=activation,
+        )
+        scheduler.scheduled_node_ids.add("next")
+        scheduler.entered_loop_region_ids.add("loop_1")
         scheduler.add_waiting_execution(
             wait_key="timer:1",
             node_execution_id=execution_id,
@@ -82,6 +119,13 @@ class SchedulerContextTests(unittest.TestCase):
         loaded = SchedulerContext.from_record(scheduler.to_record())
 
         self.assertEqual([request.node_id for request in loaded.ready_queue], ["next"])
+        self.assertEqual(loaded.ready_queue[0].activations, (activation,))
+        self.assertEqual(
+            loaded.edge_resolutions[activation.edge_id].activation,
+            activation,
+        )
+        self.assertEqual(loaded.scheduled_node_ids, {"next"})
+        self.assertEqual(loaded.entered_loop_region_ids, {"loop_1"})
         self.assertEqual(
             list(loaded.waiting_executions),
             ["timer:1"],

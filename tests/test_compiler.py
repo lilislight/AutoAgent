@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from pydantic import ValidationError
+
 from autoagent.compiler import CompileResult, Diagnostic, WorkflowCompiler, WorkflowIR
 from autoagent.workflow import (
     BackoffPolicy,
@@ -9,7 +11,6 @@ from autoagent.workflow import (
     CapabilitySelectionPolicy,
     Edge,
     EdgePolicy,
-    JoinPolicy,
     MapPolicy,
     Node,
     NodePolicy,
@@ -18,7 +19,6 @@ from autoagent.workflow import (
     ResourcePolicy,
     RetryPolicy,
     SystemCommand,
-    TimerPolicy,
     TimeoutPolicy,
     Workflow,
 )
@@ -48,6 +48,13 @@ def output_binding(result):
     return {"result": result}
 
 
+def make_workflow(**fields) -> Workflow:
+    """Keep compiler tests focused while every source Workflow has stable identity."""
+
+    fields.setdefault("id", "compiler_test_workflow")
+    return Workflow(**fields)
+
+
 class WorkflowCompilerTests(unittest.TestCase):
     def compile_ok(self, workflow: Workflow) -> WorkflowIR:
         result = WorkflowCompiler().compile(workflow)
@@ -56,13 +63,27 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertIsNotNone(result.workflow_ir)
         return result.workflow_ir
 
+    def test_direct_callable_varargs_are_rejected(self) -> None:
+        def unsupported(*values: str) -> str:
+            return "".join(values)
+
+        result = WorkflowCompiler().compile(
+            make_workflow(nodes=[Node(id="unsupported", capability=unsupported)])
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            ["OPERATOR_CONTRACT_INVALID"],
+            self.diagnostic_codes(result),
+        )
+
     def diagnostic_codes(self, result: CompileResult) -> list[str]:
         return [diagnostic.code for diagnostic in result.diagnostics]
 
-    def test_single_callable_node_success_uses_auto_workflow_id_and_version(self):
-        workflow_ir = self.compile_ok(Workflow(nodes=[Node(capability=task)]))
+    def test_single_callable_node_preserves_required_id_and_defaults_version(self):
+        workflow_ir = self.compile_ok(make_workflow(nodes=[Node(capability=task)]))
 
-        self.assertTrue(workflow_ir.workflow_id.startswith("workflow_"))
+        self.assertEqual("compiler_test_workflow", workflow_ir.workflow_id)
         self.assertEqual(1, workflow_ir.workflow_version)
         self.assertEqual(["node_1"], list(workflow_ir.nodes))
         self.assertIs(task, workflow_ir.nodes["node_1"].capability)
@@ -71,8 +92,24 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual({"node_1": ()}, workflow_ir.graph.outgoing_edges)
         self.assertEqual({"node_1": ()}, workflow_ir.graph.incoming_edges)
 
+    def test_workflow_requires_non_empty_stable_id(self) -> None:
+        with self.assertRaises(ValidationError):
+            Workflow(nodes=[Node(capability=task)])
+        with self.assertRaises(ValidationError):
+            Workflow(id="   ", nodes=[Node(capability=task)])
+
+    def test_workflow_ir_serializes_contract_descriptor_without_live_validators(self):
+        workflow_ir = self.compile_ok(make_workflow(nodes=[Node(capability=task)]))
+
+        node = workflow_ir.model_dump()["nodes"]["node_1"]
+        input_contract = node["input_contract"]
+        self.assertEqual(input_contract["kind"], "arguments")
+        self.assertEqual(input_contract["json_schema"]["type"], "object")
+        self.assertNotIn("_signature", input_contract)
+        self.assertNotIn("_parameter_adapters", input_contract)
+
     def test_manual_node_ids_are_preserved(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             id="workflow_manual",
             version="2",
             nodes=[
@@ -90,7 +127,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["edge_source_target"], list(workflow_ir.edges))
 
     def test_auto_node_ids_skip_manual_conflicts(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="node_1", capability=task),
                 Node(capability=other_task),
@@ -104,7 +141,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["node_1", "node_2", "node_3", "node_4"], list(workflow_ir.nodes))
 
     def test_auto_edge_ids_use_endpoint_ids_and_duplicate_suffix(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="from", capability=task),
                 Node(id="to", capability=other_task),
@@ -125,7 +162,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         source = Node(id="source", capability=task)
         middle = Node(id="middle", capability=other_task)
         target = Node(id="target", capability=third_task)
-        workflow = Workflow()
+        workflow = make_workflow()
         workflow.add_node(source)
         workflow.add_node(middle)
         workflow.add_node(target)
@@ -140,7 +177,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual("target", workflow_ir.edges["string_to_object"].to_node)
 
     def test_unknown_edge_endpoints_emit_diagnostics_and_fail(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[Node(id="known", capability=task)],
             edges=[
                 Edge(id="missing_source", from_node="missing", to_node="known"),
@@ -158,8 +195,32 @@ class WorkflowCompilerTests(unittest.TestCase):
             {diagnostic.subject for diagnostic in result.diagnostics},
         )
 
+    def test_independent_node_and_edge_errors_are_collected_together(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="known", capability=task),
+                Node(id="missing_capability", capability=CapabilityRef(id="missing")),
+            ],
+            edges=[
+                Edge(from_node="known", to_node="unknown"),
+                Edge(from_node="known", to_node="missing_capability", condition="bad"),
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            {
+                "EDGE_UNKNOWN_NODE",
+                "CAPABILITY_NOT_REGISTERED",
+                "STRING_CONDITION_UNSUPPORTED",
+            },
+            set(self.diagnostic_codes(result)),
+        )
+
     def test_explicit_entry_takes_precedence_over_inferred_entries(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="first", capability=task),
                 Node(id="second", capability=other_task, entry=True),
@@ -174,7 +235,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertTrue(workflow_ir.nodes["second"].entry)
 
     def test_infers_entries_and_exits(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="first", capability=task),
                 Node(id="second", capability=other_task),
@@ -198,7 +259,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertTrue(workflow_ir.nodes["third"].exit)
 
     def test_graph_indexes_include_edges_predecessors_and_successors(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="a", capability=task),
                 Node(id="b", capability=other_task),
@@ -225,7 +286,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual({"a": ("b", "c"), "b": ("c",), "c": ()}, workflow_ir.graph.successors)
 
     def test_callable_edge_condition_is_carried_into_edge_ir(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="from", capability=task),
                 Node(id="to", capability=other_task),
@@ -238,7 +299,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertIs(edge_condition, workflow_ir.edges["conditional"].condition)
 
     def test_string_edge_condition_emits_unsupported_diagnostic(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="from", capability=task),
                 Node(id="to", capability=other_task),
@@ -254,7 +315,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual("conditional", result.diagnostics[0].subject)
 
     def test_callable_mappings_are_carried_into_node_ir(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(
                     id="mapped",
@@ -276,7 +337,7 @@ class WorkflowCompilerTests(unittest.TestCase):
             timeout=TimeoutPolicy(timeout_ms=1000),
             resource=ResourcePolicy(max_node_executions_per_invocation=3),
         )
-        workflow = Workflow(nodes=[Node(id="limited", capability=task, policy=policy)])
+        workflow = make_workflow(nodes=[Node(id="limited", capability=task, policy=policy)])
 
         workflow_ir = self.compile_ok(workflow)
 
@@ -296,7 +357,7 @@ class WorkflowCompilerTests(unittest.TestCase):
                 max_parallelism=2,
             )
         )
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="source", capability=task),
                 Node(id="target", capability=other_task),
@@ -310,7 +371,7 @@ class WorkflowCompilerTests(unittest.TestCase):
 
     def test_replication_policy_requires_output_aggregator(self):
         result = WorkflowCompiler().compile(
-            Workflow(
+            make_workflow(
                 nodes=[
                     Node(
                         id="sample",
@@ -325,25 +386,8 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["POLICY_REPLICATION_INVALID"], self.diagnostic_codes(result))
         self.assertIn("requires output_aggregator", result.diagnostics[0].message)
 
-    def test_timer_policy_long_blocking_delay_emits_warning_only(self):
-        workflow = Workflow(
-            nodes=[
-                Node(
-                    id="sleep",
-                    capability=task,
-                    policy=NodePolicy(timer=TimerPolicy(delay_ms=6000, mode="blocking")),
-                )
-            ]
-        )
-
-        result = WorkflowCompiler().compile(workflow)
-
-        self.assertTrue(result.ok)
-        self.assertEqual(["POLICY_TIMER_BLOCKING_LONG"], self.diagnostic_codes(result))
-        self.assertEqual("warning", result.diagnostics[0].severity)
-
     def test_invalid_map_policy_emits_diagnostic(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="source", capability=task),
                 Node(id="target", capability=other_task),
@@ -364,58 +408,84 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["POLICY_MAP_INVALID"], self.diagnostic_codes(result))
         self.assertEqual("map_edge", result.diagnostics[0].subject)
 
-    def test_join_policy_validation_emits_diagnostics(self):
-        cases = [
-            (
-                "missing_count",
-                JoinPolicy(mode="n"),
-                "JoinPolicy mode n requires count.",
-            ),
-            (
-                "zero_count",
-                JoinPolicy(mode="n", count=0),
-                "JoinPolicy count must be positive.",
-            ),
-            (
-                "count_too_large",
-                JoinPolicy(mode="n", count=3),
-                "JoinPolicy count exceeds incoming edge count.",
-            ),
-            (
-                "count_without_n",
-                JoinPolicy(mode="all", count=1),
-                "JoinPolicy count is only valid when mode is n.",
-            ),
-        ]
+    def test_compiler_derives_single_entry_loop_region(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="start", capability=task),
+                Node(id="agent", capability=other_task),
+                Node(id="tools", capability=third_task),
+                Node(id="final", capability=task),
+            ],
+            edges=[
+                Edge(id="start_agent", from_node="start", to_node="agent"),
+                Edge(id="agent_tools", from_node="agent", to_node="tools", condition=edge_condition),
+                Edge(id="tools_agent", from_node="tools", to_node="agent"),
+                Edge(id="agent_final", from_node="agent", to_node="final", condition=edge_condition),
+            ],
+        )
 
-        for name, join_policy, expected_message in cases:
-            with self.subTest(name=name):
-                workflow = Workflow(
-                    nodes=[
-                        Node(id="left", capability=task),
-                        Node(id="right", capability=other_task),
-                        Node(
-                            id="join",
-                            capability=third_task,
-                            policy=NodePolicy(join=join_policy),
-                        ),
-                    ],
-                    edges=[
-                        Edge(from_node="left", to_node="join"),
-                        Edge(from_node="right", to_node="join"),
-                    ],
-                )
+        workflow_ir = self.compile_ok(workflow)
 
-                result = WorkflowCompiler().compile(workflow)
+        region = workflow_ir.graph.loop_regions["loop_1"]
+        self.assertEqual(("agent", "tools"), region.node_ids)
+        self.assertEqual("agent", region.entry_node_id)
+        self.assertEqual(("start_agent",), region.entry_edge_ids)
+        self.assertEqual({"agent_tools", "tools_agent"}, set(region.internal_edge_ids))
+        self.assertEqual(("agent_final",), region.exit_edge_ids)
+        self.assertEqual(
+            {"agent": "loop_1", "tools": "loop_1"},
+            workflow_ir.graph.node_loop_regions,
+        )
 
-                self.assertFalse(result.ok)
-                self.assertIsNone(result.workflow_ir)
-                self.assertEqual(["POLICY_JOIN_INVALID"], self.diagnostic_codes(result))
-                self.assertEqual("join", result.diagnostics[0].subject)
-                self.assertEqual(expected_message, result.diagnostics[0].message)
+    def test_loop_with_multiple_entry_nodes_is_rejected(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="start", capability=task),
+                Node(id="left", capability=other_task),
+                Node(id="right", capability=third_task),
+                Node(id="final", capability=task),
+            ],
+            edges=[
+                Edge(from_node="start", to_node="left"),
+                Edge(from_node="start", to_node="right"),
+                Edge(from_node="left", to_node="right"),
+                Edge(from_node="right", to_node="left"),
+                Edge(from_node="right", to_node="final", condition=edge_condition),
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertIn("LOOP_ENTRY_INVALID", self.diagnostic_codes(result))
+        loop_diagnostic = next(
+            item for item in result.diagnostics if item.code == "LOOP_ENTRY_INVALID"
+        )
+        self.assertEqual("edge_start_right", loop_diagnostic.subject)
+        self.assertEqual(
+            "left",
+            loop_diagnostic.metadata["expected_entry_node_id"],
+        )
+
+    def test_loop_node_with_unconditional_fan_out_is_rejected(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="loop", capability=task, entry=True),
+                Node(id="final", capability=other_task),
+            ],
+            edges=[
+                Edge(from_node="loop", to_node="loop"),
+                Edge(from_node="loop", to_node="final", condition=edge_condition),
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertIn("LOOP_ROUTING_AMBIGUOUS", self.diagnostic_codes(result))
 
     def test_selection_policy_cannot_prefer_and_exclude_same_operator(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(
                     id="select",
@@ -433,7 +503,10 @@ class WorkflowCompilerTests(unittest.TestCase):
         result = WorkflowCompiler().compile(workflow)
 
         self.assertFalse(result.ok)
-        self.assertEqual(["POLICY_SELECTION_INVALID"], self.diagnostic_codes(result))
+        self.assertEqual(
+            ["POLICY_SELECTION_INVALID", "POLICY_SELECTION_INVALID"],
+            self.diagnostic_codes(result),
+        )
         self.assertEqual("select", result.diagnostics[0].subject)
 
     def test_retry_backoff_timeout_and_resource_policy_validation(self):
@@ -477,7 +550,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         for name, policy, expected_code in cases:
             with self.subTest(name=name):
                 result = WorkflowCompiler().compile(
-                    Workflow(nodes=[Node(id=name, capability=task, policy=policy)])
+                    make_workflow(nodes=[Node(id=name, capability=task, policy=policy)])
                 )
 
                 self.assertFalse(result.ok)
@@ -495,7 +568,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         for policy in cases:
             with self.subTest(policy=policy):
                 result = WorkflowCompiler().compile(
-                    Workflow(
+                    make_workflow(
                         nodes=[
                             Node(
                                 id="limited",
@@ -510,18 +583,22 @@ class WorkflowCompilerTests(unittest.TestCase):
                 self.assertEqual(["POLICY_RESOURCE_INVALID"], self.diagnostic_codes(result))
                 self.assertEqual("limited", result.diagnostics[0].subject)
 
-    def test_unsupported_capabilities_emit_diagnostics(self):
+    def test_unregistered_capabilities_emit_diagnostics(self):
         cases = [
-            ("string", "raw.capability", "CAPABILITY_REF_UNSUPPORTED"),
-            ("capability", CapabilityRef(id="capability"), "CAPABILITY_REF_UNSUPPORTED"),
-            ("operator", OperatorRef(id="operator"), "OPERATOR_REF_UNSUPPORTED"),
-            ("system_command", SystemCommand(id="wait"), "SYSTEM_COMMAND_UNSUPPORTED"),
+            ("string", "raw.capability", "CAPABILITY_NOT_REGISTERED"),
+            ("capability", CapabilityRef(id="capability"), "CAPABILITY_NOT_REGISTERED"),
+            ("operator", OperatorRef(id="operator"), "OPERATOR_NOT_REGISTERED"),
+            (
+                "system_command",
+                SystemCommand(id="unknown"),
+                "SYSTEM_COMMAND_UNSUPPORTED",
+            ),
         ]
 
         for name, capability, expected_code in cases:
             with self.subTest(name=name):
                 result = WorkflowCompiler().compile(
-                    Workflow(nodes=[Node(id="unsupported", capability=capability)])
+                    make_workflow(nodes=[Node(id="unsupported", capability=capability)])
                 )
 
                 self.assertFalse(result.ok)
@@ -529,8 +606,86 @@ class WorkflowCompilerTests(unittest.TestCase):
                 self.assertEqual([expected_code], self.diagnostic_codes(result))
                 self.assertEqual("unsupported", result.diagnostics[0].subject)
 
+    def test_wait_system_command_compiles_framework_contract(self):
+        result = WorkflowCompiler().compile(
+            make_workflow(
+                id="wait_contract",
+                nodes=[Node(id="approval", capability=SystemCommand(id="wait"))],
+            )
+        )
+
+        self.assertTrue(result.ok)
+        assert result.workflow_ir is not None
+        node = result.workflow_ir.nodes["approval"]
+        self.assertIsInstance(node.capability, SystemCommand)
+        self.assertEqual(
+            set(node.input_contract.json_schema["properties"]),
+            {"wait_key", "wait_type", "payload"},
+        )
+        self.assertFalse(node.output_contract.known)
+
+    def test_wait_system_command_rejects_node_policy(self):
+        result = WorkflowCompiler().compile(
+            make_workflow(
+                nodes=[
+                    Node(
+                        id="approval",
+                        capability=SystemCommand(id="wait"),
+                        policy=NodePolicy(max_concurrency=1),
+                    )
+                ]
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            ["SYSTEM_COMMAND_POLICY_UNSUPPORTED"],
+            self.diagnostic_codes(result),
+        )
+
+    def test_wait_system_command_rejects_reserved_command_object(self):
+        result = WorkflowCompiler().compile(
+            make_workflow(
+                nodes=[
+                    Node(
+                        id="approval",
+                        capability=SystemCommand(id="wait", command=object()),
+                    )
+                ]
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            ["SYSTEM_COMMAND_CONFIG_UNSUPPORTED"],
+            self.diagnostic_codes(result),
+        )
+
+    def test_map_policy_cannot_target_wait_system_command(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="source", capability=lambda: [{"wait_key": "one"}]),
+                Node(id="wait", capability=SystemCommand(id="wait")),
+            ],
+            edges=[
+                Edge(
+                    from_node="source",
+                    to_node="wait",
+                    policy=EdgePolicy(map=MapPolicy()),
+                )
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            "SYSTEM_COMMAND_MAP_UNSUPPORTED",
+            self.diagnostic_codes(result),
+        )
+
     def test_duplicate_node_id_emits_diagnostic(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="duplicate", capability=task),
                 Node(id="duplicate", capability=other_task),
@@ -545,7 +700,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual("duplicate", result.diagnostics[0].subject)
 
     def test_duplicate_edge_id_emits_diagnostic(self):
-        workflow = Workflow(
+        workflow = make_workflow(
             nodes=[
                 Node(id="from", capability=task),
                 Node(id="to", capability=other_task),
@@ -569,6 +724,7 @@ class WorkflowCompilerTests(unittest.TestCase):
             compiler_version="0.1",
             workflow_id="workflow_test",
             workflow_version=1,
+            definition_hash="test_definition_hash",
         )
 
         self.assertTrue(CompileResult(workflow_ir=workflow_ir).ok)

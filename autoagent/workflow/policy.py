@@ -1,60 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
-
-class FailurePolicy(BaseModel):
-    """Workflow-level behavior for unhandled branch failures."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    mode: Literal["fail_fast", "finish_active"] = Field(
-        default="fail_fast",
-        description=(
-            "fail_fast fails the run immediately. finish_active lets already "
-            "active branches finish before the run reaches a final status."
-        ),
-    )
-
-
-class WorkflowPolicy(BaseModel):
-    """Workflow-level policy shared by the whole run."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    failure: FailurePolicy = Field(
-        default_factory=FailurePolicy,
-        description="Unhandled branch failure behavior.",
-    )
-
-
-class JoinPolicy(BaseModel):
-    """Readiness rule for a node with multiple incoming edges."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    mode: Literal["all", "any", "n"] = Field(
-        default="all",
-        description="How many incoming dependencies must be satisfied.",
-    )
-    count: int | None = Field(
-        default=None,
-        description="Required incoming edge count when mode is n.",
-    )
-
-
-class RoutingPolicy(BaseModel):
-    """Selection rule when multiple outgoing edges are satisfied."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    mode: Literal["all_satisfied", "first_satisfied", "exclusive"] = Field(
-        default="all_satisfied",
-        description="How to select satisfied outgoing edges.",
-    )
 
 
 class CapabilitySelectionPolicy(BaseModel):
@@ -65,9 +14,6 @@ class CapabilitySelectionPolicy(BaseModel):
     mode: Literal[
         "default",
         "priority",
-        "lowest_cost",
-        "lowest_latency",
-        "highest_reliability",
         "first_available",
     ] = Field(
         default="default",
@@ -75,7 +21,11 @@ class CapabilitySelectionPolicy(BaseModel):
     )
     allow_fallback: bool = Field(
         default=True,
-        description="Whether execution may try another operator after failure.",
+        description=(
+            "Whether execution may try another operator after an OperatorCall "
+            "failure. Mapping, binding, condition, and aggregation failures do "
+            "not enter operator fallback."
+        ),
     )
     preferred_operator_ids: tuple[str, ...] = Field(
         default_factory=tuple,
@@ -121,13 +71,19 @@ class BackoffPolicy(BaseModel):
 
 
 class RetryPolicy(BaseModel):
-    """Retry rule for failed node attempts."""
+    """Retry rule for OperatorCall failures inside one NodeExecution."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     max_attempts: int = Field(
         default=1,
-        description="Maximum attempts for one node execution.",
+        description=(
+            "Maximum calls per selected Operator. V1 retries Operator handler "
+            "exceptions, timeouts, and invalid Operator outputs. Input mapping, "
+            "item selection, condition, output aggregation, and output binding "
+            "failures are deterministic framework-stage errors and are never "
+            "retried or sent to capability fallback."
+        ),
     )
     backoff: BackoffPolicy | None = Field(
         default=None,
@@ -173,35 +129,9 @@ class ResourcePolicy(BaseModel):
     max_runtime_ms_per_invocation: int | None = Field(
         default=None,
         description=(
-            "Maximum accumulated runtime in milliseconds for this node_id in "
-            "one Invocation."
-        ),
-    )
-
-
-class TimerPolicy(BaseModel):
-    """Delay rule applied before or after one logical node execution."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    delay_ms: int = Field(
-        description="Delay duration in milliseconds.",
-    )
-    mode: Literal["blocking", "waiting", "auto"] = Field(
-        default="auto",
-        description=(
-            "blocking sleeps inside the executor worker. waiting stores a "
-            "WaitingExecution and relies on a timer service to resume later. "
-            "auto lets executor/runtime choose, but compiler may warn when a "
-            "long delay would block a worker."
-        ),
-    )
-    position: Literal["before", "after"] = Field(
-        default="before",
-        description=(
-            "before delays before operator call. after delays after "
-            "operator completion but before the node transition is exposed to "
-            "scheduler."
+            "Maximum accumulated Operator handler time in milliseconds for this "
+            "node_id in one Invocation. Mapping, binding, condition, aggregation, "
+            "and retry backoff time are excluded."
         ),
     )
 
@@ -214,12 +144,14 @@ class ReplicationPolicy(BaseModel):
     count: int = Field(
         description="How many OperatorCalls to create for one NodeExecution.",
     )
-    output_aggregator: Callable[[list[Any]], Any] | None = Field(
+    output_aggregator: Callable[[list[Any]], Any | Awaitable[Any]] | None = Field(
         default=None,
         description=(
             "Required aggregation function for replication. It receives all "
             "successful OperatorCall outputs and returns the final "
-            "NodeExecution.output consumed by downstream nodes."
+            "NodeExecution.output consumed by downstream nodes. If any replica "
+            "fails, remaining calls are cancelled when possible and this hook is "
+            "not called."
         ),
     )
     max_parallelism: int | None = Field(
@@ -233,14 +165,6 @@ class NodePolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    join: JoinPolicy | None = Field(
-        default=None,
-        description="Readiness rule for incoming edges.",
-    )
-    routing: RoutingPolicy | None = Field(
-        default=None,
-        description="Selection rule for outgoing edges.",
-    )
     selection: CapabilitySelectionPolicy | None = Field(
         default=None,
         description="Operator selection rule for capability refs.",
@@ -257,10 +181,6 @@ class NodePolicy(BaseModel):
         default=None,
         description="Resource limits for this node.",
     )
-    timer: TimerPolicy | None = Field(
-        default=None,
-        description="Optional delay before or after this node execution.",
-    )
     replication: ReplicationPolicy | None = Field(
         default=None,
         description=(
@@ -272,9 +192,9 @@ class NodePolicy(BaseModel):
     max_concurrency: int | None = Field(
         default=None,
         description=(
-            "Maximum concurrent NodeExecutions or internal OperatorCalls "
-            "allowed for this node. NodeExecutor combines this with operator "
-            "limits and runtime global limits."
+            "Maximum concurrent logical NodeExecutions for this node across "
+            "sessions in one App process. MapPolicy/ReplicationPolicy "
+            "max_parallelism separately limits internal OperatorCalls."
         ),
     )
 
@@ -284,21 +204,26 @@ class MapPolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    item_selector: Callable[[Any], Iterable[Any]] | None = Field(
+    item_selector: Callable[
+        [Any],
+        Iterable[Mapping[str, Any]]
+        | Awaitable[Iterable[Mapping[str, Any]]],
+    ] | None = Field(
         default=None,
         description=(
             "Maps source NodeExecution.output into iterable target operator "
-            "inputs. When omitted, runtime treats the source output itself as "
-            "the iterable. Each selected item becomes one map_item "
-            "OperatorCall inside the target NodeExecution."
+            "argument mappings. Each selected mapping is copied to a dict and "
+            "becomes one map_item OperatorCall. When omitted, the source output "
+            "must itself be an iterable of argument mappings."
         ),
     )
-    output_aggregator: Callable[[list[Any]], Any] | None = Field(
+    output_aggregator: Callable[[list[Any]], Any | Awaitable[Any]] | None = Field(
         default=None,
         description=(
             "Aggregates map item outputs into the target NodeExecution.output. "
             "When omitted, outputs are collected into a list ordered by item "
-            "index."
+            "index. If any item fails, remaining calls are cancelled when "
+            "possible and this hook is not called."
         ),
     )
     max_parallelism: int | None = Field(

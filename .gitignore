@@ -12,6 +12,11 @@ env/
 build/
 dist/
 *.egg-info/
+ui/node_modules/
+ui/dist/
+
+# Local Workflow previews
+workflow_preview.mmd
 
 # Test and coverage
 .pytest_cache/
@@ -27,4 +32,3 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
-

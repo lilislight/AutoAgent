@@ -5,6 +5,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+WAIT_SYSTEM_COMMAND_ID = "wait"
+
+
 class CapabilityRef(BaseModel):
     """Reference to an abstract capability requirement."""
 
@@ -34,16 +37,21 @@ class OperatorRef(BaseModel):
 
 
 class SystemCommand(BaseModel):
-    """Runtime system command request."""
+    """Reference to a framework-owned runtime command.
+
+    V1 supports only ``SystemCommand(id="wait")``. Unlike an Operator, a
+    SystemCommand is interpreted by the framework and never resolved through an
+    OperatorRegistry.
+    """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     id: str = Field(
-        description="System command id, such as wait_human_input.",
+        description="Framework-owned command id. V1 accepts only 'wait'.",
     )
     command: Any | None = Field(
         default=None,
-        description="Optional system command object.",
+        description="Reserved for future command objects; unsupported in V1.",
     )
     metadata: dict[str, Any] = Field(
         default_factory=dict,

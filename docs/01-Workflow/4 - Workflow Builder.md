@@ -53,14 +53,29 @@ workflows.
 Workflow should provide an inspection utility for checking graph structure before
 execution.
 
-The first target format should be Mermaid:
+Use Mermaid when embedding the graph in Markdown or other documentation:
 
 ```python
 print(workflow.to_mermaid())
 ```
 
-Visualization is an authoring/debugging utility. It does not execute the
-Workflow and does not replace Compiler validation.
+Generate a standalone HTML/SVG preview for local inspection:
+
+```python
+preview_path = workflow.preview("workflow_preview.html")
+```
+
+When the Workflow uses `CapabilityRef` or `OperatorRef`, render through the App
+so preview compilation can see its registries:
+
+```python
+preview_path = app.preview(workflow, "workflow_preview.html")
+```
+
+The preview runs Compiler validation without executing the Workflow. Valid
+edges are gray, warning edges are amber, and invalid edges are red with their
+diagnostics shown below the graph. This static authoring preview is separate
+from the future Runtime observability graph.
 
 ## YAML
 

@@ -8,9 +8,21 @@ from autoagent.compiler.diagnostic import CompileResult, Diagnostic
 from autoagent.compiler.id_generation import (
     generate_edge_id,
     generate_node_id,
-    generate_workflow_id,
 )
-from autoagent.compiler.workflow_ir import EdgeIR, GraphIR, NodeIR, WorkflowIR
+from autoagent.compiler.snapshot import WorkflowVersionSnapshot
+from autoagent.compiler.workflow_ir import (
+    EdgeIR,
+    GraphIR,
+    LoopRegionIR,
+    NodeIR,
+    WorkflowIR,
+)
+from autoagent.operators import CapabilityRegistry, OperatorRegistry
+from autoagent.operators.contract import (
+    OperatorContract,
+    callable_contract,
+    value_contract,
+)
 from autoagent.workflow import (
     CapabilityRef,
     Edge,
@@ -19,14 +31,45 @@ from autoagent.workflow import (
     SystemCommand,
     Workflow,
 )
+from autoagent.workflow.capability import WAIT_SYSTEM_COMMAND_ID
+
+
+def _wait_contract(
+    *,
+    wait_key: str | None = None,
+    wait_type: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    """Signature-only definition of the framework wait command contract."""
+
+    raise RuntimeError("System wait contracts are compiled, not invoked.")
+
+
+_WAIT_OPERATOR_CONTRACT, _ = callable_contract(_wait_contract)
 
 
 class WorkflowCompiler:
     """Compile Workflow source models into WorkflowIR."""
 
+    def __init__(
+        self,
+        *,
+        capability_registry: CapabilityRegistry | None = None,
+        operator_registry: OperatorRegistry | None = None,
+    ) -> None:
+        """Create a compiler with optional application registry visibility.
+
+        Direct callables require no registry. CapabilityRef and OperatorRef are
+        validated against these registries, but remain references in WorkflowIR
+        so NodeExecutor can resolve the current implementation at execution time.
+        """
+
+        self.capability_registry = capability_registry
+        self.operator_registry = operator_registry
+
     def compile(self, workflow: Workflow) -> CompileResult:
         diagnostics: list[Diagnostic] = []
-        workflow_id = workflow.id or generate_workflow_id()
+        workflow_id = workflow.id
         workflow_version = workflow.version if workflow.version is not None else 1
 
         node_ids, node_object_ids = self._compile_node_ids(workflow, diagnostics)
@@ -34,18 +77,33 @@ class WorkflowCompiler:
             workflow, node_ids, node_object_ids, diagnostics
         )
 
-        if self._has_errors(diagnostics):
-            return CompileResult(diagnostics=diagnostics)
-
         nodes = self._compile_nodes(workflow, node_ids, diagnostics)
         edges = self._compile_edges(workflow, edge_refs, diagnostics)
 
-        if self._has_errors(diagnostics):
-            return CompileResult(diagnostics=diagnostics)
-
-        graph = self._build_graph(nodes, edges)
-        self._validate_policies(nodes, edges, graph, diagnostics)
-        entry_node_ids = self._infer_entry_node_ids(nodes, graph, diagnostics)
+        # Continue graph-level validation on the compilable subgraph so one
+        # preview can report independent node, edge, policy, and loop errors.
+        # Edges touching a node that failed compilation are excluded because
+        # that node's own diagnostic already explains why it is unavailable.
+        graph_edges = {
+            edge_id: edge
+            for edge_id, edge in edges.items()
+            if edge.from_node in nodes and edge.to_node in nodes
+        }
+        graph = self._build_graph(nodes, graph_edges)
+        entry_node_ids = (
+            self._infer_entry_node_ids(nodes, graph, diagnostics) if nodes else ()
+        )
+        if nodes:
+            self._compile_loop_regions(
+                nodes=nodes,
+                edges=graph_edges,
+                graph=graph,
+                entry_node_ids=entry_node_ids,
+                diagnostics=diagnostics,
+            )
+            self._validate_policies(nodes, graph_edges, diagnostics)
+        if not self._has_errors(diagnostics):
+            self._compile_final_output_contracts(nodes, graph_edges, diagnostics)
         exit_node_ids = self._infer_exit_node_ids(nodes, graph)
         self._mark_entry_exit_flags(nodes, entry_node_ids, exit_node_ids)
 
@@ -57,15 +115,28 @@ class WorkflowCompiler:
             compiler_version=COMPILER_VERSION,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            # Snapshot computation needs the complete compiled graph. This
+            # placeholder exists only inside this method and is replaced below.
+            definition_hash="pending",
+            name=workflow.name,
+            description=workflow.description,
             nodes=nodes,
             edges=edges,
             graph=graph,
             entry_node_ids=entry_node_ids,
             exit_node_ids=exit_node_ids,
-            policy=workflow.policy,
             metadata=workflow.metadata,
         )
-        return CompileResult(workflow_ir=workflow_ir, diagnostics=diagnostics)
+        snapshot = WorkflowVersionSnapshot.from_workflow_ir(
+            workflow_ir,
+            operator_registry=self.operator_registry,
+        )
+        workflow_ir.definition_hash = snapshot.definition_hash
+        return CompileResult(
+            workflow_ir=workflow_ir,
+            workflow_snapshot=snapshot,
+            diagnostics=diagnostics,
+        )
 
     def _compile_node_ids(
         self,
@@ -114,11 +185,11 @@ class WorkflowCompiler:
         node_ids: dict[int, str],
         node_object_ids: dict[int, str],
         diagnostics: list[Diagnostic],
-    ) -> list[tuple[Edge, str, str]]:
+    ) -> list[tuple[int, Edge, str, str]]:
         known_node_ids = set(node_ids.values())
-        edge_refs: list[tuple[Edge, str, str]] = []
+        edge_refs: list[tuple[int, Edge, str, str]] = []
 
-        for edge in workflow.edges:
+        for edge_index, edge in enumerate(workflow.edges):
             from_node = self._resolve_node_ref(
                 edge.from_node, known_node_ids, node_object_ids
             )
@@ -133,6 +204,7 @@ class WorkflowCompiler:
                         severity="error",
                         message="Edge references an unknown source node.",
                         subject=edge.id,
+                        metadata={"object_type": "edge", "source_index": edge_index},
                     )
                 )
             if to_node is None:
@@ -142,10 +214,11 @@ class WorkflowCompiler:
                         severity="error",
                         message="Edge references an unknown target node.",
                         subject=edge.id,
+                        metadata={"object_type": "edge", "source_index": edge_index},
                     )
                 )
             if from_node is not None and to_node is not None:
-                edge_refs.append((edge, from_node, to_node))
+                edge_refs.append((edge_index, edge, from_node, to_node))
 
         return edge_refs
 
@@ -175,6 +248,18 @@ class WorkflowCompiler:
             if capability is None:
                 continue
 
+            contract = self._binding_contract(capability)
+            if contract is None:
+                diagnostics.append(
+                    Diagnostic(
+                        code="OPERATOR_CONTRACT_UNAVAILABLE",
+                        severity="error",
+                        message="Compiled node capability has no Operator contract.",
+                        subject=node_id,
+                    )
+                )
+                continue
+
             if node.input_mapping is not None and not callable(node.input_mapping):
                 diagnostics.append(
                     Diagnostic(
@@ -196,9 +281,12 @@ class WorkflowCompiler:
 
             nodes[node_id] = NodeIR(
                 id=node_id,
+                name=node.name,
+                description=node.description,
                 capability=capability,
-                input_schema=node.input_schema,
-                output_schema=None,
+                input_contract=contract.input,
+                operator_output_contract=contract.output,
+                output_contract=contract.output,
                 input_plan=node.input_mapping,
                 output_binding=node.output_binding,
                 policy=node.policy,
@@ -215,55 +303,99 @@ class WorkflowCompiler:
         diagnostics: list[Diagnostic],
     ) -> Any | None:
         if callable(capability):
+            _, issues = callable_contract(capability)
+            for issue in issues:
+                if issue.severity == "error":
+                    diagnostics.append(
+                        Diagnostic(
+                            code="OPERATOR_CONTRACT_INVALID",
+                            severity="error",
+                            message=issue.message,
+                            subject=node_id,
+                        )
+                    )
+            if any(issue.severity == "error" for issue in issues):
+                return None
             return capability
 
         if isinstance(capability, str):
-            # TODO: Resolve CapabilityRef through capability registry.
-            diagnostics.append(
-                Diagnostic(
-                    code="CAPABILITY_REF_UNSUPPORTED",
-                    severity="error",
-                    message="String capability refs are not supported until registry exists.",
-                    subject=node_id,
-                )
-            )
-            return None
+            capability = CapabilityRef(id=capability)
 
         if isinstance(capability, CapabilityRef):
-            # TODO: Resolve CapabilityRef through capability registry.
-            diagnostics.append(
-                Diagnostic(
-                    code="CAPABILITY_REF_UNSUPPORTED",
-                    severity="error",
-                    message="CapabilityRef is not supported until registry exists.",
-                    subject=node_id,
+            if (
+                self.capability_registry is None
+                or not self.capability_registry.contains(capability.id)
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        code="CAPABILITY_NOT_REGISTERED",
+                        severity="error",
+                        message=f"Capability is not registered: {capability.id}",
+                        subject=node_id,
+                    )
                 )
+                return None
+            operators = (
+                self.operator_registry.for_capability(
+                    capability.id,
+                    include_disabled=True,
+                )
+                if self.operator_registry is not None
+                else ()
             )
-            return None
+            if not operators:
+                diagnostics.append(
+                    Diagnostic(
+                        code="CAPABILITY_HAS_NO_OPERATOR",
+                        severity="error",
+                        message=f"Capability has no registered Operator: {capability.id}",
+                        subject=node_id,
+                    )
+                )
+                return None
+            return capability
 
         if isinstance(capability, OperatorRef):
-            # TODO: Validate OperatorRef through operator registry.
-            diagnostics.append(
-                Diagnostic(
-                    code="OPERATOR_REF_UNSUPPORTED",
-                    severity="error",
-                    message="OperatorRef is not supported until operator registry exists.",
-                    subject=node_id,
+            if (
+                self.operator_registry is None
+                or not self.operator_registry.contains(capability.id)
+            ):
+                diagnostics.append(
+                    Diagnostic(
+                        code="OPERATOR_NOT_REGISTERED",
+                        severity="error",
+                        message=f"Operator is not registered: {capability.id}",
+                        subject=node_id,
+                    )
                 )
-            )
-            return None
+                return None
+            return capability
 
         if isinstance(capability, SystemCommand):
-            # TODO: Validate SystemCommand through system command registry.
-            diagnostics.append(
-                Diagnostic(
-                    code="SYSTEM_COMMAND_UNSUPPORTED",
-                    severity="error",
-                    message="SystemCommand is not supported until system registry exists.",
-                    subject=node_id,
+            if capability.id != WAIT_SYSTEM_COMMAND_ID:
+                diagnostics.append(
+                    Diagnostic(
+                        code="SYSTEM_COMMAND_UNSUPPORTED",
+                        severity="error",
+                        message=(
+                            "Unsupported SystemCommand. V1 accepts only "
+                            f"'{WAIT_SYSTEM_COMMAND_ID}'."
+                        ),
+                        subject=node_id,
+                    )
                 )
-            )
-            return None
+                return None
+            if capability.command is not None:
+                diagnostics.append(
+                    Diagnostic(
+                        code="SYSTEM_COMMAND_CONFIG_UNSUPPORTED",
+                        severity="error",
+                        message="SystemCommand.command is reserved and unsupported in V1.",
+                        subject=node_id,
+                    )
+                )
+                return None
+            return capability
 
         diagnostics.append(
             Diagnostic(
@@ -275,10 +407,36 @@ class WorkflowCompiler:
         )
         return None
 
+    def _binding_contract(self, binding: Any) -> OperatorContract | None:
+        if callable(binding):
+            contract, _ = callable_contract(binding)
+            return contract
+        if isinstance(binding, CapabilityRef):
+            capability = (
+                self.capability_registry.get(binding.id)
+                if self.capability_registry is not None
+                else None
+            )
+            if capability is None:
+                return None
+            return capability.contract
+        if isinstance(binding, OperatorRef):
+            operator = (
+                self.operator_registry.get(binding.id)
+                if self.operator_registry is not None
+                else None
+            )
+            if operator is None:
+                return None
+            return operator.contract
+        if isinstance(binding, SystemCommand) and binding.id == WAIT_SYSTEM_COMMAND_ID:
+            return _WAIT_OPERATOR_CONTRACT
+        return None
+
     def _compile_edges(
         self,
         workflow: Workflow,
-        edge_refs: list[tuple[Edge, str, str]],
+        edge_refs: list[tuple[int, Edge, str, str]],
         diagnostics: list[Diagnostic],
     ) -> dict[str, EdgeIR]:
         manual_ids: set[str] = set()
@@ -305,7 +463,14 @@ class WorkflowCompiler:
         edges: dict[str, EdgeIR] = {}
         outgoing_order: dict[str, int] = {}
 
-        for edge, from_node, to_node in edge_refs:
+        for edge_index, edge, from_node, to_node in edge_refs:
+            if edge.id is None:
+                edge_base = f"edge_{from_node}_{to_node}"
+                edge_id = generate_edge_id(edge_base, used_edge_ids)
+            else:
+                edge_id = edge.id
+            used_edge_ids.add(edge_id)
+
             if isinstance(edge.condition, str):
                 # TODO: Add safe string condition expression compiler.
                 diagnostics.append(
@@ -313,7 +478,8 @@ class WorkflowCompiler:
                         code="STRING_CONDITION_UNSUPPORTED",
                         severity="error",
                         message="String edge conditions are not supported yet.",
-                        subject=edge.id,
+                        subject=edge_id,
+                        metadata={"object_type": "edge", "source_index": edge_index},
                     )
                 )
                 continue
@@ -324,18 +490,12 @@ class WorkflowCompiler:
                         code="CONDITION_UNSUPPORTED",
                         severity="error",
                         message="Only callable edge conditions are supported.",
-                        subject=edge.id,
+                        subject=edge_id,
+                        metadata={"object_type": "edge", "source_index": edge_index},
                     )
                 )
                 continue
 
-            if edge.id is None:
-                edge_base = f"edge_{from_node}_{to_node}"
-                edge_id = generate_edge_id(edge_base, used_edge_ids)
-            else:
-                edge_id = edge.id
-
-            used_edge_ids.add(edge_id)
             order = outgoing_order.get(from_node, 0)
             outgoing_order[from_node] = order + 1
 
@@ -424,11 +584,196 @@ class WorkflowCompiler:
             node.entry = node_id in entry_ids
             node.exit = node_id in exit_ids
 
+    def _compile_loop_regions(
+        self,
+        *,
+        nodes: dict[str, NodeIR],
+        edges: dict[str, EdgeIR],
+        graph: GraphIR,
+        entry_node_ids: tuple[str, ...],
+        diagnostics: list[Diagnostic],
+    ) -> None:
+        """Find loop SCCs and validate the V1 single-path loop boundary.
+
+        Parallel fan-out and complete fan-in use invocation-level edge states in
+        the acyclic condensation graph. Edges inside a loop are repeatable, so a
+        loop must have one entry node and runtime must select at most one outgoing
+        edge after each execution. This keeps ReAct/retry loops useful without
+        introducing cycle-aware joins or branch rounds.
+        """
+
+        node_order = {node_id: index for index, node_id in enumerate(nodes)}
+        components = self._strongly_connected_components(graph, tuple(nodes))
+        loop_components = []
+        for component in components:
+            if len(component) > 1:
+                loop_components.append(component)
+                continue
+            node_id = component[0]
+            if node_id in graph.successors.get(node_id, ()):
+                loop_components.append(component)
+
+        loop_components.sort(key=lambda item: min(node_order[node_id] for node_id in item))
+        loop_regions: dict[str, LoopRegionIR] = {}
+        node_loop_regions: dict[str, str] = {}
+        workflow_entries = set(entry_node_ids)
+
+        for index, component in enumerate(loop_components, start=1):
+            node_ids = tuple(sorted(component, key=node_order.__getitem__))
+            node_set = set(node_ids)
+            internal_edges = tuple(
+                edge_id
+                for edge_id, edge in edges.items()
+                if edge.from_node in node_set and edge.to_node in node_set
+            )
+            entry_edges = tuple(
+                edge_id
+                for edge_id, edge in edges.items()
+                if edge.from_node not in node_set and edge.to_node in node_set
+            )
+            exit_edges = tuple(
+                edge_id
+                for edge_id, edge in edges.items()
+                if edge.from_node in node_set and edge.to_node not in node_set
+            )
+            workflow_entry_candidates = workflow_entries & node_set
+            entry_candidates = {
+                edges[edge_id].to_node for edge_id in entry_edges
+            } | workflow_entry_candidates
+
+            if len(entry_candidates) != 1:
+                canonical_entry = None
+                if len(workflow_entry_candidates) == 1:
+                    canonical_entry = next(iter(workflow_entry_candidates))
+                elif not workflow_entry_candidates and entry_edges:
+                    canonical_entry = edges[entry_edges[0]].to_node
+                invalid_entry_edges = tuple(
+                    edge_id
+                    for edge_id in entry_edges
+                    if canonical_entry is not None
+                    and edges[edge_id].to_node != canonical_entry
+                )
+                if invalid_entry_edges:
+                    for edge_id in invalid_entry_edges:
+                        diagnostics.append(
+                            Diagnostic(
+                                code="LOOP_ENTRY_INVALID",
+                                severity="error",
+                                message=(
+                                    "Loop regions allow one entry node. This edge "
+                                    f"enters {edges[edge_id].to_node}, but the loop "
+                                    f"entry is {canonical_entry}."
+                                ),
+                                subject=edge_id,
+                                metadata={
+                                    "object_type": "edge",
+                                    "loop_node_ids": list(node_ids),
+                                    "expected_entry_node_id": canonical_entry,
+                                },
+                            )
+                        )
+                else:
+                    diagnostics.append(
+                        Diagnostic(
+                            code="LOOP_ENTRY_INVALID",
+                            severity="error",
+                            message=(
+                                "A loop region must have exactly one entry node; "
+                                f"found {len(entry_candidates)}."
+                            ),
+                            subject=",".join(node_ids),
+                            metadata={"loop_node_ids": list(node_ids)},
+                        )
+                    )
+                continue
+
+            for node_id in node_ids:
+                outgoing = [
+                    edges[edge_id]
+                    for edge_id in graph.outgoing_edges.get(node_id, ())
+                ]
+                unconditional = [edge for edge in outgoing if edge.condition is None]
+                if len(outgoing) > 1 and unconditional:
+                    diagnostics.append(
+                        Diagnostic(
+                            code="LOOP_ROUTING_AMBIGUOUS",
+                            severity="error",
+                            message=(
+                                "A loop node with multiple outgoing edges cannot "
+                                "contain an unconditional edge; runtime requires "
+                                "mutually exclusive conditions."
+                            ),
+                            subject=node_id,
+                        )
+                    )
+
+            region_id = f"loop_{index}"
+            loop_regions[region_id] = LoopRegionIR(
+                id=region_id,
+                node_ids=node_ids,
+                entry_node_id=next(iter(entry_candidates)),
+                internal_edge_ids=internal_edges,
+                entry_edge_ids=entry_edges,
+                exit_edge_ids=exit_edges,
+            )
+            for node_id in node_ids:
+                node_loop_regions[node_id] = region_id
+
+        graph.loop_regions = loop_regions
+        graph.node_loop_regions = node_loop_regions
+
+    def _strongly_connected_components(
+        self,
+        graph: GraphIR,
+        node_ids: tuple[str, ...],
+    ) -> list[tuple[str, ...]]:
+        index = 0
+        indices: dict[str, int] = {}
+        lowlinks: dict[str, int] = {}
+        stack: list[str] = []
+        on_stack: set[str] = set()
+        components: list[tuple[str, ...]] = []
+
+        def visit(node_id: str) -> None:
+            nonlocal index
+            indices[node_id] = index
+            lowlinks[node_id] = index
+            index += 1
+            stack.append(node_id)
+            on_stack.add(node_id)
+
+            for successor_id in graph.successors.get(node_id, ()):
+                if successor_id not in indices:
+                    visit(successor_id)
+                    lowlinks[node_id] = min(
+                        lowlinks[node_id], lowlinks[successor_id]
+                    )
+                elif successor_id in on_stack:
+                    lowlinks[node_id] = min(
+                        lowlinks[node_id], indices[successor_id]
+                    )
+
+            if lowlinks[node_id] != indices[node_id]:
+                return
+
+            component: list[str] = []
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.append(member)
+                if member == node_id:
+                    break
+            components.append(tuple(component))
+
+        for node_id in node_ids:
+            if node_id not in indices:
+                visit(node_id)
+        return components
+
     def _validate_policies(
         self,
         nodes: dict[str, NodeIR],
         edges: dict[str, EdgeIR],
-        graph: GraphIR,
         diagnostics: list[Diagnostic],
     ) -> None:
         for node_id, node in nodes.items():
@@ -436,45 +781,16 @@ class WorkflowCompiler:
             if policy is None:
                 continue
 
-            if policy.join is not None:
-                incoming_count = len(graph.incoming_edges.get(node_id, ()))
-                if policy.join.mode == "n":
-                    if policy.join.count is None:
-                        diagnostics.append(
-                            Diagnostic(
-                                code="POLICY_JOIN_INVALID",
-                                severity="error",
-                                message="JoinPolicy mode n requires count.",
-                                subject=node_id,
-                            )
-                        )
-                    elif policy.join.count <= 0:
-                        diagnostics.append(
-                            Diagnostic(
-                                code="POLICY_JOIN_INVALID",
-                                severity="error",
-                                message="JoinPolicy count must be positive.",
-                                subject=node_id,
-                            )
-                        )
-                    elif policy.join.count > incoming_count:
-                        diagnostics.append(
-                            Diagnostic(
-                                code="POLICY_JOIN_INVALID",
-                                severity="error",
-                                message="JoinPolicy count exceeds incoming edge count.",
-                                subject=node_id,
-                            )
-                        )
-                elif policy.join.count is not None:
-                    diagnostics.append(
-                        Diagnostic(
-                            code="POLICY_JOIN_INVALID",
-                            severity="error",
-                            message="JoinPolicy count is only valid when mode is n.",
-                            subject=node_id,
-                        )
+            if isinstance(node.capability, SystemCommand):
+                diagnostics.append(
+                    Diagnostic(
+                        code="SYSTEM_COMMAND_POLICY_UNSUPPORTED",
+                        severity="error",
+                        message="SystemCommand wait nodes do not support NodePolicy in V1.",
+                        subject=node_id,
                     )
+                )
+                continue
 
             if policy.selection is not None:
                 preferred = set(policy.selection.preferred_operator_ids)
@@ -488,6 +804,42 @@ class WorkflowCompiler:
                             subject=node_id,
                         )
                     )
+                if not isinstance(node.capability, CapabilityRef):
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_SELECTION_INVALID",
+                            severity="error",
+                            message="Selection policy requires a CapabilityRef node.",
+                            subject=node_id,
+                        )
+                    )
+                elif self.operator_registry is not None:
+                    for operator_id in preferred | excluded:
+                        registered = self.operator_registry.get(operator_id)
+                        if registered is None:
+                            diagnostics.append(
+                                Diagnostic(
+                                    code="POLICY_SELECTION_OPERATOR_UNKNOWN",
+                                    severity="error",
+                                    message=(
+                                        "Selection policy references an unknown "
+                                        f"Operator: {operator_id}"
+                                    ),
+                                    subject=node_id,
+                                )
+                            )
+                        elif registered.capability_id != node.capability.id:
+                            diagnostics.append(
+                                Diagnostic(
+                                    code="POLICY_SELECTION_OPERATOR_MISMATCH",
+                                    severity="error",
+                                    message=(
+                                        f"Operator {operator_id} does not implement "
+                                        f"Capability {node.capability.id}."
+                                    ),
+                                    subject=node_id,
+                                )
+                            )
 
             if policy.retry is not None:
                 if policy.retry.max_attempts < 1:
@@ -538,32 +890,6 @@ class WorkflowCompiler:
                         subject=node_id,
                     )
                 )
-
-            if policy.timer is not None:
-                if policy.timer.delay_ms < 0:
-                    diagnostics.append(
-                        Diagnostic(
-                            code="POLICY_TIMER_INVALID",
-                            severity="error",
-                            message="TimerPolicy delay_ms cannot be negative.",
-                            subject=node_id,
-                        )
-                    )
-                if (
-                    policy.timer.mode == "blocking"
-                    and policy.timer.delay_ms > 5000
-                ):
-                    diagnostics.append(
-                        Diagnostic(
-                            code="POLICY_TIMER_BLOCKING_LONG",
-                            severity="warning",
-                            message=(
-                                "Blocking timer longer than 5000ms can occupy an "
-                                "executor worker; consider mode='waiting'."
-                            ),
-                            subject=node_id,
-                        )
-                    )
 
             if policy.replication is not None:
                 if policy.replication.count <= 0:
@@ -659,6 +985,7 @@ class WorkflowCompiler:
                         subject=edge_id,
                     )
                 )
+
             if map_policy.output_aggregator is not None and not callable(
                 map_policy.output_aggregator
             ):
@@ -676,6 +1003,104 @@ class WorkflowCompiler:
                         code="POLICY_MAP_INVALID",
                         severity="error",
                         message="MapPolicy max_parallelism must be positive.",
+                        subject=edge_id,
+                    )
+                )
+
+            target = nodes[edge.to_node]
+            if isinstance(target.capability, SystemCommand):
+                diagnostics.append(
+                    Diagnostic(
+                        code="SYSTEM_COMMAND_MAP_UNSUPPORTED",
+                        severity="error",
+                        message="MapPolicy cannot target a SystemCommand wait node in V1.",
+                        subject=edge_id,
+                    )
+                )
+            incoming_count = sum(
+                1 for candidate in edges.values() if candidate.to_node == edge.to_node
+            )
+            if incoming_count != 1:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_MAP_FAN_IN_UNSUPPORTED",
+                        severity="error",
+                        message=(
+                            "A MapPolicy target must have exactly one incoming edge; "
+                            "map and complete fan-in cannot share one target in V1."
+                        ),
+                        subject=edge_id,
+                    )
+                )
+            if target.input_plan is not None:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_MAP_INPUT_MAPPING_CONFLICT",
+                        severity="error",
+                        message=(
+                            "A MapPolicy item_selector owns per-item input construction; "
+                            "the target node cannot also define input_mapping."
+                        ),
+                        subject=edge_id,
+                    )
+                )
+            if target.policy is not None and target.policy.replication is not None:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_MAP_REPLICATION_CONFLICT",
+                        severity="error",
+                        message="MapPolicy and ReplicationPolicy cannot target the same node.",
+                        subject=edge_id,
+                    )
+                )
+
+    def _compile_final_output_contracts(
+        self,
+        nodes: dict[str, NodeIR],
+        edges: dict[str, EdgeIR],
+        diagnostics: list[Diagnostic],
+    ) -> None:
+        """Derive NodeExecution outputs after map/replication aggregation."""
+
+        for node_id, node in nodes.items():
+            replication = node.policy.replication if node.policy is not None else None
+            if replication is None:
+                continue
+            contract, _ = callable_contract(replication.output_aggregator)
+            node.output_contract = contract.output
+            if not contract.output.known:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
+                        severity="warning",
+                        message=(
+                            "Replication output_aggregator has no concrete return "
+                            "annotation; final node output cannot be validated."
+                        ),
+                        subject=node_id,
+                    )
+                )
+
+        for edge_id, edge in edges.items():
+            map_policy = edge.policy.map if edge.policy is not None else None
+            if map_policy is None:
+                continue
+            target = nodes[edge.to_node]
+            if map_policy.output_aggregator is None:
+                item_annotation = target.operator_output_contract.annotation
+                target.output_contract = value_contract(list[item_annotation])
+                continue
+            contract, _ = callable_contract(map_policy.output_aggregator)
+            target.output_contract = contract.output
+            if not contract.output.known:
+                diagnostics.append(
+                    Diagnostic(
+                        code="POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
+                        severity="warning",
+                        message=(
+                            "Map output_aggregator has no concrete return annotation; "
+                            "final node output cannot be validated."
+                        ),
                         subject=edge_id,
                     )
                 )

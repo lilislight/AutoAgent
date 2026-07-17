@@ -2,20 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+from autoagent.operators.manifest import OperatorManifest
+from autoagent.runtime.scheduler import EdgeActivation
 from autoagent.runtime.status import (
     EdgeEvaluationStateValue,
     NodeExecutionStateValue,
     OperatorCallKind,
     OperatorCallStateValue,
 )
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+from autoagent.runtime.time import TimestampMs, coerce_timestamp_ms, utc_timestamp_ms
 
 
 @dataclass
@@ -106,6 +104,7 @@ class OperatorCall:
 
     operator_id: str
     call_no: int
+    operator_manifest: OperatorManifest | None = None
     id: UUID = field(default_factory=uuid4)
     kind: OperatorCallKind = "normal"
     item_index: int | None = None
@@ -115,41 +114,46 @@ class OperatorCall:
     output: Any | None = None
     error: RuntimeErrorInfo | None = None
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
-    started_at: datetime | None = None
-    ended_at: datetime | None = None
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    started_at_ms: TimestampMs | None = None
+    ended_at_ms: TimestampMs | None = None
+    created_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
+    updated_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
 
     def mark_running(self, input: Any | None = None) -> None:
         self.state = "running"
         self.input = input
-        self.started_at = utc_now()
-        self.updated_at = self.started_at
+        self.started_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.started_at_ms
 
     def mark_completed(self, output: Any) -> None:
         self.state = "completed"
         self.output = output
         self.error = None
-        self.ended_at = utc_now()
-        self.updated_at = self.ended_at
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
 
     def mark_failed(self, error: RuntimeErrorInfo) -> None:
         self.state = "failed"
         self.error = error
-        self.ended_at = utc_now()
-        self.updated_at = self.ended_at
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
 
     def mark_interrupted(self, error: RuntimeErrorInfo) -> None:
         self.state = "interrupted"
         self.error = error
-        self.ended_at = utc_now()
-        self.updated_at = self.ended_at
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
 
     def to_record(self, node_execution_id: UUID) -> dict[str, Any]:
         return {
             "id": str(self.id),
             "node_execution_id": str(node_execution_id),
             "operator_id": self.operator_id,
+            "operator_manifest": (
+                self.operator_manifest.model_dump(mode="python")
+                if self.operator_manifest is not None
+                else None
+            ),
             "call_no": self.call_no,
             "kind": self.kind,
             "item_index": self.item_index,
@@ -159,10 +163,10 @@ class OperatorCall:
             "output": self.output,
             "error": self.error.to_record() if self.error else None,
             "resource_usage": self.resource_usage.to_record(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "ended_at": self.ended_at.isoformat() if self.ended_at else None,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "started_at_ms": self.started_at_ms,
+            "ended_at_ms": self.ended_at_ms,
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
         }
 
     @classmethod
@@ -170,6 +174,11 @@ class OperatorCall:
         return cls(
             id=UUID(str(record["id"])),
             operator_id=str(record["operator_id"]),
+            operator_manifest=(
+                OperatorManifest.model_validate(record["operator_manifest"])
+                if record.get("operator_manifest") is not None
+                else None
+            ),
             call_no=int(record["call_no"]),
             kind=record.get("kind", "normal"),
             item_index=record.get("item_index"),
@@ -179,10 +188,20 @@ class OperatorCall:
             output=record.get("output"),
             error=RuntimeErrorInfo.from_record(record.get("error")),
             resource_usage=ResourceUsage.from_record(record.get("resource_usage")),
-            started_at=_parse_datetime(record.get("started_at")),
-            ended_at=_parse_datetime(record.get("ended_at")),
-            created_at=_parse_datetime(record.get("created_at")) or utc_now(),
-            updated_at=_parse_datetime(record.get("updated_at")) or utc_now(),
+            started_at_ms=coerce_timestamp_ms(
+                record.get("started_at_ms", record.get("started_at"))
+            ),
+            ended_at_ms=coerce_timestamp_ms(
+                record.get("ended_at_ms", record.get("ended_at"))
+            ),
+            created_at_ms=coerce_timestamp_ms(
+                record.get("created_at_ms", record.get("created_at"))
+            )
+            or utc_timestamp_ms(),
+            updated_at_ms=coerce_timestamp_ms(
+                record.get("updated_at_ms", record.get("updated_at"))
+            )
+            or utc_timestamp_ms(),
         )
 
 
@@ -203,8 +222,8 @@ class EdgeEvaluation:
     selected: bool
     id: UUID = field(default_factory=uuid4)
     reason: str | None = None
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    created_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
+    updated_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -214,8 +233,8 @@ class EdgeEvaluation:
             "state": self.state,
             "selected": self.selected,
             "reason": self.reason,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
         }
 
     @classmethod
@@ -227,8 +246,14 @@ class EdgeEvaluation:
             state=record["state"],
             selected=bool(record["selected"]),
             reason=record.get("reason"),
-            created_at=_parse_datetime(record.get("created_at")) or utc_now(),
-            updated_at=_parse_datetime(record.get("updated_at")) or utc_now(),
+            created_at_ms=coerce_timestamp_ms(
+                record.get("created_at_ms", record.get("created_at"))
+            )
+            or utc_timestamp_ms(),
+            updated_at_ms=coerce_timestamp_ms(
+                record.get("updated_at_ms", record.get("updated_at"))
+            )
+            or utc_timestamp_ms(),
         )
 
 
@@ -262,6 +287,11 @@ class NodeExecution:
     edge_evaluations:
         Scheduler writes one entry for each outgoing edge evaluated after this
         NodeExecution has final output/state.
+
+    incoming_activations:
+        Exact selected edges and concrete upstream executions that made this
+        logical execution ready. Loop executions retain a distinct activation
+        per iteration; complete fan-in executions retain all selected inputs.
     """
 
     node_id: str
@@ -272,42 +302,51 @@ class NodeExecution:
     output: Any | None = None
     error: RuntimeErrorInfo | None = None
     idempotency_key: str | None = None
+    recovery_of_execution_id: UUID | None = None
+    recovery_attempt: int = 0
+    incoming_activations: tuple[EdgeActivation, ...] = ()
     operator_calls: list[OperatorCall] = field(default_factory=list)
     edge_evaluations: list[EdgeEvaluation] = field(default_factory=list)
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
-    started_at: datetime | None = None
-    ended_at: datetime | None = None
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    started_at_ms: TimestampMs | None = None
+    ended_at_ms: TimestampMs | None = None
+    created_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
+    updated_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
 
     def mark_ready(self) -> None:
         self.state = "ready"
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def mark_running(self, input: Any | None = None) -> None:
         self.state = "running"
         self.input = input
-        self.started_at = utc_now()
-        self.updated_at = self.started_at
+        self.started_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.started_at_ms
 
     def mark_waiting(self, reason: str | None = None) -> None:
         self.state = "waiting"
         if reason:
             self.error = RuntimeErrorInfo(code="NODE_WAITING", message=reason)
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def mark_completed(self, output: Any) -> None:
         self.state = "completed"
         self.output = output
         self.error = None
-        self.ended_at = utc_now()
-        self.updated_at = self.ended_at
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
 
     def mark_failed(self, error: RuntimeErrorInfo) -> None:
         self.state = "failed"
         self.error = error
-        self.ended_at = utc_now()
-        self.updated_at = self.ended_at
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
+
+    def mark_cancelled(self, error: RuntimeErrorInfo | None = None) -> None:
+        self.state = "cancelled"
+        self.error = error
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
 
     def mark_interrupted(self, error: RuntimeErrorInfo | None = None) -> None:
         self.state = "interrupted"
@@ -315,8 +354,8 @@ class NodeExecution:
             code="NODE_INTERRUPTED",
             message="Node execution was interrupted before completion.",
         )
-        self.ended_at = utc_now()
-        self.updated_at = self.ended_at
+        self.ended_at_ms = utc_timestamp_ms()
+        self.updated_at_ms = self.ended_at_ms
         for call in self.operator_calls:
             if call.state == "running":
                 call.mark_interrupted(self.error)
@@ -325,19 +364,21 @@ class NodeExecution:
         self,
         operator_id: str,
         *,
+        operator_manifest: OperatorManifest | None = None,
         kind: OperatorCallKind = "normal",
         item_index: int | None = None,
         replica_index: int | None = None,
     ) -> OperatorCall:
         call = OperatorCall(
             operator_id=operator_id,
+            operator_manifest=operator_manifest,
             call_no=len(self.operator_calls) + 1,
             kind=kind,
             item_index=item_index,
             replica_index=replica_index,
         )
         self.operator_calls.append(call)
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
         return call
 
     def add_edge_evaluation(
@@ -357,7 +398,7 @@ class NodeExecution:
             reason=reason,
         )
         self.edge_evaluations.append(evaluation)
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
         return evaluation
 
     def to_record(self, invocation_id: UUID) -> dict[str, Any]:
@@ -371,14 +412,23 @@ class NodeExecution:
             "output": self.output,
             "error": self.error.to_record() if self.error else None,
             "idempotency_key": self.idempotency_key,
+            "recovery_of_execution_id": (
+                str(self.recovery_of_execution_id)
+                if self.recovery_of_execution_id is not None
+                else None
+            ),
+            "recovery_attempt": self.recovery_attempt,
+            "incoming_activations": [
+                activation.to_record() for activation in self.incoming_activations
+            ],
             "edge_evaluations": [
                 evaluation.to_record() for evaluation in self.edge_evaluations
             ],
             "resource_usage": self.resource_usage.to_record(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "ended_at": self.ended_at.isoformat() if self.ended_at else None,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "started_at_ms": self.started_at_ms,
+            "ended_at_ms": self.ended_at_ms,
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
         }
 
     @classmethod
@@ -397,22 +447,34 @@ class NodeExecution:
             output=record.get("output"),
             error=RuntimeErrorInfo.from_record(record.get("error")),
             idempotency_key=record.get("idempotency_key"),
+            recovery_of_execution_id=(
+                UUID(str(record["recovery_of_execution_id"]))
+                if record.get("recovery_of_execution_id") is not None
+                else None
+            ),
+            recovery_attempt=int(record.get("recovery_attempt", 0)),
+            incoming_activations=tuple(
+                EdgeActivation.from_record(item)
+                for item in record.get("incoming_activations", [])
+            ),
             operator_calls=list(operator_calls or []),
             edge_evaluations=[
                 EdgeEvaluation.from_record(item)
                 for item in record.get("edge_evaluations", [])
             ],
             resource_usage=ResourceUsage.from_record(record.get("resource_usage")),
-            started_at=_parse_datetime(record.get("started_at")),
-            ended_at=_parse_datetime(record.get("ended_at")),
-            created_at=_parse_datetime(record.get("created_at")) or utc_now(),
-            updated_at=_parse_datetime(record.get("updated_at")) or utc_now(),
+            started_at_ms=coerce_timestamp_ms(
+                record.get("started_at_ms", record.get("started_at"))
+            ),
+            ended_at_ms=coerce_timestamp_ms(
+                record.get("ended_at_ms", record.get("ended_at"))
+            ),
+            created_at_ms=coerce_timestamp_ms(
+                record.get("created_at_ms", record.get("created_at"))
+            )
+            or utc_timestamp_ms(),
+            updated_at_ms=coerce_timestamp_ms(
+                record.get("updated_at_ms", record.get("updated_at"))
+            )
+            or utc_timestamp_ms(),
         )
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(str(value))

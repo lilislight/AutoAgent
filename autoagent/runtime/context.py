@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from types import MappingProxyType
+from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from autoagent.runtime.readonly import to_mutable_record, to_read_only
 
 
 class RuntimeContext(BaseModel):
@@ -32,7 +35,10 @@ class RuntimeContext(BaseModel):
     )
 
     def to_record(self) -> dict[str, Any]:
-        return self.model_dump()
+        return {
+            "data": to_mutable_record(self.data),
+            "metadata": to_mutable_record(self.metadata),
+        }
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> RuntimeContext:
@@ -59,6 +65,36 @@ class InvocationContext(RuntimeContext):
     """
 
 
+@dataclass(frozen=True)
+class ReadOnlyRuntimeContext:
+    """Immutable snapshot of a SessionContext or InvocationContext."""
+
+    data: Mapping[str, Any]
+    metadata: Mapping[str, Any]
+
+    @classmethod
+    def from_context(cls, context: RuntimeContext) -> ReadOnlyRuntimeContext:
+        return cls(
+            data=to_read_only(context.data),
+            metadata=to_read_only(context.metadata),
+        )
+
+
+@dataclass(frozen=True)
+class IncomingOutput:
+    """Read-only value carried by one selected incoming edge.
+
+    NodeExecutor builds these records from NodeExecutionRequest activations.
+    `edge_id` lets loop input mappings distinguish initial entry from a back
+    edge, while `source_execution_id` identifies the exact historical output.
+    """
+
+    edge_id: str
+    source_node_id: str
+    source_execution_id: UUID
+    value: Any
+
+
 class InputMappingContext:
     """Read-only view passed to input_mapping functions.
 
@@ -75,12 +111,24 @@ class InputMappingContext:
         session_context: SessionContext,
         outputs: Any,
         node_id: str,
+        incoming: tuple[IncomingOutput, ...] = (),
     ) -> None:
-        self.invocation_input = MappingProxyType(dict(invocation_input))
-        self.invocation_context = invocation_context.model_copy(deep=True)
-        self.session_context = session_context.model_copy(deep=True)
+        self.invocation_input = to_read_only(invocation_input)
+        self.invocation_context = ReadOnlyRuntimeContext.from_context(
+            invocation_context
+        )
+        self.session_context = ReadOnlyRuntimeContext.from_context(session_context)
         self.outputs = outputs
         self.node_id = node_id
+        self.incoming = tuple(
+            IncomingOutput(
+                edge_id=item.edge_id,
+                source_node_id=item.source_node_id,
+                source_execution_id=item.source_execution_id,
+                value=to_read_only(item.value),
+            )
+            for item in incoming
+        )
 
 
 class ConditionContext:
@@ -103,23 +151,25 @@ class ConditionContext:
         target_node_id: str,
         source_output: Any,
     ) -> None:
-        self.invocation_input = MappingProxyType(dict(invocation_input))
-        self.invocation_context = invocation_context.model_copy(deep=True)
-        self.session_context = session_context.model_copy(deep=True)
+        self.invocation_input = to_read_only(invocation_input)
+        self.invocation_context = ReadOnlyRuntimeContext.from_context(
+            invocation_context
+        )
+        self.session_context = ReadOnlyRuntimeContext.from_context(session_context)
         self.outputs = outputs
         self.edge_id = edge_id
         self.source_node_id = source_node_id
         self.target_node_id = target_node_id
-        self.source_output = source_output
+        self.source_output = to_read_only(source_output)
 
 
 class OutputBindingContext:
     """Mutable user-context view passed to output_binding functions.
 
-    Output binding runs after NodeExecution.output has already been finalized by
-    NodeExecutor. It may mutate session_context.data/metadata and
-    invocation_context.data/metadata, but it must not change node output,
-    scheduler queues, waiting entries, or execution history.
+    Output binding runs after NodeExecutor has produced an output and before the
+    NodeExecution is marked completed. It may mutate session_context and
+    invocation_context. Invocation input, current output, prior outputs,
+    scheduler state, and execution history are read-only.
     """
 
     def __init__(
@@ -132,9 +182,9 @@ class OutputBindingContext:
         node_id: str,
         output: Any,
     ) -> None:
-        self.invocation_input = MappingProxyType(dict(invocation_input))
+        self.invocation_input = to_read_only(invocation_input)
         self.invocation_context = invocation_context
         self.session_context = session_context
         self.outputs = outputs
         self.node_id = node_id
-        self.output = output
+        self.output = to_read_only(output)

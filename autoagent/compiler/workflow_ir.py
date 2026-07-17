@@ -2,13 +2,43 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
+from autoagent.operators.contract import SchemaContract
 from autoagent.workflow.policy import (
     EdgePolicy,
     NodePolicy,
-    WorkflowPolicy,
 )
+
+
+class LoopRegionIR(BaseModel):
+    """Compiled strongly connected region with single-path execution semantics.
+
+    A loop region is derived by the compiler; workflow authors do not create it.
+    Runtime treats internal edges as repeatable activations rather than static
+    invocation-level edge states. The region has one entry node, may contain
+    multiple conditional exits, and permits only one selected outgoing edge for
+    each completed NodeExecution.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    id: str = Field(description="Stable compiler-generated loop region id.")
+    node_ids: tuple[str, ...] = Field(
+        description="Workflow nodes contained in this strongly connected region."
+    )
+    entry_node_id: str = Field(
+        description="Only node that workflow entry or external edges may enter."
+    )
+    internal_edge_ids: tuple[str, ...] = Field(
+        description="Repeatable edges whose source and target are inside the region."
+    )
+    entry_edge_ids: tuple[str, ...] = Field(
+        description="Invocation-level edges entering entry_node_id from outside."
+    )
+    exit_edge_ids: tuple[str, ...] = Field(
+        description="Invocation-level edges leaving the region."
+    )
 
 
 class GraphIR(BaseModel):
@@ -32,24 +62,53 @@ class GraphIR(BaseModel):
         default_factory=dict,
         description="Node id to successor node ids.",
     )
+    loop_regions: dict[str, LoopRegionIR] = Field(
+        default_factory=dict,
+        description="Compiler-derived loop regions keyed by loop region id.",
+    )
+    node_loop_regions: dict[str, str] = Field(
+        default_factory=dict,
+        description="Loop node id to its containing loop region id.",
+    )
 
 
 class NodeIR(BaseModel):
     """Compiled runtime-ready node definition."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        validate_assignment=True,
+    )
 
     id: str = Field(description="Compiled unique node id.")
+    name: str | None = Field(
+        default=None,
+        description="Optional display name retained for tracing and graph views.",
+    )
+    description: str | None = Field(
+        default=None,
+        description="Optional display description retained for observation tools.",
+    )
     capability: Any = Field(
         description="Compiled capability binding. Exact type is defined later."
     )
-    input_schema: Any | None = Field(
-        default=None,
-        description="Compiled input schema when available.",
+    input_contract: SchemaContract = Field(
+        description=(
+            "Compiled named-argument input contract for each OperatorCall."
+        ),
     )
-    output_schema: Any | None = Field(
-        default=None,
-        description="Compiled output schema when available.",
+    operator_output_contract: SchemaContract = Field(
+        description=(
+            "Compiled output contract for each individual OperatorCall before "
+            "map or replication aggregation."
+        ),
+    )
+    output_contract: SchemaContract = Field(
+        description=(
+            "Final NodeExecution output contract after optional map or "
+            "replication aggregation."
+        ),
     )
     input_plan: Any | None = Field(
         default=None,
@@ -76,6 +135,16 @@ class NodeIR(BaseModel):
         description="Non-semantic auxiliary data.",
     )
 
+    @field_serializer(
+        "input_contract",
+        "operator_output_contract",
+        "output_contract",
+    )
+    def serialize_contract(self, contract: SchemaContract) -> dict[str, Any]:
+        """Exclude live validators and call signatures from serialized IR views."""
+
+        return contract.describe()
+
 
 class EdgeIR(BaseModel):
     """Compiled runtime-ready edge definition."""
@@ -95,7 +164,7 @@ class EdgeIR(BaseModel):
     )
     order: int = Field(
         default=0,
-        description="Stable outgoing edge order for routing policy.",
+        description="Stable outgoing edge order for evaluation and tracing.",
     )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
@@ -114,6 +183,20 @@ class WorkflowIR(BaseModel):
     workflow_version: str | int | None = Field(
         default=None,
         description="Compiled Workflow version.",
+    )
+    definition_hash: str = Field(
+        description=(
+            "SHA-256 hash of canonical execution semantics. Display metadata and "
+            "Operator implementation code are excluded."
+        ),
+    )
+    name: str | None = Field(
+        default=None,
+        description="Optional Workflow display name retained for observation.",
+    )
+    description: str | None = Field(
+        default=None,
+        description="Optional Workflow display description retained for observation.",
     )
     nodes: dict[str, NodeIR] = Field(
         default_factory=dict,
@@ -134,10 +217,6 @@ class WorkflowIR(BaseModel):
     exit_node_ids: tuple[str, ...] = Field(
         default_factory=tuple,
         description="Compiled exit node ids.",
-    )
-    policy: WorkflowPolicy | None = Field(
-        default=None,
-        description="Compiled Workflow-level policy.",
     )
     metadata: dict[str, Any] = Field(
         default_factory=dict,

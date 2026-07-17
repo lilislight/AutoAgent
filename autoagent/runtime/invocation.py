@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -9,12 +8,13 @@ from autoagent.runtime.context import InvocationContext
 from autoagent.runtime.execution import (
     NodeExecution,
     RuntimeErrorInfo,
-    _parse_datetime,
-    utc_now,
 )
 from autoagent.runtime.output import OutputContext
+from autoagent.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.runtime.scheduler import SchedulerContext
+from autoagent.runtime.scheduler import EdgeActivation
 from autoagent.runtime.status import InvocationStateValue
+from autoagent.runtime.time import TimestampMs, coerce_timestamp_ms, utc_timestamp_ms
 
 
 class Invocation:
@@ -27,6 +27,14 @@ class Invocation:
     workflow_id/workflow_version:
         Copied from WorkflowIR at invocation creation. They let persisted
         records explain which workflow definition produced this history.
+
+    workflow_definition_hash:
+        Canonical compiled graph identity. Durable recovery compares it with the
+        currently registered Workflow before replaying or resuming any work.
+
+    workflow_operator_manifest_hash:
+        Exact Operator compatibility environment captured at compilation. It is
+        checked separately because Operator upgrades do not change graph identity.
 
     entry_node_id:
         The selected entry node for this invocation. __init__ enqueues one
@@ -57,6 +65,8 @@ class Invocation:
         entry_node_id: str,
         input: dict[str, Any] | None = None,
         *,
+        workflow_definition_hash: str | None = None,
+        workflow_operator_manifest_hash: str | None = None,
         id: UUID | None = None,
         state: InvocationStateValue = "created",
         context: InvocationContext | None = None,
@@ -64,13 +74,16 @@ class Invocation:
         scheduler: SchedulerContext | None = None,
         node_executions: list[NodeExecution] | None = None,
         error: RuntimeErrorInfo | None = None,
-        created_at: datetime | None = None,
-        updated_at: datetime | None = None,
+        created_at_ms: TimestampMs | None = None,
+        updated_at_ms: TimestampMs | None = None,
         initialize_entry: bool = True,
+        execution_mailbox: InvocationExecutionMailbox | None = None,
     ) -> None:
         self.id = id or uuid4()
         self.workflow_id = workflow_id
         self.workflow_version = workflow_version
+        self.workflow_definition_hash = workflow_definition_hash
+        self.workflow_operator_manifest_hash = workflow_operator_manifest_hash
         self.entry_node_id = entry_node_id
         self.state: InvocationStateValue = state
         self.input: dict[str, Any] = dict(input or {})
@@ -78,9 +91,13 @@ class Invocation:
         self.result = result
         self.scheduler = scheduler or SchedulerContext()
         self.node_executions: list[NodeExecution] = list(node_executions or [])
+        # Worker futures are process-local and must never be serialized. Keeping
+        # them on the Invocation prevents one session from consuming another
+        # invocation's results when an App executes sessions concurrently.
+        self.execution_mailbox = execution_mailbox or InvocationExecutionMailbox()
         self.error = error
-        self.created_at = created_at or utc_now()
-        self.updated_at = updated_at or self.created_at
+        self.created_at_ms = created_at_ms or utc_timestamp_ms()
+        self.updated_at_ms = updated_at_ms or self.created_at_ms
 
         if initialize_entry and not self.node_executions and not self.scheduler.ready_queue:
             # New invocations start by asking WorkflowExecutor to create one
@@ -95,26 +112,41 @@ class Invocation:
 
     def mark_running(self) -> None:
         self.state = "running"
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def mark_waiting(self) -> None:
         self.state = "waiting"
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def mark_completed(self, result: dict[str, Any] | None = None) -> None:
         self.state = "completed"
         self.result = result
         self.error = None
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def mark_failed(self, error: RuntimeErrorInfo) -> None:
         self.state = "failed"
         self.error = error
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def mark_cancelled(self) -> None:
         self.state = "cancelled"
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
+
+    def mark_interrupted(self, error: RuntimeErrorInfo | None = None) -> None:
+        """Finalize an Invocation that cannot be replayed after process loss.
+
+        Durable recovery calls this only after current Workflow and Operator
+        compatibility checks reject automatic whole-node replay. Interrupted is
+        terminal for this Invocation, so Session admission may accept a new one.
+        """
+
+        self.state = "interrupted"
+        self.error = error or RuntimeErrorInfo(
+            code="INVOCATION_INTERRUPTED",
+            message="Invocation could not be recovered after process loss.",
+        )
+        self.updated_at_ms = utc_timestamp_ms()
 
     def create_node_execution(
         self,
@@ -122,6 +154,9 @@ class Invocation:
         *,
         input: Any | None = None,
         idempotency_key: str | None = None,
+        recovery_of_execution_id: UUID | None = None,
+        recovery_attempt: int = 0,
+        incoming_activations: tuple[EdgeActivation, ...] = (),
     ) -> NodeExecution:
         """Append a logical NodeExecution created from a ready request.
 
@@ -136,10 +171,13 @@ class Invocation:
             sequence=self._next_node_sequence(),
             input=input,
             idempotency_key=idempotency_key,
+            recovery_of_execution_id=recovery_of_execution_id,
+            recovery_attempt=recovery_attempt,
+            incoming_activations=incoming_activations,
         )
         execution.mark_ready()
         self.node_executions.append(execution)
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
         return execution
 
     def get_node_execution(self, execution_id: UUID) -> NodeExecution | None:
@@ -191,10 +229,11 @@ class Invocation:
                 continue
             if execution.resource_usage.duration_ms:
                 total += execution.resource_usage.duration_ms
-            elif execution.started_at is not None and execution.ended_at is not None:
-                total += int(
-                    (execution.ended_at - execution.started_at).total_seconds() * 1000
-                )
+            elif (
+                execution.started_at_ms is not None
+                and execution.ended_at_ms is not None
+            ):
+                total += max(0, execution.ended_at_ms - execution.started_at_ms)
         return total
 
     def mark_node_running(
@@ -218,7 +257,7 @@ class Invocation:
             node_id=execution.node_id,
             state=execution.state,
         )
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
         return execution
 
     def mark_node_failed(
@@ -235,7 +274,7 @@ class Invocation:
             node_id=execution.node_id,
             state=execution.state,
         )
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
         return execution
 
     def mark_node_waiting(
@@ -246,6 +285,7 @@ class Invocation:
         wait_type: str | None = None,
         payload: dict[str, Any] | None = None,
         reason: str | None = None,
+        pending_output: Any | None = None,
     ) -> NodeExecution:
         """Pause a NodeExecution on an externally resumable wait key.
 
@@ -255,6 +295,7 @@ class Invocation:
         """
 
         execution = self._require_node_execution(execution_id)
+        execution.output = pending_output
         execution.mark_waiting(reason=reason)
         self.scheduler.add_waiting_execution(
             wait_key=wait_key,
@@ -268,7 +309,10 @@ class Invocation:
             node_id=execution.node_id,
             state=execution.state,
         )
-        self.mark_waiting()
+        # The node can wait while independent branches are still ready or
+        # running. WorkflowExecutor marks the whole Invocation waiting only at
+        # the stable barrier where no further local progress is possible.
+        self.updated_at_ms = utc_timestamp_ms()
         return execution
 
     def resume_waiting_node(
@@ -305,8 +349,30 @@ class Invocation:
                 interrupted.append(execution)
         if interrupted:
             self.state = "interrupted"
-            self.updated_at = utc_now()
+            self.updated_at_ms = utc_timestamp_ms()
         return interrupted
+
+    def cancel_active_node_executions(self, reason: RuntimeErrorInfo) -> None:
+        """Finalize logical work whose worker results are abandoned by fail-fast."""
+
+        for execution in self.node_executions:
+            if execution.state in {"created", "ready", "running", "waiting"}:
+                execution.mark_cancelled(reason)
+        self.scheduler.ready_queue.clear()
+        self.scheduler.waiting_executions.clear()
+        self.scheduler.transition_queue.clear()
+        self.updated_at_ms = utc_timestamp_ms()
+
+    def interrupt_active_node_executions(self, reason: RuntimeErrorInfo) -> None:
+        """Make all unfinished work terminal after recovery is rejected."""
+
+        for execution in self.node_executions:
+            if execution.state in {"created", "ready", "running", "waiting"}:
+                execution.mark_interrupted(reason)
+        self.scheduler.ready_queue.clear()
+        self.scheduler.waiting_executions.clear()
+        self.scheduler.transition_queue.clear()
+        self.mark_interrupted(reason)
 
     def to_record(self, session_id: UUID) -> dict[str, Any]:
         return {
@@ -314,6 +380,8 @@ class Invocation:
             "session_id": str(session_id),
             "workflow_id": self.workflow_id,
             "workflow_version": self.workflow_version,
+            "workflow_definition_hash": self.workflow_definition_hash,
+            "workflow_operator_manifest_hash": self.workflow_operator_manifest_hash,
             "entry_node_id": self.entry_node_id,
             "state": self.state,
             "input": dict(self.input),
@@ -321,8 +389,8 @@ class Invocation:
             "result": self.result,
             "scheduler": self.scheduler.to_record(),
             "error": self.error.to_record() if self.error else None,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
         }
 
     @classmethod
@@ -336,6 +404,10 @@ class Invocation:
             id=UUID(str(record["id"])),
             workflow_id=str(record["workflow_id"]),
             workflow_version=record.get("workflow_version"),
+            workflow_definition_hash=record.get("workflow_definition_hash"),
+            workflow_operator_manifest_hash=record.get(
+                "workflow_operator_manifest_hash"
+            ),
             entry_node_id=str(record["entry_node_id"]),
             state=record["state"],
             input=dict(record.get("input", {})),
@@ -346,8 +418,12 @@ class Invocation:
             scheduler=SchedulerContext.from_record(record.get("scheduler")),
             node_executions=list(node_executions or []),
             error=RuntimeErrorInfo.from_record(record.get("error")),
-            created_at=_parse_datetime(record.get("created_at")),
-            updated_at=_parse_datetime(record.get("updated_at")),
+            created_at_ms=coerce_timestamp_ms(
+                record.get("created_at_ms", record.get("created_at"))
+            ),
+            updated_at_ms=coerce_timestamp_ms(
+                record.get("updated_at_ms", record.get("updated_at"))
+            ),
             initialize_entry=False,
         )
 

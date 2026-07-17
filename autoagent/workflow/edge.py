@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,7 +33,7 @@ class Edge(BaseModel):
             "validates it against the Workflow's nodes."
         )
     )
-    condition: Callable[..., bool] | str | None = Field(
+    condition: Callable[..., bool | Awaitable[bool]] | str | None = Field(
         default=None,
         description=(
             "Optional bool condition for selecting this edge. It may be a "

@@ -6,7 +6,72 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from autoagent.runtime.status import NodeExecutionStateValue
+from autoagent.runtime.status import EdgeResolutionStateValue, NodeExecutionStateValue
+
+
+@dataclass(frozen=True)
+class EdgeActivation:
+    """One selected edge produced by a concrete source NodeExecution.
+
+    Unlike an invocation-level EdgeResolution, an activation is repeatable: a
+    loop may traverse the same static edge many times, each time with a different
+    source_execution_id. NodeExecutionRequest carries the activation into the
+    target execution so input_mapping can read the exact values that triggered
+    this execution instead of guessing from latest node outputs.
+    """
+
+    edge_id: str
+    source_node_id: str
+    source_execution_id: UUID
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "source_node_id": self.source_node_id,
+            "source_execution_id": str(self.source_execution_id),
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> EdgeActivation:
+        return cls(
+            edge_id=str(record["edge_id"]),
+            source_node_id=str(record["source_node_id"]),
+            source_execution_id=UUID(str(record["source_execution_id"])),
+        )
+
+
+@dataclass(frozen=True)
+class EdgeResolution:
+    """Final invocation-level state of one edge outside a loop region.
+
+    Missing entries are pending. Scheduler writes a resolution once and never
+    changes it. A selected resolution stores the concrete activation consumed by
+    the target; a skipped resolution has no activation.
+    """
+
+    edge_id: str
+    state: EdgeResolutionStateValue
+    activation: EdgeActivation | None = None
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "state": self.state,
+            "activation": self.activation.to_record() if self.activation else None,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> EdgeResolution:
+        activation = record.get("activation")
+        return cls(
+            edge_id=str(record["edge_id"]),
+            state=record["state"],
+            activation=(
+                EdgeActivation.from_record(activation)
+                if activation is not None
+                else None
+            ),
+        )
 
 
 @dataclass
@@ -18,28 +83,32 @@ class NodeExecutionRequest:
     after graph rules say a node can run; the WorkflowExecutor drains a batch of
     requests, creates NodeExecution objects, and passes them to NodeExecutor.
 
-    source_execution_ids records which completed upstream executions caused this
-    request. It is useful for trace/debug and future join semantics, but normal
-    input_mapping should read OutputContext rather than this field.
+    activations records the exact selected incoming edges and source executions.
+    A normal/loop step usually has one; a complete fan-in may have several.
     """
 
     node_id: str
-    source_execution_ids: tuple[UUID, ...] = ()
+    activations: tuple[EdgeActivation, ...] = ()
+
+    @property
+    def source_execution_ids(self) -> tuple[UUID, ...]:
+        """Compatibility/readability view derived from incoming activations."""
+
+        return tuple(item.source_execution_id for item in self.activations)
 
     def to_record(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,
-            "source_execution_ids": [
-                str(execution_id) for execution_id in self.source_execution_ids
-            ],
+            "activations": [activation.to_record() for activation in self.activations],
         }
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> NodeExecutionRequest:
         return cls(
             node_id=str(record["node_id"]),
-            source_execution_ids=tuple(
-                UUID(value) for value in record.get("source_execution_ids", [])
+            activations=tuple(
+                EdgeActivation.from_record(item)
+                for item in record.get("activations", [])
             ),
         )
 
@@ -152,6 +221,12 @@ class SchedulerContext:
         ready_queue: list[NodeExecutionRequest] | None = None,
         waiting_executions: dict[str, WaitingExecution] | None = None,
         transition_queue: list[NodeExecutionTransition] | None = None,
+        edge_resolutions: dict[str, EdgeResolution] | None = None,
+        scheduled_node_ids: set[str] | None = None,
+        skipped_node_ids: set[str] | None = None,
+        entered_loop_region_ids: set[str] | None = None,
+        exited_loop_region_ids: set[str] | None = None,
+        entry_paths_initialized: bool = False,
     ) -> None:
         self.ready_queue: deque[NodeExecutionRequest] = deque(ready_queue or [])
         self.waiting_executions: dict[str, WaitingExecution] = dict(
@@ -160,19 +235,55 @@ class SchedulerContext:
         self.transition_queue: deque[NodeExecutionTransition] = deque(
             transition_queue or []
         )
+        self.edge_resolutions: dict[str, EdgeResolution] = dict(
+            edge_resolutions or {}
+        )
+        self.scheduled_node_ids: set[str] = set(scheduled_node_ids or set())
+        self.skipped_node_ids: set[str] = set(skipped_node_ids or set())
+        self.entered_loop_region_ids: set[str] = set(
+            entered_loop_region_ids or set()
+        )
+        self.exited_loop_region_ids: set[str] = set(exited_loop_region_ids or set())
+        self.entry_paths_initialized = entry_paths_initialized
 
     def enqueue_ready(
         self,
         node_id: str,
         *,
-        source_execution_ids: tuple[UUID, ...] = (),
+        activations: tuple[EdgeActivation, ...] = (),
     ) -> NodeExecutionRequest:
         request = NodeExecutionRequest(
             node_id=node_id,
-            source_execution_ids=source_execution_ids,
+            activations=activations,
         )
         self.ready_queue.append(request)
         return request
+
+    def resolve_edge(
+        self,
+        edge_id: str,
+        *,
+        state: EdgeResolutionStateValue,
+        activation: EdgeActivation | None = None,
+    ) -> EdgeResolution:
+        """Resolve one acyclic/loop-boundary edge exactly once."""
+
+        existing = self.edge_resolutions.get(edge_id)
+        if existing is not None:
+            if existing.state != state or existing.activation != activation:
+                raise ValueError(f"Edge already resolved with different state: {edge_id}")
+            return existing
+        if state == "selected" and activation is None:
+            raise ValueError("Selected edge resolution requires an activation.")
+        if state == "skipped" and activation is not None:
+            raise ValueError("Skipped edge resolution cannot carry an activation.")
+        resolution = EdgeResolution(
+            edge_id=edge_id,
+            state=state,
+            activation=activation,
+        )
+        self.edge_resolutions[edge_id] = resolution
+        return resolution
 
     def pop_ready(self) -> NodeExecutionRequest | None:
         if not self.ready_queue:
@@ -194,6 +305,8 @@ class SchedulerContext:
         wait_type: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> WaitingExecution:
+        if wait_key in self.waiting_executions:
+            raise ValueError(f"Duplicate active wait key: {wait_key}")
         waiting = WaitingExecution(
             wait_key=wait_key,
             node_execution_id=node_execution_id,
@@ -246,6 +359,15 @@ class SchedulerContext:
             "transition_queue": [
                 transition.to_record() for transition in self.transition_queue
             ],
+            "edge_resolutions": {
+                edge_id: resolution.to_record()
+                for edge_id, resolution in self.edge_resolutions.items()
+            },
+            "scheduled_node_ids": sorted(self.scheduled_node_ids),
+            "skipped_node_ids": sorted(self.skipped_node_ids),
+            "entered_loop_region_ids": sorted(self.entered_loop_region_ids),
+            "exited_loop_region_ids": sorted(self.exited_loop_region_ids),
+            "entry_paths_initialized": self.entry_paths_initialized,
         }
 
     @classmethod
@@ -267,4 +389,15 @@ class SchedulerContext:
                 NodeExecutionTransition.from_record(item)
                 for item in record.get("transition_queue", [])
             ],
+            edge_resolutions={
+                edge_id: EdgeResolution.from_record(item)
+                for edge_id, item in record.get("edge_resolutions", {}).items()
+            },
+            scheduled_node_ids=set(record.get("scheduled_node_ids", [])),
+            skipped_node_ids=set(record.get("skipped_node_ids", [])),
+            entered_loop_region_ids=set(
+                record.get("entered_loop_region_ids", [])
+            ),
+            exited_loop_region_ids=set(record.get("exited_loop_region_ids", [])),
+            entry_paths_initialized=bool(record.get("entry_paths_initialized", False)),
         )

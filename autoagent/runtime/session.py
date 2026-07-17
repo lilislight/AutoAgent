@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from autoagent.runtime.context import SessionContext
-from autoagent.runtime.execution import _parse_datetime, utc_now
 from autoagent.runtime.invocation import Invocation
+from autoagent.runtime.time import TimestampMs, coerce_timestamp_ms, utc_timestamp_ms
 
 
 class Session:
@@ -34,8 +33,8 @@ class Session:
         context: SessionContext | None = None,
         invocations: list[Invocation] | None = None,
         current_invocation_id: UUID | None = None,
-        created_at: datetime | None = None,
-        updated_at: datetime | None = None,
+        created_at_ms: TimestampMs | None = None,
+        updated_at_ms: TimestampMs | None = None,
     ) -> None:
         self.id = id or uuid4()
         self.namespace = namespace
@@ -44,8 +43,8 @@ class Session:
         self.context = context or SessionContext()
         self.invocations: list[Invocation] = list(invocations or [])
         self.current_invocation_id = current_invocation_id
-        self.created_at = created_at or utc_now()
-        self.updated_at = updated_at or self.created_at
+        self.created_at_ms = created_at_ms or utc_timestamp_ms()
+        self.updated_at_ms = updated_at_ms or self.created_at_ms
 
     def add_invocation(self, invocation: Invocation) -> None:
         """Attach an invocation to this session and mark it current.
@@ -60,7 +59,7 @@ class Session:
         if not any(existing.id == invocation.id for existing in self.invocations):
             self.invocations.append(invocation)
         self.current_invocation_id = invocation.id
-        self.updated_at = utc_now()
+        self.updated_at_ms = utc_timestamp_ms()
 
     def list_invocations(self) -> tuple[Invocation, ...]:
         return tuple(self.invocations)
@@ -76,6 +75,9 @@ class Session:
             return None
         return self.get_invocation(self.current_invocation_id)
 
+    def mark_context_updated(self) -> None:
+        self.updated_at_ms = utc_timestamp_ms()
+
     def to_record(self) -> dict[str, Any]:
         return {
             "id": str(self.id),
@@ -88,8 +90,8 @@ class Session:
                 if self.current_invocation_id is not None
                 else None
             ),
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
         }
 
     @classmethod
@@ -112,6 +114,10 @@ class Session:
                 if current_invocation_id is not None
                 else None
             ),
-            created_at=_parse_datetime(record.get("created_at")),
-            updated_at=_parse_datetime(record.get("updated_at")),
+            created_at_ms=coerce_timestamp_ms(
+                record.get("created_at_ms", record.get("created_at"))
+            ),
+            updated_at_ms=coerce_timestamp_ms(
+                record.get("updated_at_ms", record.get("updated_at"))
+            ),
         )

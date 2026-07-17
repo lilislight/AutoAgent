@@ -37,18 +37,12 @@ class Node(BaseModel):
             "Optional human-readable explanation of what this node does."
         ),
     )
-    input_schema: Any | None = Field(
-        default=None,
-        description=(
-            "Optional schema for this node's final input. Compiler may use it "
-            "to validate input_mapping or infer inputs."
-        ),
-    )
     input_mapping: InputMapping | None = Field(
         default=None,
         description=(
-            "Optional function that builds this node's capability input from "
-            "runtime data. Runtime decides the callable arguments."
+            "Optional function that builds named Operator arguments from runtime "
+            "data. It must return a Mapping keyed by parameter name; runtime "
+            "copies the result to a dict before Operator execution."
         ),
     )
     output_binding: OutputBinding | None = Field(
@@ -68,8 +62,8 @@ class Node(BaseModel):
     policy: NodePolicy | None = Field(
         default=None,
         description=(
-            "Optional node-level policy such as join, routing, retry, timeout, "
-            "resource, or capability selection behavior."
+            "Optional node-level execution policy such as retry, timeout, "
+            "resource, replication, or capability selection behavior."
         ),
     )
     metadata: dict[str, Any] = Field(

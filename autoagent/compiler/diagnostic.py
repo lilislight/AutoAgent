@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.compiler.workflow_ir import WorkflowIR
+from autoagent.compiler.snapshot import WorkflowVersionSnapshot
 
 
 class Diagnostic(BaseModel):
@@ -35,6 +36,10 @@ class CompileResult(BaseModel):
     workflow_ir: WorkflowIR | None = Field(
         default=None,
         description="Compiled Workflow IR when compilation succeeds.",
+    )
+    workflow_snapshot: WorkflowVersionSnapshot | None = Field(
+        default=None,
+        description="Portable structural snapshot when compilation succeeds.",
     )
     diagnostics: list[Diagnostic] = Field(
         default_factory=list,

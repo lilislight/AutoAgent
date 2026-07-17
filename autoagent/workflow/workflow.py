@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from autoagent.workflow.edge import Edge
+from autoagent.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.workflow.mapping import InputMapping, OutputBinding
 from autoagent.workflow.node import Node
-from autoagent.workflow.policy import WorkflowPolicy
+from autoagent.workflow.policy import EdgePolicy
+
+if TYPE_CHECKING:
+    from autoagent.compiler import WorkflowCompiler
+    from autoagent.workflow.diagram import WorkflowDiagram
 
 
 class Workflow(BaseModel):
@@ -20,11 +26,10 @@ class Workflow(BaseModel):
     # into this source model. In particular, they need rules for mapping
     # expressions and string conditions before those formats can be supported.
 
-    id: str | None = Field(
-        default=None,
+    id: str = Field(
         description=(
-            "Optional stable Workflow id. Compiler assigns one before emitting "
-            "Workflow IR when omitted."
+            "Stable Workflow id used to locate sessions and persisted versions "
+            "across application restarts."
         )
     )
     version: str | int | None = Field(
@@ -58,13 +63,6 @@ class Workflow(BaseModel):
             "Optional human-readable explanation of the Workflow purpose."
         ),
     )
-    policy: WorkflowPolicy | None = Field(
-        default=None,
-        description=(
-            "Optional Workflow-level policy, such as unhandled branch failure "
-            "behavior."
-        ),
-    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -73,6 +71,16 @@ class Workflow(BaseModel):
         ),
     )
 
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        """Reject identities that cannot safely key registries or durable data."""
+
+        resolved = value.strip()
+        if not resolved:
+            raise ValueError("Workflow id cannot be empty.")
+        return resolved
+
     # Supported authoring forms:
     # - add_node(function)
     # - add_node("capability_string")
@@ -80,12 +88,13 @@ class Workflow(BaseModel):
     # - add_node(function, node_id="node_id")
     def add_node(
         self,
-        node_or_capability: Node | Callable[..., Any] | str,
+        node_or_capability: (
+            Node | Callable[..., Any] | str | CapabilityRef | OperatorRef | SystemCommand
+        ),
         *,
         node_id: str | None = None,
         name: str | None = None,
         description: str | None = None,
-        input_schema: Any | None = None,
         input_mapping: InputMapping | None = None,
         output_binding: OutputBinding | None = None,
         entry: bool | None = None,
@@ -101,7 +110,6 @@ class Workflow(BaseModel):
                     node_id,
                     name,
                     description,
-                    input_schema,
                     input_mapping,
                     output_binding,
                     entry,
@@ -130,7 +138,6 @@ class Workflow(BaseModel):
             capability=node_capability,
             name=name,
             description=description,
-            input_schema=input_schema,
             input_mapping=input_mapping,
             output_binding=output_binding,
             entry=entry,
@@ -151,7 +158,8 @@ class Workflow(BaseModel):
         to_node: Node | str | None = None,
         *,
         edge_id: str | None = None,
-        condition: Callable[..., bool] | str | None = None,
+        condition: Callable[..., bool | Awaitable[bool]] | str | None = None,
+        policy: EdgePolicy | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Edge:
         """Create or add an Edge to this Workflow and return it."""
@@ -162,6 +170,7 @@ class Workflow(BaseModel):
                 for value in (
                     edge_id,
                     condition,
+                    policy,
                     metadata,
                 )
             ):
@@ -178,7 +187,37 @@ class Workflow(BaseModel):
             from_node=edge_or_from_node,
             to_node=to_node,
             condition=condition,
+            policy=policy,
             metadata=metadata or {},
         )
         self.edges.append(edge)
         return edge
+
+    def diagram(
+        self,
+        *,
+        compiler: WorkflowCompiler | None = None,
+    ) -> WorkflowDiagram:
+        """Build a compiler-assisted static preview without executing Workflow."""
+
+        from autoagent.workflow.diagram import WorkflowDiagram
+
+        return WorkflowDiagram.from_workflow(self, compiler=compiler)
+
+    def to_mermaid(self, *, compiler: WorkflowCompiler | None = None) -> str:
+        """Return a Mermaid flowchart with invalid edges highlighted."""
+
+        return self.diagram(compiler=compiler).to_mermaid()
+
+    def preview(
+        self,
+        path: str | Path | None = None,
+        *,
+        compiler: WorkflowCompiler | None = None,
+    ) -> Path:
+        """Write a Mermaid graph preview and return its path."""
+
+        from autoagent.workflow.diagram import default_preview_path
+
+        target = path if path is not None else default_preview_path(self)
+        return self.diagram(compiler=compiler).save(target)

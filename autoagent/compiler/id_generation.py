@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-from uuid import uuid4
-
-
-def generate_workflow_id() -> str:
-    return f"workflow_{uuid4().hex[:8]}"
-
-
 def generate_node_id(used_ids: set[str], start_index: int) -> tuple[str, int]:
     index = start_index
     while True:

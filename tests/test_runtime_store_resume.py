@@ -199,6 +199,7 @@ class RuntimeStoreResumeEdgeCaseTests(unittest.TestCase):
             wait_key="approval:r1",
             reason="Waiting for human approval.",
         )
+        invocation.mark_waiting()
         session.add_invocation(invocation)
         store.save_session(session)
 
@@ -232,6 +233,7 @@ class RuntimeStoreResumeEdgeCaseTests(unittest.TestCase):
         execution = invocation.create_node_execution("approve")
         invocation.mark_node_running(execution.id)
         invocation.mark_node_waiting(execution.id, wait_key="approval:r1")
+        invocation.mark_waiting()
         session.add_invocation(invocation)
         store.save_session(session)
 
@@ -361,6 +363,7 @@ class RuntimeStoreFileSnapshotTests(unittest.TestCase):
             wait_type="human",
             payload={"request_id": "r1"},
         )
+        invocation.mark_waiting()
         session.add_invocation(invocation)
         store.save_session(session)
 

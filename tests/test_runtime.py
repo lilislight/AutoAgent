@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from autoagent.runtime import InMemoryRuntimeStore, Invocation, RuntimeErrorInfo
+from autoagent.runtime import (
+    EdgeActivation,
+    InMemoryRuntimeStore,
+    Invocation,
+    RuntimeErrorInfo,
+)
 
 
 class RuntimeStoreTests(unittest.TestCase):
@@ -74,6 +79,7 @@ class RuntimeStoreTests(unittest.TestCase):
             wait_key="approval:r1",
             reason="Waiting for human approval.",
         )
+        invocation.mark_waiting()
         session.add_invocation(invocation)
         store.save_session(session)
 
@@ -205,6 +211,56 @@ class RuntimeStoreTests(unittest.TestCase):
         self.assertEqual(invocation.count_node_executions("missing"), 0)
         self.assertEqual(invocation.count_operator_calls("missing"), 0)
         self.assertEqual(invocation.sum_node_runtime_ms("missing"), 0)
+
+    def test_store_restores_edge_activation_and_fan_in_cursor(self) -> None:
+        store = InMemoryRuntimeStore()
+        session = store.get_or_create_session(
+            namespace="default",
+            workflow_id="fan_in",
+            session_key="trace",
+        )
+        invocation = Invocation(
+            workflow_id="fan_in",
+            workflow_version=1,
+            entry_node_id="source",
+            input={},
+        )
+        source = invocation.create_node_execution("source")
+        invocation.mark_node_running(source.id)
+        invocation.mark_node_completed(source.id, {"value": 1})
+        activation = EdgeActivation(
+            edge_id="source_target",
+            source_node_id="source",
+            source_execution_id=source.id,
+        )
+        target = invocation.create_node_execution(
+            "target",
+            incoming_activations=(activation,),
+        )
+        invocation.scheduler.resolve_edge(
+            activation.edge_id,
+            state="selected",
+            activation=activation,
+        )
+        invocation.scheduler.scheduled_node_ids.add("target")
+        invocation.scheduler.entered_loop_region_ids.add("loop_1")
+        session.add_invocation(invocation)
+        store.save_session(session)
+
+        loaded = store.load_invocation(invocation.id)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(
+            loaded.get_node_execution(target.id).incoming_activations,
+            (activation,),
+        )
+        self.assertEqual(
+            loaded.scheduler.edge_resolutions[activation.edge_id].activation,
+            activation,
+        )
+        self.assertEqual(loaded.scheduler.scheduled_node_ids, {"target"})
+        self.assertEqual(loaded.scheduler.entered_loop_region_ids, {"loop_1"})
 
 
 if __name__ == "__main__":

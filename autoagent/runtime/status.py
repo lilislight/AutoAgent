@@ -56,3 +56,10 @@ EdgeEvaluationStateValue = Literal[
     "skipped",   # Condition/policy did not select this edge.
     "failed",    # Condition evaluation itself failed.
 ]
+
+# Edge resolution is the invocation-level control state used only outside loop
+# regions. Pending edges are absent from SchedulerContext.edge_resolutions.
+EdgeResolutionStateValue = Literal[
+    "selected",  # Source completed and this edge condition evaluated true.
+    "skipped",   # Source/path was skipped or this edge condition evaluated false.
+]

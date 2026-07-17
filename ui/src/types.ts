@@ -10,6 +10,12 @@ export type RuntimeState =
   | "skipped"
   | string;
 
+export interface ObservationHealth {
+  status: string;
+  authentication_required: boolean;
+  authenticated: boolean;
+}
+
 export interface WorkflowSummary {
   workflow_id: string;
   workflow_version: string | number | null;
@@ -200,11 +206,18 @@ export interface RuntimeProjection {
   operator_states: Record<string, RuntimeState>;
 }
 
+export interface RuntimeEventPage {
+  events: RuntimeEvent[];
+  next_after_sequence: number;
+  has_more: boolean;
+}
+
 export interface ObservationBootstrap {
   graph: WorkflowGraphView;
   session: SessionSummary;
   invocation: InvocationDetail;
   timeline: TimelineView;
+  checkpoint: RuntimeProjection;
   events: RuntimeEvent[];
   projection: RuntimeProjection;
 }

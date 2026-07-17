@@ -195,10 +195,19 @@ class RuntimeProjection(ObservationModel):
     operator_states: dict[str, str]
 
 
+class RuntimeEventPage(ObservationModel):
+    """One forward event page and the cursor for requesting the next page."""
+
+    events: tuple[RuntimeEvent, ...]
+    next_after_sequence: int
+    has_more: bool
+
+
 class ObservationBootstrap(ObservationModel):
     graph: WorkflowGraphView
     session: SessionSummary
     invocation: InvocationDetail
     timeline: TimelineView
+    checkpoint: RuntimeProjection
     events: tuple[RuntimeEvent, ...]
     projection: RuntimeProjection

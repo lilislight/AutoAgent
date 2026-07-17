@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 _TYPE_TAG = "__autoagent_type__"
+_ARTIFACT_VIEW_TAG = "__autoagent_artifact__"
 
 
 class RuntimeSerializationError(ValueError):
@@ -285,7 +286,9 @@ class JsonRuntimeSerializer(RuntimeSerializer):
         type_tag = value.get(_TYPE_TAG)
         if type_tag is None:
             return {key: self._json_view(item) for key, item in value.items()}
-        if type_tag in {"mapping", "artifact", "pydantic", "codec"}:
+        if type_tag == "artifact":
+            return {_ARTIFACT_VIEW_TAG: self._json_view(value["value"])}
+        if type_tag in {"mapping", "pydantic", "codec"}:
             return self._json_view(value["value"])
         if type_tag in {"tuple", "set"}:
             return [self._json_view(item) for item in value["value"]]

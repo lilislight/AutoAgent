@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import random
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from time import perf_counter_ns
@@ -24,6 +24,7 @@ from autoagent.operators import (
 from autoagent.runtime import (
     InvocationExecutionMailbox,
     NodeExecution,
+    OperatorCall,
     ResourceUsage,
     RuntimeErrorInfo,
     RuntimeConcurrencyController,
@@ -31,6 +32,9 @@ from autoagent.runtime import (
 from autoagent.runtime.hooks import invoke_hook_async
 from autoagent.workflow import BackoffPolicy, MapPolicy
 from autoagent.workflow.capability import SystemCommand, WAIT_SYSTEM_COMMAND_ID
+
+
+OperatorCallCheckpoint = Callable[[OperatorCall], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class NodeExecutionJob:
     map_policy: MapPolicy | None = None
     concurrency_key: str | None = None
     recovery: bool = False
+    operator_call_checkpoint: OperatorCallCheckpoint | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,7 @@ class ResolvedNodeExecutionJob:
     map_policy: MapPolicy | None = None
     concurrency_key: str | None = None
     recovery: bool = False
+    operator_call_checkpoint: OperatorCallCheckpoint | None = None
     concurrency_controller: RuntimeConcurrencyController | None = None
     thread_pool: ThreadPoolExecutor | None = None
 
@@ -168,6 +174,7 @@ class NodeExecutor:
                 map_policy=job.map_policy,
                 concurrency_key=job.concurrency_key,
                 recovery=job.recovery,
+                operator_call_checkpoint=job.operator_call_checkpoint,
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
             )
@@ -302,10 +309,12 @@ async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecution
     if input_error is not None:
         return _failed_result(job, input_error)
     budget = _CallBudget(job.max_operator_calls)
+    call_sequence = _CallSequence(len(job.node_execution.operator_calls))
     unit_results = await _execute_units(
         job,
         units,
         budget,
+        call_sequence,
         unit_kind=unit_kind,
         max_parallelism=_max_parallelism(job, len(units)),
     )
@@ -339,6 +348,19 @@ class _CallBudget:
             return False
         self.remaining -= 1
         return True
+
+
+class _CallSequence:
+    """Allocate unique call numbers across concurrent map/replica tasks."""
+
+    def __init__(self, current: int = 0) -> None:
+        self.current = current
+
+    def next(self) -> int:
+        # No await occurs here, so tasks on one event loop cannot interleave the
+        # read/increment/write sequence.
+        self.current += 1
+        return self.current
 
 
 class _OperatorTimedOut(TimeoutError):
@@ -534,6 +556,7 @@ async def _execute_units(
     job: ResolvedNodeExecutionJob,
     units: list[tuple[int, Any]],
     budget: _CallBudget,
+    call_sequence: _CallSequence,
     *,
     unit_kind: str,
     max_parallelism: int,
@@ -546,6 +569,7 @@ async def _execute_units(
                 job,
                 unit_input,
                 budget,
+                call_sequence,
                 unit_kind=unit_kind,
                 unit_index=unit_index,
             )
@@ -585,6 +609,7 @@ async def _execute_unit(
     job: ResolvedNodeExecutionJob,
     unit_input: Any,
     budget: _CallBudget,
+    call_sequence: _CallSequence,
     *,
     unit_kind: str,
     unit_index: int,
@@ -602,39 +627,42 @@ async def _execute_unit(
                 attempt_index,
                 recovery=job.recovery,
             )
+            call = OperatorCall(
+                operator_id=operator.id,
+                operator_manifest=operator.manifest,
+                call_no=call_sequence.next(),
+                kind=kind,
+                item_index=unit_index if unit_kind == "map_item" else None,
+                replica_index=unit_index if unit_kind == "replica" else None,
+            )
+            call.mark_running(unit_input)
+            checkpoint_error = await _checkpoint_operator_call(job, call)
+            if checkpoint_error is not None:
+                call.mark_failed(checkpoint_error)
+                calls.append(_call_result(call))
+                return _UnitResult(unit_index, None, checkpoint_error, calls)
+
             started_ns = perf_counter_ns()
             try:
                 output = await _invoke_operator(job, operator, unit_input)
                 _validate_operator_output(job, operator, output)
                 duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
-                calls.append(
-                    _call_result(
-                        operator=operator,
-                        kind=kind,
-                        state="completed",
-                        input=unit_input,
-                        output=output,
-                        duration_ms=duration_ms,
-                        unit_kind=unit_kind,
-                        unit_index=unit_index,
-                    )
-                )
+                call.resource_usage = ResourceUsage(duration_ms=duration_ms)
+                call.mark_completed(output)
+                checkpoint_error = await _checkpoint_operator_call(job, call)
+                calls.append(_call_result(call))
+                if checkpoint_error is not None:
+                    return _UnitResult(unit_index, None, checkpoint_error, calls)
                 return _UnitResult(unit_index, output, None, calls)
             except Exception as exc:
                 duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
                 error = _operator_error(job, operator, exc)
-                calls.append(
-                    _call_result(
-                        operator=operator,
-                        kind=kind,
-                        state="failed",
-                        input=unit_input,
-                        error=error,
-                        duration_ms=duration_ms,
-                        unit_kind=unit_kind,
-                        unit_index=unit_index,
-                    )
-                )
+                call.resource_usage = ResourceUsage(duration_ms=duration_ms)
+                call.mark_failed(error)
+                checkpoint_error = await _checkpoint_operator_call(job, call)
+                calls.append(_call_result(call))
+                if checkpoint_error is not None:
+                    return _UnitResult(unit_index, None, checkpoint_error, calls)
                 if attempt_index + 1 < max_attempts:
                     await asyncio.sleep(_retry_delay_seconds(retry.backoff, attempt_index))
 
@@ -695,7 +723,12 @@ async def _aggregate_unit_results(
     unit_kind: str,
 ) -> NodeExecutionResult:
     unit_results.sort(key=lambda item: item.index)
-    calls = tuple(call for item in unit_results for call in item.calls)
+    calls = tuple(
+        sorted(
+            (call for item in unit_results for call in item.calls),
+            key=lambda call: call.call_no,
+        )
+    )
     duration_ms = sum(call.resource_usage.duration_ms for call in calls)
     failed = next((item for item in unit_results if item.error is not None), None)
     if failed is not None:
@@ -765,29 +798,48 @@ def _call_kind(
 
 
 def _call_result(
-    *,
-    operator: Operator,
-    kind: str,
-    state: str,
-    input: Any,
-    duration_ms: int,
-    unit_kind: str,
-    unit_index: int,
-    output: Any | None = None,
-    error: RuntimeErrorInfo | None = None,
+    call: OperatorCall,
 ) -> OperatorCallResult:
     return OperatorCallResult(
-        operator_id=operator.id,
-        operator_manifest=operator.manifest,
-        kind=kind,
-        state=state,
-        input=input,
-        output=output,
-        error=error,
-        resource_usage=ResourceUsage(duration_ms=duration_ms),
-        item_index=unit_index if unit_kind == "map_item" else None,
-        replica_index=unit_index if unit_kind == "replica" else None,
+        id=call.id,
+        call_no=call.call_no,
+        operator_id=call.operator_id,
+        operator_manifest=call.operator_manifest,
+        kind=call.kind,
+        state=call.state,
+        input=call.input,
+        output=call.output,
+        error=call.error,
+        resource_usage=call.resource_usage,
+        item_index=call.item_index,
+        replica_index=call.replica_index,
+        created_at_ms=call.created_at_ms,
+        started_at_ms=call.started_at_ms,
+        ended_at_ms=call.ended_at_ms,
     )
+
+
+async def _checkpoint_operator_call(
+    job: ResolvedNodeExecutionJob,
+    call: OperatorCall,
+) -> RuntimeErrorInfo | None:
+    checkpoint = job.operator_call_checkpoint
+    if checkpoint is None:
+        return None
+    try:
+        await checkpoint(call)
+    except Exception as exc:
+        return RuntimeErrorInfo(
+            code="RUNTIME_CHECKPOINT_FAILED",
+            message=str(exc),
+            detail={
+                "node_id": job.node_ir.id,
+                "operator_id": call.operator_id,
+                "operator_call_id": str(call.id),
+                "error_type": type(exc).__name__,
+            },
+        )
+    return None
 
 
 def _operator_budget_error(job: ResolvedNodeExecutionJob) -> RuntimeErrorInfo:

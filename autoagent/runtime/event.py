@@ -94,6 +94,8 @@ class RuntimeEventDraft:
 def invocation_checkpoint_events(
     previous: Invocation | None,
     current: Invocation,
+    *,
+    changed_node_execution_ids: frozenset[str] | None = None,
 ) -> list[RuntimeEventDraft]:
     """Describe externally observable changes in one Invocation checkpoint.
 
@@ -104,7 +106,12 @@ def invocation_checkpoint_events(
 
     drafts: list[RuntimeEventDraft] = []
     previous_executions = (
-        {str(value.id): value for value in previous.node_executions}
+        {
+            str(value.id): value
+            for value in previous.node_executions
+            if changed_node_execution_ids is None
+            or str(value.id) in changed_node_execution_ids
+        }
         if previous is not None
         else {}
     )
@@ -158,11 +165,23 @@ def invocation_checkpoint_events(
         )
 
     for execution in current.node_executions:
+        if (
+            changed_node_execution_ids is not None
+            and str(execution.id) not in changed_node_execution_ids
+        ):
+            continue
         old_execution = previous_executions.get(str(execution.id))
         drafts.extend(_node_execution_events(old_execution, execution))
 
     # A checkpoint can observe several concurrent completions. Wall time places
     # them on the timeline; stable tie breakers keep assigned sequences repeatable.
+    sort_runtime_event_drafts(drafts)
+    return drafts
+
+
+def sort_runtime_event_drafts(drafts: list[RuntimeEventDraft]) -> None:
+    """Apply one stable ordering to drafts created by the same transaction."""
+
     drafts.sort(
         key=lambda value: (
             value.occurred_at_ms,
@@ -171,7 +190,6 @@ def invocation_checkpoint_events(
             value.type,
         )
     )
-    return drafts
 
 
 def session_context_event(
@@ -188,6 +206,17 @@ def session_context_event(
         occurred_at_ms=occurred_at_ms or utc_timestamp_ms(),
         payload={"invocation_id": str(invocation_id), "context": context},
     )
+
+
+def operator_call_checkpoint_events(
+    previous: Any | None,
+    current: Any,
+    *,
+    node_id: str,
+) -> list[RuntimeEventDraft]:
+    """Describe one independently persisted OperatorCall transition."""
+
+    return _operator_call_events(previous, current, node_id)
 
 
 def _node_execution_events(previous: Any, current: Any) -> list[RuntimeEventDraft]:

@@ -18,6 +18,7 @@ from autoagent.runtime.database_models import (
     InvocationRow,
     NodeExecutionRow,
     OperatorCallRow,
+    RuntimeProjectionCheckpointRow,
     RuntimeEventRow,
     RuntimeDatabaseBase,
     SessionRow,
@@ -27,7 +28,9 @@ from autoagent.runtime.event import (
     RuntimeEvent,
     RuntimeEventDraft,
     invocation_checkpoint_events,
+    operator_call_checkpoint_events,
     session_context_event,
+    sort_runtime_event_drafts,
 )
 from autoagent.runtime.execution import NodeExecution, OperatorCall
 from autoagent.runtime.invocation import Invocation
@@ -37,17 +40,16 @@ from autoagent.runtime.store import RuntimeStore, SessionBusyError
 from autoagent.runtime.time import utc_timestamp_ms
 
 
-RUNTIME_SCHEMA_REVISION = "0002_runtime_events"
+RUNTIME_SCHEMA_REVISION = "0003_projection_checkpoints"
 
 
 class SQLiteRuntimeStore(RuntimeStore):
     """Async SQLAlchemy RuntimeStore backed by SQLite.
 
     Each public operation opens a short AsyncSession and commits one transaction.
-    Invocation saves checkpoint the Invocation row, all NodeExecution rows, and
-    all OperatorCall rows together. This is intentionally a complete V1 snapshot;
-    TODO: replace hot-path full snapshots with explicit delta checkpoint methods
-    after the event/observation contract is frozen.
+    Execution checkpoints update the Invocation control row, SessionContext,
+    explicitly changed NodeExecutions, and generated Runtime Events in one
+    transaction. Historical NodeExecutions are not rewritten on every loop turn.
 
     ``initialize`` creates and stamps a new embedded database at the current
     Alembic revision. Existing databases at an older revision are rejected so
@@ -400,6 +402,128 @@ class SQLiteRuntimeStore(RuntimeStore):
                 raise KeyError(f"Unknown session: {session_id}")
             await self._upsert_invocation(database, session_id, invocation)
 
+    async def acheckpoint_invocation(
+        self,
+        session: Session,
+        invocation: Invocation,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+    ) -> None:
+        """Persist one execution delta without rewriting historical children."""
+
+        await self.initialize()
+        async with self._event_lock, self._sessions.begin() as database:
+            session_row = await database.get(SessionRow, str(session.id))
+            if session_row is None:
+                raise KeyError(f"Unknown session: {session.id}")
+            invocation_row = await database.get(InvocationRow, str(invocation.id))
+            if invocation_row is None:
+                raise KeyError(f"Unknown invocation: {invocation.id}")
+            if invocation_row.session_id != str(session.id):
+                raise ValueError("Invocation does not belong to the supplied session.")
+
+            previous = await self._load_invocation(database, invocation.id)
+            if previous is None:  # pragma: no cover - guarded by row lookup.
+                raise KeyError(f"Unknown invocation: {invocation.id}")
+            previous_session_context = self._load(session_row.context_json)
+
+            record = invocation.to_record(session.id)
+            _assign(
+                invocation_row,
+                {
+                    "state": invocation.state,
+                    "context_json": self._dump(record["context"]),
+                    "result_json": self._dump(record["result"]),
+                    "scheduler_json": self._dump(record["scheduler"]),
+                    "error_json": self._dump(record["error"]),
+                    "updated_at_ms": invocation.updated_at_ms,
+                },
+            )
+
+            changed_ids = tuple(dict.fromkeys(node_execution_ids))
+            for execution_id in changed_ids:
+                execution = invocation.get_node_execution(execution_id)
+                if execution is None:
+                    raise KeyError(f"Unknown NodeExecution: {execution_id}")
+                await self._upsert_node_execution(database, invocation.id, execution)
+
+            session_row.context_json = self._dump(session.context.to_record())
+            session_row.current_invocation_id = (
+                str(session.current_invocation_id)
+                if session.current_invocation_id is not None
+                else None
+            )
+            session_row.updated_at_ms = session.updated_at_ms
+
+            drafts = invocation_checkpoint_events(
+                previous,
+                invocation,
+                changed_node_execution_ids=frozenset(map(str, changed_ids)),
+            )
+            if previous_session_context != session.context.to_record():
+                drafts.append(
+                    session_context_event(
+                        session_id=session.id,
+                        invocation_id=invocation.id,
+                        context=session.context.to_record(),
+                        occurred_at_ms=session.updated_at_ms,
+                    )
+                )
+            sort_runtime_event_drafts(drafts)
+            await self._append_event_drafts(
+                database,
+                session_id=session.id,
+                invocation_id=invocation.id,
+                drafts=tuple(drafts),
+            )
+
+    async def acheckpoint_operator_call(
+        self,
+        *,
+        session_id: UUID,
+        invocation_id: UUID,
+        node_execution_id: UUID,
+        node_id: str,
+        call: OperatorCall,
+    ) -> None:
+        """Persist call start/completion before returning to execution code."""
+
+        await self.initialize()
+        async with self._event_lock, self._sessions.begin() as database:
+            invocation_row = await database.get(InvocationRow, str(invocation_id))
+            if invocation_row is None:
+                raise KeyError(f"Unknown invocation: {invocation_id}")
+            if invocation_row.session_id != str(session_id):
+                raise ValueError("Invocation does not belong to the supplied session.")
+            execution_row = await database.get(
+                NodeExecutionRow,
+                str(node_execution_id),
+            )
+            if execution_row is None:
+                raise KeyError(f"Unknown NodeExecution: {node_execution_id}")
+            if execution_row.invocation_id != str(invocation_id):
+                raise ValueError("NodeExecution does not belong to the Invocation.")
+
+            previous_row = await database.get(OperatorCallRow, str(call.id))
+            previous = (
+                self._operator_call_from_row(previous_row)
+                if previous_row is not None
+                else None
+            )
+            await self._upsert_operator_call(database, node_execution_id, call)
+            await self._append_event_drafts(
+                database,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                drafts=tuple(
+                    operator_call_checkpoint_events(
+                        previous,
+                        call,
+                        node_id=node_id,
+                    )
+                ),
+            )
+
     async def aadmit_invocation(
         self,
         session_id: UUID,
@@ -616,6 +740,68 @@ class SQLiteRuntimeStore(RuntimeStore):
                 invocation_id=invocation_id,
                 drafts=drafts,
             )
+
+    async def asave_projection_checkpoint(
+        self,
+        *,
+        invocation_id: UUID,
+        through_sequence: int,
+        projection: dict[str, Any],
+    ) -> None:
+        if through_sequence < 0:
+            raise ValueError("through_sequence cannot be negative.")
+        await self.initialize()
+        async with self._sessions.begin() as database:
+            if await database.get(InvocationRow, str(invocation_id)) is None:
+                raise KeyError(f"Unknown invocation: {invocation_id}")
+            existing = await database.scalar(
+                select(RuntimeProjectionCheckpointRow).where(
+                    RuntimeProjectionCheckpointRow.invocation_id
+                    == str(invocation_id),
+                    RuntimeProjectionCheckpointRow.through_sequence
+                    == through_sequence,
+                )
+            )
+            payload = self._dump(projection)
+            if existing is None:
+                database.add(
+                    RuntimeProjectionCheckpointRow(
+                        id=str(uuid4()),
+                        invocation_id=str(invocation_id),
+                        through_sequence=through_sequence,
+                        projection_json=payload,
+                        created_at_ms=utc_timestamp_ms(),
+                    )
+                )
+            else:
+                existing.projection_json = payload
+
+    async def aload_projection_checkpoint(
+        self,
+        *,
+        invocation_id: UUID,
+        at_or_before_sequence: int | None = None,
+    ) -> tuple[int, dict[str, Any]] | None:
+        await self.initialize()
+        async with self._sessions() as database:
+            statement = (
+                select(RuntimeProjectionCheckpointRow)
+                .where(
+                    RuntimeProjectionCheckpointRow.invocation_id
+                    == str(invocation_id)
+                )
+                .order_by(RuntimeProjectionCheckpointRow.through_sequence.desc())
+                .limit(1)
+            )
+            if at_or_before_sequence is not None:
+                statement = statement.where(
+                    RuntimeProjectionCheckpointRow.through_sequence
+                    <= at_or_before_sequence
+                )
+            row = await database.scalar(statement)
+            if row is None:
+                return None
+            return row.through_sequence, self._load(row.projection_json)
 
     async def _upsert_session(
         self,

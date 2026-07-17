@@ -233,3 +233,30 @@ class RuntimeEventRow(RuntimeDatabaseBase):
     channel: Mapped[str] = mapped_column(String(32), nullable=False)
     visibility: Mapped[str] = mapped_column(String(32), nullable=False)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class RuntimeProjectionCheckpointRow(RuntimeDatabaseBase):
+    """Rebuildable observation projection at one Invocation event cursor."""
+
+    __tablename__ = "runtime_projection_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "invocation_id",
+            "through_sequence",
+            name="uq_runtime_projection_checkpoints_cursor",
+        ),
+        Index(
+            "ix_runtime_projection_checkpoints_latest",
+            "invocation_id",
+            "through_sequence",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("invocations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    through_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    projection_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)

@@ -95,7 +95,7 @@ def main() -> None:
         input={"summary": "Single failed health check", "severity": 1},
         session_id="support",
     )
-    ObservationApp(app.runtime_store).run(port=8765)
+    ObservationApp(app.runtime_store).run(host="0.0.0.0", port=8765)
 
 
 if __name__ == "__main__":

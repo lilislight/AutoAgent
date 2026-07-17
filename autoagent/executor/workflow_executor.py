@@ -3,15 +3,21 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from typing import Any
+from uuid import UUID
 
 from autoagent.compiler import NodeIR, WorkflowIR, WorkflowVersionSnapshot
-from autoagent.executor.node_executor import NodeExecutionJob, NodeExecutor
+from autoagent.executor.node_executor import (
+    NodeExecutionJob,
+    NodeExecutor,
+    OperatorCallCheckpoint,
+)
 from autoagent.executor.result import NodeExecutionResult
 from autoagent.runtime import (
     InputMappingContext,
     IncomingOutput,
     Invocation,
     NodeExecution,
+    OperatorCall,
     OutputBindingContext,
     RuntimeErrorInfo,
     RuntimeStore,
@@ -80,7 +86,7 @@ class WorkflowExecutor:
         invocation: Invocation,
     ) -> Invocation:
         self.scheduler.initialize(workflow_ir=workflow_ir, invocation=invocation)
-        await self.runtime_store.asave_invocation(session.id, invocation)
+        await self.runtime_store.acheckpoint_invocation(session, invocation)
         try:
             return await self._drive(
                 workflow_ir=workflow_ir,
@@ -159,6 +165,7 @@ class WorkflowExecutor:
             for manifest in workflow_snapshot.operator_manifests
         }
         jobs: list[NodeExecutionJob] = []
+        changed_execution_ids: list[UUID] = []
         for interrupted in active:
             node_ir = workflow_ir.nodes.get(interrupted.node_id)
             reason = self._recovery_rejection_reason(
@@ -177,6 +184,7 @@ class WorkflowExecutor:
 
         for interrupted in active:
             node_ir = workflow_ir.nodes[interrupted.node_id]
+            changed_execution_ids.append(interrupted.id)
             interrupted.mark_interrupted(
                 RuntimeErrorInfo(
                     code="WORKER_LOST",
@@ -199,6 +207,7 @@ class WorkflowExecutor:
                 incoming_activations=interrupted.incoming_activations,
             )
             invocation.mark_node_running(replacement.id, input=replacement.input)
+            changed_execution_ids.append(replacement.id)
             jobs.append(
                 NodeExecutionJob(
                     node_ir=node_ir,
@@ -211,12 +220,21 @@ class WorkflowExecutor:
                     map_policy=map_policy,
                     concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
                     recovery=True,
+                    operator_call_checkpoint=self._operator_call_checkpoint(
+                        session=session,
+                        invocation=invocation,
+                        node_execution=replacement,
+                    ),
                 )
             )
 
         invocation.mark_running()
+        await self.runtime_store.acheckpoint_invocation(
+            session,
+            invocation,
+            node_execution_ids=tuple(changed_execution_ids),
+        )
         self.node_executor.submit_batch(jobs, mailbox=invocation.execution_mailbox)
-        await self.runtime_store.asave_invocation(session.id, invocation)
         return await self._drive(
             workflow_ir=workflow_ir,
             session=session,
@@ -279,8 +297,17 @@ class WorkflowExecutor:
         message: str,
     ) -> None:
         error = RuntimeErrorInfo(code=code, message=message)
+        changed_execution_ids = tuple(
+            execution.id
+            for execution in invocation.node_executions
+            if execution.state in {"created", "ready", "running"}
+        )
         invocation.interrupt_active_node_executions(error)
-        await self.runtime_store.asave_invocation(session.id, invocation)
+        await self.runtime_store.acheckpoint_invocation(
+            session,
+            invocation,
+            node_execution_ids=changed_execution_ids,
+        )
 
     async def _drive(
         self,
@@ -300,25 +327,48 @@ class WorkflowExecutor:
                     invocation=invocation,
                     transitions=transitions,
                 )
-                await self.runtime_store.asave_invocation(session.id, invocation)
+                await self.runtime_store.acheckpoint_invocation(
+                    session,
+                    invocation,
+                    node_execution_ids=tuple(
+                        transition.node_execution_id for transition in transitions
+                    ),
+                )
                 if invocation.state == "failed":
-                    await self._abandon_active_work(invocation)
-                    await self.runtime_store.asave_invocation(session.id, invocation)
+                    abandoned = await self._abandon_active_work(invocation)
+                    await self.runtime_store.acheckpoint_invocation(
+                        session,
+                        invocation,
+                        node_execution_ids=abandoned,
+                    )
                     return invocation
                 continue
 
             ready_requests = invocation.scheduler.drain_ready()
             if ready_requests:
-                await self._submit_ready_requests(
+                changed_execution_ids, jobs = await self._submit_ready_requests(
                     workflow_ir=workflow_ir,
                     session=session,
                     invocation=invocation,
                     ready_requests=ready_requests,
                 )
-                await self.runtime_store.asave_invocation(session.id, invocation)
+                await self.runtime_store.acheckpoint_invocation(
+                    session,
+                    invocation,
+                    node_execution_ids=changed_execution_ids,
+                )
+                if jobs:
+                    self.node_executor.submit_batch(
+                        jobs,
+                        mailbox=invocation.execution_mailbox,
+                    )
                 if invocation.state == "failed":
-                    await self._abandon_active_work(invocation)
-                    await self.runtime_store.asave_invocation(session.id, invocation)
+                    abandoned = await self._abandon_active_work(invocation)
+                    await self.runtime_store.acheckpoint_invocation(
+                        session,
+                        invocation,
+                        node_execution_ids=abandoned,
+                    )
                     return invocation
                 continue
 
@@ -326,19 +376,26 @@ class WorkflowExecutor:
                 results = await self.node_executor.wait_next_completed(
                     invocation.execution_mailbox
                 )
+                changed_execution_ids = []
                 for result in results:
-                    await self._apply_result(
+                    changed_execution_id = await self._apply_result(
                         workflow_ir=workflow_ir,
                         session=session,
                         invocation=invocation,
                         result=result,
                     )
-                await self.runtime_store.asave_invocation(session.id, invocation)
+                    if changed_execution_id is not None:
+                        changed_execution_ids.append(changed_execution_id)
+                await self.runtime_store.acheckpoint_invocation(
+                    session,
+                    invocation,
+                    node_execution_ids=tuple(changed_execution_ids),
+                )
                 continue
 
             if invocation.scheduler.waiting_executions:
                 invocation.mark_waiting()
-                await self.runtime_store.asave_invocation(session.id, invocation)
+                await self.runtime_store.acheckpoint_invocation(session, invocation)
                 return invocation
 
             if self._is_completed(workflow_ir=workflow_ir, invocation=invocation):
@@ -348,7 +405,7 @@ class WorkflowExecutor:
                         invocation=invocation,
                     )
                 )
-                await self.runtime_store.asave_invocation(session.id, invocation)
+                await self.runtime_store.acheckpoint_invocation(session, invocation)
                 return invocation
 
             invocation.mark_failed(
@@ -357,7 +414,7 @@ class WorkflowExecutor:
                     message="Workflow has no ready, running, waiting, or completed exit node.",
                 )
             )
-            await self.runtime_store.asave_invocation(session.id, invocation)
+            await self.runtime_store.acheckpoint_invocation(session, invocation)
             return invocation
 
     async def _cancel_invocation(
@@ -370,10 +427,19 @@ class WorkflowExecutor:
             code="INVOCATION_CANCELLED",
             message="Invocation was cancelled by its caller.",
         )
+        changed_execution_ids = tuple(
+            execution.id
+            for execution in invocation.node_executions
+            if execution.state in {"created", "ready", "running"}
+        )
         invocation.cancel_active_node_executions(error)
         invocation.mark_cancelled()
         await self.node_executor.abandon(invocation.execution_mailbox)
-        await self.runtime_store.asave_invocation(session.id, invocation)
+        await self.runtime_store.acheckpoint_invocation(
+            session,
+            invocation,
+            node_execution_ids=changed_execution_ids,
+        )
 
     def resume(
         self,
@@ -454,7 +520,11 @@ class WorkflowExecutor:
 
         if not invocation.scheduler.waiting_executions:
             invocation.mark_running()
-        await self.runtime_store.asave_invocation(session.id, invocation)
+        await self.runtime_store.acheckpoint_invocation(
+            session,
+            invocation,
+            node_execution_ids=(node_execution.id,),
+        )
         return await self._drive(
             workflow_ir=workflow_ir,
             session=session,
@@ -468,8 +538,9 @@ class WorkflowExecutor:
         session: Session,
         invocation: Invocation,
         ready_requests: list[NodeExecutionRequest],
-    ) -> None:
+    ) -> tuple[tuple[UUID, ...], list[NodeExecutionJob]]:
         jobs: list[NodeExecutionJob] = []
+        changed_execution_ids: list[UUID] = []
         for request in ready_requests:
             node_ir = workflow_ir.nodes.get(request.node_id)
             if node_ir is None:
@@ -479,7 +550,7 @@ class WorkflowExecutor:
                         message=f"Ready request references unknown node: {request.node_id}",
                     )
                 )
-                return
+                return tuple(changed_execution_ids), jobs
 
             resource_error = self._check_node_execution_resource(
                 invocation=invocation,
@@ -487,7 +558,7 @@ class WorkflowExecutor:
             )
             if resource_error is not None:
                 invocation.mark_failed(resource_error)
-                return
+                return tuple(changed_execution_ids), jobs
 
             try:
                 map_policy = self._map_policy_for_request(workflow_ir, request)
@@ -506,6 +577,7 @@ class WorkflowExecutor:
                     node_ir.id,
                     incoming_activations=request.activations,
                 )
+                changed_execution_ids.append(node_execution.id)
                 invocation.scheduler.scheduled_node_ids.add(node_ir.id)
                 invocation.mark_node_failed(
                     node_execution.id,
@@ -524,6 +596,7 @@ class WorkflowExecutor:
                 input=node_input,
                 incoming_activations=request.activations,
             )
+            changed_execution_ids.append(node_execution.id)
             if node_execution.idempotency_key is None:
                 node_execution.idempotency_key = str(node_execution.id)
             invocation.scheduler.scheduled_node_ids.add(node_ir.id)
@@ -548,13 +621,15 @@ class WorkflowExecutor:
                     ),
                     map_policy=map_policy,
                     concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
+                    operator_call_checkpoint=self._operator_call_checkpoint(
+                        session=session,
+                        invocation=invocation,
+                        node_execution=node_execution,
+                    ),
                 )
             )
 
-        self.node_executor.submit_batch(
-            jobs,
-            mailbox=invocation.execution_mailbox,
-        )
+        return tuple(changed_execution_ids), jobs
 
     async def _apply_result(
         self,
@@ -563,7 +638,7 @@ class WorkflowExecutor:
         session: Session,
         invocation: Invocation,
         result: NodeExecutionResult,
-    ) -> None:
+    ) -> UUID | None:
         node_execution = invocation.get_node_execution(result.node_execution_id)
         if node_execution is None:
             invocation.mark_failed(
@@ -573,28 +648,17 @@ class WorkflowExecutor:
                     detail={"node_execution_id": str(result.node_execution_id)},
                 )
             )
-            return
+            return None
 
+        existing_call_ids = {call.id for call in node_execution.operator_calls}
         for call_result in result.operator_calls:
-            call = node_execution.add_operator_call(
-                call_result.operator_id,
-                operator_manifest=call_result.operator_manifest,
-                kind=call_result.kind,
-                item_index=call_result.item_index,
-                replica_index=call_result.replica_index,
-            )
-            call.mark_running(call_result.input)
-            call.resource_usage = call_result.resource_usage
-            if call_result.state == "completed":
-                call.mark_completed(call_result.output)
-            else:
-                call.mark_failed(call_result.error or RuntimeErrorInfo(
-                    code="OPERATOR_CALL_FAILED",
-                    message="Operator call failed.",
-                ))
+            if call_result.id not in existing_call_ids:
+                node_execution.operator_calls.append(call_result.to_operator_call())
+                existing_call_ids.add(call_result.id)
             node_execution.resource_usage.add(
                 duration_ms=call_result.resource_usage.duration_ms
             )
+        node_execution.operator_calls.sort(key=lambda call: call.call_no)
 
         runtime_error = self._check_runtime_resource_after_result(
             workflow_ir=workflow_ir,
@@ -603,7 +667,7 @@ class WorkflowExecutor:
         )
         if runtime_error is not None:
             invocation.mark_node_failed(node_execution.id, runtime_error)
-            return
+            return node_execution.id
 
         if result.state == "completed":
             try:
@@ -630,11 +694,9 @@ class WorkflowExecutor:
                     ),
                 )
                 session.mark_context_updated()
-                await self.runtime_store.asave_session_context(session)
             else:
                 invocation.mark_node_completed(node_execution.id, result.output)
                 session.mark_context_updated()
-                await self.runtime_store.asave_session_context(session)
         elif result.state == "waiting":
             try:
                 invocation.mark_node_waiting(
@@ -661,6 +723,27 @@ class WorkflowExecutor:
                     message="Node execution failed.",
                 ),
             )
+        return node_execution.id
+
+    def _operator_call_checkpoint(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+        node_execution: NodeExecution,
+    ) -> OperatorCallCheckpoint:
+        """Bind a worker call checkpoint to its persisted runtime hierarchy."""
+
+        async def checkpoint(call: OperatorCall) -> None:
+            await self.runtime_store.acheckpoint_operator_call(
+                session_id=session.id,
+                invocation_id=invocation.id,
+                node_execution_id=node_execution.id,
+                node_id=node_execution.node_id,
+                call=call,
+            )
+
+        return checkpoint
 
     async def _build_node_input(
         self,
@@ -784,11 +867,9 @@ class WorkflowExecutor:
                 ),
             )
             session.mark_context_updated()
-            await self.runtime_store.asave_session_context(session)
         else:
             invocation.mark_node_completed(node_execution.id, output)
             session.mark_context_updated()
-            await self.runtime_store.asave_session_context(session)
 
     def _map_policy_for_request(
         self,
@@ -829,13 +910,19 @@ class WorkflowExecutor:
             )
         return None
 
-    async def _abandon_active_work(self, invocation: Invocation) -> None:
+    async def _abandon_active_work(self, invocation: Invocation) -> tuple[UUID, ...]:
         error = RuntimeErrorInfo(
             code="INVOCATION_FAILED_FAST",
             message="Node execution was cancelled after fail-fast invocation failure.",
         )
+        changed_execution_ids = tuple(
+            execution.id
+            for execution in invocation.node_executions
+            if execution.state in {"created", "ready", "running"}
+        )
         invocation.cancel_active_node_executions(error)
         await self.node_executor.abandon(invocation.execution_mailbox)
+        return changed_execution_ids
 
     def _check_operator_call_resource(
         self,

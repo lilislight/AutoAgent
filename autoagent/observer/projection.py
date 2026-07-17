@@ -17,17 +17,30 @@ def project_runtime_events(
     events: Iterable[RuntimeEvent],
     *,
     through_sequence: int | None = None,
+    base_projection: RuntimeProjection | None = None,
 ) -> RuntimeProjection:
     """Reduce immutable events into graph state at one deterministic cursor."""
 
-    invocation_state = "created"
-    applied_sequence = 0
-    executions: dict[str, ProjectedNodeExecution] = {}
-    edge_values: dict[str, ProjectedEdge] = {}
-    operator_states: dict[str, str] = {}
+    if base_projection is not None and base_projection.invocation_id != invocation_id:
+        raise ValueError("Projection checkpoint belongs to another Invocation.")
+    invocation_state = (
+        base_projection.invocation_state if base_projection is not None else "created"
+    )
+    applied_sequence = (
+        base_projection.through_sequence if base_projection is not None else 0
+    )
+    executions = (
+        dict(base_projection.node_executions) if base_projection is not None else {}
+    )
+    edge_values = dict(base_projection.edges) if base_projection is not None else {}
+    operator_states = (
+        dict(base_projection.operator_states) if base_projection is not None else {}
+    )
 
     ordered = sorted(events, key=lambda item: item.sequence)
     for event in ordered:
+        if event.sequence <= applied_sequence:
+            continue
         if through_sequence is not None and event.sequence > through_sequence:
             break
         applied_sequence = event.sequence

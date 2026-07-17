@@ -11,7 +11,9 @@ from autoagent.runtime.event import (
     RuntimeEvent,
     RuntimeEventDraft,
     invocation_checkpoint_events,
+    operator_call_checkpoint_events,
     session_context_event,
+    sort_runtime_event_drafts,
 )
 from autoagent.runtime.execution import NodeExecution, OperatorCall
 from autoagent.runtime.invocation import Invocation
@@ -49,9 +51,9 @@ class RuntimeStore(ABC):
     asks WorkflowExecutor to replay the whole node or marks the old Invocation
     interrupted. RuntimeStore never executes user code itself.
 
-    V1 stores complete Invocation snapshots transactionally. TODO: add narrower
-    checkpoint operations after Runtime Events define the durable write units;
-    observation queries should not need to rebuild all historical Invocations.
+    Execution-path checkpoints update the Invocation control record, optional
+    SessionContext, and only the NodeExecution rows changed in that control-loop
+    turn. Materialized state and generated Runtime Events commit atomically.
     """
 
     async def ainitialize(self) -> None:
@@ -141,6 +143,38 @@ class RuntimeStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def acheckpoint_invocation(
+        self,
+        session: Session,
+        invocation: Invocation,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+    ) -> None:
+        """Atomically persist one execution-loop delta and its Runtime Events.
+
+        The Invocation control record always changes because Scheduler queues,
+        InvocationContext, state, result, or error may have changed. Only the
+        listed NodeExecution rows and their OperatorCalls are rewritten. The
+        supplied Session contributes SessionContext to the same transaction.
+        """
+
+        raise NotImplementedError
+
+    @abstractmethod
+    async def acheckpoint_operator_call(
+        self,
+        *,
+        session_id: UUID,
+        invocation_id: UUID,
+        node_execution_id: UUID,
+        node_id: str,
+        call: OperatorCall,
+    ) -> None:
+        """Insert a running OperatorCall or update its terminal state atomically."""
+
+        raise NotImplementedError
+
+    @abstractmethod
     async def aadmit_invocation(
         self,
         session_id: UUID,
@@ -223,6 +257,29 @@ class RuntimeStore(ABC):
 
         raise NotImplementedError
 
+    @abstractmethod
+    async def asave_projection_checkpoint(
+        self,
+        *,
+        invocation_id: UUID,
+        through_sequence: int,
+        projection: dict[str, Any],
+    ) -> None:
+        """Persist a rebuildable observation projection at an event cursor."""
+
+        raise NotImplementedError
+
+    @abstractmethod
+    async def aload_projection_checkpoint(
+        self,
+        *,
+        invocation_id: UUID,
+        at_or_before_sequence: int | None = None,
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Load the newest projection no later than the optional cursor."""
+
+        raise NotImplementedError
+
 
 class InMemoryRuntimeStore(RuntimeStore):
     """In-memory store backed by database-shaped record tables.
@@ -264,6 +321,13 @@ class InMemoryRuntimeStore(RuntimeStore):
         # observation clients never depend on mutable latest-state rows.
         self.runtime_events: dict[UUID, dict[str, Any]] = {}
         self.session_runtime_events: dict[UUID, list[UUID]] = {}
+
+        # Rebuildable observation cache keyed by Invocation and event cursor.
+        # This is not execution state and may be deleted without data loss.
+        self.projection_checkpoints: dict[
+            tuple[UUID, int],
+            dict[str, Any],
+        ] = {}
 
     def save_workflow_snapshot(
         self,
@@ -407,6 +471,36 @@ class InMemoryRuntimeStore(RuntimeStore):
     ) -> None:
         self.save_invocation(session_id, invocation)
 
+    async def acheckpoint_invocation(
+        self,
+        session: Session,
+        invocation: Invocation,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+    ) -> None:
+        self.checkpoint_invocation(
+            session,
+            invocation,
+            node_execution_ids=node_execution_ids,
+        )
+
+    async def acheckpoint_operator_call(
+        self,
+        *,
+        session_id: UUID,
+        invocation_id: UUID,
+        node_execution_id: UUID,
+        node_id: str,
+        call: OperatorCall,
+    ) -> None:
+        self.checkpoint_operator_call(
+            session_id=session_id,
+            invocation_id=invocation_id,
+            node_execution_id=node_execution_id,
+            node_id=node_id,
+            call=call,
+        )
+
     async def aadmit_invocation(
         self,
         session_id: UUID,
@@ -502,6 +596,43 @@ class InMemoryRuntimeStore(RuntimeStore):
     ) -> tuple[RuntimeEvent, ...]:
         with self._lock:
             return self._append_event_drafts(session_id, invocation_id, drafts)
+
+    async def asave_projection_checkpoint(
+        self,
+        *,
+        invocation_id: UUID,
+        through_sequence: int,
+        projection: dict[str, Any],
+    ) -> None:
+        if through_sequence < 0:
+            raise ValueError("through_sequence cannot be negative.")
+        with self._lock:
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown invocation: {invocation_id}")
+            self.projection_checkpoints[(invocation_id, through_sequence)] = {
+                "projection": deepcopy(projection),
+            }
+
+    async def aload_projection_checkpoint(
+        self,
+        *,
+        invocation_id: UUID,
+        at_or_before_sequence: int | None = None,
+    ) -> tuple[int, dict[str, Any]] | None:
+        with self._lock:
+            candidates = [
+                (sequence, record)
+                for (candidate_id, sequence), record in self.projection_checkpoints.items()
+                if candidate_id == invocation_id
+                and (
+                    at_or_before_sequence is None
+                    or sequence <= at_or_before_sequence
+                )
+            ]
+            if not candidates:
+                return None
+            sequence, record = max(candidates, key=lambda value: value[0])
+            return sequence, deepcopy(record["projection"])
 
     def save_session(self, session: Session) -> None:
         with self._lock:
@@ -651,6 +782,95 @@ class InMemoryRuntimeStore(RuntimeStore):
                 self._save_node_execution(invocation.id, execution)
             drafts = invocation_checkpoint_events(previous, invocation)
             self._append_event_drafts(session_id, invocation.id, tuple(drafts))
+
+    def checkpoint_invocation(
+        self,
+        session: Session,
+        invocation: Invocation,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+    ) -> None:
+        """Persist one control-loop delta under the Store lock.
+
+        Unlike ``save_invocation``, this method never rebuilds the Invocation's
+        child index. Existing historical NodeExecutions remain untouched and
+        only explicitly listed rows are inserted or updated.
+        """
+
+        with self._lock:
+            previous_session = self.sessions.get(session.id)
+            if previous_session is None:
+                raise KeyError(f"Unknown session: {session.id}")
+            previous = self.load_invocation(invocation.id)
+            if previous is None:
+                raise KeyError(f"Unknown invocation: {invocation.id}")
+            if str(self.invocations[invocation.id]["session_id"]) != str(session.id):
+                raise ValueError("Invocation does not belong to the supplied session.")
+
+            self.invocations[invocation.id] = deepcopy(
+                invocation.to_record(session.id)
+            )
+            changed_ids = tuple(dict.fromkeys(node_execution_ids))
+            for execution_id in changed_ids:
+                execution = invocation.get_node_execution(execution_id)
+                if execution is None:
+                    raise KeyError(f"Unknown NodeExecution: {execution_id}")
+                self._save_node_execution(invocation.id, execution)
+
+            session_record = session.to_record()
+            self.sessions[session.id] = deepcopy(session_record)
+            self.session_keys[
+                (session.namespace, session.workflow_id, session.session_key)
+            ] = session.id
+
+            drafts = invocation_checkpoint_events(
+                previous,
+                invocation,
+                changed_node_execution_ids=frozenset(map(str, changed_ids)),
+            )
+            if previous_session.get("context") != session.context.to_record():
+                drafts.append(
+                    session_context_event(
+                        session_id=session.id,
+                        invocation_id=invocation.id,
+                        context=session.context.to_record(),
+                        occurred_at_ms=session.updated_at_ms,
+                    )
+                )
+            sort_runtime_event_drafts(drafts)
+            self._append_event_drafts(session.id, invocation.id, tuple(drafts))
+
+    def checkpoint_operator_call(
+        self,
+        *,
+        session_id: UUID,
+        invocation_id: UUID,
+        node_execution_id: UUID,
+        node_id: str,
+        call: OperatorCall,
+    ) -> None:
+        """Persist one call transition without mutating the live Invocation."""
+
+        with self._lock:
+            invocation_record = self.invocations.get(invocation_id)
+            execution_record = self.node_executions.get(node_execution_id)
+            if invocation_record is None:
+                raise KeyError(f"Unknown invocation: {invocation_id}")
+            if str(invocation_record["session_id"]) != str(session_id):
+                raise ValueError("Invocation does not belong to the supplied session.")
+            if execution_record is None:
+                raise KeyError(f"Unknown NodeExecution: {node_execution_id}")
+            if str(execution_record["invocation_id"]) != str(invocation_id):
+                raise ValueError("NodeExecution does not belong to the Invocation.")
+
+            previous = self._load_operator_call(call.id)
+            self._save_operator_call(node_execution_id, call)
+            drafts = operator_call_checkpoint_events(
+                previous,
+                call,
+                node_id=node_id,
+            )
+            self._append_event_drafts(session_id, invocation_id, tuple(drafts))
 
     def admit_invocation(self, session_id: UUID, invocation: Invocation) -> Session:
         """Perform session admission and persistence under one store lock.

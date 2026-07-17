@@ -11,15 +11,21 @@ export function projectEvents(
   invocationId: string,
   source: RuntimeEvent[],
   throughSequence?: number,
+  base?: RuntimeProjection,
 ): RuntimeProjection {
-  let invocationState: RuntimeState = "created";
-  let appliedSequence = 0;
-  const nodeExecutions: Record<string, ProjectedNodeExecution> = {};
-  const edges: Record<string, ProjectedEdge> = {};
-  const operatorStates: Record<string, RuntimeState> = {};
+  let invocationState: RuntimeState = base?.invocation_state ?? "created";
+  let appliedSequence = base?.through_sequence ?? 0;
+  const nodeExecutions: Record<string, ProjectedNodeExecution> = {
+    ...(base?.node_executions ?? {}),
+  };
+  const edges: Record<string, ProjectedEdge> = { ...(base?.edges ?? {}) };
+  const operatorStates: Record<string, RuntimeState> = {
+    ...(base?.operator_states ?? {}),
+  };
 
   const events = [...source].sort((left, right) => left.sequence - right.sequence);
   for (const event of events) {
+    if (event.sequence <= appliedSequence) continue;
     if (throughSequence !== undefined && event.sequence > throughSequence) break;
     appliedSequence = event.sequence;
     if (event.type === "invocation.state_changed") {

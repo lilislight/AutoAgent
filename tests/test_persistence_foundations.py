@@ -260,6 +260,18 @@ class RuntimeSerializerTests(unittest.TestCase):
         self.assertEqual((1, "two"), restored["tuple"])
         self.assertEqual({"a", "b"}, restored["set"])
         self.assertEqual(artifact, restored["artifact"])
+        self.assertEqual(
+            {
+                "__autoagent_artifact__": {
+                    "uri": "artifact://images/result.png",
+                    "media_type": "image/png",
+                    "size_bytes": 42,
+                    "sha256": "abc",
+                    "metadata": {},
+                }
+            },
+            serializer.json_view(serializer.dumps(artifact)),
+        )
         self.assertIsInstance(restored["message"], Message)
         self.assertEqual(value["reserved"], restored["reserved"])
 

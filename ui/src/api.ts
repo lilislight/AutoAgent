@@ -1,6 +1,7 @@
 import type {
   InvocationSummary,
   ObservationBootstrap,
+  ObservationHealth,
   RuntimeEvent,
   SessionSummary,
   WorkflowSummary,
@@ -17,6 +18,25 @@ async function requestJson<T>(path: string): Promise<T> {
 
 export function listWorkflows(): Promise<WorkflowSummary[]> {
   return requestJson("/api/workflows");
+}
+
+export function getHealth(): Promise<ObservationHealth> {
+  return requestJson("/api/health");
+}
+
+export async function createAuthenticationSession(token: string): Promise<void> {
+  const response = await fetch("/api/auth/session", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ token }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || "Authentication failed.");
+  }
 }
 
 export function listSessions(workflowId: string): Promise<SessionSummary[]> {

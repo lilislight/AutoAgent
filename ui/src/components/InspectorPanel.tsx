@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Braces, Info, ListTree, X } from "lucide-react";
+import { Braces, ExternalLink, File, Info, ListTree, X } from "lucide-react";
 
 import type {
   InvocationDetail,
@@ -132,7 +132,68 @@ function JsonBlock({ value, empty }: { value: unknown; empty: string }) {
   if (value === null || value === undefined) {
     return <div className="inspector-empty">{empty}</div>;
   }
-  return <pre className="json-block">{JSON.stringify(value, null, 2)}</pre>;
+  const artifacts = findArtifacts(value);
+  return (
+    <div className="structured-value">
+      {artifacts.length > 0 && (
+        <div className="artifact-list">
+          {artifacts.map((artifact, index) => (
+            <ArtifactCard key={`${artifact.uri}:${index}`} artifact={artifact} />
+          ))}
+        </div>
+      )}
+      <pre className="json-block">{JSON.stringify(value, null, 2)}</pre>
+    </div>
+  );
+}
+
+interface ArtifactView {
+  uri: string;
+  media_type?: string | null;
+  size_bytes?: number | null;
+  sha256?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+function ArtifactCard({ artifact }: { artifact: ArtifactView }) {
+  const href = /^https?:\/\//i.test(artifact.uri) ? artifact.uri : null;
+  return (
+    <div className="artifact-card">
+      <File size={17} />
+      <div>
+        <strong>{artifact.media_type || "Artifact"}</strong>
+        {href ? (
+          <a href={href} target="_blank" rel="noreferrer">
+            {artifact.uri}
+            <ExternalLink size={12} />
+          </a>
+        ) : (
+          <code>{artifact.uri}</code>
+        )}
+        <span>
+          {artifact.size_bytes == null ? "External data" : formatBytes(artifact.size_bytes)}
+          {artifact.sha256 ? ` · sha256 ${artifact.sha256.slice(0, 12)}` : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function findArtifacts(value: unknown): ArtifactView[] {
+  if (Array.isArray(value)) return value.flatMap(findArtifacts);
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const tagged = record.__autoagent_artifact__;
+  if (tagged && typeof tagged === "object" && "uri" in tagged) {
+    return [tagged as ArtifactView];
+  }
+  return Object.values(record).flatMap(findArtifacts);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function EventList({ events }: { events: RuntimeEvent[] }) {

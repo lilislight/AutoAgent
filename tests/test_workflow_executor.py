@@ -6,7 +6,7 @@ import time
 import unittest
 
 from autoagent import AutoAgentApp
-from autoagent.runtime import SessionBusyError
+from autoagent.runtime import InMemoryRuntimeStore, SessionBusyError
 from autoagent.workflow import (
     BackoffPolicy,
     CapabilityRef,
@@ -32,6 +32,109 @@ def finish_message(text: str) -> str:
 
 
 class WorkflowExecutorTests(unittest.TestCase):
+    def test_operator_call_is_checkpointed_before_user_handler_runs(self) -> None:
+        async def scenario() -> None:
+            handler_started = asyncio.Event()
+            release_handler = asyncio.Event()
+
+            async def handler(value: str) -> str:
+                handler_started.set()
+                await release_handler.wait()
+                return value.upper()
+
+            workflow = Workflow(id="operator_call_checkpoint")
+            workflow.add_node(handler, node_id="work")
+            app = AutoAgentApp()
+
+            task = asyncio.create_task(
+                app.ainvoke(
+                    workflow,
+                    input={"value": "hello"},
+                    session_id="checkpoint-session",
+                )
+            )
+            await asyncio.wait_for(handler_started.wait(), timeout=1)
+
+            session = app.runtime_store.find_session(
+                namespace=app.namespace,
+                workflow_id=workflow.id,
+                session_key="checkpoint-session",
+            )
+            self.assertIsNotNone(session)
+            invocation = session.get_current_invocation()
+            self.assertIsNotNone(invocation)
+            execution = invocation.node_executions[0]
+            self.assertEqual(execution.state, "running")
+            self.assertEqual(len(execution.operator_calls), 1)
+            persisted_call = execution.operator_calls[0]
+            self.assertEqual(persisted_call.state, "running")
+            self.assertEqual(persisted_call.input, {"value": "hello"})
+
+            release_handler.set()
+            completed = await asyncio.wait_for(task, timeout=1)
+            stored = app.runtime_store.load_invocation(completed.id)
+            final_call = stored.node_executions[0].operator_calls[0]
+            self.assertEqual(final_call.id, persisted_call.id)
+            self.assertEqual(final_call.state, "completed")
+            self.assertEqual(final_call.output, "HELLO")
+
+        asyncio.run(scenario())
+
+    def test_operator_call_start_checkpoint_failure_prevents_user_code(self) -> None:
+        class FailingStartStore(InMemoryRuntimeStore):
+            async def acheckpoint_operator_call(self, **kwargs) -> None:
+                if kwargs["call"].state == "running":
+                    raise OSError("checkpoint unavailable")
+                await super().acheckpoint_operator_call(**kwargs)
+
+        calls = 0
+
+        def handler() -> str:
+            nonlocal calls
+            calls += 1
+            return "should-not-run"
+
+        workflow = Workflow(id="operator_start_checkpoint_failure")
+        workflow.add_node(handler, node_id="work")
+        invocation = AutoAgentApp(runtime_store=FailingStartStore()).invoke(workflow)
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(invocation.state, "failed")
+        self.assertEqual(
+            invocation.node_executions[0].error.code,
+            "RUNTIME_CHECKPOINT_FAILED",
+        )
+
+    def test_operator_call_completion_checkpoint_failure_is_not_retried(self) -> None:
+        class FailingCompletionStore(InMemoryRuntimeStore):
+            async def acheckpoint_operator_call(self, **kwargs) -> None:
+                if kwargs["call"].state != "running":
+                    raise OSError("checkpoint unavailable")
+                await super().acheckpoint_operator_call(**kwargs)
+
+        calls = 0
+
+        def handler() -> str:
+            nonlocal calls
+            calls += 1
+            return "completed-side-effect"
+
+        workflow = Workflow(id="operator_completion_checkpoint_failure")
+        workflow.add_node(
+            handler,
+            node_id="work",
+            policy=NodePolicy(retry=RetryPolicy(max_attempts=3)),
+        )
+        app = AutoAgentApp(runtime_store=FailingCompletionStore())
+        invocation = app.invoke(workflow)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(invocation.state, "failed")
+        execution = invocation.node_executions[0]
+        self.assertEqual(execution.error.code, "RUNTIME_CHECKPOINT_FAILED")
+        self.assertEqual(len(execution.operator_calls), 1)
+        self.assertEqual(execution.operator_calls[0].state, "completed")
+
     def test_app_invoke_executes_simple_chain(self) -> None:
         workflow = Workflow(id="simple_chain")
         workflow.add_node(start_message, node_id="start")

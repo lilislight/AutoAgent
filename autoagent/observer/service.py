@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -11,6 +12,8 @@ from autoagent.observer.models import (
     NodeExecutionView,
     ObservationBootstrap,
     OperatorCallView,
+    RuntimeEventPage,
+    RuntimeProjection,
     SessionSummary,
     TimelineSpan,
     TimelineView,
@@ -20,6 +23,7 @@ from autoagent.observer.models import (
     WorkflowSummary,
 )
 from autoagent.observer.projection import project_runtime_events
+from autoagent.observer.security import redact_sensitive_data
 from autoagent.runtime import (
     Invocation,
     JsonRuntimeSerializer,
@@ -38,9 +42,19 @@ class ObservationService:
         runtime_store: RuntimeStore,
         *,
         serializer: RuntimeSerializer | None = None,
+        bootstrap_event_limit: int = 1000,
+        event_page_size: int = 1000,
+        redactor: Callable[[Any], Any] | None = None,
     ) -> None:
+        if bootstrap_event_limit < 1:
+            raise ValueError("bootstrap_event_limit must be positive.")
+        if not 1 <= event_page_size <= 9999:
+            raise ValueError("event_page_size must be between 1 and 9999.")
         self.runtime_store = runtime_store
         self.serializer = serializer or JsonRuntimeSerializer()
+        self.bootstrap_event_limit = bootstrap_event_limit
+        self.event_page_size = event_page_size
+        self.redactor = redactor or redact_sensitive_data
 
     async def list_workflows(
         self,
@@ -129,12 +143,41 @@ class ObservationService:
         visibility: str | None = None,
     ) -> tuple[RuntimeEvent, ...]:
         await self._load_scope(session_id, invocation_id)
-        return await self.runtime_store.alist_runtime_events(
+        values = await self.runtime_store.alist_runtime_events(
             session_id=session_id,
             invocation_id=invocation_id,
             after_sequence=after_sequence,
             limit=limit,
             visibility=visibility,
+        )
+        return tuple(self._event_view(value) for value in values)
+
+    async def list_event_page(
+        self,
+        *,
+        session_id: UUID,
+        invocation_id: UUID,
+        after_sequence: int = 0,
+        limit: int = 1000,
+        visibility: str | None = None,
+    ) -> RuntimeEventPage:
+        """Read one bounded event page without an extra count query."""
+
+        await self._load_scope(session_id, invocation_id)
+        values = await self.runtime_store.alist_runtime_events(
+            session_id=session_id,
+            invocation_id=invocation_id,
+            after_sequence=after_sequence,
+            limit=limit + 1,
+            visibility=visibility,
+        )
+        page = tuple(self._event_view(value) for value in values[:limit])
+        return RuntimeEventPage(
+            events=page,
+            next_after_sequence=(
+                page[-1].sequence if page else after_sequence
+            ),
+            has_more=len(values) > limit,
         )
 
     async def bootstrap(
@@ -144,11 +187,50 @@ class ObservationService:
         invocation_id: UUID,
     ) -> ObservationBootstrap:
         session, invocation = await self._load_scope(session_id, invocation_id)
-        events = await self.runtime_store.alist_runtime_events(
-            session_id=session_id,
-            invocation_id=invocation_id,
-            limit=10_000,
+        stored_checkpoint = await self.runtime_store.aload_projection_checkpoint(
+            invocation_id=invocation_id
         )
+        checkpoint = (
+            RuntimeProjection.model_validate(stored_checkpoint[1])
+            if stored_checkpoint is not None
+            else project_runtime_events(invocation_id, ())
+        )
+        original_checkpoint_sequence = checkpoint.through_sequence
+        tail_events: list[RuntimeEvent] = []
+        cursor = checkpoint.through_sequence
+        while True:
+            page = await self.runtime_store.alist_runtime_events(
+                session_id=session_id,
+                invocation_id=invocation_id,
+                after_sequence=cursor,
+                limit=self.event_page_size,
+            )
+            if not page:
+                break
+            cursor = page[-1].sequence
+            tail_events.extend(page)
+            overflow = len(tail_events) - self.bootstrap_event_limit
+            if overflow > 0:
+                checkpoint = project_runtime_events(
+                    invocation_id,
+                    tail_events[:overflow],
+                    base_projection=checkpoint,
+                )
+                del tail_events[:overflow]
+            if len(page) < self.event_page_size:
+                break
+
+        projection = project_runtime_events(
+            invocation_id,
+            tail_events,
+            base_projection=checkpoint,
+        )
+        if checkpoint.through_sequence > original_checkpoint_sequence:
+            await self.runtime_store.asave_projection_checkpoint(
+                invocation_id=invocation_id,
+                through_sequence=checkpoint.through_sequence,
+                projection=checkpoint.model_dump(mode="python"),
+            )
         if invocation.workflow_definition_hash is None:
             raise ValueError("Invocation does not contain a Workflow definition hash.")
         graph = await self.get_graph(
@@ -162,8 +244,9 @@ class ObservationService:
             session=_session_summary(session),
             invocation=self._invocation_detail(invocation),
             timeline=_timeline(invocation),
-            events=events,
-            projection=project_runtime_events(invocation.id, events),
+            checkpoint=self._projection_view(checkpoint),
+            events=tuple(self._event_view(value) for value in tail_events),
+            projection=self._projection_view(projection),
         )
 
     async def _load_scope(
@@ -187,7 +270,9 @@ class ObservationService:
             input=self._json_view(invocation.input),
             context=self._json_view(invocation.context.to_record()),
             result=self._json_view(invocation.result),
-            error=invocation.error.to_record() if invocation.error else None,
+            error=self._redact(
+                invocation.error.to_record() if invocation.error else None
+            ),
             node_executions=tuple(
                 self._node_execution_view(value)
                 for value in invocation.node_executions
@@ -202,7 +287,9 @@ class ObservationService:
             state=execution.state,
             input=self._json_view(execution.input),
             output=self._json_view(execution.output),
-            error=execution.error.to_record() if execution.error else None,
+            error=self._redact(
+                execution.error.to_record() if execution.error else None
+            ),
             incoming_activations=tuple(
                 value.to_record() for value in execution.incoming_activations
             ),
@@ -229,7 +316,9 @@ class ObservationService:
                     state=value.state,
                     input=self._json_view(value.input),
                     output=self._json_view(value.output),
-                    error=value.error.to_record() if value.error else None,
+                    error=self._redact(
+                        value.error.to_record() if value.error else None
+                    ),
                     resource_usage=value.resource_usage.to_record(),
                     started_at_ms=value.started_at_ms,
                     ended_at_ms=value.ended_at_ms,
@@ -248,7 +337,31 @@ class ObservationService:
     def _json_view(self, value: Any) -> Any:
         if value is None:
             return None
-        return self.serializer.json_view(self.serializer.dumps(value))
+        return self._redact(
+            self.serializer.json_view(self.serializer.dumps(value))
+        )
+
+    def _event_view(self, event: RuntimeEvent) -> RuntimeEvent:
+        return event.model_copy(update={"payload": self._json_view(event.payload)})
+
+    def _projection_view(self, projection: RuntimeProjection) -> RuntimeProjection:
+        return projection.model_copy(
+            update={
+                "node_executions": {
+                    execution_id: execution.model_copy(
+                        update={
+                            "input": self._json_view(execution.input),
+                            "output": self._json_view(execution.output),
+                            "error": self._json_view(execution.error),
+                        }
+                    )
+                    for execution_id, execution in projection.node_executions.items()
+                }
+            }
+        )
+
+    def _redact(self, value: Any) -> Any:
+        return self.redactor(value)
 
 
 def _workflow_summary(snapshot: WorkflowVersionSnapshot) -> WorkflowSummary:

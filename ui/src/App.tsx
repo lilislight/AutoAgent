@@ -3,7 +3,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, GitBranch, LoaderCircle } from "lucide-react";
 
 import {
+  createAuthenticationSession,
   getObservationView,
+  getHealth,
   listInvocations,
   listSessions,
   listWorkflows,
@@ -21,6 +23,9 @@ export default function App() {
   const queryClient = useQueryClient();
   const ui = useTraceUi();
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
+  const [authToken, setAuthToken] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authenticating, setAuthenticating] = useState(false);
   const [darkMode, setDarkMode] = useState(
     () => localStorage.getItem("autoagent:theme") === "dark",
   );
@@ -30,9 +35,15 @@ export default function App() {
     localStorage.setItem("autoagent:theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
+  const healthQuery = useQuery({
+    queryKey: ["observation-health"],
+    queryFn: getHealth,
+  });
+  const authenticated = healthQuery.data?.authenticated ?? false;
   const workflowQuery = useQuery({
     queryKey: ["workflows"],
     queryFn: listWorkflows,
+    enabled: authenticated,
   });
   const workflows = useMemo(() => {
     const values = workflowQuery.data ?? [];
@@ -78,13 +89,13 @@ export default function App() {
   useEffect(() => {
     if (!view) return;
     setEvents(view.events);
-    const latest = view.events.at(-1)?.sequence ?? 0;
+    const latest = view.projection.through_sequence;
     ui.setCursor(latest, true);
   }, [view?.invocation.id]);
 
   useEffect(() => {
     if (!view || !ui.sessionId || !ui.invocationId) return;
-    const afterSequence = events.at(-1)?.sequence ?? 0;
+    const afterSequence = view.projection.through_sequence;
     return subscribeToInvocation(
       ui.sessionId,
       ui.invocationId,
@@ -94,9 +105,12 @@ export default function App() {
         const state = useTraceUi.getState();
         if (state.followLive) state.setCursor(event.sequence, true);
         if (
-          event.type === "node.state_changed" ||
-          event.type === "operator.call_finished" ||
-          event.type === "invocation.state_changed"
+          state.followLive &&
+          (
+            event.type === "node.state_changed" ||
+            event.type === "operator.call_finished" ||
+            event.type === "invocation.state_changed"
+          )
         ) {
           void queryClient.invalidateQueries({
             queryKey: ["observation-view", ui.sessionId, ui.invocationId],
@@ -110,22 +124,72 @@ export default function App() {
   }, [view?.invocation.id]);
 
   const cursorSequence =
-    ui.cursorSequence ?? events.at(-1)?.sequence ?? view?.projection.through_sequence ?? 0;
+    ui.cursorSequence ?? view?.projection.through_sequence ?? 0;
   const projection = useMemo(
     () =>
       view
-        ? projectEvents(view.invocation.id, events, cursorSequence)
+        ? projectEvents(
+            view.invocation.id,
+            events,
+            cursorSequence,
+            view.checkpoint,
+          )
         : null,
     [cursorSequence, events, view],
   );
 
   const followLatest = () => {
-    const latest = events.at(-1)?.sequence ?? 0;
+    const latest = events.at(-1)?.sequence ?? view?.projection.through_sequence ?? 0;
     ui.setCursor(latest, true);
+    if (ui.sessionId && ui.invocationId) {
+      void queryClient.invalidateQueries({
+        queryKey: ["observation-view", ui.sessionId, ui.invocationId],
+      });
+    }
   };
 
   const loading = workflowQuery.isLoading || sessionQuery.isLoading || viewQuery.isLoading;
-  const error = workflowQuery.error || sessionQuery.error || invocationQuery.error || viewQuery.error;
+  const error = healthQuery.error || workflowQuery.error || sessionQuery.error || invocationQuery.error || viewQuery.error;
+
+  if (healthQuery.isLoading) {
+    return (
+      <div className="app-shell">
+        <StatusScreen
+          icon={<LoaderCircle className="spin" size={28} />}
+          title="Connecting to observation service"
+          detail="Checking service access."
+        />
+      </div>
+    );
+  }
+
+  if (healthQuery.data?.authentication_required && !authenticated) {
+    return (
+      <AuthenticationScreen
+        token={authToken}
+        error={authError}
+        pending={authenticating}
+        onTokenChange={setAuthToken}
+        onSubmit={async () => {
+          setAuthenticating(true);
+          setAuthError(null);
+          try {
+            await createAuthenticationSession(authToken);
+            setAuthToken("");
+            await healthQuery.refetch();
+          } catch (authenticationError) {
+            setAuthError(
+              authenticationError instanceof Error
+                ? authenticationError.message
+                : String(authenticationError),
+            );
+          } finally {
+            setAuthenticating(false);
+          }
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -191,6 +255,51 @@ export default function App() {
         />
       )}
     </div>
+  );
+}
+
+function AuthenticationScreen({
+  token,
+  error,
+  pending,
+  onTokenChange,
+  onSubmit,
+}: {
+  token: string;
+  error: string | null;
+  pending: boolean;
+  onTokenChange: (value: string) => void;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <main className="authentication-screen">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSubmit();
+        }}
+      >
+        <GitBranch size={24} />
+        <div>
+          <strong>AutoAgent Observation</strong>
+          <span>Enter the access token configured by the service owner.</span>
+        </div>
+        <label>
+          Access token
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={token}
+            onChange={(event) => onTokenChange(event.target.value)}
+            autoFocus
+          />
+        </label>
+        {error && <p>{error}</p>}
+        <button type="submit" disabled={pending || token.length === 0}>
+          {pending ? "Signing in..." : "Open tracing UI"}
+        </button>
+      </form>
+    </main>
   );
 }
 

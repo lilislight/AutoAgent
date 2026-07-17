@@ -21,6 +21,7 @@ from autoagent.runtime.database_models import (
     NodeExecutionRow,
     OperatorCallRow,
     RuntimeEventRow,
+    RuntimeProjectionCheckpointRow,
     SessionRow,
     WorkflowVersionRow,
 )
@@ -94,7 +95,10 @@ class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             list(range(1, len(events) + 1)),
             [event.sequence for event in events],
         )
-        observation = await ObservationService(reopened).bootstrap(
+        observation = await ObservationService(
+            reopened,
+            bootstrap_event_limit=3,
+        ).bootstrap(
             session_id=session.id,
             invocation_id=loaded.id,
         )
@@ -115,9 +119,52 @@ class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                     NodeExecutionRow,
                     OperatorCallRow,
                     RuntimeEventRow,
+                    RuntimeProjectionCheckpointRow,
                 )
             ]
-        self.assertEqual([1, 1, 1, 1, 1, len(events)], counts)
+        self.assertEqual([1, 1, 1, 1, 1, len(events), 1], counts)
+
+    async def test_running_operator_call_is_durable_before_handler_continues(
+        self,
+    ) -> None:
+        handler_started = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def process(value: str) -> str:
+            handler_started.set()
+            await release_handler.wait()
+            return value.upper()
+
+        workflow = Workflow(id="sqlite_call_checkpoint")
+        workflow.add_node(process, node_id="process")
+        app = AutoAgentApp(runtime_store=self.store)
+        task = asyncio.create_task(
+            app.ainvoke(
+                workflow,
+                input={"value": "saved"},
+                session_id="checkpoint",
+            )
+        )
+        await asyncio.wait_for(handler_started.wait(), timeout=1)
+
+        session = await self.store.afind_session(
+            namespace="default",
+            workflow_id=workflow.id,
+            session_key="checkpoint",
+        )
+        assert session is not None and session.current_invocation_id is not None
+        running = await self.store.aload_invocation(session.current_invocation_id)
+        assert running is not None
+        call = running.node_executions[0].operator_calls[0]
+        self.assertEqual("running", call.state)
+
+        release_handler.set()
+        completed = await asyncio.wait_for(task, timeout=1)
+        stored = await self.store.aload_invocation(completed.id)
+        assert stored is not None
+        final_call = stored.node_executions[0].operator_calls[0]
+        self.assertEqual(call.id, final_call.id)
+        self.assertEqual("completed", final_call.state)
 
     async def test_wait_survives_close_and_resumes_in_new_app(self) -> None:
         workflow = Workflow(id="sqlite_wait")

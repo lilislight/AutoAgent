@@ -79,12 +79,10 @@ stage before expanding the next one.
   Pydantic model types before durable records are loaded. V1 callers can pass a
   preconfigured `JsonRuntimeSerializer` to the Store, but registration is not
   yet coordinated by `AutoAgentApp`.
-- [ ] Replace execution-path snapshot saves with explicit atomic Store
-  operations for Invocation admission, NodeExecution result checkpoints,
-  entering waiting state, claiming a wait, applying resume output, and final
-  Invocation completion. Each checkpoint must persist related OperatorCalls,
-  outputs, scheduler state, InvocationContext, and changed SessionContext
-  together.
+- [x] Replace execution-path snapshot saves with delta checkpoints. Each
+  control-loop checkpoint now atomically persists Invocation control state,
+  changed NodeExecutions, related calls, outputs, scheduler state,
+  InvocationContext, changed SessionContext, and generated Runtime Events.
 - [x] Freeze the SQLite record schema, foreign keys, uniqueness constraints,
   lookup indexes, serialization format, and schema migration/version strategy.
 - [x] Add async SQLAlchemy `SQLiteRuntimeStore` using the same observable behavior as
@@ -104,9 +102,9 @@ stage before expanding the next one.
 - [x] Add map and replication crash-replay integration coverage. Both recover
   by replacing the interrupted logical NodeExecution and replaying the whole
   node; partial OperatorCall replay remains outside V1.
-- [ ] Persist each OperatorCall before invoking its handler, then update the row
-  on completion. Current recovery stores complete calls and conservatively
-  validates every selectable Operator when a process dies mid-call.
+- [x] Persist each OperatorCall before invoking its handler, then update the
+  same row on completion. A failed start checkpoint prevents user code; a
+  failed completion checkpoint fails the node without retry/fallback.
 - [ ] Define an Operator execution context for explicit idempotency-key delivery.
   V1 preserves the key across whole-node replay, but a plain callable must
   implement idempotency from its own input/environment.
@@ -122,10 +120,12 @@ stage before expanding the next one.
   replay cursors, live graph state, and timeline debugging.
 - [x] Add a read-only Observation service and React tracing UI for Workflow,
   Session, Invocation, graph, timeline, input/output, and event inspection.
-- [ ] Add paginated event checkpoints so very large Invocations do not require
-  replaying their complete event history during Observation bootstrap.
-- [ ] Add Observation authentication, payload redaction, and ArtifactRef-aware
-  rendering before exposing the service outside a trusted development network.
+- [x] Add cursor-based event pages and persistent projection checkpoints.
+  Observation bootstrap keeps a bounded event tail and replays only events
+  after the latest checkpoint on subsequent reads.
+- [x] Add optional token authentication with HttpOnly UI sessions, recursive
+  runtime payload redaction, and ArtifactRef-aware rendering before exposing
+  the service outside a trusted development network.
 - [ ] Feed the same Runtime Event protocol to optimizer inputs after event types
   have been exercised by real workloads.
 

@@ -8,13 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from autoagent.runtime import RuntimeEvent
 
 
-class ObservationModel(BaseModel):
-    """Read-only API base; observation DTOs never expose runtime mutators."""
+class TraceModel(BaseModel):
+    """Read-only API base; trace DTOs never expose runtime mutators."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class WorkflowSummary(ObservationModel):
+class WorkflowSummary(TraceModel):
     workflow_id: str
     workflow_version: str | int | None
     definition_hash: str
@@ -23,7 +23,7 @@ class WorkflowSummary(ObservationModel):
     description: str | None = None
 
 
-class WorkflowNodeView(ObservationModel):
+class WorkflowNodeView(TraceModel):
     id: str
     local_id: str | None = None
     workflow_path: tuple[str, ...] = ()
@@ -33,12 +33,14 @@ class WorkflowNodeView(ObservationModel):
     entry: bool
     exit: bool
     policy: dict[str, Any] | None = None
+    input_plan: dict[str, Any] | None = None
+    output_binding: dict[str, Any] | None = None
     input_contract: dict[str, Any]
     operator_output_contract: dict[str, Any]
     output_contract: dict[str, Any]
 
 
-class WorkflowEdgeView(ObservationModel):
+class WorkflowEdgeView(TraceModel):
     id: str
     local_id: str | None = None
     workflow_path: tuple[str, ...] = ()
@@ -49,7 +51,20 @@ class WorkflowEdgeView(ObservationModel):
     policy: dict[str, Any] | None = None
 
 
-class WorkflowGraphView(ObservationModel):
+class WorkflowGroupView(TraceModel):
+    """Sub-workflow visual group derived from expanded IR workflow_path values."""
+
+    id: str
+    parent_group_id: str | None = None
+    label: str
+    workflow_path: tuple[str, ...]
+    node_ids: tuple[str, ...]
+    direct_node_ids: tuple[str, ...]
+    entry_node_ids: tuple[str, ...]
+    exit_node_ids: tuple[str, ...]
+
+
+class WorkflowGraphView(TraceModel):
     workflow_id: str
     workflow_version: str | int | None
     definition_hash: str
@@ -58,12 +73,14 @@ class WorkflowGraphView(ObservationModel):
     description: str | None = None
     nodes: tuple[WorkflowNodeView, ...]
     edges: tuple[WorkflowEdgeView, ...]
+    groups: tuple[WorkflowGroupView, ...] = ()
+    operator_manifests: tuple[dict[str, Any], ...] = ()
     entry_node_ids: tuple[str, ...]
     exit_node_ids: tuple[str, ...]
     loop_regions: tuple[dict[str, Any], ...] = ()
 
 
-class SessionSummary(ObservationModel):
+class SessionSummary(TraceModel):
     id: UUID
     namespace: str
     workflow_id: str
@@ -74,7 +91,7 @@ class SessionSummary(ObservationModel):
     updated_at_ms: int
 
 
-class InvocationSummary(ObservationModel):
+class InvocationSummary(TraceModel):
     id: UUID
     workflow_id: str
     workflow_version: str | int | None
@@ -86,7 +103,7 @@ class InvocationSummary(ObservationModel):
     updated_at_ms: int
 
 
-class OperatorCallView(ObservationModel):
+class OperatorCallView(TraceModel):
     id: UUID
     operator_id: str
     call_no: int
@@ -104,9 +121,11 @@ class OperatorCallView(ObservationModel):
     updated_at_ms: int
 
 
-class EdgeEvaluationView(ObservationModel):
+class EdgeEvaluationView(TraceModel):
     id: UUID
     edge_id: str
+    source_execution_id: UUID
+    source_node_id: str
     target_node_id: str
     state: str
     selected: bool
@@ -114,7 +133,7 @@ class EdgeEvaluationView(ObservationModel):
     created_at_ms: int
 
 
-class NodeExecutionView(ObservationModel):
+class NodeExecutionView(TraceModel):
     id: UUID
     node_id: str
     sequence: int
@@ -143,7 +162,7 @@ class InvocationDetail(InvocationSummary):
 TimelineSpanKind = Literal["node_execution", "operator_call"]
 
 
-class TimelineSpan(ObservationModel):
+class TimelineSpan(TraceModel):
     id: str
     kind: TimelineSpanKind
     parent_id: str | None = None
@@ -156,14 +175,14 @@ class TimelineSpan(ObservationModel):
     duration_ms: int | None = Field(default=None, ge=0)
 
 
-class TimelineView(ObservationModel):
+class TimelineView(TraceModel):
     invocation_id: UUID
     started_at_ms: int
     ended_at_ms: int | None
     spans: tuple[TimelineSpan, ...]
 
 
-class ProjectedNodeExecution(ObservationModel):
+class ProjectedNodeExecution(TraceModel):
     execution_id: str
     node_id: str
     sequence: int
@@ -173,23 +192,26 @@ class ProjectedNodeExecution(ObservationModel):
     error: dict[str, Any] | None = None
 
 
-class ProjectedNode(ObservationModel):
+class ProjectedNode(TraceModel):
     node_id: str
     state: str
     latest_execution_id: str
     execution_count: int
 
 
-class ProjectedEdge(ObservationModel):
+class ProjectedEdge(TraceModel):
     edge_id: str
     state: str
     selected: bool
     evaluation_count: int
+    selected_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
     source_execution_id: str | None = None
     target_node_id: str | None = None
 
 
-class RuntimeProjection(ObservationModel):
+class RuntimeProjection(TraceModel):
     invocation_id: UUID
     through_sequence: int
     invocation_state: str
@@ -199,7 +221,7 @@ class RuntimeProjection(ObservationModel):
     operator_states: dict[str, str]
 
 
-class RuntimeEventPage(ObservationModel):
+class RuntimeEventPage(TraceModel):
     """One forward event page and the cursor for requesting the next page."""
 
     events: tuple[RuntimeEvent, ...]
@@ -208,7 +230,7 @@ class RuntimeEventPage(ObservationModel):
     has_more: bool
 
 
-class ObservationBootstrap(ObservationModel):
+class TraceBootstrap(TraceModel):
     graph: WorkflowGraphView
     session: SessionSummary
     invocation: InvocationDetail

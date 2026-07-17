@@ -4,12 +4,12 @@ import asyncio
 import inspect
 import json
 import unittest
-from pathlib import Path
 from typing import Any
+from uuid import UUID
 
-from autoagent import AutoAgentApp, ObservationApp
-from autoagent.observer import ObservationService, project_runtime_events
-from autoagent.runtime import ArtifactRef, InMemoryRuntimeStore
+from autoagent import AutoAgentApp, AutoAgentServer
+from autoagent.trace import TraceQueryService, project_runtime_events
+from autoagent.runtime import ArtifactRef, InMemoryRuntimeStore, LoggingEventSink
 from autoagent.workflow import Workflow
 
 
@@ -120,7 +120,7 @@ class RuntimeEventTests(unittest.TestCase):
         )
 
 
-class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
+class TraceQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_bootstrap_uses_bounded_tail_and_persistent_projection_checkpoint(
         self,
     ) -> None:
@@ -141,7 +141,7 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
             session_key="bounded",
         )
         assert session is not None
-        service = ObservationService(
+        service = TraceQueryService(
             store,
             bootstrap_event_limit=3,
             event_page_size=2,
@@ -215,7 +215,7 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         assert session is not None
 
-        view = await ObservationService(store).bootstrap(
+        view = await TraceQueryService(store).bootstrap(
             session_id=session.id,
             invocation_id=invocation.id,
         )
@@ -247,7 +247,7 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         assert session is not None
 
-        detail = await ObservationService(store).get_invocation(
+        detail = await TraceQueryService(store).get_invocation(
             session_id=session.id,
             invocation_id=invocation.id,
         )
@@ -276,7 +276,7 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
             session_key="incident-1",
         )
         assert session is not None
-        service = ObservationService(store)
+        service = TraceQueryService(store)
 
         view = await service.bootstrap(
             session_id=session.id,
@@ -290,11 +290,16 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("completed", view.projection.invocation_state)
         self.assertGreater(len(view.events), 0)
 
-    async def test_observation_app_builds_read_only_api(self) -> None:
-        observation = ObservationApp(InMemoryRuntimeStore())
-        routes = [route for route in observation.api.routes if hasattr(route, "path")]
+    async def test_autoagent_server_builds_trace_and_execution_api(self) -> None:
+        app = AutoAgentApp(runtime_store=InMemoryRuntimeStore())
+        workflow = Workflow(id="registered_for_trace")
+        workflow.add_node(prepare, node_id="prepare")
+        app.register_workflow(workflow)
+        server = AutoAgentServer(app)
+        routes = [route for route in server.api.routes if hasattr(route, "path")]
         paths = {route.path for route in routes}
 
+        self.assertIn("/api/workflows/{workflow_id}/invocations", paths)
         self.assertIn("/api/workflows", paths)
         self.assertIn("/api/sessions", paths)
         self.assertIn(
@@ -319,26 +324,35 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(protected_route.dependant.dependencies), 0)
         self.assertEqual(0, len(health_route.dependant.dependencies))
 
-        with self.assertRaisesRegex(ValueError, "cannot be empty"):
-            ObservationApp(InMemoryRuntimeStore(), access_token="")
-
-    async def test_observation_token_authentication_uses_http_cookie(self) -> None:
-        observation = ObservationApp(
-            InMemoryRuntimeStore(),
-            access_token="trace-secret",
-            ui_directory=Path("/path/that/does/not/exist"),
+        workflow_response = await _asgi_request(server.api, "GET", "/api/workflows")
+        self.assertEqual(200, workflow_response[0])
+        self.assertEqual(
+            "registered_for_trace",
+            json.loads(workflow_response[2])[0]["workflow_id"],
         )
 
-        health = await _asgi_request(observation.api, "GET", "/api/health")
-        denied = await _asgi_request(observation.api, "GET", "/api/workflows")
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            AutoAgentServer(
+                AutoAgentApp(runtime_store=InMemoryRuntimeStore()),
+                access_token="",
+            )
+
+    async def test_server_token_authentication_uses_http_cookie(self) -> None:
+        server = AutoAgentServer(
+            AutoAgentApp(runtime_store=InMemoryRuntimeStore()),
+            access_token="trace-secret",
+        )
+
+        health = await _asgi_request(server.api, "GET", "/api/health")
+        denied = await _asgi_request(server.api, "GET", "/api/workflows")
         rejected = await _asgi_request(
-            observation.api,
+            server.api,
             "POST",
             "/api/auth/session",
             json_body={"token": "wrong"},
         )
         accepted = await _asgi_request(
-            observation.api,
+            server.api,
             "POST",
             "/api/auth/session",
             json_body={"token": "trace-secret"},
@@ -349,7 +363,7 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
             if name.lower() == b"set-cookie"
         ).split(b";", 1)[0]
         authorized = await _asgi_request(
-            observation.api,
+            server.api,
             "GET",
             "/api/workflows",
             headers=((b"cookie", cookie),),
@@ -361,6 +375,53 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(401, rejected[0])
         self.assertEqual(200, accepted[0])
         self.assertEqual(200, authorized[0])
+
+    async def test_server_can_submit_registered_workflow_in_background(self) -> None:
+        store = InMemoryRuntimeStore()
+        app = AutoAgentApp(runtime_store=store)
+        workflow = Workflow(id="server_submit")
+        workflow.add_node(prepare, node_id="prepare")
+        app.register_workflow(workflow)
+        server = AutoAgentServer(app)
+
+        response = await _asgi_request(
+            server.api,
+            "POST",
+            "/api/workflows/server_submit/invocations",
+            json_body={"session_id": "ui-session", "input": {"message": "hello"}},
+        )
+
+        self.assertEqual(200, response[0])
+        payload = json.loads(response[2])
+        self.assertEqual("server_submit", payload["workflow_id"])
+        invocation_id = payload["invocation_id"]
+        for _ in range(50):
+            invocation = await store.aload_invocation(UUID(invocation_id))
+            if invocation is not None and invocation.state == "completed":
+                break
+            await asyncio.sleep(0.01)
+        assert invocation is not None
+        self.assertEqual("completed", invocation.state)
+
+    async def test_logging_event_sink_receives_persisted_events(self) -> None:
+        class CaptureSink(LoggingEventSink):
+            def __init__(self) -> None:
+                super().__init__()
+                self.events = []
+
+            async def aemit(self, events):
+                self.events.extend(events)
+
+        sink = CaptureSink()
+        store = InMemoryRuntimeStore(event_sinks=(sink,))
+        app = AutoAgentApp(runtime_store=store)
+        workflow = Workflow(id="sink_events")
+        workflow.add_node(prepare, node_id="prepare")
+
+        await app.ainvoke(workflow, input={"message": "hello"}, session_id="sink")
+
+        self.assertTrue(sink.events)
+        self.assertIn("invocation.created", {event.type for event in sink.events})
 
 
 async def _asgi_request(

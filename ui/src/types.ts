@@ -10,8 +10,9 @@ export type RuntimeState =
   | "skipped"
   | string;
 
-export interface ObservationHealth {
+export interface ServerHealth {
   status: string;
+  execution_enabled: boolean;
   authentication_required: boolean;
   authenticated: boolean;
 }
@@ -35,6 +36,8 @@ export interface WorkflowNodeView {
   entry: boolean;
   exit: boolean;
   policy: Record<string, unknown> | null;
+  input_plan: Record<string, unknown> | null;
+  output_binding: Record<string, unknown> | null;
   input_contract: Record<string, unknown>;
   operator_output_contract: Record<string, unknown>;
   output_contract: Record<string, unknown>;
@@ -51,9 +54,22 @@ export interface WorkflowEdgeView {
   policy: Record<string, unknown> | null;
 }
 
+export interface WorkflowGroupView {
+  id: string;
+  parent_group_id: string | null;
+  label: string;
+  workflow_path: string[];
+  node_ids: string[];
+  direct_node_ids: string[];
+  entry_node_ids: string[];
+  exit_node_ids: string[];
+}
+
 export interface WorkflowGraphView extends WorkflowSummary {
   nodes: WorkflowNodeView[];
   edges: WorkflowEdgeView[];
+  groups: WorkflowGroupView[];
+  operator_manifests: Record<string, unknown>[];
   entry_node_ids: string[];
   exit_node_ids: string[];
   loop_regions: Record<string, unknown>[];
@@ -103,6 +119,8 @@ export interface OperatorCallView {
 export interface EdgeEvaluationView {
   id: string;
   edge_id: string;
+  source_execution_id: string;
+  source_node_id: string;
   target_node_id: string;
   state: string;
   selected: boolean;
@@ -196,6 +214,9 @@ export interface ProjectedEdge {
   state: string;
   selected: boolean;
   evaluation_count: number;
+  selected_count: number;
+  skipped_count: number;
+  failed_count: number;
   source_execution_id: string | null;
   target_node_id: string | null;
 }
@@ -217,7 +238,7 @@ export interface RuntimeEventPage {
   has_more: boolean;
 }
 
-export interface ObservationBootstrap {
+export interface TraceBootstrap {
   graph: WorkflowGraphView;
   session: SessionSummary;
   invocation: InvocationDetail;
@@ -230,6 +251,7 @@ export interface ObservationBootstrap {
 export type TraceSelection =
   | { type: "node"; id: string }
   | { type: "edge"; id: string }
+  | { type: "group"; id: string }
   | { type: "node_execution"; id: string }
   | { type: "operator_call"; id: string }
   | null;

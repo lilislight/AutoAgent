@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import UUID
 
-from autoagent.observer.models import (
+from autoagent.trace.models import (
     ProjectedEdge,
     ProjectedNode,
     ProjectedNodeExecution,
@@ -93,6 +93,18 @@ def project_runtime_events(
                     previous_edge.evaluation_count + 1
                     if previous_edge is not None
                     else 1
+                ),
+                selected_count=(
+                    (previous_edge.selected_count if previous_edge is not None else 0)
+                    + (1 if bool(event.payload.get("selected", False)) else 0)
+                ),
+                skipped_count=(
+                    (previous_edge.skipped_count if previous_edge is not None else 0)
+                    + (1 if event.payload.get("state") == "skipped" else 0)
+                ),
+                failed_count=(
+                    (previous_edge.failed_count if previous_edge is not None else 0)
+                    + (1 if event.payload.get("state") == "failed" else 0)
                 ),
                 source_execution_id=event.payload.get("node_execution_id"),
                 target_node_id=event.payload.get("target_node_id"),

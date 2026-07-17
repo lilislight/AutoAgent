@@ -1,42 +1,31 @@
 from __future__ import annotations
 
-import asyncio
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import (
-    Cookie,
-    Depends,
-    FastAPI,
-    Header,
-    HTTPException,
-    Query,
-    Request,
-    Response,
-)
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from autoagent.observer.models import (
+from autoagent.app import AutoAgentApp
+from autoagent.trace.models import (
     InvocationDetail,
     InvocationSummary,
-    ObservationBootstrap,
     RuntimeEventPage,
     SessionSummary,
     TimelineView,
+    TraceBootstrap,
     WorkflowGraphView,
     WorkflowSummary,
 )
-from autoagent.observer.service import ObservationService
-from autoagent.runtime import RuntimeEvent, RuntimeStore
+from autoagent.trace.service import TraceQueryService
+from autoagent.runtime import RuntimeEvent
 
 
-_AUTH_COOKIE = "autoagent_observation_session"
+_AUTH_COOKIE = "autoagent_server_session"
 
 
 class _AuthenticationRequest(BaseModel):
@@ -45,21 +34,40 @@ class _AuthenticationRequest(BaseModel):
     token: str = Field(min_length=1)
 
 
-class ObservationApp:
-    """Read-only tracing HTTP service backed by the same RuntimeStore as execution.
+class InvocationSubmitRequest(BaseModel):
+    """Body for UI/API-triggered workflow execution."""
 
-    It may run beside AutoAgentApp in one process or as a separate process that
-    opens the same durable database. The browser never receives Runtime business
-    objects and never connects directly to the database.
+    model_config = ConfigDict(extra="forbid")
+
+    input: dict[str, Any] | None = None
+    session_id: str | None = None
+    entry_node_id: str | None = None
+
+
+class InvocationSubmitResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workflow_id: str
+    session_id: UUID
+    invocation_id: UUID
+    state: str
+
+
+class AutoAgentServer:
+    """FastAPI adapter for AutoAgentApp execution and trace APIs.
+
+    AutoAgentApp remains the framework center: it owns workflows, registries,
+    executors, and the RuntimeStore. This server only exposes those capabilities
+    through HTTP/SSE so the tracing UI can be deployed as a separate frontend.
     """
 
     def __init__(
         self,
-        runtime_store: RuntimeStore,
+        app: AutoAgentApp,
         *,
+        execution_enabled: bool = True,
         poll_interval_ms: int = 200,
         manage_store_lifecycle: bool = False,
-        ui_directory: str | Path | None = None,
         access_token: str | None = None,
         secure_cookies: bool = False,
         redactor: Callable[[Any], Any] | None = None,
@@ -70,28 +78,29 @@ class ObservationApp:
             raise ValueError("poll_interval_ms must be positive.")
         if access_token is not None and not access_token:
             raise ValueError("access_token cannot be empty.")
-        self.runtime_store = runtime_store
-        self.service = ObservationService(
-            runtime_store,
+        self.agent = app
+        self.runtime_store = app.runtime_store
+        self.execution_enabled = execution_enabled
+        self.poll_interval_ms = poll_interval_ms
+        self.manage_store_lifecycle = manage_store_lifecycle
+        self.access_token = access_token
+        self.secure_cookies = secure_cookies
+        self.service = TraceQueryService(
+            self.runtime_store,
             redactor=redactor,
             bootstrap_event_limit=bootstrap_event_limit,
             event_page_size=event_page_size,
         )
-        self.poll_interval_ms = poll_interval_ms
-        self.manage_store_lifecycle = manage_store_lifecycle
-        self.ui_directory = Path(ui_directory) if ui_directory else _default_ui_dist()
-        self.access_token = access_token
-        self.secure_cookies = secure_cookies
         self.api = self._build_api()
 
     def run(
         self,
         *,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 8765,
         reload: bool = False,
     ) -> None:
-        """Start the tracing server; production callers may use `api` directly."""
+        """Start the API server. The tracing UI should run as a separate app."""
 
         import uvicorn
 
@@ -105,11 +114,10 @@ class ObservationApp:
             try:
                 yield
             finally:
-                if self.manage_store_lifecycle:
-                    await self.runtime_store.aclose()
+                await self.agent.aclose()
 
         api = FastAPI(
-            title="AutoAgent Observation API",
+            title="AutoAgent Server API",
             version="1",
             lifespan=lifespan,
         )
@@ -144,6 +152,7 @@ class ObservationApp:
         ) -> dict[str, str | bool]:
             return {
                 "status": "ok",
+                "execution_enabled": self.execution_enabled,
                 "authentication_required": self.access_token is not None,
                 "authenticated": is_authenticated(authorization, session_cookie),
             }
@@ -172,12 +181,43 @@ class ObservationApp:
         async def delete_authentication_session(response: Response) -> None:
             response.delete_cookie(_AUTH_COOKIE)
 
+        @api.post(
+            "/api/workflows/{workflow_id}/invocations",
+            response_model=InvocationSubmitResponse,
+            dependencies=auth_dependencies,
+        )
+        async def submit_invocation(
+            workflow_id: str,
+            body: InvocationSubmitRequest,
+        ) -> InvocationSubmitResponse:
+            if not self.execution_enabled:
+                raise HTTPException(status_code=403, detail="Execution API is disabled.")
+            entry = self.agent.workflow_registry.get(workflow_id)
+            if entry is None:
+                raise HTTPException(status_code=404, detail=f"Unknown Workflow: {workflow_id}")
+            try:
+                submitted = await self.agent.asubmit(
+                    entry.workflow,
+                    input=body.input,
+                    session_id=body.session_id,
+                    entry_node_id=body.entry_node_id,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return InvocationSubmitResponse(
+                workflow_id=workflow_id,
+                session_id=submitted.session_id,
+                invocation_id=submitted.invocation.id,
+                state=submitted.invocation.state,
+            )
+
         @api.get(
             "/api/workflows",
             response_model=tuple[WorkflowSummary, ...],
             dependencies=auth_dependencies,
         )
         async def workflows(namespace: str | None = None) -> tuple[WorkflowSummary, ...]:
+            await self._save_registered_workflow_snapshots()
             return await self.service.list_workflows(namespace=namespace)
 
         @api.get(
@@ -191,6 +231,7 @@ class ObservationApp:
             namespace: str | None = None,
             operator_manifest_hash: str | None = None,
         ) -> WorkflowGraphView:
+            await self._save_registered_workflow_snapshots()
             try:
                 return await self.service.get_graph(
                     namespace=namespace,
@@ -259,13 +300,13 @@ class ObservationApp:
 
         @api.get(
             "/api/sessions/{session_id}/invocations/{invocation_id}/view",
-            response_model=ObservationBootstrap,
+            response_model=TraceBootstrap,
             dependencies=auth_dependencies,
         )
         async def invocation_view(
             session_id: UUID,
             invocation_id: UUID,
-        ) -> ObservationBootstrap:
+        ) -> TraceBootstrap:
             try:
                 return await self.service.bootstrap(
                     session_id=session_id,
@@ -303,8 +344,6 @@ class ObservationApp:
             session_id: UUID,
             invocation_id: UUID,
         ) -> None:
-            """Resolve the stream scope before SSE response headers are sent."""
-
             try:
                 await self.service.get_invocation(
                     session_id=session_id,
@@ -336,12 +375,6 @@ class ObservationApp:
             ):
                 yield runtime_event
 
-        if self.ui_directory.is_dir():
-            api.mount(
-                "/",
-                StaticFiles(directory=self.ui_directory, html=True),
-                name="tracing-ui",
-            )
         return api
 
     async def _event_stream(
@@ -359,24 +392,33 @@ class ObservationApp:
                 session_id=session_id,
                 invocation_id=invocation_id,
                 after_sequence=cursor,
-                limit=1000,
+                limit=100,
             )
             if events:
-                idle_polls = 0
-                for runtime_event in events:
-                    cursor = runtime_event.sequence
+                for event in events:
+                    cursor = max(cursor, event.sequence)
+                    idle_polls = 0
                     yield ServerSentEvent(
-                        data=runtime_event.model_dump(mode="json"),
-                        event=runtime_event.channel,
-                        id=str(runtime_event.sequence),
-                        retry=1000,
+                        data=event.model_dump_json(),
+                        event=event.channel,
+                        id=str(event.sequence),
                     )
                 continue
             idle_polls += 1
-            if idle_polls * self.poll_interval_ms >= 15_000:
-                idle_polls = 0
+            if idle_polls % 100 == 0:
                 yield ServerSentEvent(comment="keepalive")
+            import asyncio
+
             await asyncio.sleep(self.poll_interval_ms / 1000)
+
+    async def _save_registered_workflow_snapshots(self) -> None:
+        """Expose registered-but-not-yet-invoked Workflows to trace clients."""
+
+        for entry in tuple(self.agent.workflow_registry.values()):
+            await self.runtime_store.asave_workflow_snapshot(
+                self.agent.namespace,
+                entry.workflow_snapshot,
+            )
 
 
 def _resume_cursor(after_sequence: int, last_event_id: str | None) -> int:
@@ -384,9 +426,6 @@ def _resume_cursor(after_sequence: int, last_event_id: str | None) -> int:
         return after_sequence
     try:
         return max(after_sequence, int(last_event_id))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid Last-Event-ID.") from exc
-
-
-def _default_ui_dist() -> Path:
-    return Path(__file__).resolve().parents[2] / "ui" / "dist"
+    except ValueError:
+        return after_sequence
+    TraceBootstrap,

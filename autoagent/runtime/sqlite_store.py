@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from autoagent.runtime.execution import NodeExecution, OperatorCall
 from autoagent.runtime.invocation import Invocation
 from autoagent.runtime.serialization import JsonRuntimeSerializer
 from autoagent.runtime.session import Session
+from autoagent.runtime.sinks import RuntimeEventSink
 from autoagent.runtime.store import RuntimeStore, SessionBusyError
 from autoagent.runtime.time import utc_timestamp_ms
 
@@ -62,8 +64,10 @@ class SQLiteRuntimeStore(RuntimeStore):
         database_url: str | Path,
         *,
         serializer: JsonRuntimeSerializer | None = None,
+        event_sinks: Iterable[RuntimeEventSink] = (),
         echo: bool = False,
     ) -> None:
+        super().__init__(event_sinks=event_sinks)
         resolved_url = _resolve_database_url(database_url)
         self.engine: AsyncEngine = create_async_engine(resolved_url, echo=echo)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -86,12 +90,14 @@ class SQLiteRuntimeStore(RuntimeStore):
         path: str | Path,
         *,
         serializer: JsonRuntimeSerializer | None = None,
+        event_sinks: Iterable[RuntimeEventSink] = (),
         echo: bool = False,
     ) -> SQLiteRuntimeStore:
         resolved = Path(path).expanduser().resolve()
         return cls(
             f"sqlite+aiosqlite:///{resolved}",
             serializer=serializer,
+            event_sinks=event_sinks,
             echo=echo,
         )
 
@@ -223,13 +229,16 @@ class SQLiteRuntimeStore(RuntimeStore):
 
     async def asave_session(self, session: Session) -> None:
         await self.initialize()
+        events: list[RuntimeEvent] = []
         async with self._event_lock, self._sessions.begin() as database:
             await self._upsert_session(database, session)
             for invocation in session.invocations:
-                await self._upsert_invocation(database, session.id, invocation)
+                events.extend(await self._upsert_invocation(database, session.id, invocation))
+        await self.aemit_runtime_events(tuple(events))
 
     async def asave_session_context(self, session: Session) -> None:
         await self.initialize()
+        events: tuple[RuntimeEvent, ...] = ()
         async with self._event_lock, self._sessions.begin() as database:
             row = await database.get(SessionRow, str(session.id))
             if row is None:
@@ -246,7 +255,7 @@ class SQLiteRuntimeStore(RuntimeStore):
                 previous_context != session.context.to_record()
                 and session.current_invocation_id is not None
             ):
-                await self._append_event_drafts(
+                events = await self._append_event_drafts(
                     database,
                     session_id=session.id,
                     invocation_id=session.current_invocation_id,
@@ -259,6 +268,7 @@ class SQLiteRuntimeStore(RuntimeStore):
                         ),
                     ),
                 )
+        await self.aemit_runtime_events(events)
 
     async def aload_session(self, session_id: UUID) -> Session | None:
         await self.initialize()
@@ -385,7 +395,8 @@ class SQLiteRuntimeStore(RuntimeStore):
             if invocation is None:  # pragma: no cover - guarded by row lookup.
                 raise ValueError("Session current Invocation does not exist.")
             invocation.mark_running()
-            await self._upsert_invocation(database, session_id, invocation)
+            events = await self._upsert_invocation(database, session_id, invocation)
+        await self.aemit_runtime_events(events)
         claimed = await self.aload_session(session_id)
         if claimed is None:  # pragma: no cover
             raise RuntimeError("Claimed Session disappeared.")
@@ -400,7 +411,8 @@ class SQLiteRuntimeStore(RuntimeStore):
         async with self._event_lock, self._sessions.begin() as database:
             if await database.get(SessionRow, str(session_id)) is None:
                 raise KeyError(f"Unknown session: {session_id}")
-            await self._upsert_invocation(database, session_id, invocation)
+            events = await self._upsert_invocation(database, session_id, invocation)
+        await self.aemit_runtime_events(events)
 
     async def acheckpoint_invocation(
         self,
@@ -470,12 +482,13 @@ class SQLiteRuntimeStore(RuntimeStore):
                     )
                 )
             sort_runtime_event_drafts(drafts)
-            await self._append_event_drafts(
+            events = await self._append_event_drafts(
                 database,
                 session_id=session.id,
                 invocation_id=invocation.id,
                 drafts=tuple(drafts),
             )
+        await self.aemit_runtime_events(events)
 
     async def acheckpoint_operator_call(
         self,
@@ -511,7 +524,7 @@ class SQLiteRuntimeStore(RuntimeStore):
                 else None
             )
             await self._upsert_operator_call(database, node_execution_id, call)
-            await self._append_event_drafts(
+            events = await self._append_event_drafts(
                 database,
                 session_id=session_id,
                 invocation_id=invocation_id,
@@ -523,6 +536,7 @@ class SQLiteRuntimeStore(RuntimeStore):
                     )
                 ),
             )
+        await self.aemit_runtime_events(events)
 
     async def aadmit_invocation(
         self,
@@ -552,9 +566,10 @@ class SQLiteRuntimeStore(RuntimeStore):
                     session = await self._load_session(database, session_id)
                     assert current is not None and session is not None
                     raise SessionBusyError(session, current)
-            await self._upsert_invocation(database, session_id, invocation)
+            events = await self._upsert_invocation(database, session_id, invocation)
             session_row.current_invocation_id = str(invocation.id)
             session_row.updated_at_ms = utc_timestamp_ms()
+        await self.aemit_runtime_events(events)
         admitted = await self.aload_session(session_id)
         if admitted is None:  # pragma: no cover
             raise RuntimeError("Admitted Session disappeared.")
@@ -598,6 +613,7 @@ class SQLiteRuntimeStore(RuntimeStore):
 
         await self.initialize()
         recovered: list[Invocation] = []
+        emitted: list[RuntimeEvent] = []
         async with self._event_lock, self._sessions.begin() as database:
             ids = (
                 await database.scalars(
@@ -616,8 +632,9 @@ class SQLiteRuntimeStore(RuntimeStore):
                 session_id = UUID(
                     (await database.get(InvocationRow, raw_id)).session_id  # type: ignore[union-attr]
                 )
-                await self._upsert_invocation(database, session_id, invocation)
+                emitted.extend(await self._upsert_invocation(database, session_id, invocation))
                 recovered.append(invocation)
+        await self.aemit_runtime_events(tuple(emitted))
         return tuple(recovered)
 
     async def alist_workflow_snapshots(
@@ -748,12 +765,14 @@ class SQLiteRuntimeStore(RuntimeStore):
     ) -> tuple[RuntimeEvent, ...]:
         await self.initialize()
         async with self._event_lock, self._sessions.begin() as database:
-            return await self._append_event_drafts(
+            events = await self._append_event_drafts(
                 database,
                 session_id=session_id,
                 invocation_id=invocation_id,
                 drafts=drafts,
             )
+        await self.aemit_runtime_events(events)
+        return events
 
     async def asave_projection_checkpoint(
         self,
@@ -846,7 +865,7 @@ class SQLiteRuntimeStore(RuntimeStore):
         database: AsyncSession,
         session_id: UUID,
         invocation: Invocation,
-    ) -> None:
+    ) -> tuple[RuntimeEvent, ...]:
         if not invocation.workflow_definition_hash:
             raise ValueError(
                 "Durable Invocation requires workflow_definition_hash."
@@ -914,7 +933,7 @@ class SQLiteRuntimeStore(RuntimeStore):
             str(invocation.id),
             persisted_execution_ids,
         )
-        await self._append_event_drafts(
+        return await self._append_event_drafts(
             database,
             session_id=session_id,
             invocation_id=invocation.id,

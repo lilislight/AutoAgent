@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import RLock
@@ -48,6 +49,45 @@ class WorkflowRegistryEntry:
         self.workflow = workflow
         self.workflow_ir = workflow_ir
         self.workflow_snapshot = workflow_snapshot
+
+
+class SubmittedInvocation:
+    """Process-local handle returned when an invocation is started in background.
+
+    The RuntimeStore remains the durable source of truth. This object only lets
+    service adapters return the admitted IDs immediately and optionally await
+    the background task if they are running in the same process.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: UUID,
+        invocation: Invocation,
+        task: asyncio.Task[Invocation],
+    ) -> None:
+        self.session_id = session_id
+        self.invocation = invocation
+        self.task = task
+
+
+class _PreparedInvocation:
+    """Internal admission result shared by blocking invoke and background submit."""
+
+    def __init__(
+        self,
+        *,
+        workflow_ir: WorkflowIR,
+        workflow_snapshot: WorkflowVersionSnapshot,
+        session: Session,
+        invocation: Invocation,
+        recover_existing: bool,
+    ) -> None:
+        self.workflow_ir = workflow_ir
+        self.workflow_snapshot = workflow_snapshot
+        self.session = session
+        self.invocation = invocation
+        self.recover_existing = recover_existing
 
 
 class AutoAgentApp:
@@ -105,6 +145,7 @@ class AutoAgentApp:
         # the row as crash residue.
         self._live_invocation_ids: set[UUID] = set()
         self._live_invocation_lock = RLock()
+        self._background_tasks: dict[UUID, asyncio.Task[Invocation]] = {}
 
     def register_runtime_codec(self, codec: RuntimeCodec) -> None:
         """Register one trusted custom persistence codec before loading records."""
@@ -136,7 +177,29 @@ class AutoAgentApp:
     async def aclose(self) -> None:
         """Release database pools and other RuntimeStore resources."""
 
+        if self._background_tasks:
+            await asyncio.gather(
+                *tuple(self._background_tasks.values()),
+                return_exceptions=True,
+            )
         await self.runtime_store.aclose()
+
+    def register_workflow(self, workflow: Workflow) -> WorkflowRegistryEntry:
+        """Compile and cache a Workflow without invoking it.
+
+        AutoAgentServer uses this registry to expose execution APIs by workflow
+        id. Re-registering the same object is idempotent; reusing an id for a
+        different Workflow object is rejected because runtime history is keyed
+        by workflow id and compiled definition hash.
+        """
+
+        workflow_ir = self._get_or_compile_workflow(workflow)
+        workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
+        return WorkflowRegistryEntry(
+            workflow=workflow,
+            workflow_ir=workflow_ir,
+            workflow_snapshot=workflow_snapshot,
+        )
 
     def register_capability(
         self,
@@ -347,59 +410,112 @@ class AutoAgentApp:
         There is intentionally no manual crash-recovery option in V1.
         """
 
-        workflow_ir = self._get_or_compile_workflow(workflow)
-        workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
-        await self.runtime_store.asave_workflow_snapshot(
-            self.namespace,
-            workflow_snapshot,
-        )
-
-        selected_entry_node_id = entry_node_id or self._default_entry_node_id(workflow_ir)
-        if selected_entry_node_id not in workflow_ir.entry_node_ids:
-            raise ValueError(f"Invalid entry node id: {selected_entry_node_id}")
-
-        session = await self._get_or_create_session(
-            workflow_id=workflow_ir.workflow_id,
-            session_id=session_id,
-        )
-        current = session.get_current_invocation()
-        if current is not None and current.state in {"created", "running"}:
-            if not self._claim_invocation_live(current.id):
-                raise SessionBusyError(session, current)
-            try:
-                recovered = await self.workflow_executor.arecover(
-                    workflow_ir=workflow_ir,
-                    workflow_snapshot=workflow_snapshot,
-                    session=session,
-                    invocation=current,
-                )
-            finally:
-                self._set_invocation_live(current.id, False)
-            if recovered.state != "interrupted":
-                # Recovery takes precedence over the new request. The caller can
-                # submit its new input after this historical Invocation reaches a
-                # stable state; silently mixing two inputs would violate Session
-                # admission semantics.
-                return recovered
-            session = await self.runtime_store.aload_session(session.id) or session
-        invocation = Invocation(
-            workflow_id=workflow_ir.workflow_id,
-            workflow_version=workflow_ir.workflow_version,
-            workflow_definition_hash=workflow_ir.definition_hash,
-            workflow_operator_manifest_hash=workflow_snapshot.operator_manifest_hash,
-            entry_node_id=selected_entry_node_id,
+        prepared = await self._prepare_invocation(
+            workflow,
             input=input,
+            session_id=session_id,
+            entry_node_id=entry_node_id,
         )
-        self._set_invocation_live(invocation.id, True)
         try:
-            session = await self.runtime_store.aadmit_invocation(session.id, invocation)
+            if prepared.recover_existing:
+                recovered = await self.workflow_executor.arecover(
+                    workflow_ir=prepared.workflow_ir,
+                    workflow_snapshot=prepared.workflow_snapshot,
+                    session=prepared.session,
+                    invocation=prepared.invocation,
+                )
+                if recovered.state != "interrupted":
+                    return recovered
+                self._set_invocation_live(prepared.invocation.id, False)
+                session = await self.runtime_store.aload_session(prepared.session.id)
+                if session is None:
+                    raise RuntimeError("Recovered Session disappeared.")
+                prepared = await self._prepare_fresh_invocation(
+                    workflow_ir=prepared.workflow_ir,
+                    workflow_snapshot=prepared.workflow_snapshot,
+                    session=session,
+                    entry_node_id=prepared.invocation.entry_node_id,
+                    input=input,
+                )
             return await self.workflow_executor.ainvoke(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
+                workflow_ir=prepared.workflow_ir,
+                session=prepared.session,
+                invocation=prepared.invocation,
             )
         finally:
-            self._set_invocation_live(invocation.id, False)
+            self._set_invocation_live(prepared.invocation.id, False)
+
+    async def asubmit(
+        self,
+        workflow: Workflow,
+        input: dict[str, Any] | None = None,
+        *,
+        session_id: str | None = None,
+        entry_node_id: str | None = None,
+    ) -> SubmittedInvocation:
+        """Admit an invocation and continue executing it in a background task.
+
+        This is the server/UI entrypoint. The invocation is already persisted
+        before this method returns, so clients can immediately subscribe to its
+        event stream. The returned task is process-local and is removed from the
+        App registry when it finishes.
+        """
+
+        prepared = await self._prepare_invocation(
+            workflow,
+            input=input,
+            session_id=session_id,
+            entry_node_id=entry_node_id,
+        )
+
+        async def run_prepared() -> Invocation:
+            try:
+                if prepared.recover_existing:
+                    recovered = await self.workflow_executor.arecover(
+                        workflow_ir=prepared.workflow_ir,
+                        workflow_snapshot=prepared.workflow_snapshot,
+                        session=prepared.session,
+                        invocation=prepared.invocation,
+                    )
+                    if recovered.state != "interrupted":
+                        return recovered
+                    self._set_invocation_live(prepared.invocation.id, False)
+                    session = await self.runtime_store.aload_session(prepared.session.id)
+                    if session is None:
+                        raise RuntimeError("Recovered Session disappeared.")
+                    fresh = await self._prepare_fresh_invocation(
+                        workflow_ir=prepared.workflow_ir,
+                        workflow_snapshot=prepared.workflow_snapshot,
+                        session=session,
+                        entry_node_id=prepared.invocation.entry_node_id,
+                        input=input,
+                    )
+                    try:
+                        return await self.workflow_executor.ainvoke(
+                            workflow_ir=fresh.workflow_ir,
+                            session=fresh.session,
+                            invocation=fresh.invocation,
+                        )
+                    finally:
+                        self._set_invocation_live(fresh.invocation.id, False)
+                return await self.workflow_executor.ainvoke(
+                    workflow_ir=prepared.workflow_ir,
+                    session=prepared.session,
+                    invocation=prepared.invocation,
+                )
+            finally:
+                self._set_invocation_live(prepared.invocation.id, False)
+
+        task = asyncio.create_task(run_prepared())
+        self._background_tasks[prepared.invocation.id] = task
+        task.add_done_callback(
+            lambda finished: self._background_tasks.pop(prepared.invocation.id, None)
+        )
+        return SubmittedInvocation(
+            session_id=prepared.session.id,
+            invocation=prepared.invocation,
+            task=task,
+        )
 
     def resume(
         self,
@@ -493,6 +609,80 @@ class AutoAgentApp:
                     f"Duplicate workflow id already registered: {workflow.id}"
                 )
             return registry_entry.workflow_ir
+
+    async def _prepare_invocation(
+        self,
+        workflow: Workflow,
+        input: dict[str, Any] | None,
+        *,
+        session_id: str | None,
+        entry_node_id: str | None,
+    ) -> _PreparedInvocation:
+        """Compile, persist snapshot, check session admission, and claim liveness."""
+
+        workflow_ir = self._get_or_compile_workflow(workflow)
+        workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
+        await self.runtime_store.asave_workflow_snapshot(
+            self.namespace,
+            workflow_snapshot,
+        )
+        selected_entry_node_id = entry_node_id or self._default_entry_node_id(workflow_ir)
+        if selected_entry_node_id not in workflow_ir.entry_node_ids:
+            raise ValueError(f"Invalid entry node id: {selected_entry_node_id}")
+
+        session = await self._get_or_create_session(
+            workflow_id=workflow_ir.workflow_id,
+            session_id=session_id,
+        )
+        current = session.get_current_invocation()
+        if current is not None and current.state in {"created", "running"}:
+            if not self._claim_invocation_live(current.id):
+                raise SessionBusyError(session, current)
+            return _PreparedInvocation(
+                workflow_ir=workflow_ir,
+                workflow_snapshot=workflow_snapshot,
+                session=session,
+                invocation=current,
+                recover_existing=True,
+            )
+        return await self._prepare_fresh_invocation(
+            workflow_ir=workflow_ir,
+            workflow_snapshot=workflow_snapshot,
+            session=session,
+            entry_node_id=selected_entry_node_id,
+            input=input,
+        )
+
+    async def _prepare_fresh_invocation(
+        self,
+        *,
+        workflow_ir: WorkflowIR,
+        workflow_snapshot: WorkflowVersionSnapshot,
+        session: Session,
+        entry_node_id: str,
+        input: dict[str, Any] | None,
+    ) -> _PreparedInvocation:
+        invocation = Invocation(
+            workflow_id=workflow_ir.workflow_id,
+            workflow_version=workflow_ir.workflow_version,
+            workflow_definition_hash=workflow_ir.definition_hash,
+            workflow_operator_manifest_hash=workflow_snapshot.operator_manifest_hash,
+            entry_node_id=entry_node_id,
+            input=input,
+        )
+        self._set_invocation_live(invocation.id, True)
+        try:
+            session = await self.runtime_store.aadmit_invocation(session.id, invocation)
+        except Exception:
+            self._set_invocation_live(invocation.id, False)
+            raise
+        return _PreparedInvocation(
+            workflow_ir=workflow_ir,
+            workflow_snapshot=workflow_snapshot,
+            session=session,
+            invocation=invocation,
+            recover_existing=False,
+        )
 
     def _default_entry_node_id(self, workflow_ir: WorkflowIR) -> str:
         entry_count = len(workflow_ir.entry_node_ids)

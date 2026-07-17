@@ -1,30 +1,30 @@
-from autoagent.observer.app import ObservationApp
-from autoagent.observer.models import (
+from autoagent.trace.models import (
     InvocationDetail,
     InvocationSummary,
-    ObservationBootstrap,
     RuntimeEventPage,
     RuntimeProjection,
     SessionSummary,
     TimelineView,
+    TraceBootstrap,
     WorkflowGraphView,
+    WorkflowGroupView,
     WorkflowSummary,
 )
-from autoagent.observer.projection import project_runtime_events
-from autoagent.observer.service import ObservationService
-from autoagent.observer.security import redact_sensitive_data
+from autoagent.trace.projection import project_runtime_events
+from autoagent.trace.service import TraceQueryService
+from autoagent.trace.security import redact_sensitive_data
 
 __all__ = [
     "InvocationDetail",
     "InvocationSummary",
-    "ObservationApp",
-    "ObservationBootstrap",
-    "ObservationService",
     "RuntimeEventPage",
     "RuntimeProjection",
     "SessionSummary",
+    "TraceQueryService",
     "TimelineView",
+    "TraceBootstrap",
     "WorkflowGraphView",
+    "WorkflowGroupView",
     "WorkflowSummary",
     "project_runtime_events",
     "redact_sensitive_data",

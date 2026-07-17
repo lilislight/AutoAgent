@@ -5,25 +5,25 @@ from typing import Any
 from uuid import UUID
 
 from autoagent.compiler import WorkflowVersionSnapshot
-from autoagent.observer.models import (
+from autoagent.trace.models import (
     EdgeEvaluationView,
     InvocationDetail,
     InvocationSummary,
     NodeExecutionView,
-    ObservationBootstrap,
     OperatorCallView,
     RuntimeEventPage,
     RuntimeProjection,
     SessionSummary,
     TimelineSpan,
     TimelineView,
+    TraceBootstrap,
     WorkflowEdgeView,
     WorkflowGraphView,
     WorkflowNodeView,
     WorkflowSummary,
 )
-from autoagent.observer.projection import project_runtime_events
-from autoagent.observer.security import redact_sensitive_data
+from autoagent.trace.projection import project_runtime_events
+from autoagent.trace.security import redact_sensitive_data
 from autoagent.runtime import (
     Invocation,
     RuntimeEvent,
@@ -33,8 +33,8 @@ from autoagent.runtime import (
 )
 
 
-class ObservationService:
-    """Read-only application service shared by HTTP routes and future tooling."""
+class TraceQueryService:
+    """Read-only trace query service shared by HTTP routes and future tooling."""
 
     def __init__(
         self,
@@ -192,7 +192,7 @@ class ObservationService:
         *,
         session_id: UUID,
         invocation_id: UUID,
-    ) -> ObservationBootstrap:
+    ) -> TraceBootstrap:
         session, invocation = await self._load_scope(session_id, invocation_id)
         stored_checkpoint = await self.runtime_store.aload_projection_checkpoint(
             invocation_id=invocation_id
@@ -246,7 +246,7 @@ class ObservationService:
             definition_hash=invocation.workflow_definition_hash,
             operator_manifest_hash=invocation.workflow_operator_manifest_hash,
         )
-        return ObservationBootstrap(
+        return TraceBootstrap(
             graph=graph,
             session=_session_summary(session),
             invocation=self._invocation_detail(invocation),
@@ -304,6 +304,8 @@ class ObservationService:
                 EdgeEvaluationView(
                     id=value.id,
                     edge_id=value.edge_id,
+                    source_execution_id=execution.id,
+                    source_node_id=execution.node_id,
                     target_node_id=value.target_node_id,
                     state=value.state,
                     selected=value.selected,
@@ -384,42 +386,99 @@ def _workflow_summary(snapshot: WorkflowVersionSnapshot) -> WorkflowSummary:
 
 def _workflow_graph(snapshot: WorkflowVersionSnapshot) -> WorkflowGraphView:
     definition = snapshot.definition
+    nodes = tuple(
+        WorkflowNodeView(
+            id=str(node["id"]),
+            local_id=node.get("local_id"),
+            workflow_path=tuple(node.get("workflow_path", [])),
+            name=node.get("name"),
+            description=node.get("description"),
+            capability=dict(node["capability"]),
+            entry=bool(node.get("entry", False)),
+            exit=bool(node.get("exit", False)),
+            policy=node.get("policy"),
+            input_plan=node.get("input_plan"),
+            output_binding=node.get("output_binding"),
+            input_contract=dict(node["input_contract"]),
+            operator_output_contract=dict(node["operator_output_contract"]),
+            output_contract=dict(node["output_contract"]),
+        )
+        for node in definition.get("nodes", [])
+    )
+    edges = tuple(
+        WorkflowEdgeView(
+            id=str(edge["id"]),
+            local_id=edge.get("local_id"),
+            workflow_path=tuple(edge.get("workflow_path", [])),
+            from_node=str(edge["from_node"]),
+            to_node=str(edge["to_node"]),
+            order=int(edge["order"]),
+            condition=edge.get("condition"),
+            policy=edge.get("policy"),
+        )
+        for edge in definition.get("edges", [])
+    )
     return WorkflowGraphView(
         **_workflow_summary(snapshot).model_dump(),
-        nodes=tuple(
-            WorkflowNodeView(
-                id=str(node["id"]),
-                local_id=node.get("local_id"),
-                workflow_path=tuple(node.get("workflow_path", [])),
-                name=node.get("name"),
-                description=node.get("description"),
-                capability=dict(node["capability"]),
-                entry=bool(node.get("entry", False)),
-                exit=bool(node.get("exit", False)),
-                policy=node.get("policy"),
-                input_contract=dict(node["input_contract"]),
-                operator_output_contract=dict(node["operator_output_contract"]),
-                output_contract=dict(node["output_contract"]),
-            )
-            for node in definition.get("nodes", [])
-        ),
-        edges=tuple(
-            WorkflowEdgeView(
-                id=str(edge["id"]),
-                local_id=edge.get("local_id"),
-                workflow_path=tuple(edge.get("workflow_path", [])),
-                from_node=str(edge["from_node"]),
-                to_node=str(edge["to_node"]),
-                order=int(edge["order"]),
-                condition=edge.get("condition"),
-                policy=edge.get("policy"),
-            )
-            for edge in definition.get("edges", [])
+        nodes=nodes,
+        edges=edges,
+        groups=_workflow_groups(nodes, edges),
+        operator_manifests=tuple(
+            manifest.model_dump(mode="python")
+            for manifest in snapshot.operator_manifests
         ),
         entry_node_ids=tuple(definition.get("entry_node_ids", [])),
         exit_node_ids=tuple(definition.get("exit_node_ids", [])),
         loop_regions=tuple(definition.get("loop_regions", [])),
     )
+
+
+def _workflow_groups(
+    nodes: tuple[WorkflowNodeView, ...],
+    edges: tuple[WorkflowEdgeView, ...],
+) -> tuple[Any, ...]:
+    from autoagent.trace.models import WorkflowGroupView
+
+    paths: set[tuple[str, ...]] = set()
+    for node in nodes:
+        for index in range(1, len(node.workflow_path) + 1):
+            paths.add(tuple(node.workflow_path[:index]))
+    groups = []
+    for path in sorted(paths, key=lambda value: (len(value), value)):
+        group_id = "/".join(path)
+        parent_path = path[:-1]
+        member_ids = tuple(
+            node.id
+            for node in nodes
+            if tuple(node.workflow_path[: len(path)]) == path
+        )
+        member_set = set(member_ids)
+        direct_node_ids = tuple(
+            node.id for node in nodes if tuple(node.workflow_path) == path
+        )
+        entry_node_ids = tuple(
+            edge.to_node
+            for edge in edges
+            if edge.to_node in member_set and edge.from_node not in member_set
+        )
+        exit_node_ids = tuple(
+            edge.from_node
+            for edge in edges
+            if edge.from_node in member_set and edge.to_node not in member_set
+        )
+        groups.append(
+            WorkflowGroupView(
+                id=group_id,
+                parent_group_id="/".join(parent_path) if parent_path else None,
+                label=path[-1],
+                workflow_path=path,
+                node_ids=member_ids,
+                direct_node_ids=direct_node_ids,
+                entry_node_ids=tuple(dict.fromkeys(entry_node_ids)),
+                exit_node_ids=tuple(dict.fromkeys(exit_node_ids)),
+            )
+        )
+    return tuple(groups)
 
 
 def _session_summary(session: Session) -> SessionSummary:
@@ -513,3 +572,4 @@ def _timeline(invocation: Invocation) -> TimelineView:
         ended_at_ms=invocation.updated_at_ms if terminal else None,
         spans=tuple(spans),
     )
+    TraceBootstrap,

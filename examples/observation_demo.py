@@ -1,10 +1,10 @@
-"""Seed a realistic trace and start the local AutoAgent Observation UI."""
+"""Seed a realistic trace and start the local AutoAgent Server API."""
 
 from __future__ import annotations
 
 import time
 
-from autoagent import AutoAgentApp, ObservationApp
+from autoagent import AutoAgentApp, AutoAgentServer
 from autoagent.workflow import Workflow
 
 
@@ -95,7 +95,8 @@ def main() -> None:
         input={"summary": "Single failed health check", "severity": 1},
         session_id="support",
     )
-    ObservationApp(app.runtime_store).run(host="0.0.0.0", port=8765)
+    app.register_workflow(workflow)
+    AutoAgentServer(app).run(host="0.0.0.0", port=8765)
 
 
 if __name__ == "__main__":

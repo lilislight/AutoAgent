@@ -77,6 +77,12 @@ export function projectEvents(
         state: String(event.payload.state ?? "evaluated"),
         selected: Boolean(event.payload.selected),
         evaluation_count: (previous?.evaluation_count ?? 0) + 1,
+        selected_count:
+          (previous?.selected_count ?? 0) + (event.payload.selected ? 1 : 0),
+        skipped_count:
+          (previous?.skipped_count ?? 0) + (event.payload.state === "skipped" ? 1 : 0),
+        failed_count:
+          (previous?.failed_count ?? 0) + (event.payload.state === "failed" ? 1 : 0),
         source_execution_id: asNullableString(event.payload.node_execution_id),
         target_node_id: asNullableString(event.payload.target_node_id),
       };

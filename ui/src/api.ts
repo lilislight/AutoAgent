@@ -1,7 +1,7 @@
 import type {
   InvocationSummary,
-  ObservationBootstrap,
-  ObservationHealth,
+  TraceBootstrap,
+  ServerHealth,
   RuntimeEvent,
   RuntimeEventPage,
   SessionSummary,
@@ -21,7 +21,7 @@ export function listWorkflows(): Promise<WorkflowSummary[]> {
   return requestJson("/api/workflows");
 }
 
-export function getHealth(): Promise<ObservationHealth> {
+export function getHealth(): Promise<ServerHealth> {
   return requestJson("/api/health");
 }
 
@@ -49,10 +49,10 @@ export function listInvocations(sessionId: string): Promise<InvocationSummary[]>
   return requestJson(`/api/sessions/${sessionId}/invocations`);
 }
 
-export function getObservationView(
+export function getTraceView(
   sessionId: string,
   invocationId: string,
-): Promise<ObservationBootstrap> {
+): Promise<TraceBootstrap> {
   return requestJson(
     `/api/sessions/${sessionId}/invocations/${invocationId}/view`,
   );

@@ -5,7 +5,7 @@ import { AlertTriangle, GitBranch, LoaderCircle } from "lucide-react";
 import {
   createAuthenticationSession,
   getEarlierEvents,
-  getObservationView,
+  getTraceView,
   getHealth,
   listInvocations,
   listSessions,
@@ -14,6 +14,7 @@ import {
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
 import { InspectorPanel } from "./components/InspectorPanel";
+import { type DetailTab, SelectionMenu } from "./components/SelectionMenu";
 import { ScopeBar } from "./components/ScopeBar";
 import { WorkflowCanvas } from "./components/WorkflowCanvas";
 import { projectEvents } from "./projection";
@@ -33,6 +34,8 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(
     () => localStorage.getItem("autoagent:theme") === "dark",
   );
+  const [selectionAnchor, setSelectionAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [drawerTab, setDrawerTab] = useState<DetailTab | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = darkMode ? "dark" : "light";
@@ -40,7 +43,7 @@ export default function App() {
   }, [darkMode]);
 
   const healthQuery = useQuery({
-    queryKey: ["observation-health"],
+    queryKey: ["trace-health"],
     queryFn: getHealth,
   });
   const authenticated = healthQuery.data?.authenticated ?? false;
@@ -84,8 +87,8 @@ export default function App() {
   }, [invocations, sessions, ui]);
 
   const viewQuery = useQuery({
-    queryKey: ["observation-view", ui.sessionId, ui.invocationId],
-    queryFn: () => getObservationView(ui.sessionId!, ui.invocationId!),
+    queryKey: ["trace-view", ui.sessionId, ui.invocationId],
+    queryFn: () => getTraceView(ui.sessionId!, ui.invocationId!),
     enabled: Boolean(ui.sessionId && ui.invocationId),
   });
   const view = viewQuery.data;
@@ -119,7 +122,7 @@ export default function App() {
           )
         ) {
           void queryClient.invalidateQueries({
-            queryKey: ["observation-view", ui.sessionId, ui.invocationId],
+            queryKey: ["trace-view", ui.sessionId, ui.invocationId],
           });
         }
       },
@@ -176,7 +179,7 @@ export default function App() {
     ui.setCursor(latest, true);
     if (ui.sessionId && ui.invocationId) {
       void queryClient.invalidateQueries({
-        queryKey: ["observation-view", ui.sessionId, ui.invocationId],
+        queryKey: ["trace-view", ui.sessionId, ui.invocationId],
       });
     }
   };
@@ -189,7 +192,7 @@ export default function App() {
       <div className="app-shell">
         <StatusScreen
           icon={<LoaderCircle className="spin" size={28} />}
-          title="Connecting to observation service"
+          title="Connecting to AutoAgent Server"
           detail="Checking service access."
         />
       </div>
@@ -261,17 +264,35 @@ export default function App() {
             projection={projection}
             followLive={ui.followLive}
             selection={ui.selection}
-            onSelect={ui.setSelection}
+            onSelect={(selection, anchor) => {
+              ui.setSelection(selection);
+              setSelectionAnchor(anchor ?? null);
+              if (!selection) setDrawerTab(null);
+            }}
           />
-          <InspectorPanel
-            graph={view.graph}
-            invocation={view.invocation}
-            events={events}
-            projection={projection}
+          <SelectionMenu
             selection={ui.selection}
-            cursorSequence={cursorSequence}
-            onClose={() => ui.setSelection(null)}
+            graph={view.graph}
+            anchor={selectionAnchor}
+            onOpen={(tab) => setDrawerTab(tab)}
+            onClose={() => {
+              ui.setSelection(null);
+              setSelectionAnchor(null);
+              setDrawerTab(null);
+            }}
           />
+          {drawerTab && (
+            <InspectorPanel
+              graph={view.graph}
+              invocation={view.invocation}
+              events={events}
+              projection={projection}
+              selection={ui.selection}
+              cursorSequence={cursorSequence}
+              initialTab={drawerTab}
+              onClose={() => setDrawerTab(null)}
+            />
+          )}
           <ExecutionTimeline
             timeline={view.timeline}
             events={events}
@@ -318,7 +339,7 @@ function AuthenticationScreen({
       >
         <GitBranch size={24} />
         <div>
-          <strong>AutoAgent Observation</strong>
+          <strong>AutoAgent Trace</strong>
           <span>Enter the access token configured by the service owner.</span>
         </div>
         <label>

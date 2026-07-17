@@ -29,6 +29,7 @@ from autoagent.runtime.scheduler import (
     WaitingExecution,
 )
 from autoagent.runtime.session import Session
+from autoagent.runtime.sinks import LoggingEventSink, RuntimeEventSink
 from autoagent.runtime.status import (
     EdgeEvaluationStateValue,
     EdgeResolutionStateValue,
@@ -65,6 +66,7 @@ __all__ = [
     "InvocationContext",
     "InvocationStateValue",
     "JsonRuntimeSerializer",
+    "LoggingEventSink",
     "NodeExecution",
     "NodeExecutionStateValue",
     "NodeExecutionRequest",
@@ -80,6 +82,7 @@ __all__ = [
     "RuntimeErrorInfo",
     "RuntimeEvent",
     "RuntimeEventDraft",
+    "RuntimeEventSink",
     "RuntimeContext",
     "RuntimeConcurrencyController",
     "RuntimeCodec",

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from autoagent import AutoAgentApp
 from autoagent.compiler import WorkflowCompiler
-from autoagent.observer import ObservationService
+from autoagent.trace import TraceQueryService
 from autoagent.runtime import (
     EdgeActivation,
     Invocation,
@@ -118,7 +118,7 @@ class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events[-2:], latest_page)
         self.assertEqual(events[-4:-2], previous_page)
-        observation = await ObservationService(
+        observation = await TraceQueryService(
             reopened,
             bootstrap_event_limit=3,
         ).bootstrap(

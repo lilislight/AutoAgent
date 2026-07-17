@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Any
 from threading import RLock
+from typing import Any
+from collections.abc import Iterable
 from uuid import UUID
 
 from autoagent.compiler import WorkflowVersionSnapshot
@@ -19,6 +20,7 @@ from autoagent.runtime.execution import NodeExecution, OperatorCall
 from autoagent.runtime.invocation import Invocation
 from autoagent.runtime.serialization import JsonRuntimeSerializer
 from autoagent.runtime.session import Session
+from autoagent.runtime.sinks import RuntimeEventSink, emit_to_sinks
 
 
 class SessionBusyError(RuntimeError):
@@ -58,6 +60,18 @@ class RuntimeStore(ABC):
     """
 
     serializer: JsonRuntimeSerializer
+
+    def __init__(
+        self,
+        *,
+        event_sinks: Iterable[RuntimeEventSink] = (),
+    ) -> None:
+        self.event_sinks: tuple[RuntimeEventSink, ...] = tuple(event_sinks)
+
+    async def aemit_runtime_events(self, events: tuple[RuntimeEvent, ...]) -> None:
+        """Notify diagnostic/event consumers after a store operation succeeds."""
+
+        await emit_to_sinks(self.event_sinks, events)
 
     async def ainitialize(self) -> None:
         """Initialize backing resources; in-memory stores require no work."""
@@ -293,7 +307,13 @@ class InMemoryRuntimeStore(RuntimeStore):
     and resume logic should all expose the same logical structure.
     """
 
-    def __init__(self, *, serializer: JsonRuntimeSerializer | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        serializer: JsonRuntimeSerializer | None = None,
+        event_sinks: Iterable[RuntimeEventSink] = (),
+    ) -> None:
+        super().__init__(event_sinks=event_sinks)
         self._lock = RLock()
         self.serializer = serializer or JsonRuntimeSerializer()
         self.workflow_versions: dict[
@@ -416,10 +436,12 @@ class InMemoryRuntimeStore(RuntimeStore):
         )
 
     async def asave_session(self, session: Session) -> None:
-        self.save_session(session)
+        events = self.save_session(session)
+        await self.aemit_runtime_events(events)
 
     async def asave_session_context(self, session: Session) -> None:
-        self.save_session_context(session)
+        events = self.save_session_context(session)
+        await self.aemit_runtime_events(events)
 
     async def aload_session(self, session_id: UUID) -> Session | None:
         return self.load_session(session_id)
@@ -460,7 +482,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         workflow_definition_hash: str | None = None,
         workflow_operator_manifest_hash: str | None = None,
     ) -> Session:
-        return self.claim_waiting_session(
+        session, events = self.claim_waiting_session(
             namespace=namespace,
             workflow_id=workflow_id,
             session_key=session_key,
@@ -468,13 +490,16 @@ class InMemoryRuntimeStore(RuntimeStore):
             workflow_definition_hash=workflow_definition_hash,
             workflow_operator_manifest_hash=workflow_operator_manifest_hash,
         )
+        await self.aemit_runtime_events(events)
+        return session
 
     async def asave_invocation(
         self,
         session_id: UUID,
         invocation: Invocation,
     ) -> None:
-        self.save_invocation(session_id, invocation)
+        events = self.save_invocation(session_id, invocation)
+        await self.aemit_runtime_events(events)
 
     async def acheckpoint_invocation(
         self,
@@ -483,11 +508,12 @@ class InMemoryRuntimeStore(RuntimeStore):
         *,
         node_execution_ids: tuple[UUID, ...] = (),
     ) -> None:
-        self.checkpoint_invocation(
+        events = self.checkpoint_invocation(
             session,
             invocation,
             node_execution_ids=node_execution_ids,
         )
+        await self.aemit_runtime_events(events)
 
     async def acheckpoint_operator_call(
         self,
@@ -498,20 +524,23 @@ class InMemoryRuntimeStore(RuntimeStore):
         node_id: str,
         call: OperatorCall,
     ) -> None:
-        self.checkpoint_operator_call(
+        events = self.checkpoint_operator_call(
             session_id=session_id,
             invocation_id=invocation_id,
             node_execution_id=node_execution_id,
             node_id=node_id,
             call=call,
         )
+        await self.aemit_runtime_events(events)
 
     async def aadmit_invocation(
         self,
         session_id: UUID,
         invocation: Invocation,
     ) -> Session:
-        return self.admit_invocation(session_id, invocation)
+        session, events = self.admit_invocation(session_id, invocation)
+        await self.aemit_runtime_events(events)
+        return session
 
     async def aload_invocation(self, invocation_id: UUID) -> Invocation | None:
         return self.load_invocation(invocation_id)
@@ -617,7 +646,9 @@ class InMemoryRuntimeStore(RuntimeStore):
         drafts: tuple[RuntimeEventDraft, ...],
     ) -> tuple[RuntimeEvent, ...]:
         with self._lock:
-            return self._append_event_drafts(session_id, invocation_id, drafts)
+            events = self._append_event_drafts(session_id, invocation_id, drafts)
+        await self.aemit_runtime_events(events)
+        return events
 
     async def asave_projection_checkpoint(
         self,
@@ -656,8 +687,9 @@ class InMemoryRuntimeStore(RuntimeStore):
             sequence, record = max(candidates, key=lambda value: value[0])
             return sequence, deepcopy(record["projection"])
 
-    def save_session(self, session: Session) -> None:
+    def save_session(self, session: Session) -> tuple[RuntimeEvent, ...]:
         with self._lock:
+            collected: list[RuntimeEvent] = []
             record = session.to_record()
             self.sessions[session.id] = deepcopy(record)
             self.session_keys[
@@ -665,9 +697,10 @@ class InMemoryRuntimeStore(RuntimeStore):
             ] = session.id
             self.session_invocations.setdefault(session.id, [])
             for invocation in session.invocations:
-                self.save_invocation(session.id, invocation)
+                collected.extend(self.save_invocation(session.id, invocation))
+            return tuple(collected)
 
-    def save_session_context(self, session: Session) -> None:
+    def save_session_context(self, session: Session) -> tuple[RuntimeEvent, ...]:
         with self._lock:
             previous = self.sessions.get(session.id)
             if previous is None:
@@ -681,7 +714,7 @@ class InMemoryRuntimeStore(RuntimeStore):
                 and session.current_invocation_id is not None
                 and session.current_invocation_id in self.invocations
             ):
-                self._append_event_drafts(
+                return self._append_event_drafts(
                     session.id,
                     session.current_invocation_id,
                     (
@@ -693,6 +726,7 @@ class InMemoryRuntimeStore(RuntimeStore):
                         ),
                     ),
                 )
+            return ()
 
     def load_session(self, session_id: UUID) -> Session | None:
         with self._lock:
@@ -713,7 +747,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         namespace: str,
         workflow_id: str,
         session_key: str | None,
-    ) -> Session:
+    ) -> tuple[Session, tuple[RuntimeEvent, ...]]:
         with self._lock:
             key = (namespace, workflow_id, session_key)
             session_id = self.session_keys.get(key)
@@ -784,10 +818,14 @@ class InMemoryRuntimeStore(RuntimeStore):
             if wait_key not in invocation.scheduler.waiting_executions:
                 raise KeyError(f"Unknown wait key: {wait_key}")
             invocation.mark_running()
-            self.save_invocation(session.id, invocation)
-            return session
+            events = self.save_invocation(session.id, invocation)
+            return session, events
 
-    def save_invocation(self, session_id: UUID, invocation: Invocation) -> None:
+    def save_invocation(
+        self,
+        session_id: UUID,
+        invocation: Invocation,
+    ) -> tuple[RuntimeEvent, ...]:
         with self._lock:
             if session_id not in self.sessions:
                 raise KeyError(f"Unknown session: {session_id}")
@@ -803,7 +841,7 @@ class InMemoryRuntimeStore(RuntimeStore):
             for execution in invocation.node_executions:
                 self._save_node_execution(invocation.id, execution)
             drafts = invocation_checkpoint_events(previous, invocation)
-            self._append_event_drafts(session_id, invocation.id, tuple(drafts))
+            return self._append_event_drafts(session_id, invocation.id, tuple(drafts))
 
     def checkpoint_invocation(
         self,
@@ -811,7 +849,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         invocation: Invocation,
         *,
         node_execution_ids: tuple[UUID, ...] = (),
-    ) -> None:
+    ) -> tuple[RuntimeEvent, ...]:
         """Persist one control-loop delta under the Store lock.
 
         Unlike ``save_invocation``, this method never rebuilds the Invocation's
@@ -860,7 +898,7 @@ class InMemoryRuntimeStore(RuntimeStore):
                     )
                 )
             sort_runtime_event_drafts(drafts)
-            self._append_event_drafts(session.id, invocation.id, tuple(drafts))
+            return self._append_event_drafts(session.id, invocation.id, tuple(drafts))
 
     def checkpoint_operator_call(
         self,
@@ -870,7 +908,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         node_execution_id: UUID,
         node_id: str,
         call: OperatorCall,
-    ) -> None:
+    ) -> tuple[RuntimeEvent, ...]:
         """Persist one call transition without mutating the live Invocation."""
 
         with self._lock:
@@ -892,9 +930,13 @@ class InMemoryRuntimeStore(RuntimeStore):
                 call,
                 node_id=node_id,
             )
-            self._append_event_drafts(session_id, invocation_id, tuple(drafts))
+            return self._append_event_drafts(session_id, invocation_id, tuple(drafts))
 
-    def admit_invocation(self, session_id: UUID, invocation: Invocation) -> Session:
+    def admit_invocation(
+        self,
+        session_id: UUID,
+        invocation: Invocation,
+    ) -> tuple[Session, tuple[RuntimeEvent, ...]]:
         """Perform session admission and persistence under one store lock.
 
         `created` is treated as active because another caller must not enter the
@@ -914,8 +956,8 @@ class InMemoryRuntimeStore(RuntimeStore):
             }:
                 raise SessionBusyError(session, current)
             session.add_invocation(invocation)
-            self.save_session(session)
-            return session
+            events = self.save_session(session)
+            return session, events
 
     def load_invocation(self, invocation_id: UUID) -> Invocation | None:
         with self._lock:

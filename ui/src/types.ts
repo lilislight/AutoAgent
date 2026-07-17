@@ -27,6 +27,8 @@ export interface WorkflowSummary {
 
 export interface WorkflowNodeView {
   id: string;
+  local_id?: string | null;
+  workflow_path?: string[];
   name: string | null;
   description: string | null;
   capability: Record<string, unknown>;
@@ -40,6 +42,8 @@ export interface WorkflowNodeView {
 
 export interface WorkflowEdgeView {
   id: string;
+  local_id?: string | null;
+  workflow_path?: string[];
   from_node: string;
   to_node: string;
   order: number;

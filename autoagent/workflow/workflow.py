@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from autoagent.operators.operator import Operator
 from autoagent.workflow.edge import Edge
 from autoagent.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.workflow.mapping import InputMapping, OutputBinding
@@ -82,14 +83,21 @@ class Workflow(BaseModel):
         return resolved
 
     # Supported authoring forms:
-    # - add_node(function)
-    # - add_node("capability_string")
-    # - add_node(Node(...))
     # - add_node(function, node_id="node_id")
+    # - add_node("capability_string", node_id="node_id")
+    # - add_node(child_workflow, node_id="child")
+    # - add_node(Node(...))
     def add_node(
         self,
         node_or_capability: (
-            Node | Callable[..., Any] | str | CapabilityRef | OperatorRef | SystemCommand
+            Node
+            | Callable[..., Any]
+            | Operator
+            | str
+            | CapabilityRef
+            | OperatorRef
+            | SystemCommand
+            | Workflow
         ),
         *,
         node_id: str | None = None,
@@ -100,8 +108,15 @@ class Workflow(BaseModel):
         entry: bool | None = None,
         policy: Any | None = None,
         metadata: dict[str, Any] | None = None,
+        child_entry_node_id: str | None = None,
+        child_exit_node_id: str | None = None,
     ) -> Node:
-        """Create or add a Node to this Workflow and return it."""
+        """Create or add a Node to this Workflow and return it.
+
+        A Workflow capability is an expandable child, not a runtime Operator.
+        `node_id` becomes its namespace. Multiple child boundaries require
+        child_entry_node_id and child_exit_node_id during compilation.
+        """
 
         if isinstance(node_or_capability, Node):
             if any(
@@ -115,6 +130,8 @@ class Workflow(BaseModel):
                     entry,
                     policy,
                     metadata,
+                    child_entry_node_id,
+                    child_exit_node_id,
                 )
             ):
                 raise ValueError("Cannot override fields when adding a Node object.")
@@ -122,19 +139,13 @@ class Workflow(BaseModel):
             self.nodes.append(node_or_capability)
             return node_or_capability
 
-        resolved_node_id = node_id
+        if node_id is None:
+            raise ValueError("node_id is required when adding a node capability.")
+
         node_capability = node_or_capability
 
-        if isinstance(node_capability, str) and resolved_node_id is not None:
-            raise ValueError(
-                "Cannot provide node_id when adding a string capability."
-            )
-
-        if resolved_node_id is None and isinstance(node_capability, Callable):
-            resolved_node_id = getattr(node_capability, "__name__", None)
-
         node = Node(
-            id=resolved_node_id,
+            id=node_id,
             capability=node_capability,
             name=name,
             description=description,
@@ -143,6 +154,8 @@ class Workflow(BaseModel):
             entry=entry,
             policy=policy,
             metadata=metadata or {},
+            child_entry_node_id=child_entry_node_id,
+            child_exit_node_id=child_exit_node_id,
         )
         self.nodes.append(node)
         return node
@@ -221,3 +234,8 @@ class Workflow(BaseModel):
 
         target = path if path is not None else default_preview_path(self)
         return self.diagram(compiler=compiler).save(target)
+
+
+# Resolve Node.capability's recursive Workflow annotation only after both
+# Pydantic models exist. Authors still bind the Workflow object directly.
+Node.model_rebuild(_types_namespace={"Workflow": Workflow})

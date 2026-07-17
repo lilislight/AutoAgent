@@ -227,16 +227,17 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             return calls
 
         workflow = Workflow(id="accumulated_runtime_limit")
+        workflow.add_node(lambda: None, node_id="start", entry=True)
         workflow.add_node(
             iterative,
             node_id="loop",
             input_mapping=lambda _ctx: {},
-            entry=True,
             policy=NodePolicy(
                 resource=ResourcePolicy(max_runtime_ms_per_invocation=20)
             ),
         )
         workflow.add_node(lambda value: value, node_id="done")
+        workflow.add_edge("start", "loop")
         workflow.add_edge(
             "loop",
             "loop",

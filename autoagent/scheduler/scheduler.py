@@ -324,10 +324,10 @@ class Scheduler:
             invocation_input=invocation.input,
             invocation_context=invocation.context,
             session_context=session.context,
-            outputs=invocation.outputs,
-            edge_id=edge.id,
-            source_node_id=edge.from_node,
-            target_node_id=edge.to_node,
+            outputs=invocation.outputs.scoped(edge.scope_node_ids),
+            edge_id=edge.local_id or edge.id,
+            source_node_id=edge.local_from_node or edge.from_node,
+            target_node_id=edge.local_to_node or edge.to_node,
             source_output=source_output,
         )
         try:

@@ -32,6 +32,25 @@ stage before expanding the next one.
   `workflow.to_mermaid()`, `workflow.preview()`, and `app.preview()`. Generated
   directed graphs highlight valid, warning, and invalid edges using Compiler
   diagnostics without executing the Workflow.
+- [x] Require every source Node to have an explicit stable id. Callable bindings
+  are compiled into direct Operators; the same Callable object is reused inside
+  one Workflow while distinct objects receive distinct binding identities.
+- [x] Treat explicit entry markers as validated assertions rather than overrides
+  for graph inference. Every zero-incoming node remains an entry, and an
+  explicit entry with any incoming edge is a compile error. A Workflow that
+  enters a loop therefore needs a separate zero-incoming entry node.
+- [ ] Make Capability selection ties independent of Operator registration order
+  by defining a stable Operator-id tie breaker for every public selection mode.
+- [ ] Stop deriving a Capability's canonical contract from whichever Operator
+  happens to register first; define one deterministic contract owner.
+- [ ] Process Scheduler fan-in targets in Workflow declaration order instead of
+  iterating a set, so ready requests and Runtime Events remain reproducible.
+- [ ] Define deterministic handling when multiple concurrent tasks complete or
+  fail in the same event-loop turn without pretending real completion timing is
+  deterministic.
+- [ ] Detect or reject source Workflow mutation after App compilation. Defer the
+  final behavior until optimizer hot-patch and version-promotion semantics are
+  designed; V1 continues using the first cached WorkflowIR.
 
 ## 2. Define Operator and Capability Contracts
 
@@ -133,7 +152,14 @@ stage before expanding the next one.
 
 ## 5. Add Higher-Level Agent Features
 
-- [ ] Add `AgentNode` as compile-time syntax sugar over ordinary nodes and edges.
+- [x] Add compile-time expandable child Workflows through the existing
+  `add_node` API without WorkflowRef. Compiler recursively namespaces child
+  nodes, rewires parent edges, preserves child-local hook lookups, and exposes
+  Workflow paths to Observation. Multiple child entries/exits require explicit
+  `child_entry_node_id`/`child_exit_node_id`; unreachable entry components are
+  excluded from the embedding.
+- [ ] Add `AgentNode` through `add_node` as compile-time syntax sugar over an
+  expandable child Workflow; do not add AgentRef.
 - [ ] Add tool loops, memory integration, reusable harnesses, and dynamic
   fan-out without changing Scheduler or Runtime core semantics.
 

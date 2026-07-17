@@ -5,6 +5,7 @@ from pathlib import Path
 from re import sub
 from typing import TYPE_CHECKING, Literal
 
+from autoagent.operators.operator import Operator
 from autoagent.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.workflow.node import Node
 
@@ -166,20 +167,11 @@ class WorkflowDiagram:
 def _source_nodes(
     workflow: Workflow,
 ) -> tuple[list[DiagramNode], dict[int, str], dict[str, str]]:
-    from autoagent.compiler.id_generation import generate_node_id
-
-    manual_ids = {node.id for node in workflow.nodes if node.id is not None}
-    assigned_ids = set(manual_ids)
-    next_index = 1
     nodes: list[DiagramNode] = []
     object_keys: dict[int, str] = {}
     id_keys: dict[str, str] = {}
     for index, node in enumerate(workflow.nodes):
-        if node.id is None:
-            node_id, next_index = generate_node_id(assigned_ids, next_index)
-        else:
-            node_id = node.id
-        assigned_ids.add(node_id)
+        node_id = node.id
         key = f"n{index}"
         object_keys[id(node)] = key
         id_keys.setdefault(node_id, key)
@@ -341,6 +333,12 @@ def _mark_boundaries(
         incoming[edge.target] = incoming.get(edge.target, 0) + 1
         outgoing[edge.source] = outgoing.get(edge.source, 0) + 1
     explicit_entry = any(node.entry for node in nodes if not node.missing)
+    matched_compiled_entry = any(
+        node.id in compiled_entries for node in nodes if not node.missing
+    )
+    matched_compiled_exit = any(
+        node.id in compiled_exits for node in nodes if not node.missing
+    )
     return [
         DiagramNode(
             key=node.key,
@@ -352,7 +350,7 @@ def _mark_boundaries(
                 or node.entry
                 or (
                     not explicit_entry
-                    and not compiled_entries
+                    and not matched_compiled_entry
                     and incoming.get(node.key, 0) == 0
                     and not node.missing
                 )
@@ -360,7 +358,7 @@ def _mark_boundaries(
             exit=(
                 node.id in compiled_exits
                 or (
-                    not compiled_exits
+                    not matched_compiled_exit
                     and outgoing.get(node.key, 0) == 0
                     and not node.missing
                 )
@@ -372,7 +370,13 @@ def _mark_boundaries(
 
 
 def _capability_name(node: Node) -> str:
+    from autoagent.workflow.workflow import Workflow
+
     capability = node.capability
+    if isinstance(capability, Workflow):
+        return f"Workflow: {capability.id}"
+    if isinstance(capability, Operator):
+        return capability.id
     if isinstance(capability, str):
         return capability
     if isinstance(capability, CapabilityRef):

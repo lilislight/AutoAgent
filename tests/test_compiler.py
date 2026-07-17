@@ -5,6 +5,7 @@ import unittest
 from pydantic import ValidationError
 
 from autoagent.compiler import CompileResult, Diagnostic, WorkflowCompiler, WorkflowIR
+from autoagent.operators import Operator
 from autoagent.workflow import (
     BackoffPolicy,
     CapabilityRef,
@@ -81,27 +82,43 @@ class WorkflowCompilerTests(unittest.TestCase):
         return [diagnostic.code for diagnostic in result.diagnostics]
 
     def test_single_callable_node_preserves_required_id_and_defaults_version(self):
-        workflow_ir = self.compile_ok(make_workflow(nodes=[Node(capability=task)]))
+        workflow_ir = self.compile_ok(
+            make_workflow(nodes=[Node(id="task", capability=task)])
+        )
 
         self.assertEqual("compiler_test_workflow", workflow_ir.workflow_id)
         self.assertEqual(1, workflow_ir.workflow_version)
-        self.assertEqual(["node_1"], list(workflow_ir.nodes))
-        self.assertIs(task, workflow_ir.nodes["node_1"].capability)
-        self.assertEqual(("node_1",), workflow_ir.entry_node_ids)
-        self.assertEqual(("node_1",), workflow_ir.exit_node_ids)
-        self.assertEqual({"node_1": ()}, workflow_ir.graph.outgoing_edges)
-        self.assertEqual({"node_1": ()}, workflow_ir.graph.incoming_edges)
+        self.assertEqual(["task"], list(workflow_ir.nodes))
+        capability = workflow_ir.nodes["task"].capability
+        self.assertIsInstance(capability, Operator)
+        self.assertIs(task, capability.handler)
+        self.assertEqual(("task",), workflow_ir.entry_node_ids)
+        self.assertEqual(("task",), workflow_ir.exit_node_ids)
+        self.assertEqual({"task": ()}, workflow_ir.graph.outgoing_edges)
+        self.assertEqual({"task": ()}, workflow_ir.graph.incoming_edges)
 
     def test_workflow_requires_non_empty_stable_id(self) -> None:
         with self.assertRaises(ValidationError):
-            Workflow(nodes=[Node(capability=task)])
+            Workflow(nodes=[Node(id="task", capability=task)])
         with self.assertRaises(ValidationError):
-            Workflow(id="   ", nodes=[Node(capability=task)])
+            Workflow(id="   ", nodes=[Node(id="task", capability=task)])
+
+    def test_node_requires_explicit_id(self) -> None:
+        with self.assertRaises(ValidationError):
+            Node(capability=task)
+        with self.assertRaises(ValidationError):
+            Node(id="  ", capability=task)
+
+        workflow = make_workflow()
+        with self.assertRaisesRegex(ValueError, "node_id is required"):
+            workflow.add_node(task)
 
     def test_workflow_ir_serializes_contract_descriptor_without_live_validators(self):
-        workflow_ir = self.compile_ok(make_workflow(nodes=[Node(capability=task)]))
+        workflow_ir = self.compile_ok(
+            make_workflow(nodes=[Node(id="task", capability=task)])
+        )
 
-        node = workflow_ir.model_dump()["nodes"]["node_1"]
+        node = workflow_ir.model_dump()["nodes"]["task"]
         input_contract = node["input_contract"]
         self.assertEqual(input_contract["kind"], "arguments")
         self.assertEqual(input_contract["json_schema"]["type"], "object")
@@ -126,19 +143,263 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["source", "target"], list(workflow_ir.nodes))
         self.assertEqual(["edge_source_target"], list(workflow_ir.edges))
 
-    def test_auto_node_ids_skip_manual_conflicts(self):
+    def test_direct_callable_bindings_reuse_only_the_same_object(self):
+        def factory():
+            def generated(value=None):
+                return value
+
+            return generated
+
+        first = factory()
+        second = factory()
+        workflow_ir = self.compile_ok(
+            make_workflow(
+                nodes=[
+                    Node(id="first", capability=first),
+                    Node(id="first_again", capability=first),
+                    Node(id="second", capability=second),
+                ]
+            )
+        )
+
+        first_operator = workflow_ir.nodes["first"].capability
+        self.assertIs(first_operator, workflow_ir.nodes["first_again"].capability)
+        self.assertIsNot(first_operator, workflow_ir.nodes["second"].capability)
+        self.assertNotEqual(
+            first_operator.id,
+            workflow_ir.nodes["second"].capability.id,
+        )
+
+    def test_child_workflow_is_expanded_and_parent_edges_are_rewired(self):
+        child = Workflow(id="child")
+        child.add_node(task, node_id="prepare")
+        child.add_node(other_task, node_id="finish")
+        child.add_edge("prepare", "finish", edge_id="inside")
+
+        parent = make_workflow(id="parent")
+        parent.add_node(task, node_id="start")
+        parent.add_node(child, node_id="child")
+        parent.add_node(third_task, node_id="end")
+        parent.add_edge("start", "child", edge_id="enter_child")
+        parent.add_edge("child", "end", edge_id="leave_child")
+
+        workflow_ir = self.compile_ok(parent)
+
+        self.assertEqual(
+            ["start", "child/prepare", "child/finish", "end"],
+            list(workflow_ir.nodes),
+        )
+        self.assertEqual(
+            ("child/prepare", "child/finish"),
+            (
+                workflow_ir.edges["child/inside"].from_node,
+                workflow_ir.edges["child/inside"].to_node,
+            ),
+        )
+        self.assertEqual("child/prepare", workflow_ir.edges["enter_child"].to_node)
+        self.assertEqual("child/finish", workflow_ir.edges["leave_child"].from_node)
+        self.assertEqual(("start",), workflow_ir.entry_node_ids)
+        self.assertEqual(("end",), workflow_ir.exit_node_ids)
+        child_finish = workflow_ir.nodes["child/finish"]
+        self.assertEqual("finish", child_finish.local_id)
+        self.assertEqual(("child",), child_finish.workflow_path)
+        self.assertEqual("child/prepare", child_finish.scope_node_ids["prepare"])
+
+    def test_same_child_workflow_can_be_expanded_more_than_once(self):
+        child = Workflow(id="reusable_child")
+        child.add_node(task, node_id="work")
+
+        parent = make_workflow(id="parent")
+        parent.add_node(child, node_id="first")
+        parent.add_node(child, node_id="second")
+        parent.add_edge("first", "second")
+
+        workflow_ir = self.compile_ok(parent)
+
+        self.assertEqual(["first/work", "second/work"], list(workflow_ir.nodes))
+        self.assertEqual(
+            ("first/work", "second/work"),
+            (
+                workflow_ir.edges["edge_first_second"].from_node,
+                workflow_ir.edges["edge_first_second"].to_node,
+            ),
+        )
+        self.assertIs(
+            workflow_ir.nodes["first/work"].capability,
+            workflow_ir.nodes["second/work"].capability,
+        )
+
+    def test_nested_child_workflows_expand_recursively(self):
+        inner = Workflow(id="inner")
+        inner.add_node(task, node_id="work")
+        middle = Workflow(id="middle")
+        middle.add_node(inner, node_id="inner")
+        outer = make_workflow(id="outer")
+        outer.add_node(middle, node_id="middle")
+
+        workflow_ir = self.compile_ok(outer)
+
+        self.assertEqual(["middle/inner/work"], list(workflow_ir.nodes))
+        self.assertEqual(("middle/inner/work",), workflow_ir.entry_node_ids)
+        self.assertEqual(("middle/inner/work",), workflow_ir.exit_node_ids)
+        self.assertEqual(
+            ("middle", "inner"),
+            workflow_ir.nodes["middle/inner/work"].workflow_path,
+        )
+
+    def test_child_workflow_multiple_entries_require_explicit_selection(self):
+        child = Workflow(id="multi_entry")
+        child.add_node(task, node_id="left")
+        child.add_node(other_task, node_id="left_end")
+        child.add_node(task, node_id="right")
+        child.add_node(other_task, node_id="right_end")
+        child.add_edge("left", "left_end")
+        child.add_edge("right", "right_end")
+
+        parent = make_workflow(id="ambiguous_parent")
+        parent.add_node(child, node_id="child")
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertFalse(result.ok)
+        self.assertIn("SUBWORKFLOW_ENTRY_REQUIRED", self.diagnostic_codes(result))
+
+        selected_parent = make_workflow(id="selected_parent")
+        selected_parent.add_node(
+            child,
+            node_id="child",
+            child_entry_node_id="right",
+            child_exit_node_id="right_end",
+        )
+        workflow_ir = self.compile_ok(selected_parent)
+        self.assertEqual(["child/right", "child/right_end"], list(workflow_ir.nodes))
+
+    def test_child_workflow_multiple_reachable_exits_require_selection(self):
+        child = Workflow(id="multi_exit")
+        child.add_node(task, node_id="start")
+        child.add_node(other_task, node_id="success")
+        child.add_node(third_task, node_id="failure")
+        child.add_edge("start", "success", condition=edge_condition)
+        child.add_edge("start", "failure", condition=lambda _ctx: False)
+
+        parent = make_workflow(id="ambiguous_exit_parent")
+        parent.add_node(child, node_id="child")
+        result = WorkflowCompiler().compile(parent)
+        self.assertFalse(result.ok)
+        self.assertIn("SUBWORKFLOW_EXIT_REQUIRED", self.diagnostic_codes(result))
+
+        selected_parent = make_workflow(id="selected_exit_parent")
+        selected_parent.add_node(
+            child,
+            node_id="child",
+            child_exit_node_id="success",
+        )
+        selected_parent.add_node(task, node_id="after")
+        selected_parent.add_edge("child", "after")
+        workflow_ir = self.compile_ok(selected_parent)
+        self.assertEqual("child/success", workflow_ir.edges["edge_child_after"].from_node)
+        self.assertIn("child/failure", workflow_ir.exit_node_ids)
+        self.assertIn("after", workflow_ir.exit_node_ids)
+
+    def test_child_boundary_selector_must_name_a_valid_boundary(self):
+        child = Workflow(id="child")
+        child.add_node(task, node_id="start")
+        child.add_node(other_task, node_id="finish")
+        child.add_edge("start", "finish")
+        parent = make_workflow(id="parent")
+        parent.add_node(
+            child,
+            node_id="child",
+            child_entry_node_id="finish",
+        )
+
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertFalse(result.ok)
+        self.assertIn("SUBWORKFLOW_ENTRY_INVALID", self.diagnostic_codes(result))
+
+    def test_reachable_invalid_child_edge_is_not_hidden_by_expansion(self):
+        child = Workflow(id="child")
+        child.add_node(task, node_id="start")
+        child.add_node(other_task, node_id="finish")
+        child.add_edge("start", "finish", condition=edge_condition)
+        child.add_edge("start", "missing", condition=lambda _ctx: False)
+        parent = make_workflow(id="parent")
+        parent.add_node(child, node_id="child")
+
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertFalse(result.ok)
+        self.assertIn("EDGE_UNKNOWN_NODE", self.diagnostic_codes(result))
+
+    def test_expanded_node_id_collision_is_rejected(self):
+        child = Workflow(id="child", nodes=[Node(id="work", capability=task)])
+        parent = make_workflow(id="parent")
+        parent.add_node(child, node_id="child")
+        parent.add_node(other_task, node_id="child/work")
+
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertFalse(result.ok)
+        self.assertIn("NODE_DUPLICATE_ID", self.diagnostic_codes(result))
+
+    def test_child_workflow_placeholder_rejects_node_execution_behavior(self):
+        child = Workflow(id="child", nodes=[Node(id="work", capability=task)])
+        parent = make_workflow(id="parent")
+        parent.add_node(
+            child,
+            node_id="child",
+            input_mapping=input_mapping,
+            policy=NodePolicy(timeout=TimeoutPolicy(timeout_ms=10)),
+        )
+
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            "SUBWORKFLOW_NODE_BEHAVIOR_UNSUPPORTED",
+            self.diagnostic_codes(result),
+        )
+
+    def test_map_policy_cannot_target_child_workflow_placeholder(self):
+        child = Workflow(id="child", nodes=[Node(id="work", capability=task)])
+        parent = make_workflow(id="parent")
+        parent.add_node(task, node_id="start")
+        parent.add_node(child, node_id="child")
+        parent.add_edge(
+            "start",
+            "child",
+            policy=EdgePolicy(map=MapPolicy()),
+        )
+
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertFalse(result.ok)
+        self.assertIn("SUBWORKFLOW_MAP_UNSUPPORTED", self.diagnostic_codes(result))
+
+    def test_child_boundary_selectors_are_rejected_for_regular_nodes(self):
         workflow = make_workflow(
             nodes=[
-                Node(id="node_1", capability=task),
-                Node(capability=other_task),
-                Node(id="node_3", capability=third_task),
-                Node(capability=task),
+                Node(
+                    id="task",
+                    capability=task,
+                    child_entry_node_id="other",
+                )
             ]
         )
 
-        workflow_ir = self.compile_ok(workflow)
+        result = WorkflowCompiler().compile(workflow)
 
-        self.assertEqual(["node_1", "node_2", "node_3", "node_4"], list(workflow_ir.nodes))
+        self.assertFalse(result.ok)
+        self.assertIn("SUBWORKFLOW_SELECTOR_INVALID", self.diagnostic_codes(result))
+
+    def test_recursive_child_workflow_is_rejected(self):
+        workflow = make_workflow(id="recursive")
+        workflow.add_node(workflow, node_id="self")
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertIn("SUBWORKFLOW_RECURSION", self.diagnostic_codes(result))
 
     def test_auto_edge_ids_use_endpoint_ids_and_duplicate_suffix(self):
         workflow = make_workflow(
@@ -219,7 +480,7 @@ class WorkflowCompilerTests(unittest.TestCase):
             set(self.diagnostic_codes(result)),
         )
 
-    def test_explicit_entry_takes_precedence_over_inferred_entries(self):
+    def test_explicit_entry_with_incoming_edge_is_rejected(self):
         workflow = make_workflow(
             nodes=[
                 Node(id="first", capability=task),
@@ -228,10 +489,34 @@ class WorkflowCompilerTests(unittest.TestCase):
             edges=[Edge(from_node="first", to_node="second")],
         )
 
-        workflow_ir = self.compile_ok(workflow)
+        result = WorkflowCompiler().compile(workflow)
 
-        self.assertEqual(("second",), workflow_ir.entry_node_ids)
-        self.assertFalse(workflow_ir.nodes["first"].entry)
+        self.assertFalse(result.ok)
+        self.assertIn("WF_ENTRY_HAS_INCOMING_EDGE", self.diagnostic_codes(result))
+
+    def test_explicit_entry_with_self_loop_is_rejected(self):
+        workflow = make_workflow(
+            nodes=[Node(id="loop", capability=task, entry=True)],
+            edges=[Edge(from_node="loop", to_node="loop", condition=edge_condition)],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertIn("WF_ENTRY_HAS_INCOMING_EDGE", self.diagnostic_codes(result))
+
+    def test_explicit_entry_does_not_hide_other_inferred_entries(self):
+        workflow_ir = self.compile_ok(
+            make_workflow(
+                nodes=[
+                    Node(id="first", capability=task),
+                    Node(id="second", capability=other_task, entry=True),
+                ]
+            )
+        )
+
+        self.assertEqual(("first", "second"), workflow_ir.entry_node_ids)
+        self.assertTrue(workflow_ir.nodes["first"].entry)
         self.assertTrue(workflow_ir.nodes["second"].entry)
 
     def test_infers_entries_and_exits(self):
@@ -470,10 +755,12 @@ class WorkflowCompilerTests(unittest.TestCase):
     def test_loop_node_with_unconditional_fan_out_is_rejected(self):
         workflow = make_workflow(
             nodes=[
-                Node(id="loop", capability=task, entry=True),
+                Node(id="start", capability=task, entry=True),
+                Node(id="loop", capability=task),
                 Node(id="final", capability=other_task),
             ],
             edges=[
+                Edge(from_node="start", to_node="loop"),
                 Edge(from_node="loop", to_node="loop"),
                 Edge(from_node="loop", to_node="final", condition=edge_condition),
             ],

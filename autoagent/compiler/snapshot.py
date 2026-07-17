@@ -99,6 +99,9 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
         nodes.append(
             {
                 "id": node.id,
+                "local_id": node.local_id,
+                "scope_node_ids": dict(node.scope_node_ids),
+                "workflow_path": list(node.workflow_path),
                 "capability": _binding_definition(node.capability),
                 "input_contract": node.input_contract.describe(),
                 "operator_output_contract": node.operator_output_contract.describe(),
@@ -116,6 +119,11 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
         edges.append(
             {
                 "id": edge.id,
+                "local_id": edge.local_id,
+                "local_from_node": edge.local_from_node,
+                "local_to_node": edge.local_to_node,
+                "scope_node_ids": dict(edge.scope_node_ids),
+                "workflow_path": list(edge.workflow_path),
                 "from_node": edge.from_node,
                 "to_node": edge.to_node,
                 "condition": _hook_definition(edge.condition),
@@ -150,6 +158,9 @@ def _operator_manifests(
     manifests: dict[str, OperatorManifest] = {}
     for node in workflow_ir.nodes.values():
         binding = node.capability
+        if isinstance(binding, Operator):
+            manifests[binding.id] = binding.manifest
+            continue
         if callable(binding):
             operator = Operator.from_callable(binding)
             manifests[operator.id] = operator.manifest
@@ -171,6 +182,8 @@ def _operator_manifests(
 
 
 def _binding_definition(binding: Any) -> dict[str, Any]:
+    if isinstance(binding, Operator):
+        return {"kind": "operator", "id": binding.id}
     if callable(binding):
         return {"kind": "operator", "id": callable_operator_id(binding)}
     if isinstance(binding, CapabilityRef):

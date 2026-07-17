@@ -1,31 +1,59 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from autoagent.operators.operator import Operator
 from autoagent.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.workflow.mapping import InputMapping, OutputBinding
 from autoagent.workflow.policy import NodePolicy
+
+if TYPE_CHECKING:
+    from autoagent.workflow.workflow import Workflow
 
 
 class Node(BaseModel):
     """Static schedulable execution unit inside a Workflow source definition."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        validate_assignment=True,
+    )
 
-    id: str | None = Field(
-        default=None,
+    id: str = Field(
+        description="Required unique node id inside one Workflow."
+    )
+    capability: (
+        Callable[..., Any]
+        | Operator
+        | str
+        | CapabilityRef
+        | OperatorRef
+        | SystemCommand
+        | Workflow
+    ) = Field(
         description=(
-            "Optional unique node id inside one Workflow. Compiler assigns one "
-            "before emitting Workflow IR when omitted."
+            "Executable binding for this node. A direct Callable is compiled "
+            "into a direct Operator; str is shorthand for CapabilityRef; a "
+            "Workflow is recursively expanded at compile time."
         )
     )
-    capability: Callable[..., Any] | str | CapabilityRef | OperatorRef | SystemCommand = Field(
+    child_entry_node_id: str | None = Field(
+        default=None,
         description=(
-            "Capability executed by this node. str is shorthand for CapabilityRef."
-        )
+            "Source node id selected as the entry when capability is a child "
+            "Workflow with multiple entries."
+        ),
+    )
+    child_exit_node_id: str | None = Field(
+        default=None,
+        description=(
+            "Source node id selected as the exit when capability is a child "
+            "Workflow with multiple exits."
+        ),
     )
     name: str | None = Field(
         default=None,
@@ -73,3 +101,27 @@ class Node(BaseModel):
             "or integrations."
         ),
     )
+
+    # Compiler-only provenance used after recursive expansion. Authors cannot
+    # provide these private values on the source model.
+    _local_id: str | None = PrivateAttr(default=None)
+    _scope_node_ids: dict[str, str] = PrivateAttr(default_factory=dict)
+    _workflow_path: tuple[str, ...] = PrivateAttr(default_factory=tuple)
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        resolved = value.strip()
+        if not resolved:
+            raise ValueError("Node id cannot be empty.")
+        return resolved
+
+    @field_validator("child_entry_node_id", "child_exit_node_id")
+    @classmethod
+    def validate_child_boundary_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        resolved = value.strip()
+        if not resolved:
+            raise ValueError("Child Workflow boundary node id cannot be empty.")
+        return resolved

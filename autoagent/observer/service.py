@@ -389,6 +389,8 @@ def _workflow_graph(snapshot: WorkflowVersionSnapshot) -> WorkflowGraphView:
         nodes=tuple(
             WorkflowNodeView(
                 id=str(node["id"]),
+                local_id=node.get("local_id"),
+                workflow_path=tuple(node.get("workflow_path", [])),
                 name=node.get("name"),
                 description=node.get("description"),
                 capability=dict(node["capability"]),
@@ -404,6 +406,8 @@ def _workflow_graph(snapshot: WorkflowVersionSnapshot) -> WorkflowGraphView:
         edges=tuple(
             WorkflowEdgeView(
                 id=str(edge["id"]),
+                local_id=edge.get("local_id"),
+                workflow_path=tuple(edge.get("workflow_path", [])),
                 from_node=str(edge["from_node"]),
                 to_node=str(edge["to_node"]),
                 order=int(edge["order"]),

@@ -24,6 +24,22 @@ def target(value: str) -> str:
 
 
 class WorkflowDiagramTests(unittest.TestCase):
+    def test_child_workflow_placeholder_keeps_source_boundary_markers(self) -> None:
+        child = Workflow(
+            id="child",
+            nodes=[Node(id="work", capability=source)],
+        )
+        parent = Workflow(id="parent")
+        parent.add_node(child, node_id="child")
+
+        diagram = parent.diagram()
+
+        self.assertTrue(diagram.compiled)
+        self.assertEqual(len(diagram.nodes), 1)
+        self.assertTrue(diagram.nodes[0].entry)
+        self.assertTrue(diagram.nodes[0].exit)
+        self.assertEqual(diagram.nodes[0].capability, "Workflow: child")
+
     def test_valid_workflow_generates_directed_mermaid(self) -> None:
         workflow = Workflow(
             id="preview",

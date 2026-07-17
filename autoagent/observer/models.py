@@ -25,6 +25,8 @@ class WorkflowSummary(ObservationModel):
 
 class WorkflowNodeView(ObservationModel):
     id: str
+    local_id: str | None = None
+    workflow_path: tuple[str, ...] = ()
     name: str | None = None
     description: str | None = None
     capability: dict[str, Any]
@@ -38,6 +40,8 @@ class WorkflowNodeView(ObservationModel):
 
 class WorkflowEdgeView(ObservationModel):
     id: str
+    local_id: str | None = None
+    workflow_path: tuple[str, ...] = ()
     from_node: str
     to_node: str
     order: int

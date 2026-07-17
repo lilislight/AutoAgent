@@ -147,15 +147,23 @@ class Operator:
         return result
 
     @classmethod
-    def from_callable(cls, handler: Callable[..., Any]) -> Operator:
+    def from_callable(
+        cls,
+        handler: Callable[..., Any],
+        *,
+        operator_id: str | None = None,
+    ) -> Operator:
         """Create a virtual Operator using the same defaults as registration.
 
-        Direct callables are not a separate recovery mechanism. They have a
-        stable module/qualified-name identity, version 1, and ``never`` recovery
-        unless a future explicit callable wrapper provides different metadata.
+        Direct callables are not a separate recovery mechanism. Without an
+        explicit operator_id they use module/qualified-name identity. Compiler
+        supplies a node-stable binding id so distinct Callable objects become
+        distinct Operators while repeated use of one object can reuse it.
+        Direct Operators keep version 1 and ``never`` recovery unless the
+        developer binds an explicit Operator object with different metadata.
         """
 
-        return cls(id=callable_operator_id(handler), handler=handler)
+        return cls(id=operator_id or callable_operator_id(handler), handler=handler)
 
 
 def _call_handler(handler: Callable[..., Any], input: Any) -> Any:

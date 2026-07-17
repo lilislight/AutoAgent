@@ -21,10 +21,10 @@ class OperatorResolutionError(Exception):
 class OperatorResolver:
     """Resolve a compiled node binding into one concrete executable Operator.
 
-    Callable bindings bypass registries. OperatorRef resolves one exact
-    implementation. CapabilityRef obtains all enabled implementations and
-    applies the node's CapabilitySelectionPolicy for every NodeExecution, which
-    preserves late binding after Workflow compilation.
+    Direct Operator and legacy Callable bindings bypass registries. OperatorRef
+    resolves one exact registered implementation. CapabilityRef obtains all
+    enabled implementations and applies the node's CapabilitySelectionPolicy
+    for every NodeExecution, preserving late binding after compilation.
     """
 
     def __init__(
@@ -48,6 +48,15 @@ class OperatorResolver:
         policy: CapabilitySelectionPolicy | None = None,
     ) -> tuple[Operator, ...]:
         """Return candidates in execution order for primary/fallback calls."""
+
+        if isinstance(binding, Operator):
+            if not binding.enabled:
+                raise OperatorResolutionError(
+                    "OPERATOR_UNAVAILABLE",
+                    f"Operator is disabled: {binding.id}",
+                    {"operator_id": binding.id},
+                )
+            return (binding,)
 
         if callable(binding):
             return (Operator.from_callable(binding),)

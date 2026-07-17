@@ -82,6 +82,18 @@ class NodeIR(BaseModel):
     )
 
     id: str = Field(description="Compiled unique node id.")
+    local_id: str | None = Field(
+        default=None,
+        description="Source node id visible in its authoring Workflow scope.",
+    )
+    scope_node_ids: dict[str, str] = Field(
+        default_factory=dict,
+        description="Source node ids to expanded ids used by hook output lookups.",
+    )
+    workflow_path: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Containing child Workflow node path; empty at root.",
+    )
     name: str | None = Field(
         default=None,
         description="Optional display name retained for tracing and graph views.",
@@ -152,6 +164,26 @@ class EdgeIR(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     id: str = Field(description="Compiled unique edge id.")
+    local_id: str | None = Field(
+        default=None,
+        description="Source edge id visible in its authoring Workflow scope.",
+    )
+    local_from_node: str | None = Field(
+        default=None,
+        description="Source endpoint id visible to the condition hook.",
+    )
+    local_to_node: str | None = Field(
+        default=None,
+        description="Target endpoint id visible to the condition hook.",
+    )
+    scope_node_ids: dict[str, str] = Field(
+        default_factory=dict,
+        description="Source node ids to expanded ids for condition output lookups.",
+    )
+    workflow_path: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Containing child Workflow node path; empty at root.",
+    )
     from_node: str = Field(description="Compiled source node id.")
     to_node: str = Field(description="Compiled target node id.")
     condition: Any | None = Field(

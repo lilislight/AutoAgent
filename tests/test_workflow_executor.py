@@ -32,6 +32,80 @@ def finish_message(text: str) -> str:
 
 
 class WorkflowExecutorTests(unittest.TestCase):
+    def test_expanded_child_workflow_executes_with_local_hook_ids(self) -> None:
+        observed_condition: list[tuple[str, str, str, int]] = []
+        observed_binding: list[tuple[str, int]] = []
+
+        def parent_start(value: int) -> int:
+            return value
+
+        def child_first(value: int) -> int:
+            return value + 1
+
+        def child_second(value: int) -> int:
+            return value * 2
+
+        def parent_finish(value: int) -> int:
+            return value + 3
+
+        def child_condition(ctx) -> bool:
+            observed_condition.append(
+                (
+                    ctx.edge_id,
+                    ctx.source_node_id,
+                    ctx.target_node_id,
+                    ctx.outputs.latest("first"),
+                )
+            )
+            return True
+
+        def child_binding(ctx) -> None:
+            observed_binding.append((ctx.node_id, ctx.outputs.latest("first")))
+
+        child = Workflow(id="child")
+        child.add_node(
+            child_first,
+            node_id="first",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        child.add_node(
+            child_second,
+            node_id="second",
+            input_mapping=lambda ctx: {"value": ctx.outputs.latest("first")},
+            output_binding=child_binding,
+        )
+        child.add_edge(
+            "first",
+            "second",
+            edge_id="continue",
+            condition=child_condition,
+        )
+
+        parent = Workflow(id="expanded_child_execution")
+        parent.add_node(parent_start, node_id="start")
+        parent.add_node(child, node_id="child")
+        parent.add_node(
+            parent_finish,
+            node_id="finish",
+            input_mapping=lambda ctx: {"value": ctx.outputs.latest("child")},
+        )
+        parent.add_edge("start", "child")
+        parent.add_edge("child", "finish")
+
+        invocation = AutoAgentApp().invoke(parent, input={"value": 2})
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(invocation.result, {"output": 9})
+        self.assertEqual(
+            ["start", "child/first", "child/second", "finish"],
+            [execution.node_id for execution in invocation.node_executions],
+        )
+        self.assertEqual(
+            [("continue", "first", "second", 3)],
+            observed_condition,
+        )
+        self.assertEqual([("second", 3)], observed_binding)
+
     def test_operator_call_is_checkpointed_before_user_handler_runs(self) -> None:
         async def scenario() -> None:
             handler_started = asyncio.Event()
@@ -727,8 +801,10 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value + 1
 
         workflow = Workflow(id="ambiguous_loop")
-        workflow.add_node(agent, node_id="agent", entry=True)
+        workflow.add_node(lambda: {}, node_id="start", entry=True)
+        workflow.add_node(agent, node_id="agent")
         workflow.add_node(agent, node_id="final")
+        workflow.add_edge("start", "agent")
         workflow.add_edge(
             "agent",
             "agent",
@@ -829,14 +905,16 @@ class WorkflowExecutorTests(unittest.TestCase):
             return True
 
         workflow = Workflow(id="limited_loop")
+        workflow.add_node(lambda: None, node_id="start", entry=True)
         workflow.add_node(
             loop_node,
             node_id="loop",
-            entry=True,
+            input_mapping=lambda _ctx: {},
             policy=NodePolicy(
                 resource=ResourcePolicy(max_node_executions_per_invocation=1)
             ),
         )
+        workflow.add_edge("start", "loop")
         workflow.edges.append(
             Edge(
                 from_node="loop",
@@ -1023,6 +1101,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow = Workflow(id="retry_then_fallback")
         workflow.add_node(
             "retry_fallback",
+            node_id="retry_fallback",
             policy=NodePolicy(retry=RetryPolicy(max_attempts=2)),
         )
 

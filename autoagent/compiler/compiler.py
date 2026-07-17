@@ -5,10 +5,8 @@ from typing import Any
 
 from autoagent.compiler.constants import COMPILER_VERSION, WORKFLOW_IR_VERSION
 from autoagent.compiler.diagnostic import CompileResult, Diagnostic
-from autoagent.compiler.id_generation import (
-    generate_edge_id,
-    generate_node_id,
-)
+from autoagent.compiler.expansion import expand_child_workflows
+from autoagent.compiler.id_generation import generate_edge_id
 from autoagent.compiler.snapshot import WorkflowVersionSnapshot
 from autoagent.compiler.workflow_ir import (
     EdgeIR,
@@ -17,12 +15,13 @@ from autoagent.compiler.workflow_ir import (
     NodeIR,
     WorkflowIR,
 )
-from autoagent.operators import CapabilityRegistry, OperatorRegistry
+from autoagent.operators import CapabilityRegistry, Operator, OperatorRegistry
 from autoagent.operators.contract import (
     OperatorContract,
     callable_contract,
     value_contract,
 )
+from autoagent.operators.manifest import callable_operator_id
 from autoagent.workflow import (
     CapabilityRef,
     Edge,
@@ -71,6 +70,7 @@ class WorkflowCompiler:
         diagnostics: list[Diagnostic] = []
         workflow_id = workflow.id
         workflow_version = workflow.version if workflow.version is not None else 1
+        workflow = expand_child_workflows(workflow, diagnostics)
 
         node_ids, node_object_ids = self._compile_node_ids(workflow, diagnostics)
         edge_refs = self._compile_edge_refs(
@@ -147,7 +147,14 @@ class WorkflowCompiler:
         duplicate_ids: set[str] = set()
 
         for node in workflow.nodes:
-            if node.id is None:
+            if not node.id:
+                diagnostics.append(
+                    Diagnostic(
+                        code="NODE_ID_REQUIRED",
+                        severity="error",
+                        message="Every node must define a non-empty node id.",
+                    )
+                )
                 continue
             if node.id in used_manual_ids:
                 duplicate_ids.add(node.id)
@@ -165,15 +172,10 @@ class WorkflowCompiler:
 
         node_ids: dict[int, str] = {}
         object_id_to_node_id: dict[int, str] = {}
-        next_index = 1
-        assigned_ids = set(used_manual_ids)
-
         for node in workflow.nodes:
-            if node.id is None:
-                node_id, next_index = generate_node_id(assigned_ids, next_index)
-            else:
-                node_id = node.id
-            assigned_ids.add(node_id)
+            if not node.id:
+                continue
+            node_id = node.id
             node_ids[id(node)] = node_id
             object_id_to_node_id[id(node)] = node_id
 
@@ -241,12 +243,32 @@ class WorkflowCompiler:
         diagnostics: list[Diagnostic],
     ) -> dict[str, NodeIR]:
         nodes: dict[str, NodeIR] = {}
+        direct_operators: dict[int, Operator] = {}
 
         for node in workflow.nodes:
+            if id(node) not in node_ids:
+                continue
             node_id = node_ids[id(node)]
-            capability = self._compile_capability(node.capability, node_id, diagnostics)
+            source_capability = node.capability
+            capability = self._compile_capability(
+                source_capability,
+                node_id,
+                diagnostics,
+            )
             if capability is None:
                 continue
+            if callable(capability):
+                callable_identity = id(capability)
+                capability = direct_operators.get(callable_identity)
+                if capability is None:
+                    capability = Operator.from_callable(
+                        source_capability,
+                        operator_id=(
+                            f"{callable_operator_id(source_capability)}"
+                            f"@{node_id}"
+                        ),
+                    )
+                    direct_operators[callable_identity] = capability
 
             contract = self._binding_contract(capability)
             if contract is None:
@@ -281,6 +303,9 @@ class WorkflowCompiler:
 
             nodes[node_id] = NodeIR(
                 id=node_id,
+                local_id=node._local_id or node_id,
+                scope_node_ids=node._scope_node_ids,
+                workflow_path=node._workflow_path,
                 name=node.name,
                 description=node.description,
                 capability=capability,
@@ -298,10 +323,20 @@ class WorkflowCompiler:
 
     def _compile_capability(
         self,
-        capability: Callable[..., Any] | str | CapabilityRef | OperatorRef | SystemCommand,
+        capability: (
+            Callable[..., Any]
+            | Operator
+            | str
+            | CapabilityRef
+            | OperatorRef
+            | SystemCommand
+        ),
         node_id: str,
         diagnostics: list[Diagnostic],
     ) -> Any | None:
+        if isinstance(capability, Operator):
+            return capability
+
         if callable(capability):
             _, issues = callable_contract(capability)
             for issue in issues:
@@ -408,6 +443,8 @@ class WorkflowCompiler:
         return None
 
     def _binding_contract(self, binding: Any) -> OperatorContract | None:
+        if isinstance(binding, Operator):
+            return binding.contract
         if callable(binding):
             contract, _ = callable_contract(binding)
             return contract
@@ -501,6 +538,11 @@ class WorkflowCompiler:
 
             edges[edge_id] = EdgeIR(
                 id=edge_id,
+                local_id=edge._local_id or edge_id,
+                local_from_node=edge._local_from_node or from_node,
+                local_to_node=edge._local_to_node or to_node,
+                scope_node_ids=edge._scope_node_ids,
+                workflow_path=edge._workflow_path,
                 from_node=from_node,
                 to_node=to_node,
                 condition=edge.condition,
@@ -546,15 +588,31 @@ class WorkflowCompiler:
         graph: GraphIR,
         diagnostics: list[Diagnostic],
     ) -> tuple[str, ...]:
-        explicit_entries = tuple(
-            node_id for node_id, node in nodes.items() if node.entry
-        )
-        if explicit_entries:
-            return explicit_entries
-
-        inferred_entries = tuple(
+        inferred_entries = [
             node_id for node_id in nodes if not graph.incoming_edges.get(node_id)
-        )
+        ]
+        entry_ids = set(inferred_entries)
+
+        # Explicit entry markers assert the same property inferred from the
+        # graph: an entry has no incoming edge. They never replace inference,
+        # so every other zero-incoming node remains an entry as well.
+        for node_id, node in nodes.items():
+            if not node.entry or node_id in entry_ids:
+                continue
+            diagnostics.append(
+                Diagnostic(
+                    code="WF_ENTRY_HAS_INCOMING_EDGE",
+                    severity="error",
+                    message="An explicit entry node cannot have incoming edges.",
+                    subject=node_id,
+                    metadata={
+                        "incoming_edge_ids": list(
+                            graph.incoming_edges.get(node_id, ())
+                        ),
+                    },
+                )
+            )
+
         if not inferred_entries:
             diagnostics.append(
                 Diagnostic(
@@ -563,7 +621,7 @@ class WorkflowCompiler:
                     message="Workflow has no entry node.",
                 )
             )
-        return inferred_entries
+        return tuple(inferred_entries)
 
     def _infer_exit_node_ids(
         self,

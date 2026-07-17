@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from autoagent.workflow.node import Node
 from autoagent.workflow.policy import EdgePolicy
@@ -55,3 +55,10 @@ class Edge(BaseModel):
             "optimizer notes, or integrations."
         ),
     )
+
+    # Compiler-only provenance for condition contexts after child expansion.
+    _local_id: str | None = PrivateAttr(default=None)
+    _local_from_node: str | None = PrivateAttr(default=None)
+    _local_to_node: str | None = PrivateAttr(default=None)
+    _scope_node_ids: dict[str, str] = PrivateAttr(default_factory=dict)
+    _workflow_path: tuple[str, ...] = PrivateAttr(default_factory=tuple)

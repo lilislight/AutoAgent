@@ -12,6 +12,7 @@ from autoagent import (
     CapabilitySelectionPolicy,
     Node,
     NodePolicy,
+    Operator,
     OperatorRef,
     Workflow,
     capability,
@@ -218,6 +219,7 @@ class OperatorRegistrationTests(unittest.TestCase):
             )
         with self.assertRaises(ValidationError):
             Node(
+                id="handler",
                 capability=handler,
                 input_schema={"type": "object"},
             )
@@ -312,6 +314,28 @@ class OperatorRegistrationTests(unittest.TestCase):
 
 
 class OperatorExecutionTests(unittest.TestCase):
+    def test_direct_operator_executes_without_app_registration(self) -> None:
+        direct = Operator(
+            id="direct_uppercase",
+            handler=lambda value: value.upper(),
+            version=2,
+        )
+        workflow = Workflow(
+            id="direct_operator",
+            nodes=[Node(id="uppercase", capability=direct)],
+        )
+
+        invocation = AutoAgentApp().invoke(
+            workflow,
+            input={"value": "hello"},
+        )
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual({"output": "HELLO"}, invocation.result)
+        call = invocation.node_executions[0].operator_calls[0]
+        self.assertEqual("direct_uppercase", call.operator_id)
+        self.assertEqual(2, call.operator_manifest.version)
+
     def test_pydantic_input_is_validated_and_passed_to_operator(self) -> None:
         app = AutoAgentApp()
 
@@ -621,7 +645,7 @@ class OperatorExecutionTests(unittest.TestCase):
             return value.upper()
 
         workflow = Workflow(id="string_shorthand")
-        workflow.add_node("uppercase")
+        workflow.add_node("uppercase", node_id="uppercase")
 
         invocation = app.invoke(workflow, input={"value": "hello"})
 

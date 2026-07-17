@@ -759,6 +759,11 @@ class WorkflowExecutor:
             invocation=invocation,
             request=request,
         )
+        scoped_incoming = self._scope_incoming_outputs(
+            workflow_ir=workflow_ir,
+            node_ir=node_ir,
+            incoming=incoming,
+        )
         if map_policy is not None:
             if len(incoming) != 1:
                 raise ValueError("MapPolicy requires exactly one incoming activation.")
@@ -770,9 +775,9 @@ class WorkflowExecutor:
                     invocation_input=invocation.input,
                     invocation_context=invocation.context,
                     session_context=session.context,
-                    outputs=invocation.outputs,
-                    node_id=node_ir.id,
-                    incoming=incoming,
+                    outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
+                    node_id=node_ir.local_id or node_ir.id,
+                    incoming=scoped_incoming,
                 ),
             )
 
@@ -784,9 +789,37 @@ class WorkflowExecutor:
             return incoming[0].value
 
         values: dict[str, Any] = {}
-        for item in incoming:
+        for item in scoped_incoming:
             values[item.source_node_id] = item.value
         return values
+
+    def _scope_incoming_outputs(
+        self,
+        *,
+        workflow_ir: WorkflowIR,
+        node_ir: NodeIR,
+        incoming: tuple[IncomingOutput, ...],
+    ) -> tuple[IncomingOutput, ...]:
+        """Expose local ids for activations authored in the same child scope."""
+
+        scoped: list[IncomingOutput] = []
+        for item in incoming:
+            edge = workflow_ir.edges.get(item.edge_id)
+            same_scope = edge is not None and edge.workflow_path == node_ir.workflow_path
+            edge_id = item.edge_id
+            source_node_id = item.source_node_id
+            if same_scope:
+                edge_id = edge.local_id or edge.id
+                source_node_id = edge.local_from_node or item.source_node_id
+            scoped.append(
+                IncomingOutput(
+                    edge_id=edge_id,
+                    source_node_id=source_node_id,
+                    source_execution_id=item.source_execution_id,
+                    value=item.value,
+                )
+            )
+        return tuple(scoped)
 
     def _build_incoming_outputs(
         self,
@@ -830,8 +863,8 @@ class WorkflowExecutor:
                 invocation_input=invocation.input,
                 invocation_context=invocation.context,
                 session_context=session.context,
-                outputs=invocation.outputs,
-                node_id=node_ir.id,
+                outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
+                node_id=node_ir.local_id or node_ir.id,
                 output=output,
             ),
         )

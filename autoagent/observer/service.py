@@ -26,7 +26,6 @@ from autoagent.observer.projection import project_runtime_events
 from autoagent.observer.security import redact_sensitive_data
 from autoagent.runtime import (
     Invocation,
-    JsonRuntimeSerializer,
     RuntimeEvent,
     RuntimeSerializer,
     RuntimeStore,
@@ -51,7 +50,7 @@ class ObservationService:
         if not 1 <= event_page_size <= 9999:
             raise ValueError("event_page_size must be between 1 and 9999.")
         self.runtime_store = runtime_store
-        self.serializer = serializer or JsonRuntimeSerializer()
+        self.serializer = serializer or runtime_store.serializer
         self.bootstrap_event_limit = bootstrap_event_limit
         self.event_page_size = event_page_size
         self.redactor = redactor or redact_sensitive_data
@@ -139,6 +138,7 @@ class ObservationService:
         session_id: UUID,
         invocation_id: UUID,
         after_sequence: int = 0,
+        before_sequence: int | None = None,
         limit: int = 1000,
         visibility: str | None = None,
     ) -> tuple[RuntimeEvent, ...]:
@@ -147,6 +147,7 @@ class ObservationService:
             session_id=session_id,
             invocation_id=invocation_id,
             after_sequence=after_sequence,
+            before_sequence=before_sequence,
             limit=limit,
             visibility=visibility,
         )
@@ -158,6 +159,7 @@ class ObservationService:
         session_id: UUID,
         invocation_id: UUID,
         after_sequence: int = 0,
+        before_sequence: int | None = None,
         limit: int = 1000,
         visibility: str | None = None,
     ) -> RuntimeEventPage:
@@ -168,14 +170,19 @@ class ObservationService:
             session_id=session_id,
             invocation_id=invocation_id,
             after_sequence=after_sequence,
+            before_sequence=before_sequence,
             limit=limit + 1,
             visibility=visibility,
         )
-        page = tuple(self._event_view(value) for value in values[:limit])
+        selected = values[-limit:] if before_sequence is not None else values[:limit]
+        page = tuple(self._event_view(value) for value in selected)
         return RuntimeEventPage(
             events=page,
             next_after_sequence=(
                 page[-1].sequence if page else after_sequence
+            ),
+            previous_before_sequence=(
+                page[0].sequence if page else before_sequence
             ),
             has_more=len(values) > limit,
         )

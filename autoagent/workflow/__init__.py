@@ -2,6 +2,7 @@ from autoagent.workflow.capability import CapabilityRef, OperatorRef, SystemComm
 from autoagent.workflow.edge import Edge
 from autoagent.workflow.diagram import DiagramEdge, DiagramNode, WorkflowDiagram
 from autoagent.workflow.mapping import InputMapping, OutputBinding
+from autoagent.workflow.hooks import HookVersion, workflow_hook
 from autoagent.workflow.node import Node
 from autoagent.workflow.policy import (
     BackoffPolicy,
@@ -28,6 +29,7 @@ __all__ = [
     "Node",
     "NodePolicy",
     "InputMapping",
+    "HookVersion",
     "OutputBinding",
     "OperatorRef",
     "ReplicationPolicy",
@@ -37,4 +39,5 @@ __all__ = [
     "TimeoutPolicy",
     "Workflow",
     "WorkflowDiagram",
+    "workflow_hook",
 ]

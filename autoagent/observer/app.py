@@ -283,6 +283,7 @@ class ObservationApp:
             session_id: UUID,
             invocation_id: UUID,
             after_sequence: int = Query(default=0, ge=0),
+            before_sequence: int | None = Query(default=None, ge=1),
             limit: int = Query(default=1000, ge=1, le=9999),
             visibility: str | None = None,
         ) -> RuntimeEventPage:
@@ -291,6 +292,7 @@ class ObservationApp:
                     session_id=session_id,
                     invocation_id=invocation_id,
                     after_sequence=after_sequence,
+                    before_sequence=before_sequence,
                     limit=limit,
                     visibility=visibility,
                 )

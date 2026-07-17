@@ -4,6 +4,8 @@ import asyncio
 import inspect
 import json
 import unittest
+from pathlib import Path
+from typing import Any
 
 from autoagent import AutoAgentApp, ObservationApp
 from autoagent.observer import ObservationService, project_runtime_events
@@ -173,6 +175,29 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(page.has_more)
         self.assertEqual(page.events[-1].sequence, page.next_after_sequence)
 
+        all_events = await store.alist_runtime_events(
+            session_id=session.id,
+            invocation_id=invocation.id,
+            limit=10_000,
+        )
+        reverse_page = await service.list_event_page(
+            session_id=session.id,
+            invocation_id=invocation.id,
+            before_sequence=all_events[-1].sequence + 1,
+            limit=2,
+        )
+        previous_page = await service.list_event_page(
+            session_id=session.id,
+            invocation_id=invocation.id,
+            before_sequence=reverse_page.previous_before_sequence,
+            limit=2,
+        )
+        self.assertEqual(all_events[-2:], reverse_page.events)
+        self.assertEqual(
+            all_events[-4:-2],
+            previous_page.events,
+        )
+
     async def test_runtime_payloads_are_redacted_without_changing_store_data(self) -> None:
         store = InMemoryRuntimeStore()
         app = AutoAgentApp(runtime_store=store)
@@ -296,6 +321,101 @@ class ObservationServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "cannot be empty"):
             ObservationApp(InMemoryRuntimeStore(), access_token="")
+
+    async def test_observation_token_authentication_uses_http_cookie(self) -> None:
+        observation = ObservationApp(
+            InMemoryRuntimeStore(),
+            access_token="trace-secret",
+            ui_directory=Path("/path/that/does/not/exist"),
+        )
+
+        health = await _asgi_request(observation.api, "GET", "/api/health")
+        denied = await _asgi_request(observation.api, "GET", "/api/workflows")
+        rejected = await _asgi_request(
+            observation.api,
+            "POST",
+            "/api/auth/session",
+            json_body={"token": "wrong"},
+        )
+        accepted = await _asgi_request(
+            observation.api,
+            "POST",
+            "/api/auth/session",
+            json_body={"token": "trace-secret"},
+        )
+        cookie = next(
+            value
+            for name, value in accepted[1]
+            if name.lower() == b"set-cookie"
+        ).split(b";", 1)[0]
+        authorized = await _asgi_request(
+            observation.api,
+            "GET",
+            "/api/workflows",
+            headers=((b"cookie", cookie),),
+        )
+
+        self.assertEqual(200, health[0])
+        self.assertFalse(json.loads(health[2])["authenticated"])
+        self.assertEqual(401, denied[0])
+        self.assertEqual(401, rejected[0])
+        self.assertEqual(200, accepted[0])
+        self.assertEqual(200, authorized[0])
+
+
+async def _asgi_request(
+    application: Any,
+    method: str,
+    path: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+    headers: tuple[tuple[bytes, bytes], ...] = (),
+) -> tuple[int, list[tuple[bytes, bytes]], bytes]:
+    """Exercise FastAPI's real ASGI HTTP boundary without an HTTP client dependency."""
+
+    body = json.dumps(json_body).encode() if json_body is not None else b""
+    request_headers = list(headers)
+    if json_body is not None:
+        request_headers.append((b"content-type", b"application/json"))
+    messages: list[dict[str, Any]] = []
+    request_sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if request_sent:
+            return {"type": "http.disconnect"}
+        request_sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    await application(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": method,
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": request_headers,
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "state": {},
+        },
+        receive,
+        send,
+    )
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    response_body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    return start["status"], start["headers"], response_body
 
 
 if __name__ == "__main__":

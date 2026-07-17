@@ -4,6 +4,7 @@ import { AlertTriangle, GitBranch, LoaderCircle } from "lucide-react";
 
 import {
   createAuthenticationSession,
+  getEarlierEvents,
   getObservationView,
   getHealth,
   listInvocations,
@@ -23,6 +24,9 @@ export default function App() {
   const queryClient = useQueryClient();
   const ui = useTraceUi();
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [authToken, setAuthToken] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState(false);
@@ -89,6 +93,8 @@ export default function App() {
   useEffect(() => {
     if (!view) return;
     setEvents(view.events);
+    setHistoryLoaded(view.checkpoint.through_sequence === 0);
+    setHistoryError(null);
     const latest = view.projection.through_sequence;
     ui.setCursor(latest, true);
   }, [view?.invocation.id]);
@@ -132,11 +138,38 @@ export default function App() {
             view.invocation.id,
             events,
             cursorSequence,
-            view.checkpoint,
+            historyLoaded ? undefined : view.checkpoint,
           )
         : null,
-    [cursorSequence, events, view],
+    [cursorSequence, events, historyLoaded, view],
   );
+
+  const loadFullHistory = async () => {
+    if (!view || !ui.sessionId || !ui.invocationId || historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      let collected = [...events];
+      let beforeSequence =
+        collected[0]?.sequence ?? view.checkpoint.through_sequence + 1;
+      while (beforeSequence > 1) {
+        const page = await getEarlierEvents(
+          ui.sessionId,
+          ui.invocationId,
+          beforeSequence,
+        );
+        collected = mergeEvents(page.events, collected);
+        if (!page.has_more || page.previous_before_sequence === null) break;
+        beforeSequence = page.previous_before_sequence;
+      }
+      setEvents(collected);
+      setHistoryLoaded(true);
+    } catch (loadError) {
+      setHistoryError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
 
   const followLatest = () => {
     const latest = events.at(-1)?.sequence ?? view?.projection.through_sequence ?? 0;
@@ -245,6 +278,10 @@ export default function App() {
             cursorSequence={cursorSequence}
             onCursorChange={(sequence) => ui.setCursor(sequence, false)}
             onSelect={ui.setSelection}
+            historyAvailable={!historyLoaded && view.checkpoint.through_sequence > 0}
+            historyLoading={historyLoading}
+            historyError={historyError}
+            onLoadHistory={() => void loadFullHistory()}
           />
         </main>
       ) : (
@@ -324,4 +361,12 @@ function StatusScreen({
 function appendEvent(values: RuntimeEvent[], event: RuntimeEvent): RuntimeEvent[] {
   if (values.some((value) => value.id === event.id)) return values;
   return [...values, event].sort((left, right) => left.sequence - right.sequence);
+}
+
+function mergeEvents(...groups: RuntimeEvent[][]): RuntimeEvent[] {
+  const values = new Map<string, RuntimeEvent>();
+  for (const group of groups) {
+    for (const event of group) values.set(event.id, event);
+  }
+  return [...values.values()].sort((left, right) => left.sequence - right.sequence);
 }

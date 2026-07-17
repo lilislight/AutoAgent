@@ -14,6 +14,7 @@ from autoagent.operators import Operator, OperatorManifest, OperatorRegistry
 from autoagent.operators.contract import SchemaContract
 from autoagent.operators.manifest import callable_operator_id
 from autoagent.workflow import CapabilityRef, OperatorRef, SystemCommand
+from autoagent.workflow.hooks import get_workflow_hook_version
 
 
 class WorkflowVersionSnapshot(BaseModel):
@@ -185,17 +186,16 @@ def _hook_definition(hook: Any) -> Any:
     if hook is None:
         return None
     if callable(hook):
-        return {"callable": _callable_identity(hook)}
+        definition = {"callable": _callable_identity(hook)}
+        version = get_workflow_hook_version(hook)
+        if version is not None:
+            definition["version"] = version
+        return definition
     return _canonicalize(hook)
 
 
 def _callable_identity(handler: Any) -> Any:
-    """Identify hook location without treating source text as compatibility.
-
-    TODO: a future explicit hook version can remove the need to rely on
-    workflow.version when a callable changes behavior without changing its
-    module and qualified name.
-    """
+    """Identify hook location without treating source text as compatibility."""
 
     if isinstance(handler, partial):
         return {
@@ -231,7 +231,7 @@ def _canonicalize(value: Any) -> Any:
         encoded = [_canonicalize(item) for item in value]
         return sorted(encoded, key=_canonical_json)
     if callable(value):
-        return {"callable": _callable_identity(value)}
+        return _hook_definition(value)
     raise TypeError(f"Value is not canonicalizable: {type(value).__name__}")
 
 

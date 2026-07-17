@@ -17,6 +17,7 @@ from autoagent.runtime.event import (
 )
 from autoagent.runtime.execution import NodeExecution, OperatorCall
 from autoagent.runtime.invocation import Invocation
+from autoagent.runtime.serialization import JsonRuntimeSerializer
 from autoagent.runtime.session import Session
 
 
@@ -55,6 +56,8 @@ class RuntimeStore(ABC):
     SessionContext, and only the NodeExecution rows changed in that control-loop
     turn. Materialized state and generated Runtime Events commit atomically.
     """
+
+    serializer: JsonRuntimeSerializer
 
     async def ainitialize(self) -> None:
         """Initialize backing resources; in-memory stores require no work."""
@@ -238,6 +241,7 @@ class RuntimeStore(ABC):
         session_id: UUID | None = None,
         invocation_id: UUID | None = None,
         after_sequence: int = 0,
+        before_sequence: int | None = None,
         limit: int = 1000,
         visibility: str | None = None,
     ) -> tuple[RuntimeEvent, ...]:
@@ -289,8 +293,9 @@ class InMemoryRuntimeStore(RuntimeStore):
     and resume logic should all expose the same logical structure.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, serializer: JsonRuntimeSerializer | None = None) -> None:
         self._lock = RLock()
+        self.serializer = serializer or JsonRuntimeSerializer()
         self.workflow_versions: dict[
             tuple[str, str, str, str],
             dict[str, Any],
@@ -567,10 +572,17 @@ class InMemoryRuntimeStore(RuntimeStore):
         session_id: UUID | None = None,
         invocation_id: UUID | None = None,
         after_sequence: int = 0,
+        before_sequence: int | None = None,
         limit: int = 1000,
         visibility: str | None = None,
     ) -> tuple[RuntimeEvent, ...]:
-        _validate_event_query(session_id, invocation_id, after_sequence, limit)
+        _validate_event_query(
+            session_id,
+            invocation_id,
+            after_sequence,
+            before_sequence,
+            limit,
+        )
         with self._lock:
             records = list(self.runtime_events.values())
         values = [
@@ -582,10 +594,20 @@ class InMemoryRuntimeStore(RuntimeStore):
                 or str(record["invocation_id"]) == str(invocation_id)
             )
             and int(record["sequence"]) > after_sequence
+            and (
+                before_sequence is None
+                or int(record["sequence"]) < before_sequence
+            )
             and (visibility is None or record["visibility"] == visibility)
         ]
-        values.sort(key=lambda item: item.sequence)
-        return tuple(values[:limit])
+        values.sort(
+            key=lambda item: item.sequence,
+            reverse=before_sequence is not None,
+        )
+        page = values[:limit]
+        if before_sequence is not None:
+            page.reverse()
+        return tuple(page)
 
     async def aappend_runtime_events(
         self,
@@ -1033,11 +1055,16 @@ def _validate_event_query(
     session_id: UUID | None,
     invocation_id: UUID | None,
     after_sequence: int,
+    before_sequence: int | None,
     limit: int,
 ) -> None:
     if session_id is None and invocation_id is None:
         raise ValueError("session_id or invocation_id is required.")
     if after_sequence < 0:
         raise ValueError("after_sequence cannot be negative.")
+    if before_sequence is not None and before_sequence <= 0:
+        raise ValueError("before_sequence must be positive.")
+    if before_sequence is not None and after_sequence >= before_sequence:
+        raise ValueError("after_sequence must be less than before_sequence.")
     if limit <= 0 or limit > 10_000:
         raise ValueError("limit must be between 1 and 10000.")

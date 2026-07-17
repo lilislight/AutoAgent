@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from autoagent import AutoAgentApp
@@ -35,6 +36,14 @@ from autoagent.workflow import (
     SystemCommand,
     Workflow,
 )
+
+
+class DurableMessage(BaseModel):
+    text: str
+
+
+def build_durable_message(text: str) -> DurableMessage:
+    return DurableMessage(text=text.upper())
 
 
 class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -95,6 +104,20 @@ class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             list(range(1, len(events) + 1)),
             [event.sequence for event in events],
         )
+        latest_page = await reopened.alist_runtime_events(
+            session_id=session.id,
+            invocation_id=loaded.id,
+            before_sequence=events[-1].sequence + 1,
+            limit=2,
+        )
+        previous_page = await reopened.alist_runtime_events(
+            session_id=session.id,
+            invocation_id=loaded.id,
+            before_sequence=latest_page[0].sequence,
+            limit=2,
+        )
+        self.assertEqual(events[-2:], latest_page)
+        self.assertEqual(events[-4:-2], previous_page)
         observation = await ObservationService(
             reopened,
             bootstrap_event_limit=3,
@@ -165,6 +188,31 @@ class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         final_call = stored.node_executions[0].operator_calls[0]
         self.assertEqual(call.id, final_call.id)
         self.assertEqual("completed", final_call.state)
+
+    async def test_app_registers_runtime_model_before_restart_load(self) -> None:
+        workflow = Workflow(id="sqlite_registered_model")
+        workflow.add_node(build_durable_message, node_id="message")
+        app = AutoAgentApp(runtime_store=self.store)
+        completed = await app.ainvoke(
+            workflow,
+            input={"text": "persisted"},
+            session_id="model",
+        )
+        await self.store.close()
+
+        reopened = SQLiteRuntimeStore.from_path(self.database_path)
+        self.store = reopened
+        AutoAgentApp(
+            runtime_store=reopened,
+            runtime_models=(DurableMessage,),
+        )
+        loaded = await reopened.aload_invocation(completed.id)
+
+        assert loaded is not None
+        self.assertEqual(
+            DurableMessage(text="PERSISTED"),
+            loaded.node_executions[0].output,
+        )
 
     async def test_wait_survives_close_and_resumes_in_new_app(self) -> None:
         workflow = Workflow(id="sqlite_wait")

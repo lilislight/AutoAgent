@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import RLock
 from typing import Any, TypeVar
 from uuid import UUID, uuid4
+
+from pydantic import BaseModel
 
 from autoagent.compiler import WorkflowCompiler, WorkflowIR, WorkflowVersionSnapshot
 from autoagent.executor import NodeExecutor, WorkflowExecutor
@@ -20,6 +22,8 @@ from autoagent.operators.contract import ensure_callable_contract
 from autoagent.runtime import (
     InMemoryRuntimeStore,
     Invocation,
+    JsonRuntimeSerializer,
+    RuntimeCodec,
     RuntimeStore,
     Session,
     SessionBusyError,
@@ -54,6 +58,9 @@ class AutoAgentApp:
         *,
         namespace: str = "default",
         runtime_store: RuntimeStore | None = None,
+        runtime_serializer: JsonRuntimeSerializer | None = None,
+        runtime_codecs: Iterable[RuntimeCodec] = (),
+        runtime_models: Iterable[type[BaseModel]] = (),
     ) -> None:
         resolved_namespace = namespace.strip()
         if not resolved_namespace:
@@ -65,7 +72,21 @@ class AutoAgentApp:
             capability_registry=self.capability_registry,
             operator_registry=self.operator_registry,
         )
-        self.runtime_store: RuntimeStore = runtime_store or InMemoryRuntimeStore()
+        if runtime_store is None:
+            runtime_store = InMemoryRuntimeStore(serializer=runtime_serializer)
+        elif (
+            runtime_serializer is not None
+            and runtime_store.serializer is not runtime_serializer
+        ):
+            raise ValueError(
+                "runtime_serializer must be the serializer owned by runtime_store."
+            )
+        self.runtime_store = runtime_store
+        self.runtime_serializer = runtime_store.serializer
+        for codec in runtime_codecs:
+            self.register_runtime_codec(codec)
+        for model_type in runtime_models:
+            self.register_runtime_model(model_type)
         node_executor = NodeExecutor(
             operator_resolver=OperatorResolver(
                 self.capability_registry,
@@ -84,6 +105,24 @@ class AutoAgentApp:
         # the row as crash residue.
         self._live_invocation_ids: set[UUID] = set()
         self._live_invocation_lock = RLock()
+
+    def register_runtime_codec(self, codec: RuntimeCodec) -> None:
+        """Register one trusted custom persistence codec before loading records."""
+
+        self.runtime_serializer.register_codec(codec)
+
+    def register_runtime_model(
+        self,
+        model_type: type[BaseModel],
+        *,
+        type_id: str | None = None,
+    ) -> str:
+        """Register a trusted Pydantic type used by durable runtime values."""
+
+        return self.runtime_serializer.register_pydantic_model(
+            model_type,
+            type_id=type_id,
+        )
 
     def close(self) -> None:
         """Release Store resources from synchronous application code."""

@@ -209,6 +209,7 @@ export interface RuntimeProjection {
 export interface RuntimeEventPage {
   events: RuntimeEvent[];
   next_after_sequence: number;
+  previous_before_sequence: number | null;
   has_more: boolean;
 }
 

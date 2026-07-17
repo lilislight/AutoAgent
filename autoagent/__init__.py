@@ -21,6 +21,7 @@ from autoagent.workflow import (
     Edge,
     EdgePolicy,
     InputMapping,
+    HookVersion,
     MapPolicy,
     Node,
     NodePolicy,
@@ -33,6 +34,7 @@ from autoagent.workflow import (
     TimeoutPolicy,
     Workflow,
     WorkflowDiagram,
+    workflow_hook,
 )
 from autoagent.runtime import (
     ArtifactRef,
@@ -53,6 +55,7 @@ __all__ = [
     "Edge",
     "EdgePolicy",
     "InputMapping",
+    "HookVersion",
     "MapPolicy",
     "JsonRuntimeSerializer",
     "Node",
@@ -79,4 +82,5 @@ __all__ = [
     "capability",
     "get_default_app",
     "operator",
+    "workflow_hook",
 ]

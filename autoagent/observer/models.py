@@ -200,6 +200,7 @@ class RuntimeEventPage(ObservationModel):
 
     events: tuple[RuntimeEvent, ...]
     next_after_sequence: int
+    previous_before_sequence: int | None
     has_more: bool
 
 

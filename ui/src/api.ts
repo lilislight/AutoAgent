@@ -3,6 +3,7 @@ import type {
   ObservationBootstrap,
   ObservationHealth,
   RuntimeEvent,
+  RuntimeEventPage,
   SessionSummary,
   WorkflowSummary,
 } from "./types";
@@ -54,6 +55,21 @@ export function getObservationView(
 ): Promise<ObservationBootstrap> {
   return requestJson(
     `/api/sessions/${sessionId}/invocations/${invocationId}/view`,
+  );
+}
+
+export function getEarlierEvents(
+  sessionId: string,
+  invocationId: string,
+  beforeSequence: number,
+  limit = 1000,
+): Promise<RuntimeEventPage> {
+  const query = new URLSearchParams({
+    before_sequence: String(beforeSequence),
+    limit: String(limit),
+  });
+  return requestJson(
+    `/api/sessions/${sessionId}/invocations/${invocationId}/events?${query}`,
   );
 }
 

@@ -1,5 +1,5 @@
 import { useMemo, useRef } from "react";
-import { Clock3, CornerDownRight } from "lucide-react";
+import { Clock3, CornerDownRight, History, LoaderCircle } from "lucide-react";
 
 import type {
   RuntimeEvent,
@@ -14,6 +14,10 @@ interface ExecutionTimelineProps {
   cursorSequence: number;
   onCursorChange: (sequence: number) => void;
   onSelect: (selection: TraceSelection) => void;
+  historyAvailable: boolean;
+  historyLoading: boolean;
+  historyError: string | null;
+  onLoadHistory: () => void;
 }
 
 export function ExecutionTimeline({
@@ -22,6 +26,10 @@ export function ExecutionTimeline({
   cursorSequence,
   onCursorChange,
   onSelect,
+  historyAvailable,
+  historyLoading,
+  historyError,
+  onLoadHistory,
 }: ExecutionTimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const range = useMemo(() => timelineRange(timeline, events), [events, timeline]);
@@ -47,9 +55,18 @@ export function ExecutionTimeline({
           <strong>Execution timeline</strong>
           <span>{formatDuration(range.end - range.start)}</span>
         </div>
-        <span className="timeline-cursor-label">
-          {formatTimestamp(cursorTime)} · event {cursorSequence}
-        </span>
+        <div className="timeline-actions">
+          {historyError && <span className="timeline-history-error">History unavailable</span>}
+          {historyAvailable && (
+            <button type="button" onClick={onLoadHistory} disabled={historyLoading}>
+              {historyLoading ? <LoaderCircle className="spin" size={13} /> : <History size={13} />}
+              {historyLoading ? "Loading history" : "Load full history"}
+            </button>
+          )}
+          <span className="timeline-cursor-label">
+            {formatTimestamp(cursorTime)} · event {cursorSequence}
+          </span>
+        </div>
       </div>
       <div className="timeline-table">
         <div className="timeline-label-column timeline-axis-label">Execution</div>

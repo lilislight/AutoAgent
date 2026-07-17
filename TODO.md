@@ -67,18 +67,17 @@ stage before expanding the next one.
 - [x] Require a stable user-authored Workflow id, compile a canonical
   `definition_hash`, and retain a `WorkflowVersionSnapshot` that excludes
   Operator implementation code from structural identity.
-- [ ] Add explicit versions for executable Workflow hooks such as
+- [x] Add `@workflow_hook(version=...)` for executable Workflow hooks such as
   input_mapping, output_binding, conditions, map selectors, and aggregators.
-  V1 hashes their module and qualified name, so changing a function body under
-  the same identity requires the developer to increment `workflow.version`.
+  The explicit hook version participates in `definition_hash` without changing
+  the callable's signature or async behavior.
 - [x] Define versioned `OperatorManifest` recovery declarations. Direct Python
   callables use the same default Operator behavior as registered Operators.
 - [x] Add a safe JSON runtime serializer with explicit Pydantic/custom codecs
   and `ArtifactRef`; pickle and implicit imports are not recovery formats.
-- [ ] Add an App-level startup API for registering trusted Runtime codecs and
-  Pydantic model types before durable records are loaded. V1 callers can pass a
-  preconfigured `JsonRuntimeSerializer` to the Store, but registration is not
-  yet coordinated by `AutoAgentApp`.
+- [x] Add App-level startup registration for trusted Runtime codecs and
+  Pydantic model types. App, Store, persistence, and Observation share one
+  serializer so restored values retain their registered Python types.
 - [x] Replace execution-path snapshot saves with delta checkpoints. Each
   control-loop checkpoint now atomically persists Invocation control state,
   changed NodeExecutions, related calls, outputs, scheduler state,
@@ -107,7 +106,8 @@ stage before expanding the next one.
   failed completion checkpoint fails the node without retry/fallback.
 - [ ] Define an Operator execution context for explicit idempotency-key delivery.
   V1 preserves the key across whole-node replay, but a plain callable must
-  implement idempotency from its own input/environment.
+  implement idempotency from its own input/environment. Deferred until
+  side-effect-aware resume semantics are designed.
 
 ## 4. Unify Runtime Events
 
@@ -122,10 +122,12 @@ stage before expanding the next one.
   Session, Invocation, graph, timeline, input/output, and event inspection.
 - [x] Add cursor-based event pages and persistent projection checkpoints.
   Observation bootstrap keeps a bounded event tail and replays only events
-  after the latest checkpoint on subsequent reads.
+  after the latest checkpoint on subsequent reads; the UI can page backward to
+  load complete historical timelines on demand.
 - [x] Add optional token authentication with HttpOnly UI sessions, recursive
   runtime payload redaction, and ArtifactRef-aware rendering before exposing
-  the service outside a trusted development network.
+  the service outside a trusted development network. HTTP integration tests
+  cover denied access, token exchange, cookie issuance, and authorized access.
 - [ ] Feed the same Runtime Event protocol to optimizer inputs after event types
   have been exercised by real workloads.
 

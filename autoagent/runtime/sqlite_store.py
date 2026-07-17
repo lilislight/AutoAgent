@@ -700,18 +700,30 @@ class SQLiteRuntimeStore(RuntimeStore):
         session_id: UUID | None = None,
         invocation_id: UUID | None = None,
         after_sequence: int = 0,
+        before_sequence: int | None = None,
         limit: int = 1000,
         visibility: str | None = None,
     ) -> tuple[RuntimeEvent, ...]:
-        _validate_event_query(session_id, invocation_id, after_sequence, limit)
+        _validate_event_query(
+            session_id,
+            invocation_id,
+            after_sequence,
+            before_sequence,
+            limit,
+        )
         await self.initialize()
         async with self._sessions() as database:
             statement = (
                 select(RuntimeEventRow)
                 .where(RuntimeEventRow.sequence > after_sequence)
-                .order_by(RuntimeEventRow.sequence)
                 .limit(limit)
             )
+            if before_sequence is None:
+                statement = statement.order_by(RuntimeEventRow.sequence)
+            else:
+                statement = statement.where(
+                    RuntimeEventRow.sequence < before_sequence
+                ).order_by(RuntimeEventRow.sequence.desc())
             if session_id is not None:
                 statement = statement.where(
                     RuntimeEventRow.session_id == str(session_id)
@@ -723,6 +735,8 @@ class SQLiteRuntimeStore(RuntimeStore):
             if visibility is not None:
                 statement = statement.where(RuntimeEventRow.visibility == visibility)
             rows = (await database.scalars(statement)).all()
+            if before_sequence is not None:
+                rows.reverse()
             return tuple(self._runtime_event_from_row(row) for row in rows)
 
     async def aappend_runtime_events(
@@ -1226,12 +1240,17 @@ def _validate_event_query(
     session_id: UUID | None,
     invocation_id: UUID | None,
     after_sequence: int,
+    before_sequence: int | None,
     limit: int,
 ) -> None:
     if session_id is None and invocation_id is None:
         raise ValueError("session_id or invocation_id is required.")
     if after_sequence < 0:
         raise ValueError("after_sequence cannot be negative.")
+    if before_sequence is not None and before_sequence <= 0:
+        raise ValueError("before_sequence must be positive.")
+    if before_sequence is not None and after_sequence >= before_sequence:
+        raise ValueError("after_sequence must be less than before_sequence.")
     if limit <= 0 or limit > 10_000:
         raise ValueError("limit must be between 1 and 10000.")
 

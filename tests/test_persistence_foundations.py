@@ -25,6 +25,7 @@ from autoagent.workflow import (
     OperatorRef,
     TimeoutPolicy,
     Workflow,
+    workflow_hook,
 )
 
 
@@ -120,6 +121,42 @@ class PersistenceIdentityTests(unittest.TestCase):
         self.assertNotEqual(base_ir.definition_hash, version_ir.definition_hash)
         self.assertNotEqual(base_ir.definition_hash, policy_ir.definition_hash)
         self.assertNotEqual(base_ir.definition_hash, contract_ir.definition_hash)
+
+    def test_explicit_hook_version_changes_definition_hash(self) -> None:
+        def condition_for(version: int):
+            @workflow_hook(version=version)
+            def condition(_ctx) -> bool:
+                return True
+
+            return condition
+
+        first = Workflow(id="hook_version", version=1)
+        first.add_node(echo, node_id="start")
+        first.add_node(echo, node_id="finish")
+        first.add_edge("start", "finish", condition=condition_for(1))
+        second = Workflow(id="hook_version", version=1)
+        second.add_node(echo, node_id="start")
+        second.add_node(echo, node_id="finish")
+        second.add_edge("start", "finish", condition=condition_for(2))
+
+        first_ir, first_snapshot = self.compile(first)
+        second_ir, second_snapshot = self.compile(second)
+
+        self.assertNotEqual(first_ir.definition_hash, second_ir.definition_hash)
+        self.assertEqual(
+            1,
+            first_snapshot.definition["edges"][0]["condition"]["version"],
+        )
+        self.assertEqual(
+            2,
+            second_snapshot.definition["edges"][0]["condition"]["version"],
+        )
+
+    def test_workflow_hook_rejects_invalid_versions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            workflow_hook(version=" ")
+        with self.assertRaisesRegex(TypeError, "string or integer"):
+            workflow_hook(version=True)
 
     def test_operator_manifest_uses_declared_contract_not_source_body(self) -> None:
         def first(value: str) -> str:
@@ -229,6 +266,43 @@ class PersistenceIdentityTests(unittest.TestCase):
 
 
 class RuntimeSerializerTests(unittest.TestCase):
+    def test_app_owns_runtime_type_registration(self) -> None:
+        class Token:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+        codec = RuntimeCodec(
+            type_id="tests.token",
+            python_type=Token,
+            encode=lambda value: {"value": value.value},
+            decode=lambda value: Token(value["value"]),
+        )
+        app = AutoAgentApp(
+            runtime_codecs=(codec,),
+            runtime_models=(Message,),
+        )
+
+        token = app.runtime_serializer.loads(
+            app.runtime_serializer.dumps(Token("registered"))
+        )
+        message = app.runtime_serializer.loads(
+            app.runtime_serializer.dumps(Message(role="user", content="hello"))
+        )
+
+        self.assertIsInstance(token, Token)
+        self.assertEqual("registered", token.value)
+        self.assertEqual(Message(role="user", content="hello"), message)
+
+    def test_app_rejects_serializer_different_from_store_owner(self) -> None:
+        from autoagent.runtime import InMemoryRuntimeStore
+
+        store = InMemoryRuntimeStore(serializer=JsonRuntimeSerializer())
+        with self.assertRaisesRegex(ValueError, "owned by runtime_store"):
+            AutoAgentApp(
+                runtime_store=store,
+                runtime_serializer=JsonRuntimeSerializer(),
+            )
+
     def test_round_trip_supported_runtime_values(self) -> None:
         serializer = JsonRuntimeSerializer()
         now = datetime(2026, 7, 16, 12, 30, tzinfo=timezone.utc)

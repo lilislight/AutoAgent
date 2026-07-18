@@ -2,6 +2,7 @@ import {
   Activity,
   CirclePause,
   Moon,
+  Play,
   Radio,
   Sun,
 } from "lucide-react";
@@ -22,10 +23,13 @@ interface ScopeBarProps {
   followLive: boolean;
   connected: boolean;
   darkMode: boolean;
+  executionEnabled: boolean;
+  invoking: boolean;
   onWorkflowChange: (value: string | null) => void;
   onSessionChange: (value: string | null) => void;
   onInvocationChange: (value: string | null) => void;
   onFollowLive: () => void;
+  onOpenInvoke: () => void;
   onToggleTheme: () => void;
 }
 
@@ -39,10 +43,13 @@ export function ScopeBar({
   followLive,
   connected,
   darkMode,
+  executionEnabled,
+  invoking,
   onWorkflowChange,
   onSessionChange,
   onInvocationChange,
   onFollowLive,
+  onOpenInvoke,
   onToggleTheme,
 }: ScopeBarProps) {
   const selectedInvocation = invocations.find((value) => value.id === invocationId);
@@ -90,6 +97,16 @@ export function ScopeBar({
           <Radio size={13} />
           {connected ? "Live link" : "Offline"}
         </span>
+        <button
+          className="toolbar-button"
+          type="button"
+          onClick={onOpenInvoke}
+          disabled={!workflowId || !executionEnabled || invoking}
+          title={executionEnabled ? "Invoke selected workflow" : "Execution API is disabled"}
+        >
+          <Play size={15} />
+          {invoking ? "Invoking" : "Invoke"}
+        </button>
         <button
           className={`toolbar-button ${followLive ? "is-active" : ""}`}
           type="button"

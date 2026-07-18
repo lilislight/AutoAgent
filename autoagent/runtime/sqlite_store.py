@@ -730,17 +730,9 @@ class SQLiteRuntimeStore(RuntimeStore):
         )
         await self.initialize()
         async with self._sessions() as database:
-            statement = (
-                select(RuntimeEventRow)
-                .where(RuntimeEventRow.sequence > after_sequence)
-                .limit(limit)
+            statement = select(RuntimeEventRow).where(
+                RuntimeEventRow.sequence > after_sequence
             )
-            if before_sequence is None:
-                statement = statement.order_by(RuntimeEventRow.sequence)
-            else:
-                statement = statement.where(
-                    RuntimeEventRow.sequence < before_sequence
-                ).order_by(RuntimeEventRow.sequence.desc())
             if session_id is not None:
                 statement = statement.where(
                     RuntimeEventRow.session_id == str(session_id)
@@ -751,6 +743,13 @@ class SQLiteRuntimeStore(RuntimeStore):
                 )
             if visibility is not None:
                 statement = statement.where(RuntimeEventRow.visibility == visibility)
+            if before_sequence is None:
+                statement = statement.order_by(RuntimeEventRow.sequence)
+            else:
+                statement = statement.where(
+                    RuntimeEventRow.sequence < before_sequence
+                ).order_by(RuntimeEventRow.sequence.desc())
+            statement = statement.limit(limit)
             rows = (await database.scalars(statement)).all()
             if before_sequence is not None:
                 rows.reverse()

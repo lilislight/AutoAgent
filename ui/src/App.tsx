@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, GitBranch, LoaderCircle } from "lucide-react";
+import { AlertTriangle, GitBranch, LoaderCircle, Play, X } from "lucide-react";
 
 import {
   createAuthenticationSession,
@@ -11,10 +12,10 @@ import {
   listSessions,
   listWorkflows,
   subscribeToInvocation,
+  submitInvocation,
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
 import { InspectorPanel } from "./components/InspectorPanel";
-import { type DetailTab, SelectionMenu } from "./components/SelectionMenu";
 import { ScopeBar } from "./components/ScopeBar";
 import { WorkflowCanvas } from "./components/WorkflowCanvas";
 import { projectEvents } from "./projection";
@@ -31,11 +32,18 @@ export default function App() {
   const [authToken, setAuthToken] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState(false);
+  const [timelineCollapsed, setTimelineCollapsed] = useState(false);
+  const [timelineHeight, setTimelineHeight] = useState(248);
+  const [invokeOpen, setInvokeOpen] = useState(false);
+  const [invokeInput, setInvokeInput] = useState("{}");
+  const [invokeSessionKey, setInvokeSessionKey] = useState("");
+  const [invokeEntryNodeId, setInvokeEntryNodeId] = useState("");
+  const [invokeSubmitting, setInvokeSubmitting] = useState(false);
+  const [invokeError, setInvokeError] = useState<string | null>(null);
+  const [invokeMessage, setInvokeMessage] = useState<string | null>(null);
   const [darkMode, setDarkMode] = useState(
     () => localStorage.getItem("autoagent:theme") === "dark",
   );
-  const [selectionAnchor, setSelectionAnchor] = useState<{ x: number; y: number } | null>(null);
-  const [drawerTab, setDrawerTab] = useState<DetailTab | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = darkMode ? "dark" : "light";
@@ -91,7 +99,13 @@ export default function App() {
     queryFn: () => getTraceView(ui.sessionId!, ui.invocationId!),
     enabled: Boolean(ui.sessionId && ui.invocationId),
   });
-  const view = viewQuery.data;
+  const queriedView = viewQuery.data;
+  const view =
+    queriedView &&
+    queriedView.session.id === ui.sessionId &&
+    queriedView.invocation.id === ui.invocationId
+      ? queriedView
+      : undefined;
 
   useEffect(() => {
     if (!view) return;
@@ -135,15 +149,19 @@ export default function App() {
   const cursorSequence =
     ui.cursorSequence ?? view?.projection.through_sequence ?? 0;
   const projection = useMemo(
-    () =>
-      view
-        ? projectEvents(
-            view.invocation.id,
-            events,
-            cursorSequence,
-            historyLoaded ? undefined : view.checkpoint,
-          )
-        : null,
+    () => {
+      if (!view) return null;
+      const checkpoint =
+        !historyLoaded && cursorSequence >= view.checkpoint.through_sequence
+          ? view.checkpoint
+          : undefined;
+      return projectEvents(
+        view.invocation.id,
+        events,
+        cursorSequence,
+        checkpoint,
+      );
+    },
     [cursorSequence, events, historyLoaded, view],
   );
 
@@ -184,7 +202,41 @@ export default function App() {
     }
   };
 
-  const loading = workflowQuery.isLoading || sessionQuery.isLoading || viewQuery.isLoading;
+  const submitFromUi = async () => {
+    if (!ui.workflowId || invokeSubmitting) return;
+    setInvokeSubmitting(true);
+    setInvokeError(null);
+    setInvokeMessage(null);
+    try {
+      const parsedInput = parseJsonObject(invokeInput);
+      const response = await submitInvocation(ui.workflowId, {
+        input: parsedInput,
+        session_id: invokeSessionKey.trim() || null,
+        entry_node_id: invokeEntryNodeId.trim() || null,
+      });
+      setInvokeMessage(
+        `Created invocation ${response.invocation_id.slice(0, 8)} in session ${response.session_id.slice(0, 8)}. Select it from the Session and Invocation lists to inspect it.`,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["workflows"] }),
+        queryClient.invalidateQueries({ queryKey: ["sessions", response.workflow_id] }),
+        queryClient.invalidateQueries({ queryKey: ["sessions", ui.workflowId] }),
+        queryClient.invalidateQueries({ queryKey: ["invocations", response.session_id] }),
+        queryClient.invalidateQueries({ queryKey: ["invocations", ui.sessionId] }),
+      ]);
+    } catch (submitError) {
+      setInvokeError(submitError instanceof Error ? submitError.message : String(submitError));
+    } finally {
+      setInvokeSubmitting(false);
+    }
+  };
+
+  const loading =
+    workflowQuery.isLoading ||
+    sessionQuery.isLoading ||
+    invocationQuery.isLoading ||
+    viewQuery.isLoading ||
+    (Boolean(ui.sessionId && ui.invocationId) && !view);
   const error = healthQuery.error || workflowQuery.error || sessionQuery.error || invocationQuery.error || viewQuery.error;
 
   if (healthQuery.isLoading) {
@@ -239,12 +291,37 @@ export default function App() {
         followLive={ui.followLive}
         connected={ui.connected}
         darkMode={darkMode}
+        executionEnabled={healthQuery.data?.execution_enabled ?? false}
+        invoking={invokeSubmitting}
         onWorkflowChange={ui.setWorkflow}
         onSessionChange={ui.setSession}
         onInvocationChange={ui.setInvocation}
         onFollowLive={followLatest}
+        onOpenInvoke={() => {
+          setInvokeOpen(true);
+          setInvokeError(null);
+          setInvokeMessage(null);
+        }}
         onToggleTheme={() => setDarkMode((value) => !value)}
       />
+      {invokeOpen && (
+        <InvocationLauncher
+          workflowId={ui.workflowId}
+          input={invokeInput}
+          sessionKey={invokeSessionKey}
+          entryNodeId={invokeEntryNodeId}
+          error={invokeError}
+          message={invokeMessage}
+          submitting={invokeSubmitting}
+          onInputChange={setInvokeInput}
+          onSessionKeyChange={setInvokeSessionKey}
+          onEntryNodeIdChange={setInvokeEntryNodeId}
+          onClose={() => {
+            if (!invokeSubmitting) setInvokeOpen(false);
+          }}
+          onSubmit={submitFromUi}
+        />
+      )}
       {error ? (
         <StatusScreen
           icon={<AlertTriangle size={28} />}
@@ -258,30 +335,25 @@ export default function App() {
           detail="Reading workflow snapshots and invocation events."
         />
       ) : view && projection ? (
-        <main className="trace-workspace">
+        <main
+          className={`trace-workspace ${timelineCollapsed ? "timeline-collapsed" : ""}`}
+          style={
+            {
+              "--timeline-height": `${timelineCollapsed ? 42 : timelineHeight}px`,
+            } as CSSProperties
+          }
+        >
           <WorkflowCanvas
             graph={view.graph}
+            invocation={view.invocation}
             projection={projection}
             followLive={ui.followLive}
             selection={ui.selection}
-            onSelect={(selection, anchor) => {
+            onSelect={(selection) => {
               ui.setSelection(selection);
-              setSelectionAnchor(anchor ?? null);
-              if (!selection) setDrawerTab(null);
             }}
           />
-          <SelectionMenu
-            selection={ui.selection}
-            graph={view.graph}
-            anchor={selectionAnchor}
-            onOpen={(tab) => setDrawerTab(tab)}
-            onClose={() => {
-              ui.setSelection(null);
-              setSelectionAnchor(null);
-              setDrawerTab(null);
-            }}
-          />
-          {drawerTab && (
+          {ui.selection && (
             <InspectorPanel
               graph={view.graph}
               invocation={view.invocation}
@@ -289,8 +361,7 @@ export default function App() {
               projection={projection}
               selection={ui.selection}
               cursorSequence={cursorSequence}
-              initialTab={drawerTab}
-              onClose={() => setDrawerTab(null)}
+              onClose={() => ui.setSelection(null)}
             />
           )}
           <ExecutionTimeline
@@ -302,6 +373,10 @@ export default function App() {
             historyAvailable={!historyLoaded && view.checkpoint.through_sequence > 0}
             historyLoading={historyLoading}
             historyError={historyError}
+            collapsed={timelineCollapsed}
+            onCollapsedChange={setTimelineCollapsed}
+            height={timelineHeight}
+            onHeightChange={setTimelineHeight}
             onLoadHistory={() => void loadFullHistory()}
           />
         </main>
@@ -313,6 +388,88 @@ export default function App() {
         />
       )}
     </div>
+  );
+}
+
+function InvocationLauncher({
+  workflowId,
+  input,
+  sessionKey,
+  entryNodeId,
+  error,
+  message,
+  submitting,
+  onInputChange,
+  onSessionKeyChange,
+  onEntryNodeIdChange,
+  onClose,
+  onSubmit,
+}: {
+  workflowId: string | null;
+  input: string;
+  sessionKey: string;
+  entryNodeId: string;
+  error: string | null;
+  message: string | null;
+  submitting: boolean;
+  onInputChange: (value: string) => void;
+  onSessionKeyChange: (value: string) => void;
+  onEntryNodeIdChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <section className="invoke-panel" aria-label="Invoke workflow">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSubmit();
+        }}
+      >
+        <div className="invoke-heading">
+          <div>
+            <Play size={16} />
+            <strong>Invoke workflow</strong>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} aria-label="Close">
+            <X size={15} />
+          </button>
+        </div>
+        <label>
+          Workflow
+          <input value={workflowId ?? ""} readOnly />
+        </label>
+        <label>
+          Session key
+          <input
+            value={sessionKey}
+            onChange={(event) => onSessionKeyChange(event.target.value)}
+            placeholder="Optional. Reuse one session by key."
+          />
+        </label>
+        <label>
+          Entry node id
+          <input
+            value={entryNodeId}
+            onChange={(event) => onEntryNodeIdChange(event.target.value)}
+            placeholder="Optional for single-entry workflows."
+          />
+        </label>
+        <label>
+          Input JSON
+          <textarea
+            value={input}
+            onChange={(event) => onInputChange(event.target.value)}
+            spellCheck={false}
+          />
+        </label>
+        {message && <p className="invoke-message">{message}</p>}
+        {error && <p className="invoke-error">{error}</p>}
+        <button type="submit" disabled={!workflowId || submitting}>
+          {submitting ? "Submitting..." : "Invoke"}
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -390,4 +547,14 @@ function mergeEvents(...groups: RuntimeEvent[][]): RuntimeEvent[] {
     for (const event of group) values.set(event.id, event);
   }
   return [...values.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  const trimmed = value.trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("Input JSON must be an object.");
+  }
+  return parsed as Record<string, unknown>;
 }

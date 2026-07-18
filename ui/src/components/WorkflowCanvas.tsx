@@ -16,10 +16,13 @@ import {
   type ReactFlowInstance,
   useNodesState,
 } from "@xyflow/react";
-import { Boxes, ChevronDown, ChevronRight, Flag, Play, RotateCcw } from "lucide-react";
+import { Boxes, Flag, Play, RotateCcw } from "lucide-react";
 
 import { layoutWorkflow, loadSavedLayout, saveLayout } from "../layout";
 import type {
+  EdgeRuntimeState,
+  InvocationDetail,
+  NodeExecutionView,
   RuntimeProjection,
   RuntimeState,
   TraceSelection,
@@ -35,61 +38,49 @@ type TraceNodeData = {
   entry: boolean;
   exit: boolean;
   executionCount: number;
+  issue: NodeIssue | null;
 };
 
 type GroupNodeData = {
   label: string;
-  collapsed: boolean;
   nodeCount: number;
   state: RuntimeState;
   width: number;
   height: number;
-  onToggle: (id: string) => void;
+};
+
+type NodeIssue = {
+  tone: "danger" | "warning" | "neutral";
+  label: string;
+  title: string;
 };
 
 type TraceFlowNode =
   | FlowNode<TraceNodeData, "trace">
-  | FlowNode<GroupNodeData, "group">;
+  | FlowNode<GroupNodeData, "workflowGroup">;
 
-const nodeTypes = { trace: TraceNode, group: WorkflowGroupNode };
+const nodeTypes = { trace: TraceNode, workflowGroup: WorkflowGroupNode };
 
 interface WorkflowCanvasProps {
   graph: WorkflowGraphView;
+  invocation: InvocationDetail;
   projection: RuntimeProjection;
   followLive: boolean;
   selection: TraceSelection;
-  onSelect: (selection: TraceSelection, anchor?: { x: number; y: number }) => void;
+  onSelect: (selection: TraceSelection) => void;
 }
 
 export function WorkflowCanvas({
   graph,
+  invocation,
   projection,
   followLive,
   selection,
   onSelect,
 }: WorkflowCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<TraceFlowNode>([]);
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance<TraceFlowNode, FlowEdge> | null>(null);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
-    () => loadCollapsedGroups(graph.definition_hash),
-  );
-
-  useEffect(() => {
-    setCollapsedGroups(loadCollapsedGroups(graph.definition_hash));
-  }, [graph.definition_hash]);
-
-  const toggleGroup = useCallback(
-    (id: string) => {
-      setCollapsedGroups((current) => {
-        const next = new Set(current);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        saveCollapsedGroups(graph.definition_hash, next);
-        return next;
-      });
-    },
-    [graph.definition_hash],
-  );
 
   const buildLayout = useCallback(
     async (force = false) => {
@@ -101,18 +92,19 @@ export function WorkflowCanvas({
         graph.nodes,
         projection,
         positions,
-        collapsedGroups,
         selection,
-        toggleGroup,
       );
-      const hiddenNodeIds = hiddenByCollapsedGroups(graph.groups ?? [], collapsedGroups);
       const traceNodes: TraceFlowNode[] = graph.nodes
-        .filter((node) => !hiddenNodeIds.has(node.id))
         .map((node) => {
           const projected = projection.nodes[node.id];
           const capability = `${String(node.capability.kind ?? "operator")}:${String(
             node.capability.id ?? "unknown",
           )}`;
+          const latestExecution = projected
+            ? invocation.node_executions.find(
+                (execution) => execution.id === projected.latest_execution_id,
+              )
+            : undefined;
           return {
             id: node.id,
             type: "trace",
@@ -124,13 +116,15 @@ export function WorkflowCanvas({
               entry: node.entry,
               exit: node.exit,
               executionCount: projected?.execution_count ?? 0,
+              issue: nodeIssue(latestExecution),
             },
             selected: selection?.type === "node" && selection.id === node.id,
+            zIndex: 10,
           };
         });
       setNodes([...groupNodes, ...traceNodes]);
       requestAnimationFrame(() => flow.current?.fitView({ padding: 0.2, duration: 320 }));
-    }, [collapsedGroups, graph, projection, selection, setNodes, toggleGroup]);
+    }, [graph, invocation.node_executions, projection, selection, setNodes]);
 
   useEffect(() => {
     void buildLayout(false);
@@ -141,14 +135,13 @@ export function WorkflowCanvas({
   useEffect(() => {
     setNodes((current) =>
       current.map((node) => {
-        if (node.type === "group") {
+        if (node.type === "workflowGroup") {
           const data = node.data as GroupNodeData;
           return {
             ...node,
             selected: selection?.type === "group" && selection.id === node.id,
             data: {
               ...data,
-              collapsed: collapsedGroups.has(node.id),
               state: groupState(
                 graph.groups.find((group) => group.id === node.id),
                 projection,
@@ -157,6 +150,11 @@ export function WorkflowCanvas({
           };
         }
         const projected = projection.nodes[node.id];
+        const latestExecution = projected
+          ? invocation.node_executions.find(
+              (execution) => execution.id === projected.latest_execution_id,
+            )
+          : undefined;
         return {
           ...node,
           selected: selection?.type === "node" && selection.id === node.id,
@@ -164,63 +162,62 @@ export function WorkflowCanvas({
             ...node.data,
             state: projected?.state ?? "created",
             executionCount: projected?.execution_count ?? 0,
+            issue: nodeIssue(latestExecution),
           },
         };
       }),
     );
-  }, [collapsedGroups, graph.groups, projection, selection, setNodes]);
+  }, [graph.groups, invocation.node_executions, projection, selection, setNodes]);
 
   const edges = useMemo<FlowEdge[]>(
     () => {
-      const hiddenNodeIds = hiddenByCollapsedGroups(graph.groups ?? [], collapsedGroups);
-      const endpoint = (nodeId: string) =>
-        collapsedEndpoint(nodeId, graph.groups ?? [], collapsedGroups) ?? nodeId;
       const seen = new Set<string>();
       return graph.edges.flatMap((edge) => {
         const projected = projection.edges[edge.id];
         const selected = projected?.selected ?? false;
         const inspected = selection?.type === "edge" && selection.id === edge.id;
-        const source = endpoint(edge.from_node);
-        const target = endpoint(edge.to_node);
-        if (source === target) return [];
-        if (hiddenNodeIds.has(edge.from_node) && source === edge.from_node) return [];
-        if (hiddenNodeIds.has(edge.to_node) && target === edge.to_node) return [];
-        const edgeKey = `${source}->${target}:${edge.id}`;
+        const hovered = hoveredEdgeId === edge.id;
+        const edgeState = edgeStateClass(projected?.state, selected);
+        const edgeKey = `${edge.from_node}->${edge.to_node}:${edge.id}`;
         if (seen.has(edgeKey)) return [];
         seen.add(edgeKey);
         return {
           id: edge.id,
-          source,
-          target,
+          source: edge.from_node,
+          target: edge.to_node,
           type: "smoothstep",
           animated: followLive && selected && projection.invocation_state === "running",
           label: projected && projected.evaluation_count > 1
             ? `${projected.selected_count}/${projected.evaluation_count}`
             : undefined,
           selected: inspected,
+          interactionWidth: 28,
+          zIndex: hovered || inspected ? 80 : selected ? 40 : 8,
           markerEnd: {
             type: MarkerType.ArrowClosed,
-            color: inspected ? "var(--accent-strong)" : edgeColor(projected?.state, selected),
+            color: edgeVisualColor(projected?.state, selected, inspected, hovered),
           },
           style: {
-            stroke: inspected
-              ? "var(--accent-strong)"
-              : edgeColor(projected?.state, selected),
-            strokeWidth: inspected || selected ? 2.4 : 1.4,
-            opacity: projected ? 1 : 0.28,
+            stroke: edgeVisualColor(projected?.state, selected, inspected, hovered),
+            strokeWidth: inspected || selected || hovered ? 2.9 : 1.4,
+            opacity: projected ? 1 : 0.34,
+            strokeDasharray: projected?.state === "skipped"
+              ? "5 5"
+              : projected
+                ? undefined
+                : "4 6",
           },
-          className: `trace-edge ${inspected ? "selected" : ""}`,
+          className: `trace-edge state-${edgeState} ${inspected ? "selected" : ""} ${hovered ? "is-hovered" : ""}`,
         };
       });
     },
     [
-      collapsedGroups,
       followLive,
       graph.edges,
-      graph.groups,
       projection.edges,
       projection.invocation_state,
       selection,
+      hoveredEdgeId,
     ],
   );
 
@@ -234,6 +231,12 @@ export function WorkflowCanvas({
     saveLayout(graph.definition_hash, positions);
   }, [graph.definition_hash]);
 
+  const refreshGroupFrames = useCallback(
+    (nextNodes: TraceFlowNode[]) =>
+      refreshGroupNodes(nextNodes, graph.groups ?? [], graph.nodes, projection, selection),
+    [graph.groups, graph.nodes, projection, selection],
+  );
+
   return (
     <section className="workflow-canvas" aria-label="Workflow execution graph">
       <ReactFlow<TraceFlowNode, FlowEdge>
@@ -241,17 +244,40 @@ export function WorkflowCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
-        onNodeDragStop={persistPositions}
-        onNodeClick={(event, node) => {
-          onSelect(
-            { type: node.type === "group" ? "group" : "node", id: node.id },
-            { x: event.clientX, y: event.clientY },
+        onNodeDrag={(_event, draggedNode) => {
+          setNodes((current) =>
+            refreshGroupFrames(
+              current.map((node) =>
+                node.id === draggedNode.id ? { ...node, position: draggedNode.position } : node,
+              ),
+            ),
           );
         }}
-        onEdgeClick={(event, edge) =>
-          onSelect({ type: "edge", id: edge.id }, { x: event.clientX, y: event.clientY })
-        }
-        onPaneClick={() => onSelect(null)}
+        onNodeDragStop={() => {
+          persistPositions();
+          setNodes((current) => refreshGroupFrames(current));
+        }}
+        onNodeClick={(event, node) => {
+          event.stopPropagation();
+          onSelect(
+            { type: node.type === "workflowGroup" ? "group" : "node", id: node.id },
+          );
+        }}
+        onEdgeClick={(event, edge) => {
+          event.stopPropagation();
+          onSelect({ type: "edge", id: edge.id });
+        }}
+        onEdgeMouseEnter={(_event, edge) => {
+          setHoveredEdgeId(edge.id);
+        }}
+        onEdgeMouseLeave={() => {
+          setHoveredEdgeId(null);
+        }}
+        onPaneClick={() => {
+          // Keep the active detail panel open while users pan or inspect the
+          // canvas. It should close only via its close button or by selecting
+          // another graph element.
+        }}
         onInit={(instance) => {
           flow.current = instance;
         }}
@@ -291,26 +317,13 @@ export function WorkflowCanvas({
   );
 }
 
-function WorkflowGroupNode({ id, data, selected }: NodeProps<FlowNode<GroupNodeData, "group">>) {
-  const style = data.collapsed
-    ? undefined
-    : ({ width: data.width, height: data.height } as CSSProperties);
+function WorkflowGroupNode({ data, selected }: NodeProps<FlowNode<GroupNodeData, "workflowGroup">>) {
+  const style = { width: data.width, height: data.height } as CSSProperties;
   return (
     <div
-      className={`workflow-group-node ${data.collapsed ? "is-collapsed" : "is-expanded"} state-${stateClass(data.state)} ${selected ? "selected" : ""}`}
+      className={`workflow-group-node is-expanded state-${stateClass(data.state)} ${selected ? "selected" : ""}`}
       style={style}
     >
-      <button
-        type="button"
-        className="group-toggle"
-        onClick={(event) => {
-          event.stopPropagation();
-          data.onToggle(id);
-        }}
-        title={data.collapsed ? "Expand sub-workflow" : "Collapse sub-workflow"}
-      >
-        {data.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-      </button>
       <div className="group-label">
         <Boxes size={14} />
         <strong>{data.label}</strong>
@@ -336,6 +349,14 @@ function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
       <div className="trace-node-footer">
         <span>{traceData.state}</span>
         <span className="node-flags">
+          {traceData.issue && (
+            <span
+              className={`node-issue tone-${traceData.issue.tone}`}
+              title={traceData.issue.title}
+            >
+              {traceData.issue.label}
+            </span>
+          )}
           {traceData.entry && <Play size={12} aria-label="Entry node" />}
           {traceData.exit && <Flag size={12} aria-label="Exit node" />}
         </span>
@@ -351,6 +372,8 @@ function stateClass(state: RuntimeState): string {
 
 function stateColor(state: RuntimeState): string {
   const values: Record<string, string> = {
+    created: "#858884",
+    ready: "#147f8e",
     running: "#128a9b",
     waiting: "#c47b10",
     completed: "#24875d",
@@ -362,11 +385,81 @@ function stateColor(state: RuntimeState): string {
   return values[state] ?? "#737975";
 }
 
-function edgeColor(state: string | undefined, selected: boolean): string {
+function edgeColor(state: EdgeRuntimeState | undefined, selected: boolean): string {
   if (selected) return "var(--success)";
   if (state === "failed") return "var(--danger)";
-  if (state === "skipped") return "var(--line-strong)";
+  if (state === "skipped") return "var(--edge-skipped)";
   return "var(--edge)";
+}
+
+function edgeVisualColor(
+  state: EdgeRuntimeState | undefined,
+  selected: boolean,
+  inspected: boolean,
+  hovered: boolean,
+): string {
+  if (inspected) return "var(--accent-strong)";
+  if (!hovered) return edgeColor(state, selected);
+  if (selected) return "var(--success)";
+  if (state === "failed") return "var(--danger)";
+  if (state === "skipped") {
+    return "color-mix(in srgb, var(--edge-skipped) 72%, var(--text) 28%)";
+  }
+  return "var(--accent-strong)";
+}
+
+function edgeStateClass(state: EdgeRuntimeState | undefined, selected: boolean): string {
+  if (selected) return "selected";
+  if (state === "failed") return "failed";
+  if (state === "skipped") return "skipped";
+  return state ?? "pending";
+}
+
+function nodeIssue(execution: NodeExecutionView | undefined): NodeIssue | null {
+  if (!execution) return null;
+  const failedCalls = execution.operator_calls.filter((call) =>
+    ["failed", "interrupted"].includes(call.state),
+  );
+  if (failedCalls.length > 0 && execution.state === "completed") {
+    const latest = failedCalls.at(-1)!;
+    return {
+      tone: "warning",
+      label: "fallback",
+      title: `${latest.operator_id} ${latest.kind} ${latest.state}: ${errorMessage(latest.error)}`,
+    };
+  }
+  if (failedCalls.length > 0) {
+    const latest = failedCalls.at(-1)!;
+    return {
+      tone: "danger",
+      label: "operator",
+      title: `${latest.operator_id} ${latest.kind} ${latest.state}: ${errorMessage(latest.error)}`,
+    };
+  }
+  if (!execution.error) return null;
+  const code = typeof execution.error.code === "string" ? execution.error.code : "";
+  return {
+    tone: execution.state === "waiting" ? "warning" : "danger",
+    label: issueLabel(code, execution.state),
+    title: `${code || execution.state}: ${errorMessage(execution.error)}`,
+  };
+}
+
+function issueLabel(code: string, state: string): string {
+  if (code === "RESOURCE_LIMIT_EXCEEDED") return "policy";
+  if (code.includes("MAPPING")) return "mapping";
+  if (code.includes("BINDING")) return "binding";
+  if (code.includes("AGGREGATION")) return "aggregate";
+  if (code.includes("CONDITION")) return "condition";
+  if (state === "cancelled") return "cancelled";
+  if (state === "interrupted") return "interrupted";
+  if (state === "waiting") return "waiting";
+  return "node";
+}
+
+function errorMessage(error: Record<string, unknown> | null): string {
+  if (!error) return "No structured error.";
+  return typeof error.message === "string" ? error.message : JSON.stringify(error);
 }
 
 function buildGroupNodes(
@@ -374,41 +467,48 @@ function buildGroupNodes(
   graphNodes: WorkflowNodeView[],
   projection: RuntimeProjection,
   positions: Record<string, { x: number; y: number }>,
-  collapsed: Set<string>,
   selection: TraceSelection,
-  onToggle: (id: string) => void,
 ): TraceFlowNode[] {
-  const hiddenGroups = new Set<string>();
   const result: TraceFlowNode[] = [];
   for (const group of [...groups].sort((left, right) => left.workflow_path.length - right.workflow_path.length)) {
-    if (group.parent_group_id && hiddenGroups.has(group.parent_group_id)) {
-      hiddenGroups.add(group.id);
-      continue;
-    }
     const bounds = groupBounds(group, graphNodes, positions);
     if (!bounds) continue;
-    const isCollapsed = collapsed.has(group.id);
-    if (isCollapsed) hiddenGroups.add(group.id);
     result.push({
       id: group.id,
-      type: "group",
+      type: "workflowGroup",
       position: { x: bounds.x, y: bounds.y },
-      selectable: true,
+      selectable: false,
       draggable: false,
+      className: "workflow-group-flow-node is-expanded",
       data: {
         label: group.label,
-        collapsed: isCollapsed,
         nodeCount: group.node_ids.length,
         state: groupState(group, projection),
-        width: isCollapsed ? 260 : bounds.width,
-        height: isCollapsed ? 92 : bounds.height,
-        onToggle,
+        width: bounds.width,
+        height: bounds.height,
       },
       selected: selection?.type === "group" && selection.id === group.id,
-      style: { zIndex: isCollapsed ? 5 : -1 },
+      zIndex: -10,
     });
   }
   return result;
+}
+
+function refreshGroupNodes(
+  current: TraceFlowNode[],
+  groups: WorkflowGroupView[],
+  graphNodes: WorkflowNodeView[],
+  projection: RuntimeProjection,
+  selection: TraceSelection,
+): TraceFlowNode[] {
+  const positions = Object.fromEntries(
+    current
+      .filter((node) => node.type === "trace")
+      .map((node) => [node.id, node.position]),
+  );
+  const nextGroups = buildGroupNodes(groups, graphNodes, projection, positions, selection);
+  const traceNodes = current.filter((node) => node.type === "trace");
+  return [...nextGroups, ...traceNodes];
 }
 
 function groupBounds(
@@ -433,29 +533,6 @@ function groupBounds(
   };
 }
 
-function hiddenByCollapsedGroups(
-  groups: WorkflowGroupView[],
-  collapsed: Set<string>,
-): Set<string> {
-  const hidden = new Set<string>();
-  for (const group of groups) {
-    if (!collapsed.has(group.id)) continue;
-    for (const nodeId of group.node_ids) hidden.add(nodeId);
-  }
-  return hidden;
-}
-
-function collapsedEndpoint(
-  nodeId: string,
-  groups: WorkflowGroupView[],
-  collapsed: Set<string>,
-): string | null {
-  const matches = groups
-    .filter((group) => collapsed.has(group.id) && group.node_ids.includes(nodeId))
-    .sort((left, right) => right.workflow_path.length - left.workflow_path.length);
-  return matches[0]?.id ?? null;
-}
-
 function groupState(
   group: WorkflowGroupView | undefined,
   projection: RuntimeProjection,
@@ -469,22 +546,4 @@ function groupState(
     return states.includes("completed") ? "completed" : "skipped";
   }
   return states[0] ?? "created";
-}
-
-function collapsedKey(definitionHash: string): string {
-  return `autoagent:groups:${definitionHash}`;
-}
-
-function loadCollapsedGroups(definitionHash: string): Set<string> {
-  const raw = localStorage.getItem(collapsedKey(definitionHash));
-  if (!raw) return new Set();
-  try {
-    return new Set(JSON.parse(raw) as string[]);
-  } catch {
-    return new Set();
-  }
-}
-
-function saveCollapsedGroups(definitionHash: string, values: Set<string>): void {
-  localStorage.setItem(collapsedKey(definitionHash), JSON.stringify([...values]));
 }

@@ -67,6 +67,16 @@ class RuntimeEventTests(unittest.TestCase):
         self.assertIn("node.execution_created", types)
         self.assertIn("operator.call_started", types)
         self.assertIn("operator.call_finished", types)
+        operator_events_by_call: dict[str, list[str]] = {}
+        for event in events:
+            if event.entity_type == "operator_call" and event.entity_id is not None:
+                operator_events_by_call.setdefault(event.entity_id, []).append(event.type)
+        self.assertTrue(operator_events_by_call)
+        for call_events in operator_events_by_call.values():
+            self.assertEqual(
+                ["operator.call_started", "operator.call_finished"],
+                call_events,
+            )
         self.assertIn("edge.evaluated", types)
         output_events = [event for event in events if event.channel == "output"]
         self.assertEqual(1, len(output_events))

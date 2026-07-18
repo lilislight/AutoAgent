@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Activity, Braces, File, FileJson, ListTree, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { Activity, Check, Copy, File, FileJson, ListTree, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 
-import type { DetailTab } from "./SelectionMenu";
 import type {
   EdgeEvaluationView,
   InvocationDetail,
   NodeExecutionView,
+  OperatorCallView,
   RuntimeEvent,
   RuntimeProjection,
   TraceSelection,
   WorkflowGraphView,
 } from "../types";
+import { useTraceUi, type RuntimeTab } from "../state";
 
 interface InspectorPanelProps {
   graph: WorkflowGraphView;
@@ -21,7 +22,6 @@ interface InspectorPanelProps {
   projection: RuntimeProjection;
   selection: TraceSelection;
   cursorSequence: number;
-  initialTab: DetailTab;
   onClose: () => void;
 }
 
@@ -32,17 +32,37 @@ export function InspectorPanel({
   projection,
   selection,
   cursorSequence,
-  initialTab,
   onClose,
 }: InspectorPanelProps) {
-  const [tab, setTab] = useState<DetailTab>(initialTab);
+  const tab = useTraceUi((state) => state.inspectorTab);
+  const setTab = useTraceUi((state) => state.setInspectorTab);
+  const runtimeTab = useTraceUi((state) => state.runtimeTab);
+  const setRuntimeTab = useTraceUi((state) => state.setRuntimeTab);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
   const [selectedEvaluationId, setSelectedEvaluationId] = useState<string | null>(null);
+  const [panelWidth, setPanelWidth] = useState(() => preferredPanelWidth());
+  const [resizing, setResizing] = useState(false);
   useEffect(() => {
-    setTab(initialTab);
     setSelectedExecutionId(null);
     setSelectedEvaluationId(null);
-  }, [initialTab, selection]);
+  }, [selection]);
+
+  useEffect(() => {
+    if (!resizing) return;
+    const onPointerMove = (event: PointerEvent) => {
+      const nextWidth = clampPanelWidth(window.innerWidth - event.clientX - 12);
+      setPanelWidth(nextWidth);
+    };
+    const onPointerUp = () => setResizing(false);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+    document.body.classList.add("is-resizing-detail");
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      document.body.classList.remove("is-resizing-detail");
+    };
+  }, [resizing]);
 
   const inspected = useMemo(
     () => inspectSelection(graph, invocation, events, projection, selection, cursorSequence),
@@ -61,56 +81,57 @@ export function InspectorPanel({
     <AnimatePresence mode="wait">
       <motion.aside
         key={selection ? `${selection.type}:${selection.id}` : "summary"}
-        className="detail-drawer"
-        initial={{ opacity: 0, x: 28 }}
+        className="detail-panel"
+        style={{ width: panelWidth }}
+        initial={{ opacity: 0, x: 34 }}
         animate={{ opacity: 1, x: 0 }}
-        exit={{ opacity: 0, x: 18 }}
+        exit={{ opacity: 0, x: 24 }}
         transition={{ duration: 0.18 }}
       >
-        <div className="inspector-heading">
-          <div>
-            <span>{inspected.kind}</span>
-            <strong>{inspected.title}</strong>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} title="Close drawer">
-            <X size={16} />
-          </button>
-        </div>
-        <nav className="inspector-tabs" aria-label="Detail sections">
-          <TabButton label="Definition" icon={<FileJson size={14} />} active={tab === "definition"} onClick={() => setTab("definition")} />
-          <TabButton label="History" icon={<Activity size={14} />} active={tab === "executions"} onClick={() => setTab("executions")} />
-          <TabButton label="Data" icon={<Braces size={14} />} active={tab === "data"} onClick={() => setTab("data")} />
-          <TabButton label="Contracts" icon={<ShieldCheck size={14} />} active={tab === "contracts"} onClick={() => setTab("contracts")} />
-          <TabButton label="Policies" icon={<SlidersHorizontal size={14} />} active={tab === "policies"} onClick={() => setTab("policies")} />
-          <TabButton label="Events" icon={<ListTree size={14} />} active={tab === "events"} onClick={() => setTab("events")} />
-        </nav>
-        <div className="inspector-content">
-          {tab === "definition" && (
-            <DefinitionView values={inspected.definition} />
-          )}
-          {tab === "executions" && (
-            <HistoryView
-              executions={inspected.executions}
-              evaluations={inspected.edgeEvaluations}
-              selectedExecutionId={currentExecution?.id ?? null}
-              selectedEvaluationId={currentEvaluation?.id ?? null}
-              onExecutionChange={setSelectedExecutionId}
-              onEvaluationChange={setSelectedEvaluationId}
-            />
-          )}
-          {tab === "data" && (
-            <div className="structured-value">
-              <FieldBlock label="Input" value={currentExecution?.input ?? inspected.input} />
-              <FieldBlock
-                label="Output"
-                value={currentExecution?.output ?? inspected.output ?? currentEvaluation}
-              />
+        <button
+          className="detail-resize-handle"
+          type="button"
+          aria-label="Resize detail panel"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            setResizing(true);
+          }}
+        />
+          <div className="inspector-heading">
+            <div>
+              <span>{inspected.kind}</span>
+              <strong>{inspected.title}</strong>
             </div>
-          )}
-          {tab === "contracts" && <JsonBlock value={inspected.contracts} empty="No contracts." />}
-          {tab === "policies" && <JsonBlock value={inspected.policies} empty="No policies." />}
-          {tab === "events" && <EventList events={inspected.events} />}
-        </div>
+            <button className="icon-button" type="button" onClick={onClose} title="Close detail page">
+              <X size={16} />
+            </button>
+          </div>
+          <nav className="inspector-tabs" aria-label="Detail sections">
+            <TabButton label="Runtime" icon={<Activity size={14} />} active={tab === "runtime"} onClick={() => setTab("runtime")} />
+            <TabButton label="Definition" icon={<FileJson size={14} />} active={tab === "definition"} onClick={() => setTab("definition")} />
+            <TabButton label="Contracts" icon={<ShieldCheck size={14} />} active={tab === "contracts"} onClick={() => setTab("contracts")} />
+            <TabButton label="Policies" icon={<SlidersHorizontal size={14} />} active={tab === "policies"} onClick={() => setTab("policies")} />
+            <TabButton label="Events" icon={<ListTree size={14} />} active={tab === "events"} onClick={() => setTab("events")} />
+          </nav>
+          <div className="inspector-content">
+            {tab === "runtime" && (
+              <RuntimeView
+                inspected={inspected}
+                currentExecution={currentExecution}
+                currentEvaluation={currentEvaluation}
+                runtimeTab={runtimeTab}
+                onRuntimeTabChange={setRuntimeTab}
+                selectedExecutionId={currentExecution?.id ?? null}
+                selectedEvaluationId={currentEvaluation?.id ?? null}
+                onExecutionChange={setSelectedExecutionId}
+                onEvaluationChange={setSelectedEvaluationId}
+              />
+            )}
+            {tab === "definition" && <DefinitionView values={inspected.definition} />}
+            {tab === "contracts" && <JsonBlock value={inspected.contracts} empty="No contracts." />}
+            {tab === "policies" && <JsonBlock value={inspected.policies} empty="No policies." />}
+            {tab === "events" && <EventList events={inspected.events} />}
+          </div>
       </motion.aside>
     </AnimatePresence>
   );
@@ -138,32 +159,59 @@ function TabButton({
 function DefinitionView({ values }: { values: unknown }) {
   return (
     <div className="definition-view">
-      <Overview values={asRecord(values)} />
       <JsonBlock value={values} empty="No definition." />
     </div>
   );
 }
 
-function HistoryView({
-  executions,
-  evaluations,
+function RuntimeView({
+  inspected,
+  currentExecution,
+  currentEvaluation,
+  runtimeTab,
+  onRuntimeTabChange,
   selectedExecutionId,
   selectedEvaluationId,
   onExecutionChange,
   onEvaluationChange,
 }: {
-  executions: NodeExecutionView[];
-  evaluations: EdgeEvaluationView[];
+  inspected: ReturnType<typeof inspectSelection>;
+  currentExecution: NodeExecutionView | null;
+  currentEvaluation: EdgeEvaluationView | null;
+  runtimeTab: RuntimeTab;
+  onRuntimeTabChange: (tab: RuntimeTab) => void;
   selectedExecutionId: string | null;
   selectedEvaluationId: string | null;
   onExecutionChange: (id: string) => void;
   onEvaluationChange: (id: string) => void;
 }) {
+  const { executions, edgeEvaluations: evaluations } = inspected;
   if (executions.length === 0 && evaluations.length === 0) {
-    return <div className="inspector-empty">No history at this cursor.</div>;
+    return (
+      <div className="runtime-view">
+        <FailureSummary
+          inspected={inspected}
+          execution={currentExecution}
+          evaluation={currentEvaluation}
+        />
+        <div className="inspector-empty">No runtime history at this cursor.</div>
+        <RuntimeTabs active={runtimeTab} onChange={onRuntimeTabChange} />
+        <RuntimeTabContent
+          active={runtimeTab}
+          inspected={inspected}
+          execution={currentExecution}
+          evaluation={currentEvaluation}
+        />
+      </div>
+    );
   }
   return (
-    <div className="history-view">
+    <div className="runtime-view">
+      <FailureSummary
+        inspected={inspected}
+        execution={currentExecution}
+        evaluation={currentEvaluation}
+      />
       {executions.length > 0 && (
         <label className="history-select">
           Node execution
@@ -194,8 +242,115 @@ function HistoryView({
           </select>
         </label>
       )}
-      <JsonBlock value={{ executions, evaluations }} empty="No history." />
+      <RuntimeTabs active={runtimeTab} onChange={onRuntimeTabChange} />
+      <RuntimeTabContent
+        active={runtimeTab}
+        inspected={inspected}
+        execution={currentExecution}
+        evaluation={currentEvaluation}
+      />
     </div>
+  );
+}
+
+function RuntimeTabs({
+  active,
+  onChange,
+}: {
+  active: RuntimeTab;
+  onChange: (tab: RuntimeTab) => void;
+}) {
+  const tabs: Array<[RuntimeTab, string]> = [
+    ["input", "Input"],
+    ["output", "Output"],
+    ["execution", "Execution"],
+    ["calls", "Operator calls"],
+    ["evaluations", "Edge evaluations"],
+  ];
+  return (
+    <nav className="runtime-tabs" aria-label="Runtime data">
+      {tabs.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          className={active === id ? "is-active" : ""}
+          onClick={() => onChange(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function RuntimeTabContent({
+  active,
+  inspected,
+  execution,
+  evaluation,
+}: {
+  active: RuntimeTab;
+  inspected: ReturnType<typeof inspectSelection>;
+  execution: NodeExecutionView | null;
+  evaluation: EdgeEvaluationView | null;
+}) {
+  if (active === "input") {
+    return <FieldBlock label="Input" value={execution?.input ?? inspected.input} />;
+  }
+  if (active === "output") {
+    return <FieldBlock label="Output" value={execution?.output ?? inspected.output ?? evaluation} />;
+  }
+  if (active === "execution") {
+    return <FieldBlock label={execution ? "Execution" : "Edge evaluation"} value={execution ?? evaluation} />;
+  }
+  if (active === "calls") {
+    return <FieldBlock label="Operator calls" value={execution?.operator_calls ?? []} />;
+  }
+  return <FieldBlock label="Edge evaluations" value={inspected.edgeEvaluations} />;
+}
+
+type FailureSummaryItem = {
+  source: string;
+  code?: string;
+  message: string;
+  detail?: unknown;
+  tone: "danger" | "warning" | "neutral";
+};
+
+function FailureSummary({
+  inspected,
+  execution,
+  evaluation,
+}: {
+  inspected: ReturnType<typeof inspectSelection>;
+  execution: NodeExecutionView | null;
+  evaluation: EdgeEvaluationView | null;
+}) {
+  const directCall = operatorCallFromValue(inspected.definition);
+  const items = failureSummaryItems({ execution, evaluation, directCall });
+  if (items.length === 0) return null;
+  return (
+    <section className="failure-summary" aria-label="Failure summary">
+      <h3>Failure summary</h3>
+      {items.map((item, index) => (
+        <article
+          key={`${item.source}:${item.code ?? item.message}:${index}`}
+          className={`failure-card tone-${item.tone}`}
+        >
+          <div>
+            <strong>{item.source}</strong>
+            {item.code && <code>{item.code}</code>}
+          </div>
+          <p>{item.message}</p>
+          {item.detail !== undefined && (
+            <details>
+              <summary>Detail</summary>
+              <JsonBlock value={item.detail} empty="No detail." />
+            </details>
+          )}
+        </article>
+      ))}
+    </section>
   );
 }
 
@@ -225,13 +380,144 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
+function operatorCallFromValue(value: unknown): OperatorCallView | null {
+  const record = asRecord(value);
+  if (
+    typeof record.id === "string" &&
+    typeof record.operator_id === "string" &&
+    typeof record.kind === "string" &&
+    typeof record.state === "string"
+  ) {
+    return record as unknown as OperatorCallView;
+  }
+  return null;
+}
+
+function failureSummaryItems({
+  execution,
+  evaluation,
+  directCall,
+}: {
+  execution: NodeExecutionView | null;
+  evaluation: EdgeEvaluationView | null;
+  directCall: OperatorCallView | null;
+}): FailureSummaryItem[] {
+  const items: FailureSummaryItem[] = [];
+  const failedCalls = [
+    ...(directCall ? [directCall] : []),
+    ...(execution?.operator_calls ?? []),
+  ].filter((call, index, values) =>
+    values.findIndex((value) => value.id === call.id) === index &&
+    ["failed", "interrupted"].includes(call.state),
+  );
+
+  if (failedCalls.length > 0) {
+    const visibleCalls =
+      execution?.state === "completed" ? failedCalls.slice(0, 2) : failedCalls.slice(-2);
+    for (const call of visibleCalls) {
+      const error = errorRecord(call.error);
+      const recovered = execution?.state === "completed";
+      items.push({
+        source: recovered
+          ? `Recovered operator call #${call.call_no}`
+          : `Operator call #${call.call_no}`,
+        code: error.code,
+        message: `${call.operator_id} ${call.kind} ${call.state}: ${error.message}`,
+        detail: {
+          operator_id: call.operator_id,
+          kind: call.kind,
+          item_index: call.item_index,
+          replica_index: call.replica_index,
+          error: call.error,
+          resource_usage: call.resource_usage,
+        },
+        tone: recovered ? "warning" : "danger",
+      });
+    }
+  }
+
+  if (execution?.error) {
+    const error = errorRecord(execution.error);
+    const duplicatedByCall = failedCalls.some(
+      (call) => errorRecord(call.error).code === error.code,
+    );
+    if (!duplicatedByCall || failedCalls.length === 0) {
+      items.push({
+        source: errorSource(error.code, execution.state),
+        code: error.code,
+        message: error.message,
+        detail: execution.error,
+        tone: execution.state === "waiting" ? "warning" : "danger",
+      });
+    }
+  }
+
+  if (evaluation && (evaluation.state === "failed" || evaluation.reason)) {
+    items.push({
+      source: evaluation.state === "failed" ? "Edge condition" : "Edge decision",
+      code: evaluation.state,
+      message: evaluation.reason || `Edge was ${evaluation.state}.`,
+      detail: evaluation,
+      tone: evaluation.state === "failed" ? "danger" : "neutral",
+    });
+  }
+
+  return items;
+}
+
+function errorRecord(error: Record<string, unknown> | null): {
+  code?: string;
+  message: string;
+} {
+  if (!error) return { message: "No structured error was recorded." };
+  return {
+    code: typeof error.code === "string" ? error.code : undefined,
+    message: typeof error.message === "string"
+      ? error.message
+      : stableJsonString(error),
+  };
+}
+
+function errorSource(code: string | undefined, state: string): string {
+  if (code === "RESOURCE_LIMIT_EXCEEDED") return "Policy / resource limit";
+  if (code?.includes("MAPPING")) return "Input mapping";
+  if (code?.includes("BINDING")) return "Output binding";
+  if (code?.includes("AGGREGATION")) return "Output aggregation";
+  if (code?.includes("CONDITION")) return "Edge condition";
+  if (code?.startsWith("OPERATOR_")) return "Operator";
+  if (code?.includes("WAIT")) return "Wait";
+  if (state === "cancelled") return "Cancellation";
+  if (state === "interrupted") return "Interruption";
+  return "Node execution";
+}
+
 function JsonBlock({ value, empty }: { value: unknown; empty: string }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   if (value === null || value === undefined) {
     return <div className="inspector-empty">{empty}</div>;
   }
   const artifacts = findArtifacts(value);
+  const copyJson = async () => {
+    try {
+      await copyText(stableJsonString(value));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1400);
+  };
   return (
     <div className="structured-value">
+      <div className="json-toolbar">
+        <button type="button" onClick={() => void copyJson()}>
+          {copyState === "copied" ? <Check size={13} /> : <Copy size={13} />}
+          {copyState === "copied"
+            ? "Copied"
+            : copyState === "failed"
+              ? "Copy failed"
+              : "Copy JSON"}
+        </button>
+      </div>
       {artifacts.length > 0 && (
         <div className="artifact-list">
           {artifacts.map((artifact, index) => (
@@ -239,8 +525,57 @@ function JsonBlock({ value, empty }: { value: unknown; empty: string }) {
           ))}
         </div>
       )}
-      <pre className="json-block">{JSON.stringify(value, null, 2)}</pre>
+      <JsonTree value={value} />
     </div>
+  );
+}
+
+function JsonTree({ value }: { value: unknown }) {
+  return (
+    <div className="json-tree">
+      <JsonTreeNode name={null} value={value} depth={0} />
+    </div>
+  );
+}
+
+function JsonTreeNode({
+  name,
+  value,
+  depth,
+}: {
+  name: string | null;
+  value: unknown;
+  depth: number;
+}) {
+  const expandable = value !== null && typeof value === "object";
+  if (!expandable) {
+    return (
+      <div className="json-tree-row" style={{ paddingLeft: depth * 12 }}>
+        {name !== null && <span className="json-key">{name}</span>}
+        <span className={`json-scalar ${typeof value}`}>{formatJsonScalar(value)}</span>
+      </div>
+    );
+  }
+  const entries = Array.isArray(value)
+    ? value.map((item, index) => [String(index), item] as const)
+    : Object.entries(value as Record<string, unknown>);
+  const summary = Array.isArray(value) ? `Array(${value.length})` : `Object(${entries.length})`;
+  return (
+    <details className="json-tree-node" open={depth < 2}>
+      <summary style={{ paddingLeft: depth * 12 }}>
+        <span className="json-key">{name ?? "root"}</span>
+        <span className="json-summary">{summary}</span>
+      </summary>
+      {entries.length === 0 ? (
+        <div className="json-tree-row" style={{ paddingLeft: (depth + 1) * 12 }}>
+          <span className="json-scalar">empty</span>
+        </div>
+      ) : (
+        entries.map(([key, item]) => (
+          <JsonTreeNode key={key} name={key} value={item} depth={depth + 1} />
+        ))
+      )}
+    </details>
   );
 }
 
@@ -290,15 +625,36 @@ function EventList({ events }: { events: RuntimeEvent[] }) {
   if (events.length === 0) return <div className="inspector-empty">No events at this cursor.</div>;
   return (
     <ol className="event-list">
-      {[...events].reverse().map((event) => (
+      {[...events].reverse().map((event, index) => {
+        const localSequence = events.length - index;
+        return (
         <li key={event.id}>
-          <span className="event-sequence">{event.sequence}</span>
+          <span
+            className="event-sequence"
+            title={`Session sequence ${event.sequence}`}
+          >
+            {localSequence}
+          </span>
           <div>
             <strong>{event.type}</strong>
             <time>{formatTimestamp(event.occurred_at_ms)}</time>
+            <details className="event-detail">
+              <summary>Payload</summary>
+              <JsonBlock
+                value={{
+                  entity_type: event.entity_type,
+                  entity_id: event.entity_id,
+                  node_id: event.node_id,
+                  edge_id: event.edge_id,
+                  payload: event.payload,
+                }}
+                empty="No payload."
+              />
+            </details>
           </div>
         </li>
-      ))}
+        );
+      })}
     </ol>
   );
 }
@@ -312,21 +668,35 @@ function inspectSelection(
   cursorSequence: number,
 ) {
   const visibleEvents = events.filter((event) => event.sequence <= cursorSequence);
+  const allEvents = events;
   const visibleExecutionIds = new Set(
     visibleEvents
       .filter((event) => event.type === "node.execution_created" && event.entity_id)
       .map((event) => event.entity_id as string),
   );
+  const visibleEdgeEvaluationCounts = new Map<string, number>();
+  visibleEvents
+    .filter((event) => event.type === "edge.evaluated" && event.edge_id)
+    .forEach((event) => {
+      const edgeId = event.edge_id as string;
+      visibleEdgeEvaluationCounts.set(edgeId, (visibleEdgeEvaluationCounts.get(edgeId) ?? 0) + 1);
+    });
+  const seenEdgeEvaluationCounts = new Map<string, number>();
   const allEvaluations = invocation.node_executions.flatMap((execution) =>
     execution.edge_evaluations.map((evaluation) => ({
       ...evaluation,
       source_execution_id: evaluation.source_execution_id || execution.id,
       source_node_id: evaluation.source_node_id || execution.node_id,
     })),
-  );
+  ).filter((evaluation) => {
+    const edgeId = evaluation.edge_id;
+    const nextIndex = (seenEdgeEvaluationCounts.get(edgeId) ?? 0) + 1;
+    seenEdgeEvaluationCounts.set(edgeId, nextIndex);
+    return nextIndex <= (visibleEdgeEvaluationCounts.get(edgeId) ?? 0);
+  });
 
   if (!selection) {
-    return baseInvocation(invocation, visibleEvents, projection);
+    return baseInvocation(invocation, allEvents, projection);
   }
   if (selection.type === "group") {
     const group = graph.groups.find((value) => value.id === selection.id);
@@ -341,10 +711,8 @@ function inspectSelection(
       executions: invocation.node_executions.filter(
         (execution) => group?.node_ids.includes(execution.node_id) && visibleExecutionIds.has(execution.id),
       ),
-      edgeEvaluations: allEvaluations.filter((evaluation) =>
-        group?.node_ids.includes(evaluation.source_node_id),
-      ),
-      events: visibleEvents.filter((event) => event.node_id && group?.node_ids.includes(event.node_id)),
+      edgeEvaluations: [],
+      events: allEvents.filter((event) => event.node_id && group?.node_ids.includes(event.node_id)),
     };
   }
   if (selection.type === "node") {
@@ -377,8 +745,8 @@ function inspectSelection(
           }
         : {},
       executions,
-      edgeEvaluations: allEvaluations.filter((value) => value.source_node_id === selection.id),
-      events: visibleEvents.filter((event) => event.node_id === selection.id),
+      edgeEvaluations: [],
+      events: allEvents.filter((event) => event.node_id === selection.id),
     };
   }
   if (selection.type === "edge") {
@@ -395,7 +763,7 @@ function inspectSelection(
       policies: edge?.policy ? { policy: edge.policy } : {},
       executions: [],
       edgeEvaluations: evaluations,
-      events: visibleEvents.filter((event) => event.edge_id === selection.id),
+      events: allEvents.filter((event) => event.edge_id === selection.id),
       overview: projected,
     };
   }
@@ -410,8 +778,8 @@ function inspectSelection(
       contracts: {},
       policies: execution?.resource_usage ? { resource_usage: execution.resource_usage } : {},
       executions: execution ? [execution] : [],
-      edgeEvaluations: execution?.edge_evaluations ?? [],
-      events: visibleEvents.filter((event) => event.entity_id === selection.id),
+      edgeEvaluations: [],
+      events: allEvents.filter((event) => event.entity_id === selection.id),
     };
   }
   const call = invocation.node_executions
@@ -427,7 +795,7 @@ function inspectSelection(
     policies: call?.resource_usage ? { resource_usage: call.resource_usage } : {},
     executions: [],
     edgeEvaluations: [],
-    events: visibleEvents.filter((event) => event.entity_id === selection.id),
+    events: allEvents.filter((event) => event.entity_id === selection.id),
   };
 }
 
@@ -461,6 +829,45 @@ function formatScalar(value: unknown): string {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function formatJsonScalar(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return JSON.stringify(value);
+  return String(value);
+}
+
+function stableJsonString(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error("Clipboard copy failed.");
+}
+
+function preferredPanelWidth(): number {
+  if (typeof window === "undefined") return 460;
+  return clampPanelWidth(Math.round(window.innerWidth * 0.3));
+}
+
+function clampPanelWidth(value: number): number {
+  if (typeof window === "undefined") return Math.min(720, Math.max(360, value));
+  const max = Math.min(760, Math.max(360, window.innerWidth - 80));
+  return Math.min(max, Math.max(360, value));
 }
 
 function formatTimestamp(value: number): string {

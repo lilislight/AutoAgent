@@ -1,5 +1,6 @@
 import type {
   InvocationSummary,
+  InvocationSubmitResponse,
   TraceBootstrap,
   ServerHealth,
   RuntimeEvent,
@@ -10,6 +11,22 @@ import type {
 
 async function requestJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(detail || `${response.status} ${response.statusText}`);
@@ -47,6 +64,17 @@ export function listSessions(workflowId: string): Promise<SessionSummary[]> {
 
 export function listInvocations(sessionId: string): Promise<InvocationSummary[]> {
   return requestJson(`/api/sessions/${sessionId}/invocations`);
+}
+
+export function submitInvocation(
+  workflowId: string,
+  body: {
+    input?: Record<string, unknown> | null;
+    session_id?: string | null;
+    entry_node_id?: string | null;
+  },
+): Promise<InvocationSubmitResponse> {
+  return postJson(`/api/workflows/${workflowId}/invocations`, body);
 }
 
 export function getTraceView(

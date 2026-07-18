@@ -10,11 +10,25 @@ export type RuntimeState =
   | "skipped"
   | string;
 
+export type EdgeRuntimeState =
+  | "selected"
+  | "skipped"
+  | "failed"
+  | "pending"
+  | string;
+
 export interface ServerHealth {
   status: string;
   execution_enabled: boolean;
   authentication_required: boolean;
   authenticated: boolean;
+}
+
+export interface InvocationSubmitResponse {
+  workflow_id: string;
+  session_id: string;
+  invocation_id: string;
+  state: RuntimeState;
 }
 
 export interface WorkflowSummary {
@@ -122,7 +136,7 @@ export interface EdgeEvaluationView {
   source_execution_id: string;
   source_node_id: string;
   target_node_id: string;
-  state: string;
+  state: EdgeRuntimeState;
   selected: boolean;
   reason: string | null;
   created_at_ms: number;
@@ -211,7 +225,7 @@ export interface ProjectedNode {
 
 export interface ProjectedEdge {
   edge_id: string;
-  state: string;
+  state: EdgeRuntimeState;
   selected: boolean;
   evaluation_count: number;
   selected_count: number;

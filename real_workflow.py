@@ -1,20 +1,32 @@
 from __future__ import annotations
 
 import json
+import random
+import time
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from autoagent import (
     AutoAgentApp,
+    AutoAgentServer,
+    CapabilityRef,
+    CapabilitySelectionPolicy,
     EdgePolicy,
     MapPolicy,
     NodePolicy,
     ReplicationPolicy,
     ResourcePolicy,
+    RetryPolicy,
     TimeoutPolicy,
     Workflow,
 )
+
+
+SECURITY_REVIEW_FAILURE_RATE = 0.4
+RELIABILITY_REVIEW_TIMEOUT_MS = 120
+RELIABILITY_REVIEW_PRIMARY_SLEEP_SECONDS = 0.35
+RELIABILITY_REVIEW_CAPABILITY_ID = "reliability_review"
 
 
 class ServiceContext(BaseModel):
@@ -405,6 +417,10 @@ def mock_llm_route_reviews(report: InvestigationReport) -> ReviewRoute:
 
 
 def perform_security_review(report: InvestigationReport) -> SpecialistReview:
+    if random.random() < SECURITY_REVIEW_FAILURE_RATE:
+        raise RuntimeError(
+            "Randomized security review failure for tracing demo."
+        )
     active_exploit = "active_exploit" in report.incident.risk_labels
     return SpecialistReview(
         domain="security",
@@ -415,6 +431,11 @@ def perform_security_review(report: InvestigationReport) -> SpecialistReview:
         recommendations=["Require security approval before restoring traffic."],
         risk_score=0.96 if active_exploit else 0.72,
     )
+
+
+def slow_reliability_review(report: InvestigationReport) -> SpecialistReview:
+    time.sleep(RELIABILITY_REVIEW_PRIMARY_SLEEP_SECONDS)
+    return perform_reliability_review(report)
 
 
 def perform_reliability_review(report: InvestigationReport) -> SpecialistReview:
@@ -664,13 +685,20 @@ def build_incident_response_workflow() -> Workflow:
         input_mapping=lambda ctx: {
             "report": ctx.outputs.latest("investigation")
         },
+        policy=NodePolicy(
+            retry=RetryPolicy(max_attempts=2),
+        ),
     )
     workflow.add_node(
-        perform_reliability_review,
+        CapabilityRef(id=RELIABILITY_REVIEW_CAPABILITY_ID),
         node_id="reliability_review",
         input_mapping=lambda ctx: {
             "report": ctx.outputs.latest("investigation")
         },
+        policy=NodePolicy(
+            selection=CapabilitySelectionPolicy(allow_fallback=True),
+            timeout=TimeoutPolicy(timeout_ms=RELIABILITY_REVIEW_TIMEOUT_MS),
+        ),
     )
     workflow.add_node(
         perform_fast_track_review,
@@ -763,6 +791,35 @@ def build_incident_response_workflow() -> Workflow:
     return workflow
 
 
+def build_incident_response_app() -> tuple[AutoAgentApp, Workflow]:
+    """Create the demo App with runtime-resolved Operators registered.
+
+    The reliability review node intentionally uses a CapabilityRef so the UI can
+    show a primary OperatorCall timing out and a fallback OperatorCall finishing
+    successfully inside the same NodeExecution.
+    """
+
+    app = AutoAgentApp()
+    app.register_capability(
+        RELIABILITY_REVIEW_CAPABILITY_ID,
+        description="Review incident mitigation from a reliability perspective.",
+    )
+    app.register_operator(
+        slow_reliability_review,
+        operator_id="slow_reliability_review",
+        capability_id=RELIABILITY_REVIEW_CAPABILITY_ID,
+        default=True,
+    )
+    app.register_operator(
+        perform_reliability_review,
+        operator_id="reliability_review_fallback",
+        capability_id=RELIABILITY_REVIEW_CAPABILITY_ID,
+    )
+    workflow = build_incident_response_workflow()
+    app.register_workflow(workflow)
+    return app, workflow
+
+
 def _new_incident_sample() -> IncidentRequest:
     return IncidentRequest(
         incident_id="INC-2048",
@@ -814,9 +871,22 @@ def _resume_incident_sample() -> ResumeRequest:
 
 def _print_result(label: str, invocation) -> None:
     if invocation.state != "completed":
-        raise RuntimeError(f"{label} failed: {invocation.error}")
+        error = (
+            invocation.error.to_record()
+            if invocation.error is not None
+            else {"message": "Unknown invocation failure."}
+        )
+        print(f"\n{label} failed")
+        print(json.dumps(error, indent=2, sort_keys=True))
+        print("Executed nodes:")
+        print(" -> ".join(item.node_id for item in invocation.node_executions))
+        return
     output = invocation.result["output"]
-    payload = output.model_dump(mode="json") if isinstance(output, BaseModel) else output
+    payload = (
+        output.model_dump(mode="json")
+        if isinstance(output, BaseModel)
+        else output
+    )
     print(f"\n{label}")
     print(json.dumps(payload, indent=2, sort_keys=True))
     print("Executed nodes:")
@@ -824,12 +894,14 @@ def _print_result(label: str, invocation) -> None:
 
 
 def main() -> None:
-    workflow = build_incident_response_workflow()
-    app = AutoAgentApp()
+    app, workflow = build_incident_response_app()
 
     compile_result = app.compiler.compile(workflow)
     if not compile_result.ok:
-        diagnostics = [item.model_dump(mode="json") for item in compile_result.diagnostics]
+        diagnostics = [
+            item.model_dump(mode="json")
+            for item in compile_result.diagnostics
+        ]
         raise RuntimeError(json.dumps(diagnostics, indent=2))
 
     print("Compiled entries:", compile_result.workflow_ir.entry_node_ids)
@@ -851,6 +923,14 @@ def main() -> None:
         session_id="incident-resume-example",
     )
     _print_result("Resumed incident path", resumed_invocation)
+
+    print("\nAutoAgentServer is serving this workflow at http://0.0.0.0:8765")
+    print("Start the tracing UI with:")
+    print(
+        "cd /home/chengqian/projects/AutoAgent/ui && "
+        "AUTOAGENT_SERVER_URL=http://127.0.0.1:8765 npm run dev -- --host 0.0.0.0"
+    )
+    AutoAgentServer(app).run(host="0.0.0.0", port=8765)
 
 
 if __name__ == "__main__":

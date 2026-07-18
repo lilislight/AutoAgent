@@ -18,11 +18,15 @@
   --success: #24875d;
   --warning: #c47b10;
   --danger: #d04444;
+  --cancelled: #8b5a65;
+  --interrupted: #9a5b2d;
   --edge: #818984;
+  --edge-skipped: #9aa19b;
   --canvas-dot: #cbd0ca;
   --minimap-mask: rgba(245, 246, 242, 0.72);
   --shadow: 0 10px 30px rgba(32, 36, 33, 0.09);
   --timeline-label-width: 220px;
+  --timeline-height: 248px;
 }
 
 :root[data-theme="dark"] {
@@ -40,7 +44,10 @@
   --success: #54ad7f;
   --warning: #e1a647;
   --danger: #e36a6a;
+  --cancelled: #c27b8c;
+  --interrupted: #c98a54;
   --edge: #7c8980;
+  --edge-skipped: #68736b;
   --canvas-dot: #424943;
   --minimap-mask: rgba(23, 26, 24, 0.76);
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
@@ -74,11 +81,136 @@ button {
 }
 
 .app-shell {
+  position: relative;
   display: grid;
   grid-template-rows: 62px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   background: var(--page);
+}
+
+.invoke-panel {
+  position: absolute;
+  top: 72px;
+  right: 16px;
+  z-index: 60;
+  width: min(440px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 22px 70px rgba(26, 30, 27, 0.24);
+}
+
+.invoke-panel form {
+  display: grid;
+  gap: 11px;
+  padding: 13px;
+}
+
+.invoke-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.invoke-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent-strong);
+}
+
+.invoke-heading strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.invoke-heading button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.invoke-panel label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.invoke-panel input,
+.invoke-panel textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-transform: none;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.invoke-panel input {
+  height: 32px;
+  padding: 0 9px;
+}
+
+.invoke-panel textarea {
+  min-height: 144px;
+  max-height: 36vh;
+  padding: 9px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  line-height: 1.5;
+}
+
+.invoke-panel input:focus,
+.invoke-panel textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.invoke-panel p {
+  margin: 0;
+  font-size: 11px;
+}
+
+.invoke-message {
+  color: var(--success);
+}
+
+.invoke-error {
+  color: var(--danger);
+}
+
+.invoke-panel button[type="submit"] {
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--line));
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.invoke-panel button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .scope-bar {
@@ -151,11 +283,17 @@ button {
   color: var(--text);
   font-size: 12px;
   text-overflow: ellipsis;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
 }
 
 .scope-select select:hover,
 .scope-select select:focus {
   border-color: var(--line-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .scope-select select:disabled {
@@ -234,7 +372,18 @@ button {
   min-width: 0;
   min-height: 0;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(240px, 1fr) 248px;
+  grid-template-rows: minmax(240px, 1fr) var(--timeline-height);
+  transition: grid-template-rows 220ms ease;
+}
+
+.is-resizing-timeline .trace-workspace,
+.is-resizing-timeline .timeline-panel,
+.is-resizing-timeline .detail-panel {
+  transition: none !important;
+}
+
+.trace-workspace.timeline-collapsed {
+  grid-template-rows: minmax(240px, 1fr) var(--timeline-height);
 }
 
 .workflow-canvas {
@@ -262,7 +411,16 @@ button {
   background: var(--surface);
 }
 
+.workflow-canvas .react-flow__node.workflow-group-flow-node.is-expanded {
+  z-index: -1 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  pointer-events: none;
+}
+
 .trace-node {
+  position: relative;
   width: 224px;
   min-height: 104px;
   padding: 12px 13px 10px;
@@ -272,27 +430,39 @@ button {
   background: var(--surface);
   box-shadow: 0 5px 16px rgba(31, 36, 32, 0.08);
   transition:
+    background 180ms ease,
     border-color 180ms ease,
     box-shadow 180ms ease,
     transform 180ms ease;
 }
 
+.trace-node::after {
+  position: absolute;
+  inset: -5px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  content: "";
+  pointer-events: none;
+}
+
 .trace-node:hover {
   transform: translateY(-2px);
+  background: color-mix(in srgb, var(--surface) 82%, var(--accent) 18%);
   border-color: color-mix(in srgb, var(--accent) 50%, var(--line-strong));
   box-shadow: 0 10px 24px rgba(31, 36, 32, 0.13);
 }
 
 .trace-node.selected {
+  background: color-mix(in srgb, var(--surface) 78%, var(--accent) 22%);
   border-color: var(--accent-strong);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent), var(--shadow);
 }
 
 .workflow-group-node {
   position: relative;
-  border: 1px dashed color-mix(in srgb, var(--accent) 42%, var(--line-strong));
+  border: 1px dashed color-mix(in srgb, var(--accent-strong) 72%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-raised) 52%, transparent);
+  background: transparent;
   color: var(--text);
   transition:
     border-color 180ms ease,
@@ -301,60 +471,56 @@ button {
     background 180ms ease;
 }
 
-.workflow-group-node:hover,
-.workflow-group-node.selected {
-  border-color: var(--accent-strong);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
-}
-
-.workflow-group-node.is-collapsed {
-  display: grid;
-  width: 260px;
-  min-height: 92px;
-  padding: 13px 14px;
-  align-content: center;
-  border-style: solid;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.workflow-group-node.is-collapsed:hover {
-  transform: translateY(-2px);
-}
-
 .workflow-group-node.is-expanded {
-  pointer-events: all;
+  pointer-events: none;
 }
 
-.group-toggle {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--text-muted);
-  cursor: pointer;
+.workflow-group-node.state-running {
+  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  box-shadow: none;
+}
+
+.workflow-group-node.state-ready {
+  border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+  box-shadow: none;
+}
+
+.workflow-group-node.state-completed {
+  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  background: transparent;
+}
+
+.workflow-group-node.state-waiting {
+  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  box-shadow: none;
+}
+
+.workflow-group-node.state-failed {
+  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  background: transparent;
+  box-shadow: none;
+}
+
+.workflow-group-node.state-cancelled {
+  border-color: color-mix(in srgb, var(--cancelled) 62%, transparent);
+  background: transparent;
+  box-shadow: none;
+}
+
+.workflow-group-node.state-interrupted {
+  border-color: color-mix(in srgb, var(--interrupted) 62%, transparent);
+  background: transparent;
+  box-shadow: none;
 }
 
 .group-label {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 12px 0 38px;
+  padding: 8px 12px 0 12px;
   color: var(--accent-strong);
   font-size: 11px;
-}
-
-.workflow-group-node.is-collapsed .group-label {
-  padding: 0;
-  color: var(--text);
+  pointer-events: none;
 }
 
 .group-label strong {
@@ -369,10 +535,39 @@ button {
   font-size: 10px;
 }
 
-.trace-edge:hover path,
-.react-flow__edge:hover path {
-  stroke-width: 3;
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 35%, transparent));
+.workflow-canvas .react-flow__edge.trace-edge .react-flow__edge-interaction {
+  stroke-width: 28;
+}
+
+.workflow-canvas .react-flow__edge.trace-edge:hover .react-flow__edge-path,
+.workflow-canvas .react-flow__edge.trace-edge.is-hovered .react-flow__edge-path,
+.workflow-canvas .react-flow__edge.trace-edge.selected .react-flow__edge-path {
+  stroke: var(--accent-strong) !important;
+  stroke-width: 3.2 !important;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 45%, transparent));
+}
+
+.workflow-canvas .react-flow__edge.trace-edge.state-selected:hover .react-flow__edge-path,
+.workflow-canvas .react-flow__edge.trace-edge.state-selected.is-hovered .react-flow__edge-path {
+  stroke: var(--success) !important;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--success) 42%, transparent));
+}
+
+.workflow-canvas .react-flow__edge.trace-edge.state-failed:hover .react-flow__edge-path,
+.workflow-canvas .react-flow__edge.trace-edge.state-failed.is-hovered .react-flow__edge-path {
+  stroke: var(--danger) !important;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--danger) 42%, transparent));
+}
+
+.workflow-canvas .react-flow__edge.trace-edge.state-skipped:hover .react-flow__edge-path,
+.workflow-canvas .react-flow__edge.trace-edge.state-skipped.is-hovered .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--edge-skipped) 72%, var(--text) 28%) !important;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--edge-skipped) 45%, transparent));
+}
+
+.workflow-canvas .react-flow__edge.trace-edge:hover .react-flow__edge-text,
+.workflow-canvas .react-flow__edge.trace-edge.is-hovered .react-flow__edge-text {
+  fill: var(--accent-strong);
 }
 
 .trace-node-heading {
@@ -427,13 +622,61 @@ button {
 
 .node-flags {
   display: flex;
+  align-items: center;
   gap: 5px;
+}
+
+.node-issue {
+  max-width: 68px;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.node-issue.tone-danger {
+  background: var(--danger);
+}
+
+.node-issue.tone-warning {
+  background: var(--warning);
+}
+
+.node-issue.tone-neutral {
+  background: var(--line-strong);
+}
+
+.trace-node.state-created .state-indicator {
+  background: var(--line-strong);
+}
+
+.trace-node.state-ready {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--surface) 93%, var(--accent) 7%);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+.trace-node.state-ready .state-indicator {
+  background: var(--accent);
 }
 
 .trace-node.state-running {
   border-left-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent), var(--shadow);
-  animation: running-pulse 1.8s ease-in-out infinite;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent), 0 12px 30px rgba(8, 107, 120, 0.18);
+}
+
+.trace-node.state-running::after {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background:
+    linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 22%, transparent), transparent)
+    border-box;
+  animation: running-ring 1.6s linear infinite;
 }
 
 .trace-node.state-running .state-indicator {
@@ -442,6 +685,8 @@ button {
 
 .trace-node.state-completed {
   border-left-color: var(--success);
+  background: color-mix(in srgb, var(--surface) 90%, var(--success) 10%);
+  box-shadow: 0 5px 16px rgba(36, 135, 93, 0.12);
 }
 
 .trace-node.state-completed .state-indicator {
@@ -450,28 +695,98 @@ button {
 
 .trace-node.state-waiting {
   border-left-color: var(--warning);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 18%, transparent), var(--shadow);
+  animation: waiting-breathe 1.7s ease-in-out infinite;
 }
 
 .trace-node.state-waiting .state-indicator {
   background: var(--warning);
 }
 
-.trace-node.state-failed,
-.trace-node.state-cancelled {
+.trace-node.state-failed {
   border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--surface) 88%, var(--danger) 12%);
+  border-color: color-mix(in srgb, var(--danger) 62%, var(--line-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 22%, transparent), 0 14px 32px rgba(208, 68, 68, 0.14);
 }
 
-.trace-node.state-failed .state-indicator,
-.trace-node.state-cancelled .state-indicator {
+.trace-node.state-failed .state-indicator {
   background: var(--danger);
 }
 
+.trace-node.state-cancelled {
+  border-left-color: var(--cancelled);
+  background: color-mix(in srgb, var(--surface) 89%, var(--cancelled) 11%);
+  border-color: color-mix(in srgb, var(--cancelled) 56%, var(--line-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--cancelled) 18%, transparent), var(--shadow);
+}
+
+.trace-node.state-cancelled .state-indicator {
+  background: var(--cancelled);
+}
+
 .trace-node.state-interrupted {
-  border-left-color: #9a5b2d;
+  border-left-color: var(--interrupted);
+  background: color-mix(in srgb, var(--surface) 90%, var(--interrupted) 10%);
+  border-color: color-mix(in srgb, var(--interrupted) 48%, var(--line-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interrupted) 16%, transparent), var(--shadow);
+}
+
+.trace-node.state-interrupted .state-indicator {
+  background: var(--interrupted);
 }
 
 .trace-node.state-skipped {
   opacity: 0.52;
+}
+
+.trace-node.state-created:hover,
+.trace-node.state-ready:hover {
+  background: color-mix(in srgb, var(--surface) 83%, var(--accent) 17%);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line-strong));
+  box-shadow: 0 10px 24px rgba(31, 36, 32, 0.13);
+}
+
+.trace-node.state-running:hover {
+  background: color-mix(in srgb, var(--surface) 78%, var(--accent) 22%);
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line-strong));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 17%, transparent), 0 16px 34px rgba(8, 107, 120, 0.22);
+}
+
+.trace-node.state-completed:hover {
+  background: color-mix(in srgb, var(--surface) 82%, var(--success) 18%);
+  border-color: color-mix(in srgb, var(--success) 58%, var(--line-strong));
+  box-shadow: 0 12px 28px rgba(36, 135, 93, 0.18);
+}
+
+.trace-node.state-waiting:hover {
+  background: color-mix(in srgb, var(--surface) 82%, var(--warning) 18%);
+  border-color: color-mix(in srgb, var(--warning) 62%, var(--line-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 21%, transparent), 0 12px 30px rgba(196, 123, 16, 0.16);
+}
+
+.trace-node.state-failed:hover {
+  background: color-mix(in srgb, var(--surface) 80%, var(--danger) 20%);
+  border-color: color-mix(in srgb, var(--danger) 76%, var(--line-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 26%, transparent), 0 16px 36px rgba(208, 68, 68, 0.2);
+}
+
+.trace-node.state-cancelled:hover {
+  background: color-mix(in srgb, var(--surface) 81%, var(--cancelled) 19%);
+  border-color: color-mix(in srgb, var(--cancelled) 70%, var(--line-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cancelled) 24%, transparent), 0 14px 32px color-mix(in srgb, var(--cancelled) 20%, transparent);
+}
+
+.trace-node.state-interrupted:hover {
+  background: color-mix(in srgb, var(--surface) 83%, var(--interrupted) 17%);
+  border-color: color-mix(in srgb, var(--interrupted) 65%, var(--line-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interrupted) 20%, transparent), 0 12px 28px color-mix(in srgb, var(--interrupted) 18%, transparent);
+}
+
+.trace-node.state-skipped:hover {
+  opacity: 0.78;
+  background: color-mix(in srgb, var(--surface) 88%, var(--line-strong) 12%);
+  border-color: color-mix(in srgb, var(--line-strong) 72%, var(--text) 28%);
 }
 
 .trace-node .react-flow__handle {
@@ -481,19 +796,51 @@ button {
   background: var(--line-strong);
 }
 
-.detail-drawer {
+.detail-panel {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  top: 12px;
+  right: 12px;
+  bottom: calc(var(--timeline-height) + 12px);
   z-index: 30;
-  width: min(480px, calc(100vw - 28px));
-  height: calc(100% - 270px);
-  min-height: 420px;
+  min-width: 360px;
+  max-width: calc(100vw - 80px);
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: var(--shadow);
+  box-shadow: 0 22px 70px rgba(26, 30, 27, 0.24);
+}
+
+.trace-workspace.timeline-collapsed .detail-panel {
+  bottom: calc(var(--timeline-height) + 12px);
+}
+
+.detail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  z-index: 2;
+  width: 10px;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.detail-resize-handle::after {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+}
+
+.detail-resize-handle:hover::after,
+.is-resizing-detail .detail-resize-handle::after {
+  background: var(--accent);
 }
 
 .inspector-heading {
@@ -503,6 +850,7 @@ button {
   height: 58px;
   padding: 0 13px 0 16px;
   border-bottom: 1px solid var(--line);
+  user-select: none;
 }
 
 .inspector-heading > div {
@@ -528,7 +876,7 @@ button {
 
 .inspector-tabs {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border-bottom: 1px solid var(--line);
 }
 
@@ -562,54 +910,6 @@ button {
   padding: 14px 16px 20px;
 }
 
-.selection-menu {
-  position: fixed;
-  z-index: 40;
-  display: grid;
-  width: 214px;
-  gap: 4px;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.selection-menu-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-  padding: 2px 2px 6px;
-  border-bottom: 1px solid var(--line);
-}
-
-.selection-menu-heading strong {
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.selection-menu button {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  height: 30px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.selection-menu button:hover {
-  background: var(--surface-muted);
-  color: var(--text);
-}
-
 .overview-list {
   margin: 0;
 }
@@ -636,22 +936,85 @@ button {
   font-size: 11px;
 }
 
-.json-block {
-  margin: 0;
-  overflow: auto;
-  color: var(--text);
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .definition-view,
-.history-view,
+.runtime-view,
 .field-block {
   display: grid;
   gap: 12px;
+}
+
+.failure-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.failure-summary h3 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.failure-card {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 7px;
+  background: var(--surface-raised);
+}
+
+.failure-card.tone-danger {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--surface-raised) 86%, var(--danger) 14%);
+}
+
+.failure-card.tone-warning {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--surface-raised) 86%, var(--warning) 14%);
+}
+
+.failure-card.tone-neutral {
+  border-left-color: var(--line-strong);
+}
+
+.failure-card > div {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+}
+
+.failure-card strong {
+  font-size: 12px;
+}
+
+.failure-card code {
+  overflow: hidden;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-card p {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.failure-card details {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.failure-card summary {
+  cursor: pointer;
 }
 
 .field-block h3 {
@@ -678,11 +1041,132 @@ button {
   color: var(--text);
   font-size: 12px;
   text-transform: none;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.history-select select:hover,
+.history-select select:focus {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 11%, transparent);
+}
+
+.runtime-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runtime-tabs button {
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.runtime-tabs button:hover,
+.runtime-tabs button.is-active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+  color: var(--accent-strong);
 }
 
 .structured-value {
   display: grid;
   gap: 10px;
+}
+
+.json-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.json-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.json-toolbar button:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.json-tree {
+  max-width: 100%;
+  overflow: auto;
+  padding: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.json-tree details {
+  min-width: max-content;
+}
+
+.json-tree summary,
+.json-tree-row {
+  display: flex;
+  align-items: baseline;
+  min-height: 22px;
+  gap: 8px;
+  padding-right: 10px;
+}
+
+.json-tree summary {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.json-tree summary:hover,
+.json-tree-row:hover {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.json-key {
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.json-summary {
+  color: var(--text-muted);
+}
+
+.json-scalar {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.json-scalar.string {
+  color: var(--success);
+}
+
+.json-scalar.number,
+.json-scalar.boolean {
+  color: var(--warning);
 }
 
 .artifact-list {
@@ -835,13 +1319,37 @@ button {
   font-size: 9px;
 }
 
+.event-detail {
+  margin-top: 8px;
+}
+
+.event-detail summary {
+  width: max-content;
+  cursor: pointer;
+  color: var(--accent-strong);
+  font-size: 10px;
+}
+
+.event-detail .structured-value {
+  margin-top: 8px;
+}
+
 .timeline-panel {
+  position: relative;
   grid-column: 1 / -1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   border-top: 1px solid var(--line);
   background: var(--surface);
+  transition:
+    min-height 220ms ease,
+    transform 220ms ease,
+    opacity 220ms ease;
+}
+
+.timeline-panel.is-collapsed {
+  min-height: 42px;
 }
 
 .timeline-header {
@@ -851,6 +1359,40 @@ button {
   height: 42px;
   padding: 0 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.timeline-resize-handle {
+  position: absolute;
+  z-index: 12;
+  top: -5px;
+  right: 0;
+  left: 0;
+  height: 10px;
+  border: 0;
+  background: transparent;
+  cursor: ns-resize;
+}
+
+.timeline-resize-handle::after {
+  position: absolute;
+  top: 4px;
+  right: 16px;
+  left: 16px;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.timeline-resize-handle:hover::after,
+.timeline-panel.is-resizing .timeline-resize-handle::after {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
+  transform: scaleY(1.45);
 }
 
 .timeline-actions {
@@ -904,9 +1446,26 @@ button {
 .timeline-table {
   position: relative;
   display: grid;
-  height: calc(100% - 42px);
-  grid-template-columns: var(--timeline-label-width) minmax(0, 1fr);
+  width: calc(var(--timeline-label-width) + var(--timeline-track-width, 900px));
+  min-width: 100%;
+  min-height: 100%;
+  grid-template-columns: var(--timeline-label-width) var(--timeline-track-width, minmax(0, 1fr));
   grid-auto-rows: 28px;
+  overflow: visible;
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.timeline-table-shell {
+  position: relative;
+  height: calc(100% - 42px);
+  overflow: hidden;
+}
+
+.timeline-scroll-x {
+  width: 100%;
+  height: 100%;
   overflow: auto;
 }
 
@@ -921,8 +1480,9 @@ button {
 
 .timeline-axis-label {
   position: sticky;
-  top: 0;
-  z-index: 5;
+  top: 28px;
+  left: 0;
+  z-index: 30;
   display: flex;
   align-items: center;
   padding: 0 12px;
@@ -931,6 +1491,31 @@ button {
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.timeline-event-label,
+.timeline-event-row {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.timeline-label-column,
+.timeline-label {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  background: var(--surface);
+}
+
+.timeline-axis,
+.timeline-event-row {
+  z-index: 25;
+}
+
+.timeline-axis-label,
+.timeline-event-label {
+  z-index: 32;
 }
 
 .timeline-label {
@@ -942,11 +1527,29 @@ button {
   color: var(--text);
   gap: 6px;
   text-align: left;
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    padding-left 140ms ease;
+}
+
+.timeline-label:hover,
+.timeline-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.timeline-label.is-node {
+  font-weight: 650;
 }
 
 .timeline-label.is-child {
   padding-left: 26px;
   color: var(--text-muted);
+}
+
+.timeline-label-spacer {
+  width: 12px;
+  flex: 0 0 auto;
 }
 
 .timeline-label span {
@@ -958,8 +1561,8 @@ button {
 
 .timeline-axis {
   position: sticky;
-  top: 0;
-  z-index: 4;
+  top: 28px;
+  z-index: 25;
   cursor: crosshair;
   background: var(--surface-raised);
 }
@@ -973,10 +1576,19 @@ button {
   transform: translateX(-50%);
 }
 
+.timeline-axis > span:first-child {
+  transform: translateX(0);
+}
+
+.timeline-axis > span:last-child {
+  transform: translateX(-100%);
+}
+
 .timeline-row {
   position: relative;
   cursor: pointer;
   border-bottom: 1px solid var(--line);
+  transition: background 140ms ease;
 }
 
 .timeline-bar {
@@ -991,6 +1603,11 @@ button {
   font-size: 8px;
   line-height: 15px;
   text-align: left;
+  transition:
+    opacity 180ms ease,
+    width 180ms ease,
+    transform 180ms ease,
+    background 160ms ease;
 }
 
 .timeline-bar > span {
@@ -1010,28 +1627,151 @@ button {
   background: var(--warning);
 }
 
-.timeline-bar.state-failed,
-.timeline-bar.state-cancelled {
+.timeline-bar.state-failed {
   background: var(--danger);
+}
+
+.timeline-bar.state-cancelled {
+  background: var(--cancelled);
+}
+
+.timeline-bar.state-interrupted {
+  background: var(--interrupted);
+}
+
+.timeline-bar.state-skipped {
+  background: var(--edge-skipped);
 }
 
 .timeline-cursor-track {
   position: absolute;
   z-index: 8;
-  top: 0;
+  top: 28px;
   right: 0;
   bottom: 0;
-  left: var(--timeline-label-width);
+  left: 0;
   pointer-events: none;
 }
 
-.timeline-cursor {
+.timeline-event-label {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-raised) 75%, var(--accent) 4%);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.timeline-event-row {
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-raised) 75%, var(--accent) 4%);
+}
+
+.timeline-event-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 9px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  cursor: pointer;
+  border: 1px solid var(--surface);
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
+  transform: translateX(-50%);
+  transition:
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.timeline-event-marker.is-cluster {
+  top: 5px;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--surface);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.timeline-event-marker.is-cluster span {
+  transform: translateY(-0.5px);
+}
+
+.timeline-event-marker:hover {
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 20%, transparent);
+  transform: translateX(-50%) scale(1.25);
+}
+
+.timeline-event-marker.event-node-state_changed,
+.timeline-event-marker.event-category-node {
+  background: var(--success);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 18%, transparent);
+}
+
+.timeline-event-marker.event-category-invocation {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.timeline-event-marker.event-category-operator {
+  background: #7b61ff;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #7b61ff 18%, transparent);
+}
+
+.timeline-event-marker.event-category-edge {
+  background: var(--warning);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+.timeline-event-marker.event-category-context {
+  background: #8c6f48;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #8c6f48 18%, transparent);
+}
+
+.timeline-event-marker.event-category-output {
+  background: #d76aa2;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #d76aa2 18%, transparent);
+}
+
+.timeline-event-marker.event-category-error {
+  background: var(--danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+.timeline-cursor,
+.timeline-hover-cursor {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 1px;
+}
+
+.timeline-cursor {
   background: var(--accent-strong);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 13%, transparent);
+  transition:
+    left 150ms ease,
+    box-shadow 150ms ease,
+    width 150ms ease;
+}
+
+.timeline-cursor.is-dragging,
+.is-dragging-timeline-cursor .timeline-cursor {
+  width: 2px;
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 0 14px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.timeline-hover-cursor {
+  border-left: 1px dashed color-mix(in srgb, var(--accent-strong) 70%, transparent);
 }
 
 .status-screen {
@@ -1064,13 +1804,28 @@ button {
   }
 }
 
-@keyframes running-pulse {
-  0%,
-  100% {
-    transform: translateY(0);
+@keyframes running-ring {
+  0% {
+    opacity: 0.45;
+    transform: translateX(-3px);
   }
   50% {
-    transform: translateY(-1px);
+    opacity: 1;
+    transform: translateX(3px);
+  }
+  100% {
+    opacity: 0.45;
+    transform: translateX(-3px);
+  }
+}
+
+@keyframes waiting-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 14%, transparent), var(--shadow);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--warning) 24%, transparent), var(--shadow);
   }
 }
 
@@ -1083,8 +1838,8 @@ button {
     min-width: 142px;
   }
 
-  .trace-workspace {
-    grid-template-columns: minmax(0, 1fr) 310px;
+  .detail-panel {
+    width: min(520px, calc(100vw - 24px)) !important;
   }
 }
 
@@ -1122,7 +1877,24 @@ button {
 
   .trace-workspace {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(260px, 1fr) 220px;
+    grid-template-rows: minmax(260px, 1fr) var(--timeline-height);
+  }
+
+  .trace-workspace.timeline-collapsed {
+    grid-template-rows: minmax(260px, 1fr) var(--timeline-height);
+  }
+
+  .detail-panel {
+    top: 8px;
+    right: 8px;
+    bottom: calc(var(--timeline-height) + 8px);
+    min-width: 0;
+    width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px);
+  }
+
+  .detail-resize-handle {
+    display: none;
   }
 
   .workflow-canvas {

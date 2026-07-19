@@ -42,7 +42,18 @@ type ClusterPopoverState = {
   top: number;
 };
 
-const RUNTIME_EVENT_CLUSTER_GAP_PX = 13;
+type DurationTooltipState = {
+  span: TimelineSpan;
+  durationLabel: string;
+  left: number;
+  top: number;
+};
+
+// Both a single event and a merged event use the same 14px marker. Events are
+// merged only when their rendered controls would overlap; zooming therefore
+// expands clusters gradually instead of jumping from a few markers to all of
+// them after a small wheel movement.
+const RUNTIME_EVENT_CLUSTER_GAP_PX = 14;
 const MIN_TIMELINE_ZOOM = 1;
 const MAX_TIMELINE_ZOOM = 18;
 const PLAYBACK_BASE_DELAY_MS = 500;
@@ -98,6 +109,7 @@ export function ExecutionTimeline({
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [clusterPopover, setClusterPopover] = useState<ClusterPopoverState | null>(null);
   const [clusterPopoverOpen, setClusterPopoverOpen] = useState(false);
+  const [durationTooltip, setDurationTooltip] = useState<DurationTooltipState | null>(null);
   const clusterPopoverHideTimerRef = useRef<number | null>(null);
   const clusterPopoverRemoveTimerRef = useRef<number | null>(null);
   const range = useMemo(() => timelineRange(timeline, events), [events, timeline]);
@@ -170,6 +182,21 @@ export function ExecutionTimeline({
     return () => window.clearTimeout(timer);
   }, [collapsed, cursorSequence, events, followLive, isPlaying, onCursorChange, playbackSpeed]);
 
+  const togglePlayback = () => {
+    if (isPlaying) {
+      setIsPlaying(false);
+      return;
+    }
+    // A replay cursor can be empty for an invocation with no manually selected
+    // event. Start there instead of requiring the user to click a marker first.
+    if (!cursorEvent) {
+      const firstEvent = events[0];
+      if (!firstEvent) return;
+      onCursorChange(firstEvent.sequence);
+    }
+    setIsPlaying(true);
+  };
+
   const cancelClusterPopoverClose = () => {
     if (clusterPopoverHideTimerRef.current !== null) {
       window.clearTimeout(clusterPopoverHideTimerRef.current);
@@ -212,6 +239,20 @@ export function ExecutionTimeline({
         setClusterPopover(null);
       }, 150);
     }, 180);
+  };
+
+  const showDurationTooltip = (
+    span: TimelineSpan,
+    durationLabel: string,
+    anchor: HTMLElement,
+  ) => {
+    const bounds = anchor.getBoundingClientRect();
+    setDurationTooltip({
+      span,
+      durationLabel,
+      left: clamp(bounds.left + bounds.width / 2, 132, window.innerWidth - 132),
+      top: Math.max(8, bounds.top - 7),
+    });
   };
 
   useEffect(() => {
@@ -405,9 +446,9 @@ export function ExecutionTimeline({
             <div className="timeline-replay-controls">
               <button
                 type="button"
-                onClick={() => setIsPlaying((current) => !current)}
+                onClick={togglePlayback}
                 disabled={events.length === 0}
-                title={isPlaying ? "Stop replay" : "Play replay from the current event"}
+                title={isPlaying ? "Stop replay" : "Play replay from the current event, or the first event"}
               >
                 {isPlaying ? <Square size={13} /> : <Play size={13} />}
                 {isPlaying ? "Stop" : "Play"}
@@ -451,7 +492,10 @@ export function ExecutionTimeline({
         className="timeline-table-shell"
         ref={shellRef}
         onPointerLeave={() => setHoverLeft(null)}
-        onScroll={scheduleClusterPopoverClose}
+        onScroll={() => {
+          scheduleClusterPopoverClose();
+          setDurationTooltip(null);
+        }}
       >
           <div
             className="timeline-table"
@@ -528,6 +572,8 @@ export function ExecutionTimeline({
                 onCursorPreview={previewCursor}
                 onCursorCommit={commitCursor}
                 onCursorDragStart={startCursorDrag}
+                onDurationHover={showDurationTooltip}
+                onDurationLeave={() => setDurationTooltip(null)}
                 onSelect={() => {
                   onSelect({ type: span.kind, id: span.id });
                 }}
@@ -586,6 +632,21 @@ export function ExecutionTimeline({
         </div>,
         document.body,
       )}
+      {durationTooltip && createPortal(
+        <div
+          className="timeline-duration-tooltip"
+          role="tooltip"
+          style={{ left: durationTooltip.left, top: durationTooltip.top }}
+        >
+          <strong>{durationTooltip.span.label}</strong>
+          <span>
+            <i className={`state-${durationTooltip.span.state}`} />
+            {formatRuntimeState(durationTooltip.span.state)}
+            <b>{durationTooltip.durationLabel}</b>
+          </span>
+        </div>,
+        document.body,
+      )}
     </section>
   );
 }
@@ -599,6 +660,8 @@ function TimelineRow({
   onCursorPreview,
   onCursorCommit,
   onCursorDragStart,
+  onDurationHover,
+  onDurationLeave,
   onSelect,
 }: {
   span: TimelineSpan;
@@ -609,6 +672,8 @@ function TimelineRow({
   onCursorPreview: (clientX: number) => void;
   onCursorCommit: (clientX: number, options?: { requireNear?: boolean }) => void;
   onCursorDragStart: (clientX: number) => void;
+  onDurationHover: (span: TimelineSpan, durationLabel: string, anchor: HTMLElement) => void;
+  onDurationLeave: () => void;
   onSelect: () => void;
 }) {
   const start = scale.left(span.started_at_ms);
@@ -616,6 +681,7 @@ function TimelineRow({
   const durationMs = span.ended_at_ms === null
     ? span.duration_ms
     : Math.max(0, span.ended_at_ms - span.started_at_ms);
+  const durationLabel = formatDuration(durationMs ?? 0);
   const width = Math.max(
     0.15,
     Math.min(100 - start, Math.max(scale.minBarWidthPercent, end - start)),
@@ -660,12 +726,18 @@ function TimelineRow({
         <span
           className={`timeline-bar state-${span.state}`}
           style={{ left: `${left}%`, width: `${width}%` }}
+          onPointerEnter={(event) => onDurationHover(span, durationLabel, event.currentTarget)}
+          onPointerLeave={onDurationLeave}
         >
-          <span>{formatDuration(durationMs ?? 0)}</span>
+          <span className="timeline-bar-duration">{durationLabel}</span>
         </span>
       </button>
     </>
   );
+}
+
+function formatRuntimeState(value: string): string {
+  return value.replaceAll("_", " ");
 }
 
 function timelineRange(
@@ -785,7 +857,9 @@ function clusterRuntimeEventMarkers(
   }> = [];
   for (const item of positioned) {
     const previous = clusters.at(-1);
-    if (!previous || item.leftPx - previous.leftPxMax > minGapPx) {
+    // Equal spacing is safe: adjacent 14px controls may touch, but they do not
+    // overlap. Only merge markers that would actually cover one another.
+    if (!previous || item.leftPx - previous.leftPxMax >= minGapPx) {
       clusters.push({
         id: item.event.id,
         events: [item.event],
@@ -803,7 +877,7 @@ function clusterRuntimeEventMarkers(
 
   const markers = clusters.map((cluster) => {
     const averageLeftPx = cluster.leftPxTotal / cluster.events.length;
-    const markerHalfWidthPx = cluster.events.length > 1 ? 9 : 4;
+    const markerHalfWidthPx = minGapPx / 2;
     const leftPx = Math.min(
       trackWidthPx - markerHalfWidthPx,
       Math.max(markerHalfWidthPx, averageLeftPx),

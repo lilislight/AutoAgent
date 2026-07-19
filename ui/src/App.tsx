@@ -150,8 +150,10 @@ export default function App() {
       if (ui.sessionId) ui.setSession(null);
       return;
     }
-    if (!ui.sessionId || !sessions.some((value) => value.id === ui.sessionId)) {
-      ui.setSession(sessions.at(-1)!.id);
+    // Changing a Workflow deliberately clears the child scope. Do not silently
+    // select a Session: the navigator must let the user choose the next level.
+    if (ui.sessionId && !sessions.some((value) => value.id === ui.sessionId)) {
+      ui.setSession(null);
     }
   }, [pendingScope, sessionQuery.isSuccess, sessions, ui]);
 
@@ -168,12 +170,12 @@ export default function App() {
       if (ui.invocationId) ui.setInvocation(null);
       return;
     }
-    if (!ui.invocationId || !invocations.some((value) => value.id === ui.invocationId)) {
-      const current = sessions.find((value) => value.id === ui.sessionId)?.current_invocation_id;
-      const currentExists = current && invocations.some((value) => value.id === current);
-      ui.setInvocation(currentExists ? current : invocations.at(-1)!.id);
+    // A Session change clears Invocation intentionally. Keep the graph empty
+    // until the user selects a concrete invocation from the third column.
+    if (ui.invocationId && !invocations.some((value) => value.id === ui.invocationId)) {
+      ui.setInvocation(null);
     }
-  }, [invocationQuery.isSuccess, invocations, pendingScope, sessions, ui]);
+  }, [invocationQuery.isSuccess, invocations, pendingScope, ui]);
 
   useEffect(() => {
     if (!pendingScope) return;
@@ -410,9 +412,9 @@ export default function App() {
       followLatest();
       return;
     }
-    // The first explicit Replay enters the pre-event graph. Later switches
-    // restore the last cursor selected by a timeline click or event chip.
-    ui.setCursor(ui.replayCursorSequence ?? 0, false);
+    // The first Replay starts at the first available runtime event. Later
+    // switches restore the last cursor selected by a timeline click or chip.
+    ui.setCursor(ui.replayCursorSequence ?? events[0]?.sequence ?? 0, false);
   };
 
   const submitFromUi = async () => {
@@ -576,17 +578,9 @@ export default function App() {
         executionEnabled={healthQuery.data?.execution_enabled ?? false}
         canInvoke={registeredWorkflows.length > 0}
         invoking={invokeSubmitting}
-        onWorkflowChange={(value) => {
+        onScopeChange={(workflowId, sessionId, invocationId) => {
           clearLiveDraft();
-          ui.setWorkflow(value);
-        }}
-        onSessionChange={(value) => {
-          clearLiveDraft();
-          ui.setSession(value);
-        }}
-        onInvocationChange={(value) => {
-          clearLiveDraft();
-          ui.setInvocation(value);
+          ui.setInvocationScope(workflowId, sessionId, invocationId);
         }}
         onFollowLive={toggleTimelineMode}
         onOpenInvoke={() => {

@@ -259,67 +259,287 @@ button {
   text-transform: uppercase;
 }
 
-.scope-fields {
-  display: flex;
+.scope-navigator {
+  position: relative;
   min-width: 0;
   flex: 1;
-  gap: 8px;
 }
 
-.scope-select {
+.scope-navigator-trigger {
   display: flex;
-  min-width: 150px;
-  max-width: 250px;
-  flex: 1;
-  flex-direction: column;
+  align-items: stretch;
+  width: min(100%, 690px);
+  height: 39px;
+  min-width: 0;
+  padding: 0 7px 0 9px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.scope-navigator-trigger:hover,
+.scope-navigator-trigger:focus-visible,
+.scope-navigator-trigger.is-open {
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--surface-muted) 72%, var(--accent) 7%);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 11%, transparent);
+}
+
+.scope-path-part {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 0;
+  align-content: center;
   gap: 2px;
+}
+
+.scope-path-part small {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.scope-path-part strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-path-part.is-empty strong {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.scope-path-divider,
+.scope-navigator-chevron {
+  flex: none;
+  align-self: center;
+  color: var(--text-muted);
+}
+
+.scope-path-divider {
+  margin: 0 5px;
+  opacity: 0.6;
+}
+
+.scope-navigator-chevron {
+  margin-left: 7px;
   transition: transform 160ms ease;
 }
 
-.scope-select span {
+.scope-navigator-trigger.is-open .scope-navigator-chevron {
+  transform: rotate(180deg);
+}
+
+.scope-navigator-panel {
+  display: grid;
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 9px);
+  left: 0;
+  width: min(860px, calc(100vw - 28px));
+  min-height: 340px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 22px 64px color-mix(in srgb, #000 24%, transparent);
+  animation: scope-panel-in 160ms ease-out;
+}
+
+.scope-navigator-column {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  border-right: 1px solid var(--line);
+  background: var(--surface-raised);
+  transition: background 160ms ease;
+}
+
+.scope-navigator-column:last-child {
+  border-right: 0;
+}
+
+.scope-navigator-column.is-active {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 4%);
+}
+
+.scope-navigator-column.is-disabled {
+  opacity: 0.56;
+}
+
+.scope-navigator-column > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 39px;
+  padding: 0 11px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.scope-navigator-column > header small {
+  min-width: 20px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--surface-muted);
   color: var(--text-muted);
   font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-  transition: color 160ms ease;
+  text-align: center;
 }
 
-.scope-select select {
+.scope-navigator-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-muted);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.scope-navigator-search:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.scope-navigator-search input {
   width: 100%;
-  height: 30px;
-  padding: 0 28px 0 8px;
-  overflow: hidden;
-  border: 1px solid transparent;
+  height: 28px;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.scope-navigator-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.scope-navigator-list {
+  display: grid;
+  align-content: start;
+  min-height: 0;
+  max-height: min(460px, calc(100vh - 152px));
+  overflow: auto;
+  padding: 0 5px 6px;
+}
+
+.scope-navigator-list > p {
+  margin: 18px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scope-navigator-item {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 3px;
+  padding: 8px;
+  border: 0;
   border-radius: 5px;
   outline: none;
-  background: var(--surface-muted);
+  background: transparent;
   color: var(--text);
-  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 130ms ease, color 130ms ease, transform 130ms ease;
+}
+
+.scope-navigator-item:hover,
+.scope-navigator-item:focus-visible {
+  background: color-mix(in srgb, var(--surface-muted) 72%, var(--accent) 10%);
+  transform: translateX(1px);
+}
+
+.scope-navigator-item.is-selected {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.scope-navigator-item-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 700;
   text-overflow: ellipsis;
-  transition:
-    border-color 160ms ease,
-    background 160ms ease,
-    box-shadow 160ms ease,
-    color 160ms ease,
-    transform 160ms ease;
+  white-space: nowrap;
 }
 
-.scope-select select:hover,
-.scope-select select:focus {
-  border-color: var(--line-strong);
-  background: color-mix(in srgb, var(--surface-muted) 76%, var(--accent) 8%);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
-  transform: translateY(-1px);
-}
-
-.scope-select:hover span,
-.scope-select:focus-within span {
+.scope-navigator-item-title svg {
+  flex: none;
   color: var(--accent-strong);
 }
 
-.scope-select select:disabled {
-  opacity: 0.45;
+.scope-navigator-item-detail,
+.scope-navigator-item-meta {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-navigator-item-meta {
+  font-size: 9px;
+}
+
+.scope-navigator-state {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.scope-navigator-state.state-running,
+.scope-navigator-state.state-waiting {
+  color: var(--accent-strong);
+}
+
+.scope-navigator-state.state-completed {
+  color: var(--success);
+}
+
+.scope-navigator-state.state-failed,
+.scope-navigator-state.state-cancelled,
+.scope-navigator-state.state-interrupted {
+  color: var(--danger);
+}
+
+@keyframes scope-panel-in {
+  from { opacity: 0; transform: translateY(-5px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .scope-actions {
@@ -1840,9 +2060,96 @@ button {
     background 160ms ease;
 }
 
-.timeline-bar > span {
+.timeline-bar-duration {
+  display: block;
   padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.timeline-duration-tooltip {
+  display: grid;
+  position: fixed;
+  z-index: 10020;
+  width: max-content;
+  max-width: min(250px, calc(100vw - 36px));
+  gap: 4px;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 84%, var(--accent));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-raised) 96%, var(--accent) 4%);
+  box-shadow: 0 10px 24px color-mix(in srgb, #000 22%, transparent);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.2;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  animation: timeline-duration-tooltip-in 120ms ease-out;
+}
+
+.timeline-duration-tooltip::after {
+  position: absolute;
+  bottom: -5px;
+  left: 8px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid color-mix(in srgb, var(--line-strong) 84%, var(--accent));
+  border-bottom: 1px solid color-mix(in srgb, var(--line-strong) 84%, var(--accent));
+  background: color-mix(in srgb, var(--surface-raised) 96%, var(--accent) 4%);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.timeline-duration-tooltip strong {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-duration-tooltip > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.timeline-duration-tooltip i {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.timeline-duration-tooltip i.state-running { background: var(--accent); }
+.timeline-duration-tooltip i.state-completed { background: var(--success); }
+.timeline-duration-tooltip i.state-waiting { background: var(--warning); }
+.timeline-duration-tooltip i.state-failed { background: var(--danger); }
+.timeline-duration-tooltip i.state-cancelled { background: var(--cancelled); }
+.timeline-duration-tooltip i.state-interrupted { background: var(--interrupted); }
+.timeline-duration-tooltip i.state-skipped { background: var(--edge-skipped); }
+
+.timeline-duration-tooltip b {
+  margin-left: 3px;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+@keyframes timeline-duration-tooltip-in {
+  from { opacity: 0; transform: translate(-50%, calc(-100% + 4px)) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -100%) scale(1); }
+}
+
+.timeline-bar:hover {
+  z-index: 72;
+  filter: saturate(1.08) brightness(1.04);
 }
 
 .timeline-bar.state-running {
@@ -1904,9 +2211,9 @@ button {
   align-items: center;
   justify-content: center;
   position: absolute;
-  top: 9px;
-  width: 8px;
-  height: 8px;
+  top: 6px;
+  width: 14px;
+  height: 14px;
   padding: 0;
   cursor: pointer;
   border: 1px solid var(--surface);
@@ -1921,13 +2228,14 @@ button {
 }
 
 .timeline-event-marker.is-cluster {
-  top: 5px;
-  min-width: 18px;
-  height: 16px;
-  padding: 0 5px;
+  top: 6px;
+  min-width: 14px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
   border-radius: 999px;
   color: var(--surface);
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 800;
   line-height: 1;
 }
@@ -2241,13 +2549,30 @@ button {
     min-width: auto;
   }
 
-  .scope-fields {
+  .scope-navigator {
     order: 3;
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .scope-navigator-trigger {
     width: 100%;
   }
 
-  .scope-select {
-    min-width: 0;
+  .scope-navigator-panel {
+    width: calc(100vw - 28px);
+    min-height: 300px;
+    grid-template-columns: 1fr;
+  }
+
+  .scope-navigator-column {
+    max-height: 230px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .scope-navigator-column:last-child {
+    border-bottom: 0;
   }
 
   .scope-actions {

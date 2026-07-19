@@ -19,7 +19,7 @@ from autoagent import (
     get_default_app,
     operator,
 )
-from autoagent.operators import OperatorContractWarning
+from autoagent.core.operators import OperatorContractWarning
 
 
 class SearchRequest(BaseModel):
@@ -451,6 +451,72 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(
             invocation.node_executions[0].operator_calls[0].operator_id,
             "priority_search",
+        )
+
+    def test_priority_policy_breaks_ties_by_operator_id(self) -> None:
+        app = AutoAgentApp()
+        app.register_capability("stable_search")
+
+        @app.operator("z_search", capability="stable_search", priority=10)
+        def z_search(query: str) -> str:
+            return f"z:{query}"
+
+        @app.operator("a_search", capability="stable_search", priority=10)
+        def a_search(query: str) -> str:
+            return f"a:{query}"
+
+        workflow = Workflow(
+            id="priority_tie_breaker",
+            nodes=[
+                Node(
+                    id="search",
+                    capability=CapabilityRef(id="stable_search"),
+                    policy=NodePolicy(
+                        selection=CapabilitySelectionPolicy(mode="priority")
+                    ),
+                )
+            ],
+        )
+
+        invocation = app.invoke(workflow, input={"query": "docs"})
+
+        self.assertEqual(invocation.result, {"output": "a:docs"})
+        self.assertEqual(
+            invocation.node_executions[0].operator_calls[0].operator_id,
+            "a_search",
+        )
+
+    def test_first_available_policy_breaks_ties_by_operator_id(self) -> None:
+        app = AutoAgentApp()
+        app.register_capability("stable_available")
+
+        @app.operator("z_available", capability="stable_available")
+        def z_available(query: str) -> str:
+            return f"z:{query}"
+
+        @app.operator("a_available", capability="stable_available")
+        def a_available(query: str) -> str:
+            return f"a:{query}"
+
+        workflow = Workflow(
+            id="first_available_tie_breaker",
+            nodes=[
+                Node(
+                    id="search",
+                    capability=CapabilityRef(id="stable_available"),
+                    policy=NodePolicy(
+                        selection=CapabilitySelectionPolicy(mode="first_available")
+                    ),
+                )
+            ],
+        )
+
+        invocation = app.invoke(workflow, input={"query": "docs"})
+
+        self.assertEqual(invocation.result, {"output": "a:docs"})
+        self.assertEqual(
+            invocation.node_executions[0].operator_calls[0].operator_id,
+            "a_available",
         )
 
     def test_first_available_skips_disabled_operator(self) -> None:

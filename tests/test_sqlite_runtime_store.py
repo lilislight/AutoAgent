@@ -6,18 +6,18 @@ import unittest
 from pathlib import Path
 
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from autoagent import AutoAgentApp
-from autoagent.compiler import WorkflowCompiler
-from autoagent.trace import TraceQueryService
-from autoagent.runtime import (
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.core.trace import TraceQueryService
+from autoagent.core.runtime import (
     EdgeActivation,
     Invocation,
     SQLiteRuntimeStore,
     SessionBusyError,
 )
-from autoagent.runtime.database_models import (
+from autoagent.core.runtime.database_models import (
     InvocationRow,
     NodeExecutionRow,
     OperatorCallRow,
@@ -26,7 +26,7 @@ from autoagent.runtime.database_models import (
     SessionRow,
     WorkflowVersionRow,
 )
-from autoagent.workflow import (
+from autoagent.core.workflow import (
     EdgePolicy,
     MapPolicy,
     NodePolicy,
@@ -55,6 +55,24 @@ class SQLiteRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.store.close()
         self.temporary_directory.cleanup()
+
+    async def test_new_database_uses_current_schema_without_migration_metadata(
+        self,
+    ) -> None:
+        await self.store.initialize()
+
+        async with self.store.engine.connect() as connection:
+            table_names = set(
+                (
+                    await connection.execute(
+                        text("SELECT name FROM sqlite_master WHERE type = 'table'")
+                    )
+                ).scalars()
+            )
+
+        self.assertIn("sessions", table_names)
+        self.assertIn("invocations", table_names)
+        self.assertNotIn("alembic_version", table_names)
 
     async def test_completed_invocation_round_trips_state_events_and_observation(self) -> None:
         def produce(value: str) -> dict[str, str]:

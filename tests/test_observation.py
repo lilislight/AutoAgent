@@ -8,9 +8,9 @@ from typing import Any
 from uuid import UUID
 
 from autoagent import AutoAgentApp, AutoAgentServer
-from autoagent.trace import TraceQueryService, project_runtime_events
-from autoagent.runtime import ArtifactRef, InMemoryRuntimeStore, LoggingEventSink
-from autoagent.workflow import Workflow
+from autoagent.core.trace import TraceQueryService, project_runtime_events
+from autoagent.core.runtime import ArtifactRef, InMemoryRuntimeStore, LoggingEventSink
+from autoagent.core.workflow import SystemCommand, Workflow
 
 
 def prepare(message: str) -> dict[str, str]:
@@ -311,6 +311,7 @@ class TraceQueryServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("/api/workflows/{workflow_id}/invocations", paths)
         self.assertIn("/api/workflows", paths)
+        self.assertIn("/api/registered-workflows", paths)
         self.assertIn("/api/sessions", paths)
         self.assertIn(
             "/api/sessions/{session_id}/invocations/{invocation_id}/stream",
@@ -341,11 +342,64 @@ class TraceQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             json.loads(workflow_response[2])[0]["workflow_id"],
         )
 
+        registered_response = await _asgi_request(
+            server.api,
+            "GET",
+            "/api/registered-workflows",
+        )
+        self.assertEqual(200, registered_response[0])
+        self.assertEqual(
+            ["registered_for_trace"],
+            [item["workflow_id"] for item in json.loads(registered_response[2])],
+        )
+
         with self.assertRaisesRegex(ValueError, "cannot be empty"):
             AutoAgentServer(
                 AutoAgentApp(runtime_store=InMemoryRuntimeStore()),
                 access_token="",
             )
+
+    async def test_server_keeps_historical_snapshots_out_of_registered_workflows(
+        self,
+    ) -> None:
+        store = InMemoryRuntimeStore()
+        historical_app = AutoAgentApp(runtime_store=store)
+        historical = Workflow(id="revision_directory", version=1)
+        historical.add_node(prepare, node_id="prepare")
+        historical_entry = historical_app.register_workflow(historical)
+        await store.asave_workflow_snapshot(
+            historical_app.namespace,
+            historical_entry.workflow_snapshot,
+        )
+
+        current_app = AutoAgentApp(runtime_store=store)
+        current = Workflow(id="revision_directory", version=2)
+        current.add_node(prepare, node_id="prepare")
+        current.add_node(finish, node_id="finish")
+        current.add_edge("prepare", "finish")
+        current_entry = current_app.register_workflow(current)
+        server = AutoAgentServer(current_app)
+
+        history_response = await _asgi_request(server.api, "GET", "/api/workflows")
+        registered_response = await _asgi_request(
+            server.api,
+            "GET",
+            "/api/registered-workflows",
+        )
+
+        self.assertEqual(200, history_response[0])
+        self.assertEqual(200, registered_response[0])
+        history = json.loads(history_response[2])
+        registered = json.loads(registered_response[2])
+        self.assertEqual(2, len(history))
+        self.assertEqual(
+            {historical_entry.workflow_snapshot.definition_hash, current_entry.workflow_snapshot.definition_hash},
+            {item["definition_hash"] for item in history},
+        )
+        self.assertEqual(
+            [current_entry.workflow_snapshot.definition_hash],
+            [item["definition_hash"] for item in registered],
+        )
 
     async def test_server_token_authentication_uses_http_cookie(self) -> None:
         server = AutoAgentServer(
@@ -412,6 +466,70 @@ class TraceQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         assert invocation is not None
         self.assertEqual("completed", invocation.state)
+
+    async def test_server_can_resume_waiting_invocation(self) -> None:
+        store = InMemoryRuntimeStore()
+        app = AutoAgentApp(runtime_store=store)
+        workflow = Workflow(id="server_resume")
+        workflow.add_node(SystemCommand(id="wait"), node_id="approval")
+        workflow.add_node(finish, node_id="finish")
+        workflow.add_edge("approval", "finish")
+        app.register_workflow(workflow)
+        server = AutoAgentServer(app)
+
+        submitted_response = await _asgi_request(
+            server.api,
+            "POST",
+            "/api/workflows/server_resume/invocations",
+            json_body={
+                "session_id": "review-session",
+                "input": {
+                    "wait_key": "approval:ticket-1",
+                    "wait_type": "human",
+                    "payload": {"ticket": "ticket-1"},
+                },
+            },
+        )
+
+        self.assertEqual(200, submitted_response[0])
+        submitted_payload = json.loads(submitted_response[2])
+        invocation_id = UUID(submitted_payload["invocation_id"])
+        for _ in range(50):
+            invocation = await store.aload_invocation(invocation_id)
+            if invocation is not None and invocation.state == "waiting":
+                break
+            await asyncio.sleep(0.01)
+        assert invocation is not None
+        self.assertEqual("waiting", invocation.state)
+        self.assertIn("approval:ticket-1", invocation.scheduler.waiting_executions)
+
+        resumed_response = await _asgi_request(
+            server.api,
+            "POST",
+            "/api/workflows/server_resume/resume",
+            json_body={
+                "session_id": "review-session",
+                "wait_key": "approval:ticket-1",
+                "output": {"text": "accepted"},
+            },
+        )
+
+        self.assertEqual(200, resumed_response[0])
+        resumed_payload = json.loads(resumed_response[2])
+        self.assertEqual("server_resume", resumed_payload["workflow_id"])
+        self.assertEqual(str(invocation_id), resumed_payload["invocation_id"])
+        self.assertEqual("completed", resumed_payload["state"])
+        completed = await store.aload_invocation(invocation_id)
+        assert completed is not None
+        self.assertEqual("completed", completed.state)
+        self.assertEqual({"output": "done:accepted"}, completed.result)
+        events = await store.alist_runtime_events(
+            invocation_id=invocation_id,
+            limit=10_000,
+        )
+        event_types = [event.type for event in events]
+        self.assertIn("invocation.state_changed", event_types)
+        self.assertIn("invocation.output_published", event_types)
 
     async def test_logging_event_sink_receives_persisted_events(self) -> None:
         class CaptureSink(LoggingEventSink):

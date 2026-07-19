@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -18,15 +19,21 @@ from autoagent import (
     ReplicationPolicy,
     ResourcePolicy,
     RetryPolicy,
+    SQLiteRuntimeStore,
+    SystemCommand,
     TimeoutPolicy,
     Workflow,
 )
+from autoagent.core.runtime import OutputBindingContext, RuntimeStore
 
 
 SECURITY_REVIEW_FAILURE_RATE = 0.4
 RELIABILITY_REVIEW_TIMEOUT_MS = 120
 RELIABILITY_REVIEW_PRIMARY_SLEEP_SECONDS = 0.35
 RELIABILITY_REVIEW_CAPABILITY_ID = "reliability_review"
+DEFAULT_RUNTIME_DATABASE = (
+    Path(__file__).resolve().parent / ".autoagent" / "real-workflow.sqlite3"
+)
 
 
 class ServiceContext(BaseModel):
@@ -181,7 +188,34 @@ class EscalationPacket(BaseModel):
     proposed_actions: list[str]
 
 
+# Runtime values can outlive the Python process. These stable ids avoid using
+# ``__main__`` when this example is started as ``python real_workflow.py``.
+_RUNTIME_MODELS: tuple[type[BaseModel], ...] = (
+    ServiceContext,
+    IncidentRequest,
+    ResumeRequest,
+    IncidentHistoryItem,
+    RequestEnvelope,
+    NormalizedIncident,
+    InvestigationTask,
+    InvestigationPlan,
+    EvidenceItem,
+    InvestigationSynthesis,
+    QualityDecision,
+    InvestigationReport,
+    AuditRequest,
+    AuditResult,
+    ReviewRoute,
+    SpecialistReview,
+    CompositeReview,
+    FinalDecision,
+    PublishedResolution,
+    EscalationPacket,
+)
+
+
 def ingest_new_incident(request: IncidentRequest) -> RequestEnvelope:
+    time.sleep(5)
     return RequestEnvelope(
         incident=request,
         source="new",
@@ -218,6 +252,18 @@ def resume_incident(checkpoint: ResumeRequest) -> RequestEnvelope:
         history=history,
         open_questions=checkpoint.open_questions,
     )
+
+
+def record_manual_approval(
+    approved: bool,
+    reviewer: str = "unknown",
+    note: str = "",
+) -> dict[str, object]:
+    return {
+        "approved": approved,
+        "reviewer": reviewer,
+        "note": note,
+    }
 
 
 def normalize_incident(envelope: RequestEnvelope) -> NormalizedIncident:
@@ -523,6 +569,33 @@ def publish_resolution(
     )
 
 
+def bind_normalized_incident_context(context: OutputBindingContext) -> None:
+    """Expose the normalized incident as Invocation-scoped trace data."""
+
+    incident = context.output
+    context.invocation_context.data["normalized_incident"] = {
+        "incident_id": incident.incident_id,
+        "severity": incident.severity,
+        "service": incident.service.service,
+        "environment": incident.service.environment,
+        "risk_labels": sorted(incident.risk_labels),
+    }
+    context.invocation_context.metadata["normalized_by"] = context.node_id
+
+
+def bind_final_decision_context(context: OutputBindingContext) -> None:
+    """Persist the latest decision for the next Invocation in this Session."""
+
+    decision = context.output
+    context.session_context.data["latest_incident_decision"] = {
+        "approved": decision.approved,
+        "requires_human": decision.requires_human,
+        "reason": decision.reason,
+        "rollout_steps": list(decision.rollout_steps),
+    }
+    context.session_context.metadata["updated_by"] = context.node_id
+
+
 def create_escalation_packet(
     review: CompositeReview,
     decision: FinalDecision,
@@ -656,6 +729,20 @@ def build_incident_response_workflow() -> Workflow:
     workflow.add_node(ingest_new_incident, node_id="new_incident")
     workflow.add_node(resume_incident, node_id="resume_incident")
     workflow.add_node(
+        SystemCommand(id="wait"),
+        node_id="manual_approval_wait",
+        name="Manual approval wait",
+        description=(
+            "Independent wait entry used to demonstrate UI-driven resume. "
+            "It is not connected to the normal incident response paths."
+        ),
+    )
+    workflow.add_node(
+        record_manual_approval,
+        node_id="manual_approval_result",
+        input_mapping=lambda ctx: dict(ctx.outputs.latest("manual_approval_wait")),
+    )
+    workflow.add_node(
         normalize_incident,
         node_id="normalize_incident",
         input_mapping=lambda ctx: {
@@ -665,6 +752,7 @@ def build_incident_response_workflow() -> Workflow:
                 else ctx.outputs.latest("resume_incident")
             )
         },
+        output_binding=bind_normalized_incident_context,
     )
     workflow.add_node(
         investigation,
@@ -727,6 +815,7 @@ def build_incident_response_workflow() -> Workflow:
         mock_llm_make_final_decision,
         node_id="final_decision",
         input_mapping=lambda ctx: {"review": ctx.outputs.latest("merge_reviews")},
+        output_binding=bind_final_decision_context,
         policy=NodePolicy(
             replication=ReplicationPolicy(
                 count=3,
@@ -754,6 +843,7 @@ def build_incident_response_workflow() -> Workflow:
 
     workflow.add_edge("new_incident", "normalize_incident")
     workflow.add_edge("resume_incident", "normalize_incident")
+    workflow.add_edge("manual_approval_wait", "manual_approval_result")
     workflow.add_edge("normalize_incident", "investigation")
     workflow.add_edge("investigation", "route_reviews")
     workflow.add_edge(
@@ -791,15 +881,38 @@ def build_incident_response_workflow() -> Workflow:
     return workflow
 
 
-def build_incident_response_app() -> tuple[AutoAgentApp, Workflow]:
+def build_incident_response_app(
+    *,
+    runtime_store: RuntimeStore | None = None,
+    database_path: str | Path | None = None,
+) -> tuple[AutoAgentApp, Workflow]:
     """Create the demo App with runtime-resolved Operators registered.
 
     The reliability review node intentionally uses a CapabilityRef so the UI can
     show a primary OperatorCall timing out and a fallback OperatorCall finishing
-    successfully inside the same NodeExecution.
+    successfully inside the same NodeExecution. By default the example stores
+    durable runtime data in ``.autoagent/real-workflow.sqlite3`` so the tracing
+    server and UI can inspect historical invocations across restarts.
     """
 
-    app = AutoAgentApp()
+    if runtime_store is not None and database_path is not None:
+        raise ValueError("Pass either runtime_store or database_path, not both.")
+    if runtime_store is None:
+        resolved_database_path = Path(database_path or DEFAULT_RUNTIME_DATABASE)
+        resolved_database_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_store = SQLiteRuntimeStore.from_path(resolved_database_path)
+
+    app = AutoAgentApp(namespace="real-workflow", runtime_store=runtime_store)
+    for model_type in _RUNTIME_MODELS:
+        stable_type_id = f"real_workflow:{model_type.__qualname__}"
+        app.register_runtime_model(model_type, type_id=stable_type_id)
+        # The first version of this example was executed as a script and wrote
+        # ``__main__`` ids. Keep this alias so its current local demo database
+        # can open once; all new writes use the stable id above.
+        app.register_runtime_model(
+            model_type,
+            type_id=f"__main__:{model_type.__qualname__}",
+        )
     app.register_capability(
         RELIABILITY_REVIEW_CAPABILITY_ID,
         description="Review incident mitigation from a reliability perspective.",

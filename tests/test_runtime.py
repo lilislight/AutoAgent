@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from autoagent.runtime import (
+from autoagent.core.runtime import (
     EdgeActivation,
     InMemoryRuntimeStore,
     Invocation,

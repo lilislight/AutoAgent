@@ -20,7 +20,7 @@ from autoagent import (
     TimeoutPolicy,
     Workflow,
 )
-from autoagent.runtime import ConditionContext, OutputBindingContext
+from autoagent.core.runtime import ConditionContext, OutputBindingContext
 
 
 def collect_incident_signal(

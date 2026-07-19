@@ -4,9 +4,9 @@ import unittest
 
 from pydantic import ValidationError
 
-from autoagent.compiler import CompileResult, Diagnostic, WorkflowCompiler, WorkflowIR
-from autoagent.operators import Operator
-from autoagent.workflow import (
+from autoagent.core.compiler import CompileResult, Diagnostic, WorkflowCompiler, WorkflowIR
+from autoagent.core.operators import Operator
+from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
     CapabilitySelectionPolicy,

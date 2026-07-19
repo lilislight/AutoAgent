@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from autoagent import AutoAgentApp, AutoAgentServer
-from autoagent.workflow import Workflow
+from autoagent.core.workflow import Workflow
 
 
 def receive_incident(summary: str, severity: int) -> dict[str, object]:

@@ -6,8 +6,8 @@ import time
 import unittest
 
 from autoagent import AutoAgentApp
-from autoagent.runtime import InMemoryRuntimeStore, SessionBusyError
-from autoagent.workflow import (
+from autoagent.core.runtime import InMemoryRuntimeStore, SessionBusyError
+from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
     Edge,
@@ -740,6 +740,10 @@ class WorkflowExecutorTests(unittest.TestCase):
         join_execution = invocation.latest_node_execution("join")
         assert join_execution is not None
         self.assertEqual(len(join_execution.incoming_activations), 2)
+        self.assertEqual(
+            [activation.edge_id for activation in join_execution.incoming_activations],
+            ["edge_left_join", "edge_right_join"],
+        )
 
     def test_single_path_loop_repeats_and_exposes_incoming_edge(self) -> None:
         incoming_edges: list[str] = []

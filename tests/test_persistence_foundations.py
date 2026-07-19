@@ -9,16 +9,16 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from autoagent import AutoAgentApp
-from autoagent.compiler import WorkflowCompiler
-from autoagent.operators import Operator
-from autoagent.runtime import (
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.core.operators import Operator
+from autoagent.core.runtime import (
     ArtifactRef,
     JsonRuntimeSerializer,
     RuntimeCodec,
     RuntimeDeserializationError,
     RuntimeSerializationError,
 )
-from autoagent.workflow import (
+from autoagent.core.workflow import (
     CapabilityRef,
     Node,
     NodePolicy,
@@ -264,8 +264,53 @@ class PersistenceIdentityTests(unittest.TestCase):
         )
         self.assertEqual(2, len(app.runtime_store.workflow_versions))
 
+    def test_source_workflow_mutation_after_compilation_is_rejected(self) -> None:
+        def finish(value: str) -> str:
+            return f"finished:{value}"
+
+        workflow = Workflow(id="mutable_workflow_source")
+        workflow.add_node(echo, node_id="echo")
+        app = AutoAgentApp()
+
+        first = app.invoke(workflow, input={"value": "one"}, session_id="first")
+        first_hash = first.workflow_definition_hash
+
+        workflow.add_node(
+            finish,
+            node_id="finish",
+            input_mapping=lambda ctx: {"value": ctx.outputs.latest("echo")},
+        )
+        workflow.add_edge("echo", "finish")
+
+        with self.assertRaisesRegex(ValueError, "changed after it was compiled"):
+            app.invoke(workflow, input={"value": "two"}, session_id="second")
+
+        self.assertEqual(first.result, {"output": "one"})
+        self.assertEqual(
+            app.workflow_registry[workflow.id].workflow_ir.definition_hash,
+            first_hash,
+        )
+
 
 class RuntimeSerializerTests(unittest.TestCase):
+    def test_explicit_pydantic_type_id_is_used_for_writes_and_aliases_decode(
+        self,
+    ) -> None:
+        serializer = JsonRuntimeSerializer()
+        serializer.register_pydantic_model(Message, type_id="test.message.v1")
+        serializer.register_pydantic_model(Message, type_id="__main__:Message")
+
+        payload = serializer.dumps(Message(role="user", content="stable"))
+        self.assertIn(b'"type_id":"test.message.v1"', payload)
+        legacy_payload = (
+            b'{"__autoagent_type__":"pydantic","type_id":"__main__:Message",'
+            b'"value":{"content":"legacy","role":"user"}}'
+        )
+        self.assertEqual(
+            Message(role="user", content="legacy"),
+            serializer.loads(legacy_payload),
+        )
+
     def test_app_owns_runtime_type_registration(self) -> None:
         class Token:
             def __init__(self, value: str) -> None:
@@ -294,7 +339,7 @@ class RuntimeSerializerTests(unittest.TestCase):
         self.assertEqual(Message(role="user", content="hello"), message)
 
     def test_app_rejects_serializer_different_from_store_owner(self) -> None:
-        from autoagent.runtime import InMemoryRuntimeStore
+        from autoagent.core.runtime import InMemoryRuntimeStore
 
         store = InMemoryRuntimeStore(serializer=JsonRuntimeSerializer())
         with self.assertRaisesRegex(ValueError, "owned by runtime_store"):

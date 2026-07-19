@@ -22,6 +22,10 @@ interface InspectorPanelProps {
   projection: RuntimeProjection;
   selection: TraceSelection;
   cursorSequence: number;
+  onResumeWait?: (waitKey: string, output: unknown) => Promise<void>;
+  resumePending?: boolean;
+  resumeError?: string | null;
+  resumeDisabledReason?: string | null;
   onClose: () => void;
 }
 
@@ -32,6 +36,10 @@ export function InspectorPanel({
   projection,
   selection,
   cursorSequence,
+  onResumeWait,
+  resumePending = false,
+  resumeError = null,
+  resumeDisabledReason = null,
   onClose,
 }: InspectorPanelProps) {
   const tab = useTraceUi((state) => state.inspectorTab);
@@ -125,6 +133,10 @@ export function InspectorPanel({
                 selectedEvaluationId={currentEvaluation?.id ?? null}
                 onExecutionChange={setSelectedExecutionId}
                 onEvaluationChange={setSelectedEvaluationId}
+                onResumeWait={onResumeWait}
+                resumePending={resumePending}
+                resumeError={resumeError}
+                resumeDisabledReason={resumeDisabledReason}
               />
             )}
             {tab === "definition" && <DefinitionView values={inspected.definition} />}
@@ -174,6 +186,10 @@ function RuntimeView({
   selectedEvaluationId,
   onExecutionChange,
   onEvaluationChange,
+  onResumeWait,
+  resumePending,
+  resumeError,
+  resumeDisabledReason,
 }: {
   inspected: ReturnType<typeof inspectSelection>;
   currentExecution: NodeExecutionView | null;
@@ -184,17 +200,28 @@ function RuntimeView({
   selectedEvaluationId: string | null;
   onExecutionChange: (id: string) => void;
   onEvaluationChange: (id: string) => void;
+  onResumeWait?: (waitKey: string, output: unknown) => Promise<void>;
+  resumePending: boolean;
+  resumeError: string | null;
+  resumeDisabledReason: string | null;
 }) {
   const { executions, edgeEvaluations: evaluations } = inspected;
   if (executions.length === 0 && evaluations.length === 0) {
     return (
       <div className="runtime-view">
-        <FailureSummary
-          inspected={inspected}
-          execution={currentExecution}
-          evaluation={currentEvaluation}
-        />
-        <div className="inspector-empty">No runtime history at this cursor.</div>
+      <FailureSummary
+        inspected={inspected}
+        execution={currentExecution}
+        evaluation={currentEvaluation}
+      />
+      <WaitResumeAction
+        execution={currentExecution}
+        onResumeWait={onResumeWait}
+        pending={resumePending}
+        error={resumeError}
+        disabledReason={resumeDisabledReason}
+      />
+      <div className="inspector-empty">No runtime history at this cursor.</div>
         <RuntimeTabs active={runtimeTab} onChange={onRuntimeTabChange} />
         <RuntimeTabContent
           active={runtimeTab}
@@ -211,6 +238,13 @@ function RuntimeView({
         inspected={inspected}
         execution={currentExecution}
         evaluation={currentEvaluation}
+      />
+      <WaitResumeAction
+        execution={currentExecution}
+        onResumeWait={onResumeWait}
+        pending={resumePending}
+        error={resumeError}
+        disabledReason={resumeDisabledReason}
       />
       {executions.length > 0 && (
         <label className="history-select">
@@ -250,6 +284,67 @@ function RuntimeView({
         evaluation={currentEvaluation}
       />
     </div>
+  );
+}
+
+function WaitResumeAction({
+  execution,
+  onResumeWait,
+  pending,
+  error,
+  disabledReason,
+}: {
+  execution: NodeExecutionView | null;
+  onResumeWait?: (waitKey: string, output: unknown) => Promise<void>;
+  pending: boolean;
+  error: string | null;
+  disabledReason: string | null;
+}) {
+  const [outputText, setOutputText] = useState(
+    '{\n  "approved": true,\n  "reviewer": "operator",\n  "note": "Approved from tracing UI."\n}',
+  );
+  const [localError, setLocalError] = useState<string | null>(null);
+  if (!execution || execution.state !== "waiting") return null;
+
+  const waitKey = waitKeyFromExecution(execution);
+  const disabled = pending || !onResumeWait || Boolean(disabledReason);
+  return (
+    <section className="wait-resume-card">
+      <div className="wait-resume-heading">
+        <div>
+          <strong>Waiting for external resume</strong>
+          <span>wait_key: {waitKey}</span>
+        </div>
+      </div>
+      <label>
+        Resume output JSON
+        <textarea
+          value={outputText}
+          onChange={(event) => {
+            setOutputText(event.target.value);
+            setLocalError(null);
+          }}
+          spellCheck={false}
+        />
+      </label>
+      {disabledReason && <p className="wait-resume-error">{disabledReason}</p>}
+      {(localError || error) && <p className="wait-resume-error">{localError || error}</p>}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          try {
+            const output = outputText.trim() ? JSON.parse(outputText) : {};
+            setLocalError(null);
+            void onResumeWait?.(waitKey, output);
+          } catch (parseError) {
+            setLocalError(parseError instanceof Error ? parseError.message : String(parseError));
+          }
+        }}
+      >
+        {pending ? "Resuming..." : "Resume wait"}
+      </button>
+    </section>
   );
 }
 
@@ -378,6 +473,13 @@ function Overview({ values }: { values: Record<string, unknown> }) {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function waitKeyFromExecution(execution: NodeExecutionView): string {
+  const input = asRecord(execution.input);
+  const waitKey = input.wait_key;
+  if (typeof waitKey === "string" && waitKey.trim()) return waitKey;
+  return execution.id;
 }
 
 function operatorCallFromValue(value: unknown): OperatorCallView | null {

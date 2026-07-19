@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from uuid import uuid4
 
-from autoagent.runtime import EdgeActivation, SchedulerContext
+from autoagent.core.runtime import EdgeActivation, SchedulerContext
 
 
 class SchedulerContextTests(unittest.TestCase):

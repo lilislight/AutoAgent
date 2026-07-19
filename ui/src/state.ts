@@ -10,6 +10,7 @@ interface TraceUiState {
   sessionId: string | null;
   invocationId: string | null;
   cursorSequence: number | null;
+  replayCursorSequence: number | null;
   followLive: boolean;
   connected: boolean;
   selection: TraceSelection;
@@ -36,6 +37,7 @@ export const useTraceUi = create<TraceUiState>((set) => ({
   sessionId: null,
   invocationId: null,
   cursorSequence: null,
+  replayCursorSequence: null,
   followLive: true,
   connected: false,
   selection: null,
@@ -47,6 +49,7 @@ export const useTraceUi = create<TraceUiState>((set) => ({
       sessionId: null,
       invocationId: null,
       cursorSequence: null,
+      replayCursorSequence: null,
       followLive: true,
       selection: null,
     }),
@@ -55,6 +58,7 @@ export const useTraceUi = create<TraceUiState>((set) => ({
       sessionId,
       invocationId: null,
       cursorSequence: null,
+      replayCursorSequence: null,
       followLive: true,
       selection: null,
     }),
@@ -62,6 +66,7 @@ export const useTraceUi = create<TraceUiState>((set) => ({
     set({
       invocationId,
       cursorSequence: null,
+      replayCursorSequence: null,
       followLive: true,
       selection: null,
     }),
@@ -71,11 +76,19 @@ export const useTraceUi = create<TraceUiState>((set) => ({
       sessionId,
       invocationId,
       cursorSequence: null,
+      replayCursorSequence: null,
       followLive: true,
       selection: null,
     }),
   setCursor: (cursorSequence, followLive = false) =>
-    set({ cursorSequence, followLive }),
+    set((current) => ({
+      cursorSequence,
+      followLive,
+      // A following update must not erase the user's last replay location.
+      replayCursorSequence: followLive
+        ? current.replayCursorSequence
+        : cursorSequence,
+    })),
   setFollowLive: (followLive) => set({ followLive }),
   setConnected: (connected) => set({ connected }),
   setSelection: (selection) => set({ selection }),

@@ -1,11 +1,13 @@
 import type {
   InvocationSummary,
+  InvocationResumeResponse,
   InvocationSubmitResponse,
   TraceBootstrap,
   ServerHealth,
   RuntimeEvent,
   RuntimeEventPage,
   SessionSummary,
+  WorkflowGraphView,
   WorkflowSummary,
 } from "./types";
 
@@ -36,6 +38,20 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export function listWorkflows(): Promise<WorkflowSummary[]> {
   return requestJson("/api/workflows");
+}
+
+/** Workflows compiled into the App currently backing this server. */
+export function listRegisteredWorkflows(): Promise<WorkflowSummary[]> {
+  return requestJson("/api/registered-workflows");
+}
+
+export function getWorkflowGraph(workflow: WorkflowSummary): Promise<WorkflowGraphView> {
+  const query = new URLSearchParams({
+    operator_manifest_hash: workflow.operator_manifest_hash,
+  });
+  return requestJson(
+    `/api/workflows/${workflow.workflow_id}/versions/${workflow.definition_hash}?${query}`,
+  );
 }
 
 export function getHealth(): Promise<ServerHealth> {
@@ -77,6 +93,17 @@ export function submitInvocation(
   return postJson(`/api/workflows/${workflowId}/invocations`, body);
 }
 
+export function resumeInvocation(
+  workflowId: string,
+  body: {
+    session_id: string;
+    wait_key: string;
+    output?: unknown;
+  },
+): Promise<InvocationResumeResponse> {
+  return postJson(`/api/workflows/${workflowId}/resume`, body);
+}
+
 export function getTraceView(
   sessionId: string,
   invocationId: string,
@@ -94,6 +121,21 @@ export function getEarlierEvents(
 ): Promise<RuntimeEventPage> {
   const query = new URLSearchParams({
     before_sequence: String(beforeSequence),
+    limit: String(limit),
+  });
+  return requestJson(
+    `/api/sessions/${sessionId}/invocations/${invocationId}/events?${query}`,
+  );
+}
+
+export function getLaterEvents(
+  sessionId: string,
+  invocationId: string,
+  afterSequence: number,
+  limit = 100,
+): Promise<RuntimeEventPage> {
+  const query = new URLSearchParams({
+    after_sequence: String(afterSequence),
     limit: String(limit),
   });
   return requestJson(

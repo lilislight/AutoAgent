@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from autoagent import AutoAgentApp
-from autoagent.executor.node_executor import _retry_delay_seconds
-from autoagent.workflow import (
+from autoagent.core.executor.node_executor import _retry_delay_seconds
+from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
     NodePolicy,
@@ -61,7 +61,7 @@ class BackoffPolicyTests(unittest.TestCase):
         )
 
         with patch(
-            "autoagent.executor.node_executor.random.uniform",
+            "autoagent.core.executor.node_executor.random.uniform",
             return_value=125,
         ) as uniform:
             delay = _retry_delay_seconds(policy, retry_index=2)
@@ -77,7 +77,7 @@ class BackoffPolicyTests(unittest.TestCase):
         )
 
         with patch(
-            "autoagent.executor.node_executor.random.uniform",
+            "autoagent.core.executor.node_executor.random.uniform",
             return_value=150,
         ) as uniform:
             delay = _retry_delay_seconds(policy, retry_index=0)

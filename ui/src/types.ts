@@ -31,6 +31,13 @@ export interface InvocationSubmitResponse {
   state: RuntimeState;
 }
 
+export interface InvocationResumeResponse {
+  workflow_id: string;
+  session_id: string;
+  invocation_id: string;
+  state: RuntimeState;
+}
+
 export interface WorkflowSummary {
   workflow_id: string;
   workflow_version: string | number | null;
@@ -38,6 +45,10 @@ export interface WorkflowSummary {
   operator_manifest_hash: string;
   name: string | null;
   description: string | null;
+  /** Client-side directory metadata derived from persisted snapshots. */
+  revision_count?: number;
+  /** Whether this exact revision is registered by the current App process. */
+  registered_in_current_app?: boolean;
 }
 
 export interface WorkflowNodeView {

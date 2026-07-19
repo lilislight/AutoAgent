@@ -18,6 +18,9 @@ ui/dist/
 # Local Workflow previews
 workflow_preview.mmd
 
+# Local AutoAgent runtime data
+.autoagent/
+
 # Test and coverage
 .pytest_cache/
 .coverage

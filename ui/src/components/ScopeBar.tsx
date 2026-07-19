@@ -9,9 +9,12 @@ import {
 
 import type {
   InvocationSummary,
+  RuntimeState,
   SessionSummary,
   WorkflowSummary,
 } from "../types";
+
+const MAX_SCOPE_OPTIONS = 80;
 
 interface ScopeBarProps {
   workflows: WorkflowSummary[];
@@ -20,10 +23,17 @@ interface ScopeBarProps {
   workflowId: string | null;
   sessionId: string | null;
   invocationId: string | null;
+  invocationState: RuntimeState | null;
+  viewedWorkflow: Pick<
+    WorkflowSummary,
+    "workflow_id" | "workflow_version" | "definition_hash" | "operator_manifest_hash"
+  > | null;
+  viewedWorkflowIsRegistered: boolean;
   followLive: boolean;
-  connected: boolean;
+  backendLive: boolean;
   darkMode: boolean;
   executionEnabled: boolean;
+  canInvoke: boolean;
   invoking: boolean;
   onWorkflowChange: (value: string | null) => void;
   onSessionChange: (value: string | null) => void;
@@ -40,10 +50,14 @@ export function ScopeBar({
   workflowId,
   sessionId,
   invocationId,
+  invocationState,
+  viewedWorkflow,
+  viewedWorkflowIsRegistered,
   followLive,
-  connected,
+  backendLive,
   darkMode,
   executionEnabled,
+  canInvoke,
   invoking,
   onWorkflowChange,
   onSessionChange,
@@ -53,6 +67,31 @@ export function ScopeBar({
   onToggleTheme,
 }: ScopeBarProps) {
   const selectedInvocation = invocations.find((value) => value.id === invocationId);
+  const workflowOptions = limitOptions(
+    workflows.map((value) => ({
+      value: value.workflow_id,
+      label: `${shortId(value.workflow_id)} · ${value.name || value.workflow_id} · ${workflowDirectoryLabel(value)}`,
+    })),
+    workflowId,
+  );
+  const sessionOptions = limitOptions(
+    [...sessions]
+      .sort((left, right) => right.updated_at_ms - left.updated_at_ms)
+      .map((value) => ({
+        value: value.id,
+        label: `${shortId(value.id)} · ${value.session_key || "no key"}`,
+      })),
+    sessionId,
+  );
+  const invocationOptions = limitOptions(
+    [...invocations]
+      .sort((left, right) => right.created_at_ms - left.created_at_ms)
+      .map((value) => ({
+        value: value.id,
+        label: `${shortId(value.id)} · ${formatTime(value.created_at_ms)} · ${workflowRevisionLabel(value.workflow_version, value.definition_hash)} · ${value.state}`,
+      })),
+    invocationId,
+  );
   return (
     <header className="scope-bar">
       <div className="brand-mark" aria-label="AutoAgent Trace">
@@ -66,43 +105,53 @@ export function ScopeBar({
           value={workflowId}
           disabled={workflows.length === 0}
           onChange={onWorkflowChange}
-          options={workflows.map((value) => ({
-            value: value.workflow_id,
-            label: value.name || value.workflow_id,
-          }))}
+          options={workflowOptions}
         />
         <ScopeSelect
           label="Session"
           value={sessionId}
           disabled={!workflowId || sessions.length === 0}
           onChange={onSessionChange}
-          options={sessions.map((value) => ({
-            value: value.id,
-            label: value.session_key || shortId(value.id),
-          }))}
+          options={sessionOptions}
         />
         <ScopeSelect
           label="Invocation"
           value={invocationId}
           disabled={!sessionId || invocations.length === 0}
           onChange={onInvocationChange}
-          options={[...invocations].reverse().map((value) => ({
-            value: value.id,
-            label: `${formatTime(value.created_at_ms)} · ${value.state}`,
-          }))}
+          options={invocationOptions}
         />
       </div>
       <div className="scope-actions">
-        <span className={`connection-state ${connected ? "is-connected" : ""}`}>
-          <Radio size={13} />
-          {connected ? "Live link" : "Offline"}
-        </span>
+        {viewedWorkflow && (
+          <span
+            className={`workflow-revision-pill ${viewedWorkflowIsRegistered ? "is-current" : "is-historical"}`}
+            title={`Workflow ${viewedWorkflow.workflow_id}\nDefinition hash: ${viewedWorkflow.definition_hash}\nOperator manifest: ${viewedWorkflow.operator_manifest_hash}`}
+          >
+            {workflowRevisionLabel(
+              viewedWorkflow.workflow_version,
+              viewedWorkflow.definition_hash,
+            )}
+            <strong>{viewedWorkflowIsRegistered ? "Current app" : "History"}</strong>
+          </span>
+        )}
+        {selectedInvocation && (
+          <span className={`invocation-status-pill state-${stateClass(invocationState ?? selectedInvocation.state)}`}>
+            {shortId(selectedInvocation.id)} · {invocationState ?? selectedInvocation.state}
+          </span>
+        )}
         <button
           className="toolbar-button"
           type="button"
           onClick={onOpenInvoke}
-          disabled={!workflowId || !executionEnabled || invoking}
-          title={executionEnabled ? "Invoke selected workflow" : "Execution API is disabled"}
+          disabled={!canInvoke || !executionEnabled || invoking}
+          title={
+            !executionEnabled
+              ? "Execution API is disabled"
+              : canInvoke
+                ? "Invoke a workflow registered by the current App"
+                : "The current App has no registered workflows"
+          }
         >
           <Play size={15} />
           {invoking ? "Invoking" : "Invoke"}
@@ -112,11 +161,22 @@ export function ScopeBar({
           type="button"
           onClick={onFollowLive}
           disabled={!selectedInvocation}
-          title="Follow latest runtime event"
+          title={
+            followLive
+              ? "Enter replay at the previous cursor, or the pre-event graph"
+              : "Return to the latest runtime event"
+          }
         >
           {followLive ? <Radio size={15} /> : <CirclePause size={15} />}
           {followLive ? "Following" : "Replay"}
         </button>
+        <span
+          className={`connection-state ${backendLive ? "is-connected" : ""}`}
+          title={backendLive ? "Backend service is reachable" : "Backend service or live polling is unavailable"}
+        >
+          <Radio size={13} />
+          {backendLive ? "Live" : "Offline"}
+        </span>
         <button
           className="icon-button"
           type="button"
@@ -128,6 +188,20 @@ export function ScopeBar({
       </div>
     </header>
   );
+}
+
+function limitOptions(
+  options: { value: string; label: string }[],
+  selectedValue: string | null,
+): { value: string; label: string }[] {
+  const selected = selectedValue
+    ? options.find((option) => option.value === selectedValue)
+    : undefined;
+  const limited = options.slice(0, MAX_SCOPE_OPTIONS);
+  if (selected && !limited.some((option) => option.value === selected.value)) {
+    return [selected, ...limited.slice(0, MAX_SCOPE_OPTIONS - 1)];
+  }
+  return limited;
 }
 
 function ScopeSelect({
@@ -143,11 +217,14 @@ function ScopeSelect({
   disabled: boolean;
   onChange: (value: string | null) => void;
 }) {
+  const safeValue = value && options.some((option) => option.value === value)
+    ? value
+    : "";
   return (
     <label className="scope-select">
       <span>{label}</span>
       <select
-        value={value ?? ""}
+        value={safeValue}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value || null)}
       >
@@ -166,10 +243,30 @@ function shortId(value: string): string {
   return value.slice(0, 8);
 }
 
+function stateClass(value: RuntimeState): string {
+  return String(value).replaceAll("_", "-");
+}
+
 function formatTime(value: number): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   }).format(value);
+}
+
+function workflowDirectoryLabel(workflow: WorkflowSummary): string {
+  const revisions = workflow.revision_count ?? 1;
+  const source = workflow.registered_in_current_app ? "current" : "history";
+  return `${revisions} revision${revisions === 1 ? "" : "s"} · ${source}`;
+}
+
+function workflowRevisionLabel(
+  version: string | number | null,
+  definitionHash: string | null,
+): string {
+  const resolvedVersion = version === null ? "v?" : `v${version}`;
+  return definitionHash
+    ? `${resolvedVersion} · ${definitionHash.slice(0, 8)}`
+    : resolvedVersion;
 }

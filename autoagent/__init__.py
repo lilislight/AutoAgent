@@ -1,5 +1,5 @@
-from autoagent.app import AutoAgentApp, SubmittedInvocation, get_default_app
-from autoagent.operators import (
+from autoagent.core.app import AutoAgentApp, SubmittedInvocation, get_default_app
+from autoagent.core.operators import (
     Capability,
     Operator,
     OperatorContract,
@@ -11,7 +11,7 @@ from autoagent.operators import (
     capability,
     operator,
 )
-from autoagent.workflow import (
+from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
     CapabilitySelectionPolicy,
@@ -35,7 +35,7 @@ from autoagent.workflow import (
     WorkflowDiagram,
     workflow_hook,
 )
-from autoagent.runtime import (
+from autoagent.core.runtime import (
     ArtifactRef,
     JsonRuntimeSerializer,
     LoggingEventSink,
@@ -43,7 +43,7 @@ from autoagent.runtime import (
     RuntimeEventSink,
     SQLiteRuntimeStore,
 )
-from autoagent.server import AutoAgentServer
+from autoagent.core.server import AutoAgentServer
 
 __all__ = [
     "AutoAgentApp",

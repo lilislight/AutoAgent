@@ -233,6 +233,9 @@ def _node_execution_events(previous: Any, current: Any) -> list[RuntimeEventDraf
                 payload={
                     "sequence": current.sequence,
                     "state": "created",
+                    "execution_scope": [
+                        frame.to_record() for frame in current.execution_scope
+                    ],
                     "incoming_activations": [
                         activation.to_record()
                         for activation in current.incoming_activations

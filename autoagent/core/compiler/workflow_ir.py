@@ -12,32 +12,47 @@ from autoagent.core.workflow.policy import (
 
 
 class LoopRegionIR(BaseModel):
-    """Compiled strongly connected region with single-path execution semantics.
+    """Compiled natural loop with ordinary graph semantics inside its body.
 
     A loop region is derived by the compiler; workflow authors do not create it.
-    Runtime treats internal edges as repeatable activations rather than static
-    invocation-level edge states. The region has one entry node, may contain
-    multiple conditional exits, and permits only one selected outgoing edge for
-    each completed NodeExecution.
+    A natural loop is identified by one header and one or more back edges whose
+    target is that header. Regions may be nested. Runtime executes the acyclic
+    body between back edges with the same fan-out and complete fan-in rules as
+    the rest of the graph.
     """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     id: str = Field(description="Stable compiler-generated loop region id.")
     node_ids: tuple[str, ...] = Field(
-        description="Workflow nodes contained in this strongly connected region."
+        description="Workflow nodes contained in this natural-loop body."
     )
-    entry_node_id: str = Field(
-        description="Only node that workflow entry or external edges may enter."
+    header_node_id: str = Field(
+        description="Only node that external entry and back edges may target."
     )
     internal_edge_ids: tuple[str, ...] = Field(
         description="Repeatable edges whose source and target are inside the region."
     )
-    entry_edge_ids: tuple[str, ...] = Field(
-        description="Invocation-level edges entering entry_node_id from outside."
+    external_entry_edge_ids: tuple[str, ...] = Field(
+        description="Edges entering the header from outside this loop."
+    )
+    back_edge_ids: tuple[str, ...] = Field(
+        description="Cycle-closing edges from the loop body to its header."
     )
     exit_edge_ids: tuple[str, ...] = Field(
-        description="Invocation-level edges leaving the region."
+        description="Edges leaving this loop for its parent scope."
+    )
+    parent_loop_region_id: str | None = Field(
+        default=None,
+        description="Immediately containing natural loop, if this loop is nested.",
+    )
+    child_loop_region_ids: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Immediately nested natural loops in declaration order.",
+    )
+    depth: int = Field(
+        default=0,
+        description="Zero-based nesting depth used to build execution scopes.",
     )
 
 
@@ -66,9 +81,9 @@ class GraphIR(BaseModel):
         default_factory=dict,
         description="Compiler-derived loop regions keyed by loop region id.",
     )
-    node_loop_regions: dict[str, str] = Field(
+    node_loop_stacks: dict[str, tuple[str, ...]] = Field(
         default_factory=dict,
-        description="Loop node id to its containing loop region id.",
+        description="Node id to containing loop ids ordered outermost to innermost.",
     )
 
 

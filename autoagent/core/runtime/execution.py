@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from autoagent.core.operators.manifest import OperatorManifest
-from autoagent.core.runtime.scheduler import EdgeActivation
+from autoagent.core.runtime.scheduler import EdgeActivation, ExecutionScope, LoopIteration
 from autoagent.core.runtime.status import (
     EdgeEvaluationStateValue,
     NodeExecutionStateValue,
@@ -305,6 +305,7 @@ class NodeExecution:
     recovery_of_execution_id: UUID | None = None
     recovery_attempt: int = 0
     incoming_activations: tuple[EdgeActivation, ...] = ()
+    execution_scope: ExecutionScope = ()
     operator_calls: list[OperatorCall] = field(default_factory=list)
     edge_evaluations: list[EdgeEvaluation] = field(default_factory=list)
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
@@ -421,6 +422,9 @@ class NodeExecution:
             "incoming_activations": [
                 activation.to_record() for activation in self.incoming_activations
             ],
+            "execution_scope": [
+                frame.to_record() for frame in self.execution_scope
+            ],
             "edge_evaluations": [
                 evaluation.to_record() for evaluation in self.edge_evaluations
             ],
@@ -456,6 +460,10 @@ class NodeExecution:
             incoming_activations=tuple(
                 EdgeActivation.from_record(item)
                 for item in record.get("incoming_activations", [])
+            ),
+            execution_scope=tuple(
+                LoopIteration.from_record(item)
+                for item in record.get("execution_scope", [])
             ),
             operator_calls=list(operator_calls or []),
             edge_evaluations=[

@@ -161,6 +161,7 @@ export interface NodeExecutionView {
   input: unknown;
   output: unknown;
   error: Record<string, unknown> | null;
+  execution_scope: Record<string, unknown>[];
   incoming_activations: Record<string, unknown>[];
   edge_evaluations: EdgeEvaluationView[];
   operator_calls: OperatorCallView[];

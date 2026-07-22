@@ -53,6 +53,7 @@ def project_runtime_events(
                 node_id=event.node_id,
                 sequence=int(event.payload.get("sequence", 0)),
                 state=str(event.payload.get("state", "created")),
+                execution_scope=tuple(event.payload.get("execution_scope", ())),
             )
             continue
         if event.type == "node.state_changed" and event.entity_id and event.node_id:
@@ -62,6 +63,9 @@ def project_runtime_events(
                 node_id=event.node_id,
                 sequence=previous.sequence if previous is not None else 0,
                 state=str(event.payload.get("to", "created")),
+                execution_scope=(
+                    previous.execution_scope if previous is not None else ()
+                ),
                 input=(
                     event.payload.get("input")
                     if event.payload.get("to") == "running"

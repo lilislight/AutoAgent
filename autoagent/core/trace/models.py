@@ -141,6 +141,7 @@ class NodeExecutionView(TraceModel):
     input: Any | None = None
     output: Any | None = None
     error: dict[str, Any] | None = None
+    execution_scope: tuple[dict[str, Any], ...]
     incoming_activations: tuple[dict[str, Any], ...]
     edge_evaluations: tuple[EdgeEvaluationView, ...]
     operator_calls: tuple[OperatorCallView, ...]
@@ -187,6 +188,7 @@ class ProjectedNodeExecution(TraceModel):
     node_id: str
     sequence: int
     state: str
+    execution_scope: tuple[dict[str, Any], ...] = ()
     input: Any | None = None
     output: Any | None = None
     error: dict[str, Any] | None = None

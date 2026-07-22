@@ -297,6 +297,9 @@ class TraceQueryService:
             error=self._redact(
                 execution.error.to_record() if execution.error else None
             ),
+            execution_scope=tuple(
+                frame.to_record() for frame in execution.execution_scope
+            ),
             incoming_activations=tuple(
                 value.to_record() for value in execution.incoming_activations
             ),

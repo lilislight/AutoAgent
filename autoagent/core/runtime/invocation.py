@@ -12,7 +12,7 @@ from autoagent.core.runtime.execution import (
 from autoagent.core.runtime.output import OutputContext
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.scheduler import SchedulerContext
-from autoagent.core.runtime.scheduler import EdgeActivation
+from autoagent.core.runtime.scheduler import EdgeActivation, ExecutionScope
 from autoagent.core.runtime.status import InvocationStateValue
 from autoagent.core.runtime.time import TimestampMs, coerce_timestamp_ms, utc_timestamp_ms
 
@@ -157,6 +157,7 @@ class Invocation:
         recovery_of_execution_id: UUID | None = None,
         recovery_attempt: int = 0,
         incoming_activations: tuple[EdgeActivation, ...] = (),
+        execution_scope: ExecutionScope = (),
     ) -> NodeExecution:
         """Append a logical NodeExecution created from a ready request.
 
@@ -174,6 +175,7 @@ class Invocation:
             recovery_of_execution_id=recovery_of_execution_id,
             recovery_attempt=recovery_attempt,
             incoming_activations=incoming_activations,
+            execution_scope=execution_scope,
         )
         execution.mark_ready()
         self.node_executions.append(execution)

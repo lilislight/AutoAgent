@@ -150,6 +150,7 @@ class NodeExecutionRow(RuntimeDatabaseBase):
     idempotency_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     recovery_of_execution_id: Mapped[str | None] = mapped_column(String(36))
     recovery_attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_scope_json: Mapped[str] = mapped_column(Text, nullable=False)
     incoming_activations_json: Mapped[str] = mapped_column(Text, nullable=False)
     edge_evaluations_json: Mapped[str] = mapped_column(Text, nullable=False)
     resource_usage_json: Mapped[str] = mapped_column(Text, nullable=False)

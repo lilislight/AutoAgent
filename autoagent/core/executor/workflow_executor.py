@@ -23,7 +23,7 @@ from autoagent.core.runtime import (
     RuntimeStore,
     Session,
 )
-from autoagent.core.runtime.scheduler import NodeExecutionRequest
+from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance_key
 from autoagent.core.runtime.hooks import invoke_hook_async, run_sync
 from autoagent.core.scheduler import Scheduler
 
@@ -194,6 +194,7 @@ class WorkflowExecutor:
             request = NodeExecutionRequest(
                 node_id=interrupted.node_id,
                 activations=interrupted.incoming_activations,
+                execution_scope=interrupted.execution_scope,
             )
             map_policy = self._map_policy_for_request(workflow_ir, request)
             replacement = invocation.create_node_execution(
@@ -205,6 +206,7 @@ class WorkflowExecutor:
                 recovery_of_execution_id=interrupted.id,
                 recovery_attempt=interrupted.recovery_attempt + 1,
                 incoming_activations=interrupted.incoming_activations,
+                execution_scope=interrupted.execution_scope,
             )
             invocation.mark_node_running(replacement.id, input=replacement.input)
             changed_execution_ids.append(replacement.id)
@@ -576,9 +578,12 @@ class WorkflowExecutor:
                 node_execution = invocation.create_node_execution(
                     node_ir.id,
                     incoming_activations=request.activations,
+                    execution_scope=request.execution_scope,
                 )
                 changed_execution_ids.append(node_execution.id)
-                invocation.scheduler.scheduled_node_ids.add(node_ir.id)
+                invocation.scheduler.scheduled_node_instances.add(
+                    node_instance_key(node_ir.id, request.execution_scope)
+                )
                 invocation.mark_node_failed(
                     node_execution.id,
                     RuntimeErrorInfo(
@@ -595,11 +600,14 @@ class WorkflowExecutor:
                 node_ir.id,
                 input=node_input,
                 incoming_activations=request.activations,
+                execution_scope=request.execution_scope,
             )
             changed_execution_ids.append(node_execution.id)
             if node_execution.idempotency_key is None:
                 node_execution.idempotency_key = str(node_execution.id)
-            invocation.scheduler.scheduled_node_ids.add(node_ir.id)
+            invocation.scheduler.scheduled_node_instances.add(
+                node_instance_key(node_ir.id, request.execution_scope)
+            )
             invocation.mark_node_running(node_execution.id, input=node_input)
 
             resource_error = self._check_operator_call_resource(

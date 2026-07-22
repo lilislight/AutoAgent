@@ -693,7 +693,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["POLICY_MAP_INVALID"], self.diagnostic_codes(result))
         self.assertEqual("map_edge", result.diagnostics[0].subject)
 
-    def test_compiler_derives_single_entry_loop_region(self):
+    def test_compiler_derives_natural_loop_region(self):
         workflow = make_workflow(
             nodes=[
                 Node(id="start", capability=task),
@@ -713,13 +713,14 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         region = workflow_ir.graph.loop_regions["loop_1"]
         self.assertEqual(("agent", "tools"), region.node_ids)
-        self.assertEqual("agent", region.entry_node_id)
-        self.assertEqual(("start_agent",), region.entry_edge_ids)
+        self.assertEqual("agent", region.header_node_id)
+        self.assertEqual(("start_agent",), region.external_entry_edge_ids)
+        self.assertEqual(("tools_agent",), region.back_edge_ids)
         self.assertEqual({"agent_tools", "tools_agent"}, set(region.internal_edge_ids))
         self.assertEqual(("agent_final",), region.exit_edge_ids)
         self.assertEqual(
-            {"agent": "loop_1", "tools": "loop_1"},
-            workflow_ir.graph.node_loop_regions,
+            {"agent": ("loop_1",), "tools": ("loop_1",)},
+            workflow_ir.graph.node_loop_stacks,
         )
 
     def test_loop_with_multiple_entry_nodes_is_rejected(self):
@@ -752,7 +753,7 @@ class WorkflowCompilerTests(unittest.TestCase):
             loop_diagnostic.metadata["expected_entry_node_id"],
         )
 
-    def test_loop_node_with_unconditional_fan_out_is_rejected(self):
+    def test_loop_node_with_unconditional_fan_out_uses_ordinary_edge_semantics(self):
         workflow = make_workflow(
             nodes=[
                 Node(id="start", capability=task, entry=True),
@@ -768,8 +769,11 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         result = WorkflowCompiler().compile(workflow)
 
-        self.assertFalse(result.ok)
-        self.assertIn("LOOP_ROUTING_AMBIGUOUS", self.diagnostic_codes(result))
+        self.assertTrue(result.ok, result.diagnostics)
+        assert result.workflow_ir is not None
+        region = result.workflow_ir.graph.loop_regions["loop_1"]
+        self.assertEqual(("edge_loop_loop",), region.back_edge_ids)
+        self.assertEqual(("edge_loop_final",), region.exit_edge_ids)
 
     def test_selection_policy_cannot_prefer_and_exclude_same_operator(self):
         workflow = make_workflow(

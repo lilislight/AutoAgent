@@ -651,134 +651,292 @@ class WorkflowCompiler:
         entry_node_ids: tuple[str, ...],
         diagnostics: list[Diagnostic],
     ) -> None:
-        """Find loop SCCs and validate the V1 single-path loop boundary.
+        """Compile reducible natural loops and their nesting relationship.
 
-        Parallel fan-out and complete fan-in use invocation-level edge states in
-        the acyclic condensation graph. Edges inside a loop are repeatable, so a
-        loop must have one entry node and runtime must select at most one outgoing
-        edge after each execution. This keeps ReAct/retry loops useful without
-        introducing cycle-aware joins or branch rounds.
+        A back edge is an edge whose target dominates its source. Removing all
+        such edges must leave a DAG. This gives runtime an acyclic body for each
+        iteration while preserving ordinary fan-out and complete fan-in inside
+        the loop. Overlapping loops must be strictly nested; irreducible cycles
+        are rejected because they have no unambiguous execution scope.
         """
 
         node_order = {node_id: index for index, node_id in enumerate(nodes)}
-        components = self._strongly_connected_components(graph, tuple(nodes))
-        loop_components = []
-        for component in components:
-            if len(component) > 1:
-                loop_components.append(component)
+        reachable: set[str] = set()
+        pending = list(entry_node_ids)
+        while pending:
+            node_id = pending.pop()
+            if node_id in reachable:
                 continue
-            node_id = component[0]
-            if node_id in graph.successors.get(node_id, ()):
-                loop_components.append(component)
+            reachable.add(node_id)
+            pending.extend(graph.successors.get(node_id, ()))
 
-        loop_components.sort(key=lambda item: min(node_order[node_id] for node_id in item))
+        dominators: dict[str, set[str]] = {}
+        for node_id in nodes:
+            dominators[node_id] = (
+                {node_id} if node_id in entry_node_ids else set(reachable)
+            )
+        changed = True
+        while changed:
+            changed = False
+            for node_id in nodes:
+                if node_id not in reachable or node_id in entry_node_ids:
+                    continue
+                predecessors = [
+                    predecessor
+                    for predecessor in graph.predecessors.get(node_id, ())
+                    if predecessor in reachable
+                ]
+                inherited = (
+                    set.intersection(*(dominators[item] for item in predecessors))
+                    if predecessors
+                    else set()
+                )
+                updated = {node_id} | inherited
+                if updated != dominators[node_id]:
+                    dominators[node_id] = updated
+                    changed = True
+
+        back_edges_by_header: dict[str, list[str]] = {}
+        all_back_edge_ids: set[str] = set()
+        for edge_id, edge in edges.items():
+            if edge.from_node not in reachable or edge.to_node not in reachable:
+                continue
+            if edge.to_node in dominators[edge.from_node]:
+                back_edges_by_header.setdefault(edge.to_node, []).append(edge_id)
+                all_back_edge_ids.add(edge_id)
+
+        # Report a concrete illegal entry before the more general irreducible
+        # cycle diagnostic. This is both more actionable and lets diagrams mark
+        # the exact edge that prevents a unique loop header.
+        for component in self._strongly_connected_components(graph, tuple(nodes)):
+            component_set = set(component)
+            is_cycle = len(component) > 1 or any(
+                node_id in graph.successors.get(node_id, ())
+                for node_id in component
+            )
+            if not is_cycle:
+                continue
+            external_entries = [
+                edge_id
+                for edge_id, edge in edges.items()
+                if edge.from_node not in component_set
+                and edge.to_node in component_set
+            ]
+            entry_targets = {
+                edges[edge_id].to_node for edge_id in external_entries
+            } | (set(entry_node_ids) & component_set)
+            if len(entry_targets) <= 1:
+                continue
+            canonical = min(entry_targets, key=node_order.__getitem__)
+            invalid_edges = [
+                edge_id
+                for edge_id in external_entries
+                if edges[edge_id].to_node != canonical
+            ]
+            diagnostics.append(
+                Diagnostic(
+                    code="LOOP_ENTRY_INVALID",
+                    severity="error",
+                    message=(
+                        "Every edge entering a loop must target its unique "
+                        f"header node {canonical}."
+                    ),
+                    subject=invalid_edges[0] if invalid_edges else canonical,
+                    metadata={
+                        "object_type": "edge" if invalid_edges else "node",
+                        "loop_node_ids": sorted(
+                            component_set, key=node_order.__getitem__
+                        ),
+                        "expected_entry_node_id": canonical,
+                    },
+                )
+            )
+            return
+
+        # Any cycle left after removing dominance back edges is irreducible.
+        remaining_indegree = {node_id: 0 for node_id in reachable}
+        for edge_id, edge in edges.items():
+            if (
+                edge_id not in all_back_edge_ids
+                and edge.from_node in reachable
+                and edge.to_node in reachable
+            ):
+                remaining_indegree[edge.to_node] += 1
+        acyclic_pending = [
+            node_id
+            for node_id in nodes
+            if node_id in reachable and remaining_indegree[node_id] == 0
+        ]
+        visited = 0
+        while acyclic_pending:
+            node_id = acyclic_pending.pop(0)
+            visited += 1
+            for edge_id in graph.outgoing_edges.get(node_id, ()):
+                if edge_id in all_back_edge_ids:
+                    continue
+                target = edges[edge_id].to_node
+                if target not in remaining_indegree:
+                    continue
+                remaining_indegree[target] -= 1
+                if remaining_indegree[target] == 0:
+                    acyclic_pending.append(target)
+        if visited != len(reachable):
+            diagnostics.append(
+                Diagnostic(
+                    code="LOOP_IRREDUCIBLE",
+                    severity="error",
+                    message=(
+                        "Workflow contains a cycle that cannot be represented as "
+                        "a natural loop with a dominating header."
+                    ),
+                )
+            )
+            return
+
+        candidates: list[dict[str, Any]] = []
+        for header_node_id, back_edge_ids in back_edges_by_header.items():
+            loop_nodes = {header_node_id}
+            reverse_pending = [edges[edge_id].from_node for edge_id in back_edge_ids]
+            while reverse_pending:
+                node_id = reverse_pending.pop()
+                if node_id in loop_nodes:
+                    continue
+                loop_nodes.add(node_id)
+                reverse_pending.extend(graph.predecessors.get(node_id, ()))
+            candidates.append(
+                {
+                    "header": header_node_id,
+                    "nodes": loop_nodes,
+                    "back_edges": tuple(back_edge_ids),
+                }
+            )
+
+        for left_index, left in enumerate(candidates):
+            for right in candidates[left_index + 1 :]:
+                overlap = left["nodes"] & right["nodes"]
+                if overlap and not (
+                    left["nodes"] < right["nodes"]
+                    or right["nodes"] < left["nodes"]
+                ):
+                    diagnostics.append(
+                        Diagnostic(
+                            code="LOOP_OVERLAP_INVALID",
+                            severity="error",
+                            message=(
+                                "Natural loops may be disjoint or strictly nested; "
+                                "overlapping loop bodies are ambiguous."
+                            ),
+                            subject=",".join(sorted(overlap, key=node_order.__getitem__)),
+                        )
+                    )
+                    return
+
+        candidates.sort(key=lambda item: node_order[item["header"]])
+        for index, candidate in enumerate(candidates, start=1):
+            candidate["id"] = f"loop_{index}"
+
+        for candidate in candidates:
+            supersets = [
+                other
+                for other in candidates
+                if candidate["nodes"] < other["nodes"]
+            ]
+            candidate["parent"] = (
+                min(supersets, key=lambda item: len(item["nodes"]))
+                if supersets
+                else None
+            )
+
         loop_regions: dict[str, LoopRegionIR] = {}
-        node_loop_regions: dict[str, str] = {}
-        workflow_entries = set(entry_node_ids)
-
-        for index, component in enumerate(loop_components, start=1):
-            node_ids = tuple(sorted(component, key=node_order.__getitem__))
-            node_set = set(node_ids)
-            internal_edges = tuple(
+        for candidate in candidates:
+            node_set = candidate["nodes"]
+            header_node_id = candidate["header"]
+            node_ids = tuple(sorted(node_set, key=node_order.__getitem__))
+            internal_edge_ids = tuple(
                 edge_id
                 for edge_id, edge in edges.items()
                 if edge.from_node in node_set and edge.to_node in node_set
             )
-            entry_edges = tuple(
+            external_entry_edge_ids = tuple(
                 edge_id
                 for edge_id, edge in edges.items()
                 if edge.from_node not in node_set and edge.to_node in node_set
             )
-            exit_edges = tuple(
+            invalid_entries = tuple(
+                edge_id
+                for edge_id in external_entry_edge_ids
+                if edges[edge_id].to_node != header_node_id
+            )
+            workflow_entries = set(entry_node_ids) & node_set
+            if invalid_entries or any(
+                node_id != header_node_id for node_id in workflow_entries
+            ):
+                subject = invalid_entries[0] if invalid_entries else next(
+                    node_id
+                    for node_id in workflow_entries
+                    if node_id != header_node_id
+                )
+                diagnostics.append(
+                    Diagnostic(
+                        code="LOOP_ENTRY_INVALID",
+                        severity="error",
+                        message=(
+                            "Every edge entering a natural loop must target its "
+                            f"header node {header_node_id}."
+                        ),
+                        subject=subject,
+                        metadata={
+                            "object_type": "edge" if invalid_entries else "node",
+                            "loop_node_ids": list(node_ids),
+                            "expected_entry_node_id": header_node_id,
+                        },
+                    )
+                )
+                continue
+            exit_edge_ids = tuple(
                 edge_id
                 for edge_id, edge in edges.items()
                 if edge.from_node in node_set and edge.to_node not in node_set
             )
-            workflow_entry_candidates = workflow_entries & node_set
-            entry_candidates = {
-                edges[edge_id].to_node for edge_id in entry_edges
-            } | workflow_entry_candidates
-
-            if len(entry_candidates) != 1:
-                canonical_entry = None
-                if len(workflow_entry_candidates) == 1:
-                    canonical_entry = next(iter(workflow_entry_candidates))
-                elif not workflow_entry_candidates and entry_edges:
-                    canonical_entry = edges[entry_edges[0]].to_node
-                invalid_entry_edges = tuple(
-                    edge_id
-                    for edge_id in entry_edges
-                    if canonical_entry is not None
-                    and edges[edge_id].to_node != canonical_entry
-                )
-                if invalid_entry_edges:
-                    for edge_id in invalid_entry_edges:
-                        diagnostics.append(
-                            Diagnostic(
-                                code="LOOP_ENTRY_INVALID",
-                                severity="error",
-                                message=(
-                                    "Loop regions allow one entry node. This edge "
-                                    f"enters {edges[edge_id].to_node}, but the loop "
-                                    f"entry is {canonical_entry}."
-                                ),
-                                subject=edge_id,
-                                metadata={
-                                    "object_type": "edge",
-                                    "loop_node_ids": list(node_ids),
-                                    "expected_entry_node_id": canonical_entry,
-                                },
-                            )
-                        )
-                else:
-                    diagnostics.append(
-                        Diagnostic(
-                            code="LOOP_ENTRY_INVALID",
-                            severity="error",
-                            message=(
-                                "A loop region must have exactly one entry node; "
-                                f"found {len(entry_candidates)}."
-                            ),
-                            subject=",".join(node_ids),
-                            metadata={"loop_node_ids": list(node_ids)},
-                        )
-                    )
-                continue
-
-            for node_id in node_ids:
-                outgoing = [
-                    edges[edge_id]
-                    for edge_id in graph.outgoing_edges.get(node_id, ())
-                ]
-                unconditional = [edge for edge in outgoing if edge.condition is None]
-                if len(outgoing) > 1 and unconditional:
-                    diagnostics.append(
-                        Diagnostic(
-                            code="LOOP_ROUTING_AMBIGUOUS",
-                            severity="error",
-                            message=(
-                                "A loop node with multiple outgoing edges cannot "
-                                "contain an unconditional edge; runtime requires "
-                                "mutually exclusive conditions."
-                            ),
-                            subject=node_id,
-                        )
-                    )
-
-            region_id = f"loop_{index}"
-            loop_regions[region_id] = LoopRegionIR(
-                id=region_id,
-                node_ids=node_ids,
-                entry_node_id=next(iter(entry_candidates)),
-                internal_edge_ids=internal_edges,
-                entry_edge_ids=entry_edges,
-                exit_edge_ids=exit_edges,
+            parent = candidate["parent"]
+            children = tuple(
+                child["id"]
+                for child in candidates
+                if child["parent"] is candidate
             )
-            for node_id in node_ids:
-                node_loop_regions[node_id] = region_id
+            depth = 0
+            ancestor = parent
+            while ancestor is not None:
+                depth += 1
+                ancestor = ancestor["parent"]
+            loop_regions[candidate["id"]] = LoopRegionIR(
+                id=candidate["id"],
+                node_ids=node_ids,
+                header_node_id=header_node_id,
+                internal_edge_ids=internal_edge_ids,
+                external_entry_edge_ids=external_entry_edge_ids,
+                back_edge_ids=candidate["back_edges"],
+                exit_edge_ids=exit_edge_ids,
+                parent_loop_region_id=parent["id"] if parent is not None else None,
+                child_loop_region_ids=children,
+                depth=depth,
+            )
+
+        node_loop_stacks: dict[str, tuple[str, ...]] = {}
+        for node_id in nodes:
+            containing = [
+                region
+                for region in loop_regions.values()
+                if node_id in region.node_ids
+            ]
+            containing.sort(key=lambda region: region.depth)
+            if containing:
+                node_loop_stacks[node_id] = tuple(
+                    region.id for region in containing
+                )
 
         graph.loop_regions = loop_regions
-        graph.node_loop_regions = node_loop_regions
+        graph.node_loop_stacks = node_loop_stacks
 
     def _strongly_connected_components(
         self,

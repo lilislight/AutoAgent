@@ -301,6 +301,75 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         self.assertEqual(resumed.result, {"output": {"received": True}})
 
+    def test_wait_resume_preserves_loop_iteration_scope(self) -> None:
+        def wait_input(ctx):
+            value = ctx.incoming[0].value
+            return {
+                "wait_key": f"loop:{value}",
+                "payload": {"iteration": value},
+            }
+
+        workflow = Workflow(id="loop_wait_resume")
+        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(
+            SystemCommand(id="wait"),
+            node_id="wait",
+            input_mapping=wait_input,
+        )
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="step",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_node(
+            lambda value: value,
+            node_id="final",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_edge("start", "wait", edge_id="enter")
+        workflow.add_edge("wait", "step", edge_id="step")
+        workflow.add_edge(
+            "step",
+            "wait",
+            edge_id="continue",
+            condition=lambda ctx: ctx.source_output < 2,
+        )
+        workflow.add_edge(
+            "step",
+            "final",
+            edge_id="exit",
+            condition=lambda ctx: ctx.source_output >= 2,
+        )
+        app = AutoAgentApp()
+
+        first_wait = app.invoke(workflow, session_id="loop-wait")
+        second_wait = app.resume(
+            workflow,
+            session_id="loop-wait",
+            wait_key="loop:0",
+            output=0,
+        )
+        completed = app.resume(
+            workflow,
+            session_id="loop-wait",
+            wait_key="loop:1",
+            output=1,
+        )
+
+        self.assertEqual(first_wait.state, "waiting")
+        self.assertEqual(second_wait.state, "waiting")
+        self.assertEqual(completed.state, "completed")
+        self.assertEqual(completed.result, {"output": 2})
+        wait_scopes = [
+            execution.execution_scope
+            for execution in completed.node_executions
+            if execution.node_id == "wait"
+        ]
+        self.assertEqual(
+            [scope[-1].iteration for scope in wait_scopes],
+            [0, 1],
+        )
+
     def test_wait_is_returned_only_after_parallel_runnable_work_finishes(self) -> None:
         async def scenario() -> None:
             slow_started = asyncio.Event()
@@ -800,7 +869,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         self.assertEqual(invocation.count_node_executions("agent"), 3)
 
-    def test_loop_fails_when_multiple_outgoing_conditions_match(self) -> None:
+    def test_loop_fails_when_continue_and_exit_match_same_iteration(self) -> None:
         def agent(value: int = 0) -> int:
             return value + 1
 
@@ -824,7 +893,225 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "failed")
         assert invocation.error is not None
-        self.assertEqual(invocation.error.code, "LOOP_MULTIPLE_EDGES_ACTIVATED")
+        self.assertEqual(invocation.error.code, "LOOP_CONTINUE_EXIT_CONFLICT")
+
+    def test_loop_parallel_tools_complete_fan_in_before_next_iteration(self) -> None:
+        collect_inputs: list[tuple[int, int]] = []
+
+        def map_incoming(ctx):
+            return {"value": ctx.incoming[0].value}
+
+        def collect(left_tool: int, right_tool: int) -> int:
+            collect_inputs.append((left_tool, right_tool))
+            return max(left_tool, right_tool)
+
+        workflow = Workflow(id="parallel_tool_loop")
+        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(
+            lambda value: value,
+            node_id="agent",
+            input_mapping=map_incoming,
+        )
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="left_tool",
+            input_mapping=map_incoming,
+        )
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="right_tool",
+            input_mapping=map_incoming,
+        )
+        workflow.add_node(collect, node_id="collect")
+        workflow.add_node(
+            lambda value: value,
+            node_id="final",
+            input_mapping=map_incoming,
+        )
+        workflow.add_edge("start", "agent", edge_id="enter")
+        workflow.add_edge("agent", "left_tool", edge_id="agent_left")
+        workflow.add_edge("agent", "right_tool", edge_id="agent_right")
+        workflow.add_edge("left_tool", "collect", edge_id="left_collect")
+        workflow.add_edge("right_tool", "collect", edge_id="right_collect")
+        workflow.add_edge(
+            "collect",
+            "agent",
+            edge_id="continue",
+            condition=lambda ctx: ctx.source_output < 3,
+        )
+        workflow.add_edge(
+            "collect",
+            "final",
+            edge_id="exit",
+            condition=lambda ctx: ctx.source_output >= 3,
+        )
+
+        invocation = AutoAgentApp().invoke(workflow)
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(invocation.result, {"output": 3})
+        self.assertEqual(collect_inputs, [(1, 1), (2, 2), (3, 3)])
+        self.assertEqual(invocation.count_node_executions("agent"), 3)
+        for execution in (
+            item for item in invocation.node_executions if item.node_id == "collect"
+        ):
+            self.assertEqual(len(execution.incoming_activations), 2)
+
+    def test_nested_loop_external_entry_repeats_for_each_outer_iteration(self) -> None:
+        def map_state(ctx):
+            return {"state": dict(ctx.incoming[0].value)}
+
+        workflow = Workflow(id="nested_loop")
+        workflow.add_node(
+            lambda: {"outer": 0, "inner": 0},
+            node_id="start",
+        )
+        workflow.add_node(
+            lambda state: {"outer": state["outer"], "inner": 0},
+            node_id="outer",
+            input_mapping=map_state,
+        )
+        workflow.add_node(
+            lambda state: dict(state),
+            node_id="inner",
+            input_mapping=map_state,
+        )
+        workflow.add_node(
+            lambda state: {**state, "inner": state["inner"] + 1},
+            node_id="inner_body",
+            input_mapping=map_state,
+        )
+        workflow.add_node(
+            lambda state: {
+                "outer": state["outer"] + 1,
+                "inner": state["inner"],
+            },
+            node_id="after_inner",
+            input_mapping=map_state,
+        )
+        workflow.add_node(
+            lambda state: dict(state),
+            node_id="final",
+            input_mapping=map_state,
+        )
+        workflow.add_edge("start", "outer", edge_id="enter_outer")
+        workflow.add_edge("outer", "inner", edge_id="enter_inner")
+        workflow.add_edge("inner", "inner_body", edge_id="inner_step")
+        workflow.add_edge(
+            "inner_body",
+            "inner",
+            edge_id="inner_back",
+            condition=lambda ctx: ctx.source_output["inner"] < 2,
+        )
+        workflow.add_edge(
+            "inner_body",
+            "after_inner",
+            edge_id="inner_exit",
+            condition=lambda ctx: ctx.source_output["inner"] >= 2,
+        )
+        workflow.add_edge(
+            "after_inner",
+            "outer",
+            edge_id="outer_back",
+            condition=lambda ctx: ctx.source_output["outer"] < 2,
+        )
+        workflow.add_edge(
+            "after_inner",
+            "final",
+            edge_id="outer_exit",
+            condition=lambda ctx: ctx.source_output["outer"] >= 2,
+        )
+
+        invocation = AutoAgentApp().invoke(workflow)
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            invocation.result,
+            {"output": {"outer": 2, "inner": 2}},
+        )
+        inner_scopes = [
+            tuple((frame.loop_region_id, frame.iteration) for frame in item.execution_scope)
+            for item in invocation.node_executions
+            if item.node_id == "inner"
+        ]
+        self.assertEqual(
+            inner_scopes,
+            [
+                (("loop_1", 0), ("loop_2", 0)),
+                (("loop_1", 0), ("loop_2", 1)),
+                (("loop_1", 1), ("loop_2", 0)),
+                (("loop_1", 1), ("loop_2", 1)),
+            ],
+        )
+
+    def test_loop_branch_selection_and_skip_are_scoped_per_iteration(self) -> None:
+        incoming_counts: list[int] = []
+
+        def map_value(ctx):
+            return {"value": ctx.incoming[0].value}
+
+        def collect(values: list[int]) -> int:
+            incoming_counts.append(len(values))
+            return max(values)
+
+        workflow = Workflow(id="loop_scoped_branch")
+        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(
+            lambda value: value,
+            node_id="header",
+            input_mapping=map_value,
+        )
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="always",
+            input_mapping=map_value,
+        )
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="optional",
+            input_mapping=map_value,
+        )
+        workflow.add_node(
+            collect,
+            node_id="collect",
+            input_mapping=lambda ctx: {
+                "values": [item.value for item in ctx.incoming]
+            },
+        )
+        workflow.add_node(
+            lambda value: value,
+            node_id="final",
+            input_mapping=map_value,
+        )
+        workflow.add_edge("start", "header", edge_id="enter")
+        workflow.add_edge("header", "always", edge_id="always_branch")
+        workflow.add_edge(
+            "header",
+            "optional",
+            edge_id="optional_branch",
+            condition=lambda ctx: ctx.source_output == 1,
+        )
+        workflow.add_edge("always", "collect", edge_id="always_collect")
+        workflow.add_edge("optional", "collect", edge_id="optional_collect")
+        workflow.add_edge(
+            "collect",
+            "header",
+            edge_id="continue",
+            condition=lambda ctx: ctx.source_output < 3,
+        )
+        workflow.add_edge(
+            "collect",
+            "final",
+            edge_id="exit",
+            condition=lambda ctx: ctx.source_output >= 3,
+        )
+
+        invocation = AutoAgentApp().invoke(workflow)
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(invocation.result, {"output": 3})
+        self.assertEqual(incoming_counts, [1, 2, 1])
+        self.assertEqual(invocation.count_node_executions("optional"), 1)
 
     def test_loop_branch_can_join_with_parallel_acyclic_branch(self) -> None:
         def start() -> int:
@@ -1563,7 +1850,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": "A"})
-        self.assertIn("b", invocation.scheduler.skipped_node_ids)
+        self.assertIn("b", invocation.scheduler.skipped_node_instances)
         self.assertEqual(invocation.scheduler.edge_resolutions["b_join"].state, "skipped")
 
 

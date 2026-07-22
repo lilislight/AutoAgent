@@ -936,6 +936,7 @@ class SQLiteRuntimeStore(RuntimeStore):
                 else None
             ),
             "recovery_attempt": execution.recovery_attempt,
+            "execution_scope_json": self._dump(record["execution_scope"]),
             "incoming_activations_json": self._dump(record["incoming_activations"]),
             "edge_evaluations_json": self._dump(record["edge_evaluations"]),
             "resource_usage_json": self._dump(record["resource_usage"]),
@@ -1097,6 +1098,7 @@ class SQLiteRuntimeStore(RuntimeStore):
                 "idempotency_key": row.idempotency_key,
                 "recovery_of_execution_id": row.recovery_of_execution_id,
                 "recovery_attempt": row.recovery_attempt,
+                "execution_scope": self._load(row.execution_scope_json),
                 "incoming_activations": self._load(row.incoming_activations_json),
                 "edge_evaluations": self._load(row.edge_evaluations_json),
                 "resource_usage": self._load(row.resource_usage_json),

@@ -9,6 +9,46 @@ from uuid import UUID
 from autoagent.core.runtime.status import EdgeResolutionStateValue, NodeExecutionStateValue
 
 
+@dataclass(frozen=True, order=True)
+class LoopIteration:
+    """One natural-loop iteration in a NodeExecution's lexical scope."""
+
+    loop_region_id: str
+    iteration: int
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "loop_region_id": self.loop_region_id,
+            "iteration": self.iteration,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> LoopIteration:
+        return cls(
+            loop_region_id=str(record["loop_region_id"]),
+            iteration=int(record["iteration"]),
+        )
+
+
+ExecutionScope = tuple[LoopIteration, ...]
+
+
+def execution_scope_key(scope: ExecutionScope) -> str:
+    if not scope:
+        return "root"
+    return "/".join(
+        f"{frame.loop_region_id}:{frame.iteration}" for frame in scope
+    )
+
+
+def node_instance_key(node_id: str, scope: ExecutionScope) -> str:
+    return node_id if not scope else f"{node_id}@{execution_scope_key(scope)}"
+
+
+def edge_occurrence_key(edge_id: str, scope: ExecutionScope) -> str:
+    return edge_id if not scope else f"{edge_id}@{execution_scope_key(scope)}"
+
+
 @dataclass(frozen=True)
 class EdgeActivation:
     """One selected edge produced by a concrete source NodeExecution.
@@ -42,22 +82,24 @@ class EdgeActivation:
 
 @dataclass(frozen=True)
 class EdgeResolution:
-    """Final invocation-level state of one edge outside a loop region.
+    """Final state of one static edge occurrence in an execution scope.
 
-    Missing entries are pending. Scheduler writes a resolution once and never
-    changes it. A selected resolution stores the concrete activation consumed by
-    the target; a skipped resolution has no activation.
+    The same static edge may resolve again in another loop iteration. Missing
+    occurrence keys are pending. A selected resolution stores the concrete
+    activation consumed by the target; a skipped resolution has no activation.
     """
 
     edge_id: str
     state: EdgeResolutionStateValue
     activation: EdgeActivation | None = None
+    scope: ExecutionScope = ()
 
     def to_record(self) -> dict[str, Any]:
         return {
             "edge_id": self.edge_id,
             "state": self.state,
             "activation": self.activation.to_record() if self.activation else None,
+            "scope": [frame.to_record() for frame in self.scope],
         }
 
     @classmethod
@@ -70,6 +112,10 @@ class EdgeResolution:
                 EdgeActivation.from_record(activation)
                 if activation is not None
                 else None
+            ),
+            scope=tuple(
+                LoopIteration.from_record(item)
+                for item in record.get("scope", [])
             ),
         )
 
@@ -89,6 +135,7 @@ class NodeExecutionRequest:
 
     node_id: str
     activations: tuple[EdgeActivation, ...] = ()
+    execution_scope: ExecutionScope = ()
 
     @property
     def source_execution_ids(self) -> tuple[UUID, ...]:
@@ -100,6 +147,9 @@ class NodeExecutionRequest:
         return {
             "node_id": self.node_id,
             "activations": [activation.to_record() for activation in self.activations],
+            "execution_scope": [
+                frame.to_record() for frame in self.execution_scope
+            ],
         }
 
     @classmethod
@@ -109,6 +159,10 @@ class NodeExecutionRequest:
             activations=tuple(
                 EdgeActivation.from_record(item)
                 for item in record.get("activations", [])
+            ),
+            execution_scope=tuple(
+                LoopIteration.from_record(item)
+                for item in record.get("execution_scope", [])
             ),
         )
 
@@ -222,10 +276,11 @@ class SchedulerContext:
         waiting_executions: dict[str, WaitingExecution] | None = None,
         transition_queue: list[NodeExecutionTransition] | None = None,
         edge_resolutions: dict[str, EdgeResolution] | None = None,
-        scheduled_node_ids: set[str] | None = None,
-        skipped_node_ids: set[str] | None = None,
-        entered_loop_region_ids: set[str] | None = None,
-        exited_loop_region_ids: set[str] | None = None,
+        loop_boundary_resolutions: dict[str, EdgeResolution] | None = None,
+        scheduled_node_instances: set[str] | None = None,
+        skipped_node_instances: set[str] | None = None,
+        entered_loop_instances: set[str] | None = None,
+        exited_loop_instances: set[str] | None = None,
         entry_paths_initialized: bool = False,
     ) -> None:
         self.ready_queue: deque[NodeExecutionRequest] = deque(ready_queue or [])
@@ -238,12 +293,17 @@ class SchedulerContext:
         self.edge_resolutions: dict[str, EdgeResolution] = dict(
             edge_resolutions or {}
         )
-        self.scheduled_node_ids: set[str] = set(scheduled_node_ids or set())
-        self.skipped_node_ids: set[str] = set(skipped_node_ids or set())
-        self.entered_loop_region_ids: set[str] = set(
-            entered_loop_region_ids or set()
+        self.loop_boundary_resolutions: dict[str, EdgeResolution] = dict(
+            loop_boundary_resolutions or {}
         )
-        self.exited_loop_region_ids: set[str] = set(exited_loop_region_ids or set())
+        self.scheduled_node_instances: set[str] = set(
+            scheduled_node_instances or set()
+        )
+        self.skipped_node_instances: set[str] = set(skipped_node_instances or set())
+        self.entered_loop_instances: set[str] = set(
+            entered_loop_instances or set()
+        )
+        self.exited_loop_instances: set[str] = set(exited_loop_instances or set())
         self.entry_paths_initialized = entry_paths_initialized
 
     def enqueue_ready(
@@ -251,10 +311,12 @@ class SchedulerContext:
         node_id: str,
         *,
         activations: tuple[EdgeActivation, ...] = (),
+        execution_scope: ExecutionScope = (),
     ) -> NodeExecutionRequest:
         request = NodeExecutionRequest(
             node_id=node_id,
             activations=activations,
+            execution_scope=execution_scope,
         )
         self.ready_queue.append(request)
         return request
@@ -265,10 +327,12 @@ class SchedulerContext:
         *,
         state: EdgeResolutionStateValue,
         activation: EdgeActivation | None = None,
+        scope: ExecutionScope = (),
     ) -> EdgeResolution:
-        """Resolve one acyclic/loop-boundary edge exactly once."""
+        """Resolve one target edge occurrence exactly once."""
 
-        existing = self.edge_resolutions.get(edge_id)
+        key = edge_occurrence_key(edge_id, scope)
+        existing = self.edge_resolutions.get(key)
         if existing is not None:
             if existing.state != state or existing.activation != activation:
                 raise ValueError(f"Edge already resolved with different state: {edge_id}")
@@ -281,8 +345,43 @@ class SchedulerContext:
             edge_id=edge_id,
             state=state,
             activation=activation,
+            scope=scope,
         )
-        self.edge_resolutions[edge_id] = resolution
+        self.edge_resolutions[key] = resolution
+        return resolution
+
+    def resolve_loop_boundary(
+        self,
+        *,
+        loop_region_id: str,
+        loop_scope: ExecutionScope,
+        edge_id: str,
+        state: EdgeResolutionStateValue,
+        activation: EdgeActivation | None = None,
+    ) -> EdgeResolution:
+        """Resolve a back/exit edge for one concrete loop iteration."""
+
+        key = (
+            f"{loop_region_id}@{execution_scope_key(loop_scope)}:{edge_id}"
+        )
+        existing = self.loop_boundary_resolutions.get(key)
+        if existing is not None:
+            if existing.state != state or existing.activation != activation:
+                raise ValueError(
+                    f"Loop boundary already resolved with different state: {key}"
+                )
+            return existing
+        if state == "selected" and activation is None:
+            raise ValueError("Selected loop boundary requires an activation.")
+        if state == "skipped" and activation is not None:
+            raise ValueError("Skipped loop boundary cannot carry an activation.")
+        resolution = EdgeResolution(
+            edge_id=edge_id,
+            state=state,
+            activation=activation,
+            scope=loop_scope,
+        )
+        self.loop_boundary_resolutions[key] = resolution
         return resolution
 
     def pop_ready(self) -> NodeExecutionRequest | None:
@@ -363,10 +462,14 @@ class SchedulerContext:
                 edge_id: resolution.to_record()
                 for edge_id, resolution in self.edge_resolutions.items()
             },
-            "scheduled_node_ids": sorted(self.scheduled_node_ids),
-            "skipped_node_ids": sorted(self.skipped_node_ids),
-            "entered_loop_region_ids": sorted(self.entered_loop_region_ids),
-            "exited_loop_region_ids": sorted(self.exited_loop_region_ids),
+            "loop_boundary_resolutions": {
+                key: resolution.to_record()
+                for key, resolution in self.loop_boundary_resolutions.items()
+            },
+            "scheduled_node_instances": sorted(self.scheduled_node_instances),
+            "skipped_node_instances": sorted(self.skipped_node_instances),
+            "entered_loop_instances": sorted(self.entered_loop_instances),
+            "exited_loop_instances": sorted(self.exited_loop_instances),
             "entry_paths_initialized": self.entry_paths_initialized,
         }
 
@@ -393,11 +496,17 @@ class SchedulerContext:
                 edge_id: EdgeResolution.from_record(item)
                 for edge_id, item in record.get("edge_resolutions", {}).items()
             },
-            scheduled_node_ids=set(record.get("scheduled_node_ids", [])),
-            skipped_node_ids=set(record.get("skipped_node_ids", [])),
-            entered_loop_region_ids=set(
-                record.get("entered_loop_region_ids", [])
+            loop_boundary_resolutions={
+                key: EdgeResolution.from_record(item)
+                for key, item in record.get(
+                    "loop_boundary_resolutions", {}
+                ).items()
+            },
+            scheduled_node_instances=set(
+                record.get("scheduled_node_instances", [])
             ),
-            exited_loop_region_ids=set(record.get("exited_loop_region_ids", [])),
+            skipped_node_instances=set(record.get("skipped_node_instances", [])),
+            entered_loop_instances=set(record.get("entered_loop_instances", [])),
+            exited_loop_instances=set(record.get("exited_loop_instances", [])),
             entry_paths_initialized=bool(record.get("entry_paths_initialized", False)),
         )

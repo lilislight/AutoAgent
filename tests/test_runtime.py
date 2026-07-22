@@ -242,8 +242,8 @@ class RuntimeStoreTests(unittest.TestCase):
             state="selected",
             activation=activation,
         )
-        invocation.scheduler.scheduled_node_ids.add("target")
-        invocation.scheduler.entered_loop_region_ids.add("loop_1")
+        invocation.scheduler.scheduled_node_instances.add("target")
+        invocation.scheduler.entered_loop_instances.add("loop_1")
         session.add_invocation(invocation)
         store.save_session(session)
 
@@ -259,8 +259,8 @@ class RuntimeStoreTests(unittest.TestCase):
             loaded.scheduler.edge_resolutions[activation.edge_id].activation,
             activation,
         )
-        self.assertEqual(loaded.scheduler.scheduled_node_ids, {"target"})
-        self.assertEqual(loaded.scheduler.entered_loop_region_ids, {"loop_1"})
+        self.assertEqual(loaded.scheduler.scheduled_node_instances, {"target"})
+        self.assertEqual(loaded.scheduler.entered_loop_instances, {"loop_1"})
 
 
 if __name__ == "__main__":

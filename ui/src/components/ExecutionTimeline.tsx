@@ -119,6 +119,7 @@ export function ExecutionTimeline({
   );
   const trackWidthPx = Math.max(1, trackViewportWidthPx * zoomLevel);
   useEffect(() => {
+    if (collapsed) return;
     const element = shellRef.current;
     if (!element) return;
     const updateWidth = () => {
@@ -128,7 +129,7 @@ export function ExecutionTimeline({
     const observer = new ResizeObserver(updateWidth);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [collapsed]);
   useEffect(
     () => () => {
       document.body.classList.remove("is-resizing-timeline");

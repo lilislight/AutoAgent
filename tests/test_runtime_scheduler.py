@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from uuid import uuid4
 
-from autoagent.core.runtime import EdgeActivation, SchedulerContext
+from autoagent.core.runtime import EdgeActivation, LoopIteration, SchedulerContext
 
 
 class SchedulerContextTests(unittest.TestCase):
@@ -102,8 +102,8 @@ class SchedulerContextTests(unittest.TestCase):
             state="selected",
             activation=activation,
         )
-        scheduler.scheduled_node_ids.add("next")
-        scheduler.entered_loop_region_ids.add("loop_1")
+        scheduler.scheduled_node_instances.add("next")
+        scheduler.entered_loop_instances.add("loop_1")
         scheduler.add_waiting_execution(
             wait_key="timer:1",
             node_execution_id=execution_id,
@@ -124,13 +124,55 @@ class SchedulerContextTests(unittest.TestCase):
             loaded.edge_resolutions[activation.edge_id].activation,
             activation,
         )
-        self.assertEqual(loaded.scheduled_node_ids, {"next"})
-        self.assertEqual(loaded.entered_loop_region_ids, {"loop_1"})
+        self.assertEqual(loaded.scheduled_node_instances, {"next"})
+        self.assertEqual(loaded.entered_loop_instances, {"loop_1"})
         self.assertEqual(
             list(loaded.waiting_executions),
             ["timer:1"],
         )
         self.assertEqual([transition.state for transition in loaded.transition_queue], ["waiting"])
+
+    def test_scheduler_context_round_trips_scoped_loop_occurrences(self) -> None:
+        scheduler = SchedulerContext()
+        execution_id = uuid4()
+        scope = (
+            LoopIteration("outer", 2),
+            LoopIteration("inner", 1),
+        )
+        activation = EdgeActivation(
+            edge_id="inner_back",
+            source_node_id="collect",
+            source_execution_id=execution_id,
+        )
+        scheduler.enqueue_ready(
+            "inner",
+            activations=(activation,),
+            execution_scope=scope,
+        )
+        scheduler.resolve_edge(
+            "inner_back",
+            state="selected",
+            activation=activation,
+            scope=scope,
+        )
+        scheduler.resolve_loop_boundary(
+            loop_region_id="inner",
+            loop_scope=scope,
+            edge_id="inner_exit",
+            state="skipped",
+        )
+
+        loaded = SchedulerContext.from_record(scheduler.to_record())
+
+        self.assertEqual(loaded.ready_queue[0].execution_scope, scope)
+        self.assertEqual(
+            next(iter(loaded.edge_resolutions.values())).scope,
+            scope,
+        )
+        self.assertEqual(
+            next(iter(loaded.loop_boundary_resolutions.values())).scope,
+            scope,
+        )
 
 
 if __name__ == "__main__":

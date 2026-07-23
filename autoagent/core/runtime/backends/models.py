@@ -5,6 +5,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     String,
     Text,
@@ -91,6 +92,13 @@ class InvocationRow(RuntimeDatabaseBase):
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
     durable_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    genesis_state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    recovery_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovery_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recovery_updated_at_ms: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -118,22 +126,33 @@ class RuntimeEventRow(RuntimeDatabaseBase):
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
-class RuntimeSnapshotRow(RuntimeDatabaseBase):
-    __tablename__ = "runtime_snapshots"
+class ArtifactRow(RuntimeDatabaseBase):
+    __tablename__ = "artifacts"
     __table_args__ = (
         UniqueConstraint(
-            "invocation_id",
-            "through_sequence",
-            name="uq_runtime_snapshot_sequence",
+            "namespace",
+            "owner_invocation_id",
+            "kind",
+            "sha256",
+            name="uq_artifacts_invocation_content",
         ),
-        Index("ix_runtime_snapshots_lookup", "invocation_id", "through_sequence"),
+        Index("ix_artifacts_owner", "owner_invocation_id"),
+        Index("ix_artifacts_sha256", "namespace", "sha256"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    invocation_id: Mapped[str] = mapped_column(
+    namespace: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner_invocation_id: Mapped[str | None] = mapped_column(
         ForeignKey("invocations.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
-    through_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
-    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    storage: Mapped[str] = mapped_column(String(32), nullable=False)
+    uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    encoding: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)

@@ -38,10 +38,12 @@ from autoagent.core.workflow import (
     workflow_hook,
 )
 from autoagent.core.runtime import (
+    ArtifactPolicy,
     ArtifactRef,
     DatabaseBackend,
     JsonRuntimeSerializer,
     RuntimeCodec,
+    RuntimeRetentionPolicy,
     RuntimeStore,
 )
 from autoagent.core.server import AutoAgentServer
@@ -50,6 +52,7 @@ __all__ = [
     "AutoAgentApp",
     "AutoAgentServer",
     "ArtifactRef",
+    "ArtifactPolicy",
     "BackoffPolicy",
     "CapabilityRef",
     "Capability",
@@ -77,6 +80,7 @@ __all__ = [
     "RecoveryPolicy",
     "RetryPolicy",
     "RuntimeCodec",
+    "RuntimeRetentionPolicy",
     "SchemaContract",
     "DatabaseBackend",
     "RuntimeStore",

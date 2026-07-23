@@ -7,10 +7,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any
-from uuid import UUID
+from typing import Any, Literal
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 _TYPE_TAG = "__autoagent_type__"
@@ -26,29 +26,39 @@ class RuntimeDeserializationError(ValueError):
 
 
 class ArtifactRef(BaseModel):
-    """Serializable reference to data stored outside RuntimeStore JSON columns.
+    """One immutable reference to framework-owned or user-owned artifact data.
 
-    Images, files, byte buffers, and large model payloads should be placed in an
-    artifact store and represented in runtime input/output/context by this model.
-    RuntimeStore persists the reference; observation UIs may render it without
-    loading the artifact bytes.
+    ``runtime_value`` refs are hydrated transparently during recovery. Explicit
+    ``artifact`` refs remain references so user code and observation clients can
+    choose when to load their content. Semantic kind and physical storage are
+    separate because either kind may move to a remote artifact service later.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    uri: str = Field(description="Stable artifact-store URI or key.")
+    id: UUID = Field(default_factory=uuid4)
+    kind: Literal["runtime_value", "artifact"] = "artifact"
+    storage: Literal["database", "external"] = "external"
+    uri: str | None = Field(
+        default=None,
+        description="External URI; database artifacts are addressed by id.",
+    )
     media_type: str | None = Field(default=None, description="Optional MIME type.")
+    encoding: str | None = None
     size_bytes: int | None = Field(default=None, ge=0)
     sha256: str | None = Field(default=None, description="Optional content digest.")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("uri")
-    @classmethod
-    def validate_uri(cls, value: str) -> str:
-        resolved = value.strip()
-        if not resolved:
+    @model_validator(mode="after")
+    def validate_storage(self) -> ArtifactRef:
+        if self.storage == "external":
+            if self.uri is None or not self.uri.strip():
+                raise ValueError("External ArtifactRef requires a non-empty uri.")
+        elif self.uri is not None and not self.uri.strip():
             raise ValueError("ArtifactRef uri cannot be empty.")
-        return resolved
+        if self.kind == "runtime_value" and self.storage != "database":
+            raise ValueError("runtime_value ArtifactRef must use database storage.")
+        return self
 
 
 @dataclass(frozen=True)
@@ -132,6 +142,18 @@ class JsonRuntimeSerializer(RuntimeSerializer):
         return resolved_id
 
     def dumps(self, value: Any) -> bytes:
+        return self._dumps(value, enforce_limit=True)
+
+    def dumps_unchecked(self, value: Any) -> bytes:
+        """Encode one value without applying the inline persistence limit.
+
+        Database artifact externalization uses this to measure and store a
+        candidate before the smaller ArtifactRef-bearing envelope is encoded.
+        """
+
+        return self._dumps(value, enforce_limit=False)
+
+    def _dumps(self, value: Any, *, enforce_limit: bool) -> bytes:
         try:
             encoded = self._encode(value)
             payload = json.dumps(
@@ -145,7 +167,11 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             raise
         except (TypeError, ValueError) as exc:
             raise RuntimeSerializationError(str(exc)) from exc
-        if self.max_inline_bytes is not None and len(payload) > self.max_inline_bytes:
+        if (
+            enforce_limit
+            and self.max_inline_bytes is not None
+            and len(payload) > self.max_inline_bytes
+        ):
             raise RuntimeSerializationError(
                 "Runtime value exceeds max_inline_bytes; persist it externally and "
                 "store an ArtifactRef instead."

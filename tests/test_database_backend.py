@@ -21,6 +21,7 @@ from autoagent import (
     MapPolicy,
     NodePolicy,
     RecoveryPolicy,
+    RuntimeRetentionPolicy,
     SystemCommand,
     Workflow,
     WorkflowPolicy,
@@ -37,7 +38,11 @@ from autoagent.core.runtime.backends.database import (
     _PersistenceItem,
     _is_retryable_database_error,
 )
-from autoagent.core.runtime.backends.models import SessionRow
+from autoagent.core.runtime.backends.models import (
+    ArtifactRow,
+    InvocationRow,
+    SessionRow,
+)
 
 
 class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
@@ -51,7 +56,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         await self.store.aclose()
         self.directory.cleanup()
 
-    async def test_v1_schema_has_events_and_snapshots_without_execution_tables(self) -> None:
+    async def test_v1_schema_has_events_artifacts_and_invocation_checkpoints(
+        self,
+    ) -> None:
         await self.store.ainitialize()
 
         async def table_names() -> set[str]:
@@ -68,7 +75,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 "sessions",
                 "invocations",
                 "runtime_events",
-                "runtime_snapshots",
+                "artifacts",
             },
             names,
         )
@@ -92,11 +99,14 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow_columns = await self.backend._database_loop.arun(
             table_columns("workflow_versions")
         )
+        self.assertIn("genesis_state_json", invocation_columns)
+        self.assertIn("recovery_state_json", invocation_columns)
+        self.assertIn("recovery_sequence", invocation_columns)
         self.assertNotIn("state_json", invocation_columns)
         self.assertNotIn("snapshot_json", workflow_columns)
         self.assertNotIn("operator_manifests_json", workflow_columns)
 
-    async def test_admission_serialization_failure_leaves_session_unclaimed(
+    async def test_large_admission_value_is_externalized_and_recoverable(
         self,
     ) -> None:
         await self.store.aclose()
@@ -110,12 +120,12 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow.add_node(lambda value: len(value), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
 
-        with self.assertRaisesRegex(Exception, "max_inline_bytes"):
-            await app.ainvoke(
-                workflow,
-                input={"value": "x" * 10_000},
-                session_id="same",
-            )
+        invocation = await app.ainvoke(
+            workflow,
+            input={"value": "x" * 10_000},
+            session_id="same",
+        )
+        await self.store.aflush()
 
         session = self.store.find_session(
             namespace="default",
@@ -124,9 +134,18 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(session)
         assert session is not None
-        self.assertIsNone(session.get_current_invocation())
-        self.assertEqual({}, self.store.invocations)
+        self.assertEqual(invocation.id, session.get_current_invocation().id)
+        self.assertEqual({"output": 10_000}, invocation.result)
         self.assertEqual({}, self.store._pending_admissions)
+
+        async def artifact_count() -> int:
+            async with self.backend._database_sessions() as database:
+                return len((await database.scalars(select(ArtifactRow))).all())
+
+        self.assertGreater(
+            await self.backend._database_loop.arun(artifact_count()),
+            0,
+        )
         await app.aclose()
 
     async def test_event_serialization_failure_restores_committed_runtime(
@@ -229,16 +248,18 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                     kind="event",
                     session_id=session_id,
                     invocation_id=None,
-                    value=None,
+                    record={},
                     encoded=b"x",
+                    artifacts=(),
                     size_bytes=700,
                 ),
                 _PersistenceItem(
                     kind="event",
                     session_id=session_id,
                     invocation_id=None,
-                    value=None,
+                    record={},
                     encoded=b"x",
+                    artifacts=(),
                     size_bytes=700,
                 ),
             ]
@@ -284,9 +305,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.updated_at_ms, persisted)
         await app.aclose()
 
-    def test_snapshot_interval_must_be_positive(self) -> None:
-        with self.assertRaisesRegex(ValueError, "snapshot_interval"):
-            DatabaseBackend.from_path(self.path, snapshot_interval=0)
+    def test_recovery_event_interval_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "recovery_event_interval"):
+            DatabaseBackend.from_path(self.path, recovery_event_interval=0)
 
     def test_retryable_database_errors_are_classified_explicitly(self) -> None:
         locked = OperationalError(
@@ -347,19 +368,199 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(event.role == "boundary" for event in events))
 
-    async def test_rebuild_from_periodic_snapshot_caches_complete_event_history(
+    async def test_large_runtime_value_is_deduplicated_and_hydrated(self) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            recovery_event_interval=2,
+        )
+        self.store = RuntimeStore(backend=self.backend)
+        workflow = Workflow(id="artifact_round_trip")
+        workflow.add_node(lambda: "x" * 100_000, node_id="source")
+        workflow.add_node(
+            lambda value: value,
+            node_id="target",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_edge("source", "target")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(workflow, session_id="artifact")
+        await self.store.aflush()
+
+        async def persisted_artifacts() -> tuple[int, int, bool]:
+            async with self.backend._database_sessions() as database:
+                artifacts = (
+                    await database.scalars(select(ArtifactRow))
+                ).all()
+                events = await database.execute(
+                    text("SELECT payload_json FROM runtime_events")
+                )
+                return (
+                    len(artifacts),
+                    sum(row.size_bytes for row in artifacts),
+                    any(
+                        '"__autoagent_type__":"artifact"' in payload
+                        for payload in events.scalars()
+                    ),
+                )
+
+        count, payload_bytes, event_has_ref = (
+            await self.backend._database_loop.arun(persisted_artifacts())
+        )
+        self.assertEqual(1, count)
+        self.assertGreaterEqual(payload_bytes, 100_000)
+        self.assertTrue(event_has_ref)
+        await app.aclose()
+
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            recovery_event_interval=2,
+        )
+        reopened = RuntimeStore(backend=self.backend)
+        self.store = reopened
+        _, rebuilt = await reopened.arebuild_execution(invocation.id)
+        events = await reopened.alist_runtime_events(
+            invocation_id=invocation.id,
+            limit=10_000,
+        )
+
+        self.assertEqual(invocation.result, rebuilt.result)
+        self.assertEqual(100_000, len(rebuilt.result["output"]))
+        output_event = next(
+            event
+            for event in events
+            if event.boundary == "node.output_ready"
+            and event.payload["detail"]["node_id"] == "source"
+        )
+        output_operation = next(
+            operation
+            for operation in output_event.payload["operations"]
+            if operation["path"][-1] == "output"
+        )
+        self.assertEqual("x" * 100_000, output_operation["value"])
+
+    async def test_terminal_event_does_not_force_recovery_state_write(self) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            recovery_event_interval=1_000,
+        )
+        self.store = RuntimeStore(backend=self.backend)
+        workflow = Workflow(id="terminal_recovery_state")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(workflow)
+        await self.store.aflush()
+
+        async def load_row() -> InvocationRow:
+            async with self.backend._database_sessions() as database:
+                row = await database.get(InvocationRow, str(invocation.id))
+                assert row is not None
+                return row
+
+        row = await self.backend._database_loop.arun(load_row())
+        self.assertEqual(invocation.event_sequence, row.durable_sequence)
+        self.assertIsNone(row.recovery_sequence)
+        self.assertIsNone(row.recovery_state_json)
+        await app.aclose()
+
+    async def test_wait_boundary_forces_current_recovery_state(self) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            recovery_event_interval=1_000,
+        )
+        self.store = RuntimeStore(backend=self.backend)
+        workflow = Workflow(id="wait_recovery_state")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(
+            workflow,
+            input={"wait_key": "approval"},
+            session_id="wait",
+        )
+
+        async def load_row() -> InvocationRow:
+            async with self.backend._database_sessions() as database:
+                row = await database.get(InvocationRow, str(invocation.id))
+                assert row is not None
+                return row
+
+        row = await self.backend._database_loop.arun(load_row())
+        self.assertEqual("waiting", invocation.state)
+        self.assertEqual(invocation.event_sequence, row.recovery_sequence)
+        self.assertIsNotNone(row.recovery_state_json)
+        await app.aclose()
+
+    async def test_retention_can_evict_only_durable_terminal_invocations(
         self,
     ) -> None:
         await self.store.aclose()
-        self.backend = DatabaseBackend.from_path(self.path, snapshot_interval=2)
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(
+            backend=self.backend,
+            retention_policy=RuntimeRetentionPolicy(
+                mode="evict_durable_terminal",
+            ),
+        )
+        workflow = Workflow(id="durable_retention")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(workflow, session_id="retention")
+        await self.store.aflush()
+
+        self.assertNotIn(invocation.id, self.store.invocations)
+        self.assertNotIn(invocation.id, self.store.runtime_events)
+        self.assertEqual(
+            "durable",
+            self.store.persistence_status(invocation.id),
+        )
+        events = await self.store.alist_runtime_events(
+            invocation_id=invocation.id,
+            limit=100,
+        )
+        _, rebuilt = await self.store.arebuild_execution(invocation.id)
+        self.assertEqual(invocation.event_sequence, len(events))
+        self.assertEqual(invocation.result, rebuilt.result)
+        await app.aclose()
+
+    async def test_rebuild_from_recovery_state_caches_complete_event_history(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            recovery_event_interval=2,
+        )
         self.store = RuntimeStore(backend=self.backend)
         workflow = Workflow(id="snapshot_event_cache")
         workflow.add_node(lambda value: value + 1, node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
         invocation = await app.ainvoke(workflow, input={"value": 1})
+        await self.store.aflush()
+
+        async def recovery_cursor() -> tuple[int | None, str | None]:
+            async with self.backend._database_sessions() as database:
+                row = await database.get(InvocationRow, str(invocation.id))
+                assert row is not None
+                return row.recovery_sequence, row.recovery_state_json
+
+        cursor, recovery_state = await self.backend._database_loop.arun(
+            recovery_cursor()
+        )
+        self.assertIsNotNone(recovery_state)
+        self.assertIsNotNone(cursor)
+        assert cursor is not None
+        self.assertLess(
+            invocation.event_sequence - cursor,
+            self.backend.recovery_event_interval,
+        )
         await app.aclose()
 
-        self.backend = DatabaseBackend.from_path(self.path, snapshot_interval=2)
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            recovery_event_interval=2,
+        )
         reopened = RuntimeStore(backend=self.backend)
         self.store = reopened
         _, rebuilt = await reopened.arebuild_execution(invocation.id)
@@ -448,7 +649,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         serializer = RecordingSerializer()
         self.backend = DatabaseBackend.from_path(
             self.path,
-            snapshot_interval=1,
+            recovery_event_interval=1,
         )
         self.store = RuntimeStore(
             backend=self.backend,

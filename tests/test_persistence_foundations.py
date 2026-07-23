@@ -383,8 +383,12 @@ class RuntimeSerializerTests(unittest.TestCase):
         self.assertEqual(
             {
                 "__autoagent_artifact__": {
+                    "id": str(artifact.id),
+                    "kind": "artifact",
+                    "storage": "external",
                     "uri": "artifact://images/result.png",
                     "media_type": "image/png",
+                    "encoding": None,
                     "size_bytes": 42,
                     "sha256": "abc",
                     "metadata": {},

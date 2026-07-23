@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from copy import deepcopy
 from threading import RLock
 from typing import Any, Protocol
@@ -10,6 +11,7 @@ from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
+from autoagent.core.runtime.retention import RuntimeRetentionPolicy
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
@@ -40,8 +42,6 @@ class DurableBackend(Protocol):
     A backend never owns live execution state. It receives immutable persistence
     boundaries from RuntimeStore and may load historical data after a restart.
     """
-
-    snapshot_interval: int
 
     def bind(self, store: RuntimeStore) -> None: ...
 
@@ -92,14 +92,6 @@ class DurableBackend(Protocol):
         durability_barrier: bool,
     ) -> None: ...
 
-    async def asave_execution_snapshot(
-        self,
-        snapshot: ExecutionSnapshot,
-        *,
-        session_id: UUID | None,
-        durability_barrier: bool,
-    ) -> None: ...
-
     async def aload_execution_snapshot(
         self,
         invocation_id: UUID,
@@ -134,9 +126,11 @@ class RuntimeStore:
         *,
         backend: DurableBackend | None = None,
         serializer: JsonRuntimeSerializer | None = None,
+        retention_policy: RuntimeRetentionPolicy | None = None,
     ) -> None:
         self.serializer = serializer or JsonRuntimeSerializer()
         self.backend = backend
+        self.retention_policy = retention_policy or RuntimeRetentionPolicy()
         self._lock = RLock()
         self.workflow_versions: dict[
             tuple[str, str, str, str],
@@ -147,12 +141,14 @@ class RuntimeStore:
         self.invocations: dict[UUID, Invocation] = {}
         self.invocation_sessions: dict[UUID, UUID] = {}
         self.runtime_events: dict[UUID, list[RuntimeEvent]] = {}
-        self.execution_snapshots: dict[
+        self._replay_checkpoints: dict[
             tuple[UUID, int],
             ExecutionSnapshot,
         ] = {}
         self._committed_states: dict[UUID, dict[str, Any]] = {}
         self._pending_admissions: dict[UUID, Invocation] = {}
+        self._durable_terminal_lru: OrderedDict[UUID, None] = OrderedDict()
+        self._evicted_event_sequences: dict[UUID, int] = {}
         if backend is not None:
             backend.bind(self)
 
@@ -388,7 +384,7 @@ class RuntimeStore:
             self.invocation_sessions[invocation.id] = session.id
             self.runtime_events[invocation.id] = []
             self._committed_states[invocation.id] = state
-            self.execution_snapshots[(invocation.id, 0)] = snapshot
+            self._replay_checkpoints[(invocation.id, 0)] = snapshot
         if cancelled is not None:
             raise cancelled
         return session
@@ -499,14 +495,7 @@ class RuntimeStore:
             self.sessions[session.id] = session
             self.invocations[invocation.id] = invocation
         if self.backend is not None:
-            if event.sequence % self.backend.snapshot_interval == 0:
-                await self.asave_execution_snapshot(
-                    ExecutionSnapshot.capture(
-                        session,
-                        invocation,
-                        through_sequence=event.sequence,
-                    )
-                )
+            self._persistence_advanced(invocation.id)
         if cancelled is not None:
             raise cancelled
         return event
@@ -537,23 +526,31 @@ class RuntimeStore:
                 raise KeyError(f"Unknown Invocation aggregate: {invocation_id}")
             return state
 
-    async def asave_execution_snapshot(
+    def cache_replay_checkpoint(
         self,
         snapshot: ExecutionSnapshot,
-        *,
-        durability_barrier: bool = False,
     ) -> None:
+        """Keep one process-local checkpoint created by an explicit replay."""
+
         with self._lock:
-            self.execution_snapshots[
+            self._replay_checkpoints[
                 (snapshot.invocation_id, snapshot.through_sequence)
             ] = snapshot
-            session_id = self.invocation_sessions.get(snapshot.invocation_id)
-        if self.backend is not None:
-            await self.backend.asave_execution_snapshot(
-                snapshot,
-                session_id=session_id,
-                durability_barrier=durability_barrier,
+            candidates = sorted(
+                (
+                    sequence
+                    for candidate_id, sequence in self._replay_checkpoints
+                    if candidate_id == snapshot.invocation_id
+                    and sequence != 0
+                ),
+                reverse=True,
             )
+            for sequence in candidates[
+                self.retention_policy.max_replay_checkpoints_per_invocation:
+            ]:
+                del self._replay_checkpoints[
+                    (snapshot.invocation_id, sequence)
+                ]
 
     async def aload_execution_snapshot(
         self,
@@ -564,7 +561,8 @@ class RuntimeStore:
         with self._lock:
             candidates = [
                 snapshot
-                for (candidate_id, sequence), snapshot in self.execution_snapshots.items()
+                for (candidate_id, sequence), snapshot
+                in self._replay_checkpoints.items()
                 if candidate_id == invocation_id
                 and (
                     at_or_before_sequence is None
@@ -581,7 +579,7 @@ class RuntimeStore:
         )
         if snapshot is not None:
             with self._lock:
-                self.execution_snapshots[
+                self._replay_checkpoints[
                     (snapshot.invocation_id, snapshot.through_sequence)
                 ] = snapshot
         return snapshot
@@ -612,6 +610,14 @@ class RuntimeStore:
             events,
             through_sequence=through_sequence,
         )
+        if through_sequence is not None:
+            self.cache_replay_checkpoint(
+                ExecutionSnapshot.capture(
+                    session,
+                    invocation,
+                    through_sequence=invocation.event_sequence,
+                )
+            )
         if through_sequence is None:
             all_events = events
             if (
@@ -668,10 +674,20 @@ class RuntimeStore:
         )
 
     def persistence_status(self, invocation_id: UUID) -> str:
-        if invocation_id not in self.invocations:
+        if (
+            invocation_id not in self.invocations
+            and invocation_id not in self._evicted_event_sequences
+        ):
             raise KeyError(f"Unknown Invocation: {invocation_id}")
         if self.backend is None:
             return "memory_only"
+        expected = self._evicted_event_sequences.get(invocation_id)
+        if expected is not None:
+            return (
+                "durable"
+                if self.backend.durable_sequence(invocation_id) >= expected
+                else "pending"
+            )
         return self.backend.persistence_status(invocation_id)
 
     def durable_sequence(self, invocation_id: UUID) -> int:
@@ -713,3 +729,68 @@ class RuntimeStore:
         self.session_keys[
             (session.namespace, session.workflow_id, session.session_key)
         ] = session.id
+
+    def _persistence_advanced(self, invocation_id: UUID) -> None:
+        """Apply retention only after every emitted Event is durable."""
+
+        with self._lock:
+            invocation = self.invocations.get(invocation_id)
+            if invocation is None or invocation.state not in {
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted",
+            }:
+                return
+            events = self.runtime_events.get(invocation_id, ())
+            if (
+                not events
+                or events[-1].sequence < invocation.event_sequence
+            ):
+                return
+            if self.durable_sequence(invocation_id) < invocation.event_sequence:
+                return
+            release = getattr(self.backend, "release_invocation_cache", None)
+            if release is not None:
+                release(invocation_id)
+            mode = self.retention_policy.mode
+            if mode == "retain_all":
+                return
+            if mode == "evict_durable_terminal":
+                self._evict_invocation(invocation_id)
+                return
+            self._durable_terminal_lru.pop(invocation_id, None)
+            self._durable_terminal_lru[invocation_id] = None
+            while (
+                len(self._durable_terminal_lru)
+                > self.retention_policy.max_terminal_invocations
+            ):
+                oldest, _ = self._durable_terminal_lru.popitem(last=False)
+                self._evict_invocation(oldest)
+
+    def _evict_invocation(self, invocation_id: UUID) -> None:
+        invocation = self.invocations.pop(invocation_id, None)
+        if invocation is None:
+            return
+        self._evicted_event_sequences[invocation_id] = (
+            invocation.event_sequence
+        )
+        session_id = self.invocation_sessions.pop(invocation_id, None)
+        if session_id is not None:
+            session = self.sessions.get(session_id)
+            if session is not None:
+                session.invocations = [
+                    value
+                    for value in session.invocations
+                    if value.id != invocation_id
+                ]
+                if session.current_invocation_id == invocation_id:
+                    session.current_invocation_id = None
+        self.runtime_events.pop(invocation_id, None)
+        self._committed_states.pop(invocation_id, None)
+        for key in [
+            key
+            for key in self._replay_checkpoints
+            if key[0] == invocation_id
+        ]:
+            del self._replay_checkpoints[key]

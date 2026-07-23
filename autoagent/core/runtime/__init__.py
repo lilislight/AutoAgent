@@ -23,6 +23,8 @@ from autoagent.core.runtime.execution import (
     RuntimeErrorInfo,
 )
 from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventRole
+from autoagent.core.runtime.artifact import ArtifactPolicy
+from autoagent.core.runtime.retention import RuntimeRetentionPolicy
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.output import NodeOutput, OutputView
@@ -73,6 +75,7 @@ from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
 
 __all__ = [
     "ArtifactRef",
+    "ArtifactPolicy",
     "ConditionContext",
     "ContextSnapshot",
     "DirectOperatorExecution",
@@ -120,6 +123,7 @@ __all__ = [
     "RuntimeSerializationError",
     "RuntimeSerializer",
     "RuntimeStore",
+    "RuntimeRetentionPolicy",
     "DurableBackend",
     "SchedulerContext",
     "Session",

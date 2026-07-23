@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -14,19 +13,29 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
+from autoagent.core.runtime.artifact import (
+    ArtifactPolicy,
+    EncodedArtifact,
+    RuntimeArtifactEncoder,
+)
 from autoagent.core.runtime.backends.models import (
+    ArtifactRow,
     InvocationRow,
     RuntimeDatabaseBase,
     RuntimeEventRow,
-    RuntimeSnapshotRow,
     SessionRow,
     WorkflowVersionRow,
 )
 from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.runtime.invocation import Invocation
+from autoagent.core.runtime.serialization import ArtifactRef
 from autoagent.core.runtime.session import Session
-from autoagent.core.runtime.snapshot import ExecutionSnapshot
+from autoagent.core.runtime.snapshot import (
+    ExecutionSnapshot,
+    StateOperation,
+    apply_state_operations,
+)
 from autoagent.core.runtime.store import RuntimeStore
 from autoagent.core.runtime.time import utc_timestamp_ms
 
@@ -36,8 +45,9 @@ class _PersistenceItem:
     kind: str
     session_id: UUID | None
     invocation_id: UUID | None
-    value: Any
+    record: dict[str, Any]
     encoded: bytes | None
+    artifacts: tuple[EncodedArtifact, ...]
     size_bytes: int
     done: asyncio.Future[None] | None = None
 
@@ -56,7 +66,8 @@ class DatabaseBackend:
         batch_max_items: int = 256,
         batch_max_bytes: int = 4 * 1024 * 1024,
         batch_max_delay_ms: int = 5,
-        snapshot_interval: int = 50,
+        recovery_event_interval: int = 200,
+        artifact_policy: ArtifactPolicy | None = None,
     ) -> None:
         if queue_high_watermark_bytes < 1:
             raise ValueError("queue_high_watermark_bytes must be positive.")
@@ -74,8 +85,8 @@ class DatabaseBackend:
             raise ValueError("Expected low < high < hard byte watermarks.")
         if batch_max_items < 1 or batch_max_bytes < 1 or batch_max_delay_ms < 0:
             raise ValueError("Invalid persistence batch limits.")
-        if snapshot_interval < 1:
-            raise ValueError("snapshot_interval must be positive.")
+        if recovery_event_interval < 1:
+            raise ValueError("recovery_event_interval must be positive.")
 
         self.database_url = _resolve_database_url(database_url)
         self.engine: AsyncEngine = create_async_engine(
@@ -92,7 +103,8 @@ class DatabaseBackend:
         self.batch_max_items = batch_max_items
         self.batch_max_bytes = batch_max_bytes
         self.batch_max_delay_ms = batch_max_delay_ms
-        self.snapshot_interval = snapshot_interval
+        self.recovery_event_interval = recovery_event_interval
+        self.artifact_policy = artifact_policy or ArtifactPolicy()
 
         self._database_loop = RuntimeEventLoop(
             name="autoagent-persistence-runtime"
@@ -115,6 +127,10 @@ class DatabaseBackend:
         self._fatal_persistence_error: BaseException | None = None
         self._workflow_version_ids: dict[tuple[str, str, str, str], UUID] = {}
         self._durable_sequences: dict[UUID, int] = {}
+        self._recovery_sequences: dict[UUID, int] = {}
+        self._durable_states: dict[UUID, dict[str, Any]] = {}
+        self._projection_sequences: dict[UUID, int] = {}
+        self._artifact_encoder: RuntimeArtifactEncoder | None = None
         self._store: RuntimeStore | None = None
 
     @classmethod
@@ -135,6 +151,15 @@ class DatabaseBackend:
     @property
     def serializer(self):
         return self.store.serializer
+
+    @property
+    def artifact_encoder(self) -> RuntimeArtifactEncoder:
+        if self._artifact_encoder is None:
+            self._artifact_encoder = RuntimeArtifactEncoder(
+                self.serializer,
+                self.artifact_policy,
+            )
+        return self._artifact_encoder
 
     @property
     def pending_persistence_bytes(self) -> int:
@@ -266,8 +291,9 @@ class DatabaseBackend:
                 kind="workflow_version",
                 session_id=None,
                 invocation_id=None,
-                value=record,
+                record=record,
                 encoded=None,
+                artifacts=(),
                 size_bytes=512,
             ),
             barrier=True,
@@ -340,24 +366,58 @@ class DatabaseBackend:
             version_id = await self._load_workflow_version_id(key)
         if version_id is None:
             raise RuntimeError("Workflow version metadata is not durable.")
-        encoded_snapshot = self.serializer.dumps(snapshot.state)
+        persisted_state, artifacts = self._externalize_admission_state(
+            snapshot.state,
+            namespace=session.namespace,
+            invocation_id=invocation.id,
+        )
+        encoded_genesis = self.serializer.dumps(persisted_state)
+        session_record = snapshot.state["session"]
+        invocation_record = snapshot.state["invocation"]
         admission = {
-            "session": deepcopy(snapshot.state["session"]),
-            "invocation": deepcopy(snapshot.state["invocation"]),
+            "session": {
+                key: session_record[key]
+                for key in (
+                    "id",
+                    "namespace",
+                    "workflow_id",
+                    "session_key",
+                    "current_invocation_id",
+                    "created_at_ms",
+                    "updated_at_ms",
+                )
+            },
+            "invocation": {
+                key: invocation_record[key]
+                for key in (
+                    "id",
+                    "entry_node_id",
+                    "state",
+                    "execution_mode",
+                    "created_at_ms",
+                    "updated_at_ms",
+                )
+            },
             "workflow_version_id": version_id,
-            "snapshot": snapshot,
+            "genesis_created_at_ms": snapshot.created_at_ms,
         }
         await self._enqueue(
             _PersistenceItem(
                 kind="admission",
                 session_id=session.id,
                 invocation_id=invocation.id,
-                value=admission,
-                encoded=encoded_snapshot,
-                size_bytes=len(encoded_snapshot) + 1024,
+                record=admission,
+                encoded=encoded_genesis,
+                artifacts=artifacts,
+                size_bytes=(
+                    len(encoded_genesis)
+                    + sum(artifact.size_bytes for artifact in artifacts)
+                    + 1024
+                ),
             ),
             barrier=True,
         )
+
     async def aappend_event(
         self,
         session: Session,
@@ -376,53 +436,110 @@ class DatabaseBackend:
                 )
             )
             return
-        encoded_payload = self.serializer.dumps(event.payload)
+        encoded_payload = self.serializer.dumps_unchecked(event.payload)
+        if (
+            self.artifact_policy.enabled
+            and len(encoded_payload) > self.artifact_policy.inline_max_bytes
+        ):
+            persisted_payload, artifacts = self._externalize_event_payload(
+                event.payload,
+                namespace=session.namespace,
+                invocation_id=invocation.id,
+            )
+            encoded_payload = self.serializer.dumps(persisted_payload)
+        else:
+            artifacts = ()
+            if self.serializer.max_inline_bytes is not None:
+                encoded_payload = self.serializer.dumps(event.payload)
         await self._enqueue(
             _PersistenceItem(
                 kind="event",
                 session_id=session.id,
                 invocation_id=invocation.id,
-                value={
-                    "event": event,
+                record={
+                    "event_id": event.id,
+                    "sequence": event.sequence,
+                    "schema_version": event.schema_version,
+                    "event_type": event.type,
+                    "occurred_at_ms": event.occurred_at_ms,
                     "invocation_state": invocation.state,
                     "execution_mode": invocation.execution_mode,
                     "updated_at_ms": invocation.updated_at_ms,
                     "session_updated_at_ms": session.updated_at_ms,
+                    "force_recovery_state": durability_barrier,
                 },
                 encoded=encoded_payload,
-                size_bytes=len(encoded_payload) + 256,
+                artifacts=artifacts,
+                size_bytes=(
+                    len(encoded_payload)
+                    + sum(artifact.size_bytes for artifact in artifacts)
+                    + 256
+                ),
             ),
             barrier=durability_barrier,
         )
 
-    async def asave_execution_snapshot(
+    def _externalize_admission_state(
         self,
-        snapshot: ExecutionSnapshot,
+        state: dict[str, Any],
         *,
-        session_id: UUID | None,
-        durability_barrier: bool = False,
-    ) -> None:
-        if not self._database_loop.is_current():
-            await self._database_loop.arun(
-                self.asave_execution_snapshot(
-                    snapshot,
-                    session_id=session_id,
-                    durability_barrier=durability_barrier,
-                )
-            )
-            return
-        encoded = self.serializer.dumps(snapshot.state)
-        await self._enqueue(
-            _PersistenceItem(
-                kind="snapshot",
-                session_id=session_id,
-                invocation_id=snapshot.invocation_id,
-                value=snapshot,
-                encoded=encoded,
-                size_bytes=len(encoded) + 128,
+        namespace: str,
+        invocation_id: UUID,
+    ) -> tuple[dict[str, Any], tuple[EncodedArtifact, ...]]:
+        """Externalize mutable values without replacing restart structures."""
+
+        result = dict(state)
+        artifacts: list[EncodedArtifact] = []
+        fields = {
+            "session": ("context",),
+            "invocation": (
+                "input",
+                "context",
+                "result",
+                "error",
+                "deferred_error",
             ),
-            barrier=durability_barrier,
-        )
+        }
+        for section, section_fields in fields.items():
+            record = dict(result[section])
+            result[section] = record
+            for field in section_fields:
+                if field not in record:
+                    continue
+                persisted, encoded = self.artifact_encoder.externalize(
+                    record[field],
+                    namespace=namespace,
+                    invocation_id=invocation_id,
+                )
+                record[field] = persisted
+                artifacts.extend(encoded)
+        return result, tuple(artifacts)
+
+    def _externalize_event_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        namespace: str,
+        invocation_id: UUID,
+    ) -> tuple[dict[str, Any], tuple[EncodedArtifact, ...]]:
+        """Keep the reducer envelope inline and externalize operation values."""
+
+        result = dict(payload)
+        artifacts: list[EncodedArtifact] = []
+        operations: list[dict[str, Any]] = []
+        for raw_operation in payload.get("operations", ()):
+            operation = dict(raw_operation)
+            if "value" in operation:
+                persisted, encoded = self.artifact_encoder.externalize(
+                    operation["value"],
+                    namespace=namespace,
+                    invocation_id=invocation_id,
+                )
+                operation["value"] = persisted
+                artifacts.extend(encoded)
+            operations.append(operation)
+        result["operations"] = operations
+        return result, tuple(artifacts)
 
     async def aload_execution_snapshot(
         self,
@@ -439,26 +556,31 @@ class DatabaseBackend:
             )
         await self.ainitialize()
         async with self._database_sessions() as database:
-            statement = select(RuntimeSnapshotRow).where(
-                RuntimeSnapshotRow.invocation_id == str(invocation_id)
-            )
-            if at_or_before_sequence is not None:
-                statement = statement.where(
-                    RuntimeSnapshotRow.through_sequence <= at_or_before_sequence
-                )
-            row = await database.scalar(
-                statement.order_by(
-                    RuntimeSnapshotRow.through_sequence.desc()
-                ).limit(1)
-            )
+            row = await database.get(InvocationRow, str(invocation_id))
         if row is None:
             return None
+        use_recovery = (
+            at_or_before_sequence is None
+            and row.recovery_state_json is not None
+            and row.recovery_sequence is not None
+        )
+        encoded_state = (
+            row.recovery_state_json
+            if use_recovery
+            else row.genesis_state_json
+        )
+        sequence = int(row.recovery_sequence or 0) if use_recovery else 0
+        state = await self._hydrate_runtime_values(
+            self.serializer.loads(encoded_state)
+        )
+        self._durable_states[invocation_id] = self.serializer.loads(encoded_state)
+        self._recovery_sequences[invocation_id] = sequence
+        self._durable_sequences[invocation_id] = row.durable_sequence
         return ExecutionSnapshot(
-            id=UUID(row.id),
             invocation_id=invocation_id,
-            through_sequence=row.through_sequence,
-            state=self.serializer.loads(row.state_json),
-            created_at_ms=row.created_at_ms,
+            through_sequence=sequence,
+            state=state,
+            created_at_ms=row.recovery_updated_at_ms or row.created_at_ms,
         )
 
     async def alist_runtime_events(
@@ -495,6 +617,9 @@ class DatabaseBackend:
             ).all()
         if before_sequence is not None:
             rows.reverse()
+        payloads = await self._hydrate_runtime_values(
+            [self.serializer.loads(row.payload_json) for row in rows]
+        )
         events = tuple(
             RuntimeEvent(
                 id=UUID(row.id),
@@ -503,9 +628,9 @@ class DatabaseBackend:
                 schema_version=row.schema_version,
                 type=row.type,
                 occurred_at_ms=row.occurred_at_ms,
-                payload=self.serializer.loads(row.payload_json),
+                payload=payload,
             )
-            for row in rows
+            for row, payload in zip(rows, payloads, strict=True)
         )
         if events:
             self._durable_sequences[invocation_id] = max(
@@ -605,18 +730,21 @@ class DatabaseBackend:
                     break
                 else:
                     self._persistence_error = None
+                    advanced: set[UUID] = set()
                     for item in batch:
                         if (
                             item.invocation_id is not None
                             and item.kind == "event"
                         ):
-                            event: RuntimeEvent = item.value["event"]
                             self._durable_sequences[item.invocation_id] = max(
                                 self._durable_sequences.get(item.invocation_id, 0),
-                                event.sequence,
+                                int(item.record["sequence"]),
                             )
+                            advanced.add(item.invocation_id)
                         if item.done is not None and not item.done.done():
                             item.done.set_result(None)
+                    for invocation_id in advanced:
+                        self.store._persistence_advanced(invocation_id)
                     break
             with self._pressure_lock:
                 self._inflight_bytes -= batch_bytes
@@ -668,17 +796,19 @@ class DatabaseBackend:
                 item for item in batch if item.kind == "admission"
             ]
             event_items = [item for item in batch if item.kind == "event"]
-            snapshot_items = [
-                item for item in batch if item.kind == "snapshot"
-            ]
             for item in workflow_items:
-                await self._persist_workflow_version(database, item.value)
+                await self._persist_workflow_version(database, item.record)
             for item in admission_items:
                 await self._persist_admission(database, item)
+            artifacts = tuple(
+                artifact
+                for item in batch
+                for artifact in item.artifacts
+            )
+            if artifacts:
+                await self._persist_artifacts(database, artifacts)
             if event_items:
                 await self._persist_events(database, event_items)
-            if snapshot_items:
-                await self._persist_snapshots(database, snapshot_items)
 
     async def _persist_workflow_version(self, database, record: dict[str, Any]) -> None:
         row = await database.scalar(
@@ -713,11 +843,11 @@ class DatabaseBackend:
         database,
         item: _PersistenceItem,
     ) -> None:
-        value = item.value
+        value = item.record
         session = value["session"]
         invocation = value["invocation"]
         version_id: UUID = value["workflow_version_id"]
-        snapshot: ExecutionSnapshot = value["snapshot"]
+        genesis_state = self.serializer.loads(_text(item.encoded))
         session_row = await database.get(SessionRow, session["id"])
         session_values = {
             "namespace": session["namespace"],
@@ -740,37 +870,28 @@ class DatabaseBackend:
             "state": invocation["state"],
             "execution_mode": invocation["execution_mode"],
             "durable_sequence": 0,
+            "genesis_state_json": _text(item.encoded),
+            "recovery_state_json": None,
+            "recovery_sequence": None,
+            "recovery_updated_at_ms": None,
             "created_at_ms": invocation["created_at_ms"],
             "updated_at_ms": invocation["updated_at_ms"],
         }
         if invocation_row is None:
             database.add(InvocationRow(id=invocation["id"], **invocation_values))
-        snapshot_row = await database.scalar(
-            select(RuntimeSnapshotRow).where(
-                RuntimeSnapshotRow.invocation_id == invocation["id"],
-                RuntimeSnapshotRow.through_sequence == 0,
-            )
-        )
-        if snapshot_row is None:
-            database.add(
-                RuntimeSnapshotRow(
-                    id=str(snapshot.id),
-                    invocation_id=invocation["id"],
-                    through_sequence=0,
-                    state_json=_text(item.encoded),
-                    created_at_ms=snapshot.created_at_ms,
-                )
-            )
+        invocation_id = UUID(str(invocation["id"]))
+        self._durable_states[invocation_id] = genesis_state
+        self._projection_sequences[invocation_id] = 0
+        self._recovery_sequences[invocation_id] = 0
 
     async def _persist_events(
         self,
         database,
         items: list[_PersistenceItem],
     ) -> None:
-        events = [item.value["event"] for item in items]
         identities = [
-            (str(event.invocation_id), event.sequence)
-            for event in events
+            (str(item.invocation_id), int(item.record["sequence"]))
+            for item in items
         ]
         existing_rows = (
             await database.scalars(
@@ -786,45 +907,54 @@ class DatabaseBackend:
             (row.invocation_id, row.sequence): row
             for row in existing_rows
         }
-        for item, event in zip(items, events, strict=True):
-            row = existing.get((str(event.invocation_id), event.sequence))
+        for item in items:
+            invocation_id = str(item.invocation_id)
+            sequence = int(item.record["sequence"])
+            row = existing.get((invocation_id, sequence))
             if row is None:
                 continue
             if (
-                row.id != str(event.id)
-                or row.schema_version != event.schema_version
-                or row.type != event.type
-                or row.occurred_at_ms != event.occurred_at_ms
+                row.id != str(item.record["event_id"])
+                or row.schema_version != item.record["schema_version"]
+                or row.type != item.record["event_type"]
+                or row.occurred_at_ms != item.record["occurred_at_ms"]
                 or row.payload_json != _text(item.encoded)
             ):
                 raise RuntimeError(
                     "RuntimeEvent sequence already contains different data: "
-                    f"invocation_id={event.invocation_id}, "
-                    f"sequence={event.sequence}."
+                    f"invocation_id={invocation_id}, "
+                    f"sequence={sequence}."
                 )
         database.add_all(
             [
                 RuntimeEventRow(
-                    id=str(event.id),
-                    invocation_id=str(event.invocation_id),
-                    sequence=event.sequence,
-                    schema_version=event.schema_version,
-                    type=event.type,
-                    occurred_at_ms=event.occurred_at_ms,
+                    id=str(item.record["event_id"]),
+                    invocation_id=str(item.invocation_id),
+                    sequence=int(item.record["sequence"]),
+                    schema_version=int(item.record["schema_version"]),
+                    type=str(item.record["event_type"]),
+                    occurred_at_ms=int(item.record["occurred_at_ms"]),
                     payload_json=_text(item.encoded),
                 )
-                for item, event in zip(items, events, strict=True)
-                if (str(event.invocation_id), event.sequence) not in existing
+                for item in items
+                if (
+                    str(item.invocation_id),
+                    int(item.record["sequence"]),
+                )
+                not in existing
             ]
         )
 
         final_by_invocation: dict[str, _PersistenceItem] = {}
-        for item, event in zip(items, events, strict=True):
-            key = str(event.invocation_id)
+        grouped: dict[str, list[_PersistenceItem]] = {}
+        for item in items:
+            key = str(item.invocation_id)
+            grouped.setdefault(key, []).append(item)
             previous = final_by_invocation.get(key)
             if (
                 previous is None
-                or previous.value["event"].sequence < event.sequence
+                or int(previous.record["sequence"])
+                < int(item.record["sequence"])
             ):
                 final_by_invocation[key] = item
         rows = (
@@ -842,12 +972,55 @@ class DatabaseBackend:
                 + ", ".join(sorted(missing))
             )
         for invocation_id, item in final_by_invocation.items():
-            event = item.value["event"]
             row = row_by_id[invocation_id]
-            row.state = item.value["invocation_state"]
-            row.execution_mode = item.value["execution_mode"]
-            row.durable_sequence = max(row.durable_sequence, event.sequence)
-            row.updated_at_ms = item.value["updated_at_ms"]
+            ordered = sorted(
+                grouped[invocation_id],
+                key=lambda value: int(value.record["sequence"]),
+            )
+            state = await self._load_projection_state(database, row)
+            projection_sequence = self._projection_sequences.get(
+                UUID(invocation_id),
+                row.recovery_sequence or 0,
+            )
+            for event_item in ordered:
+                sequence = int(event_item.record["sequence"])
+                if sequence <= projection_sequence:
+                    continue
+                payload = self.serializer.loads(_text(event_item.encoded))
+                operations = tuple(
+                    StateOperation.model_validate(operation)
+                    for operation in payload["operations"]
+                )
+                state = apply_state_operations(state, operations)
+                projection_sequence = sequence
+
+            final_sequence = int(item.record["sequence"])
+            row.state = str(item.record["invocation_state"])
+            row.execution_mode = str(item.record["execution_mode"])
+            row.durable_sequence = max(row.durable_sequence, final_sequence)
+            row.updated_at_ms = int(item.record["updated_at_ms"])
+
+            recovery_sequence = int(row.recovery_sequence or 0)
+            force_recovery = any(
+                bool(value.record["force_recovery_state"])
+                for value in ordered
+            )
+            if (
+                force_recovery
+                or final_sequence - recovery_sequence
+                >= self.recovery_event_interval
+            ):
+                row.recovery_state_json = _text(
+                    self.serializer.dumps_unchecked(state)
+                )
+                row.recovery_sequence = final_sequence
+                row.recovery_updated_at_ms = int(
+                    item.record["updated_at_ms"]
+                )
+                self._recovery_sequences[UUID(invocation_id)] = final_sequence
+
+            self._durable_states[UUID(invocation_id)] = state
+            self._projection_sequences[UUID(invocation_id)] = final_sequence
 
         final_by_session: dict[str, _PersistenceItem] = {}
         for item in items:
@@ -857,8 +1030,8 @@ class DatabaseBackend:
             previous = final_by_session.get(session_id)
             if (
                 previous is None
-                or previous.value["session_updated_at_ms"]
-                < item.value["session_updated_at_ms"]
+                or previous.record["session_updated_at_ms"]
+                < item.record["session_updated_at_ms"]
             ):
                 final_by_session[session_id] = item
         if final_by_session:
@@ -872,53 +1045,139 @@ class DatabaseBackend:
             for row in session_rows:
                 row.updated_at_ms = max(
                     row.updated_at_ms,
-                    final_by_session[row.id].value[
+                    final_by_session[row.id].record[
                         "session_updated_at_ms"
                     ],
                 )
 
-    async def _persist_snapshots(
+    async def _persist_artifacts(
         self,
         database,
-        items: list[_PersistenceItem],
+        artifacts: tuple[EncodedArtifact, ...],
     ) -> None:
-        snapshots = [item.value for item in items]
-        identities = [
-            (str(snapshot.invocation_id), snapshot.through_sequence)
-            for snapshot in snapshots
-        ]
-        existing = set(
-            (
-                await database.execute(
-                    select(
-                        RuntimeSnapshotRow.invocation_id,
-                        RuntimeSnapshotRow.through_sequence,
-                    ).where(
-                        tuple_(
-                            RuntimeSnapshotRow.invocation_id,
-                            RuntimeSnapshotRow.through_sequence,
-                        ).in_(identities)
-                    )
+        unique = {str(artifact.id): artifact for artifact in artifacts}
+        if not unique:
+            return
+        existing_ids = set(
+            await database.scalars(
+                select(ArtifactRow.id).where(
+                    ArtifactRow.id.in_(tuple(unique))
                 )
-            ).all()
+            )
         )
         database.add_all(
             [
-                RuntimeSnapshotRow(
-                    id=str(snapshot.id),
-                    invocation_id=str(snapshot.invocation_id),
-                    through_sequence=snapshot.through_sequence,
-                    state_json=_text(item.encoded),
-                    created_at_ms=snapshot.created_at_ms,
+                ArtifactRow(
+                    id=artifact_id,
+                    namespace=artifact.namespace,
+                    owner_invocation_id=str(artifact.owner_invocation_id),
+                    kind=artifact.kind,
+                    storage=artifact.storage,
+                    uri=artifact.uri,
+                    media_type=artifact.media_type,
+                    encoding=artifact.encoding,
+                    size_bytes=artifact.size_bytes,
+                    sha256=artifact.sha256,
+                    payload_blob=artifact.payload,
+                    metadata_json=_text(
+                        self.serializer.dumps_unchecked(artifact.metadata)
+                    ),
+                    created_at_ms=artifact.created_at_ms,
                 )
-                for item, snapshot in zip(items, snapshots, strict=True)
-                if (
-                    str(snapshot.invocation_id),
-                    snapshot.through_sequence,
-                )
-                not in existing
+                for artifact_id, artifact in unique.items()
+                if artifact_id not in existing_ids
             ]
         )
+
+    async def _load_projection_state(
+        self,
+        database,
+        row: InvocationRow,
+    ) -> dict[str, Any]:
+        invocation_id = UUID(row.id)
+        cached = self._durable_states.get(invocation_id)
+        if (
+            cached is not None
+            and self._projection_sequences.get(invocation_id)
+            == row.durable_sequence
+        ):
+            return cached
+
+        if (
+            row.recovery_state_json is not None
+            and row.recovery_sequence is not None
+        ):
+            state = self.serializer.loads(row.recovery_state_json)
+            cursor = row.recovery_sequence
+        else:
+            state = self.serializer.loads(row.genesis_state_json)
+            cursor = 0
+        if cursor < row.durable_sequence:
+            rows = (
+                await database.scalars(
+                    select(RuntimeEventRow)
+                    .where(
+                        RuntimeEventRow.invocation_id == row.id,
+                        RuntimeEventRow.sequence > cursor,
+                        RuntimeEventRow.sequence <= row.durable_sequence,
+                    )
+                    .order_by(RuntimeEventRow.sequence)
+                )
+            ).all()
+            for event_row in rows:
+                payload = self.serializer.loads(event_row.payload_json)
+                operations = tuple(
+                    StateOperation.model_validate(operation)
+                    for operation in payload["operations"]
+                )
+                state = apply_state_operations(state, operations)
+                cursor = event_row.sequence
+        self._durable_states[invocation_id] = state
+        self._projection_sequences[invocation_id] = cursor
+        self._recovery_sequences[invocation_id] = int(
+            row.recovery_sequence or 0
+        )
+        return state
+
+    async def _hydrate_runtime_values(self, value: Any) -> Any:
+        current = value
+        while True:
+            refs: dict[UUID, ArtifactRef] = {}
+            _collect_runtime_artifact_refs(current, refs)
+            if not refs:
+                return current
+            async with self._database_sessions() as database:
+                rows = (
+                    await database.scalars(
+                        select(ArtifactRow).where(
+                            ArtifactRow.id.in_(
+                                tuple(str(value) for value in refs)
+                            )
+                        )
+                    )
+                ).all()
+            row_by_id = {UUID(row.id): row for row in rows}
+            missing = set(refs) - set(row_by_id)
+            if missing:
+                raise RuntimeError(
+                    "Runtime values reference missing Artifacts: "
+                    + ", ".join(sorted(str(value) for value in missing))
+                )
+            replacements: dict[UUID, Any] = {}
+            for artifact_id, row in row_by_id.items():
+                if row.payload_blob is None:
+                    raise RuntimeError(
+                        f"Runtime value Artifact has no database payload: {artifact_id}"
+                    )
+                ref = refs[artifact_id]
+                self.artifact_encoder.remember(
+                    ref,
+                    invocation_id=UUID(str(row.owner_invocation_id)),
+                )
+                replacements[artifact_id] = self.serializer.loads(
+                    row.payload_blob
+                )
+            current = _replace_runtime_artifact_refs(current, replacements)
 
     async def _load_workflow_version_id(
         self,
@@ -956,11 +1215,64 @@ class DatabaseBackend:
                     RuntimeError("Runtime persistence failed permanently.")
                 )
 
+    def release_invocation_cache(self, invocation_id: UUID) -> None:
+        self._durable_states.pop(invocation_id, None)
+        self._projection_sequences.pop(invocation_id, None)
+        self._recovery_sequences.pop(invocation_id, None)
+        if self._artifact_encoder is not None:
+            self._artifact_encoder.forget_invocation(invocation_id)
+
 
 def _text(payload: bytes | None) -> str:
     if payload is None:
         raise ValueError("Persistence payload was not serialized.")
     return payload.decode("utf-8")
+
+
+def _collect_runtime_artifact_refs(
+    value: Any,
+    refs: dict[UUID, ArtifactRef],
+) -> None:
+    if isinstance(value, ArtifactRef):
+        if value.kind == "runtime_value":
+            refs[value.id] = value
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_runtime_artifact_refs(item, refs)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _collect_runtime_artifact_refs(item, refs)
+
+
+def _replace_runtime_artifact_refs(
+    value: Any,
+    replacements: dict[UUID, Any],
+) -> Any:
+    if isinstance(value, ArtifactRef):
+        return replacements.get(value.id, value)
+    if isinstance(value, dict):
+        return {
+            key: _replace_runtime_artifact_refs(item, replacements)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _replace_runtime_artifact_refs(item, replacements)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _replace_runtime_artifact_refs(item, replacements)
+            for item in value
+        )
+    if isinstance(value, set):
+        return {
+            _replace_runtime_artifact_refs(item, replacements)
+            for item in value
+        }
+    return value
 
 
 def _is_retryable_database_error(error: DBAPIError) -> bool:

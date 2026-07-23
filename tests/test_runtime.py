@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from autoagent import AutoAgentApp, Workflow
+from autoagent import AutoAgentApp, RuntimeRetentionPolicy, Workflow
 from autoagent.core.runtime import (
     apply_state_operations,
     capture_execution_state,
@@ -133,7 +133,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(3, len({session.id for session in values}))
 
-    async def test_admission_creates_sequence_zero_genesis_snapshot(self) -> None:
+    async def test_admission_creates_sequence_zero_genesis_checkpoint(self) -> None:
         store = RuntimeStore()
         session = await store.aget_or_create_session(
             namespace="default",
@@ -155,6 +155,36 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, snapshot.through_sequence)
         self.assertEqual(0, invocation.event_sequence)
         self.assertEqual((), events)
+
+    async def test_replay_checkpoint_limit_never_evicts_genesis(self) -> None:
+        store = RuntimeStore(
+            retention_policy=RuntimeRetentionPolicy(
+                max_replay_checkpoints_per_invocation=2,
+            )
+        )
+        app = AutoAgentApp(runtime_store=store)
+        workflow = Workflow(id="checkpoint_retention")
+        workflow.add_node(lambda: "done", node_id="node")
+        invocation = await app.ainvoke(workflow)
+
+        for sequence in (1, 2, 3):
+            await store.arebuild_execution(
+                invocation.id,
+                through_sequence=sequence,
+            )
+
+        sequences = {
+            sequence
+            for candidate_id, sequence in store._replay_checkpoints
+            if candidate_id == invocation.id
+        }
+        self.assertEqual({0, 2, 3}, sequences)
+        _, rebuilt = await store.arebuild_execution(
+            invocation.id,
+            through_sequence=1,
+        )
+        self.assertEqual(1, rebuilt.event_sequence)
+        await app.aclose()
 
     async def test_events_are_invocation_local_contiguous_and_rebuildable(self) -> None:
         store = RuntimeStore()

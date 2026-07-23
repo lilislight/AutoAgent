@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from collections.abc import Iterable
 
 from autoagent.core.compiler import EdgeIR, LoopRegionIR, WorkflowIR
@@ -317,10 +316,10 @@ class Scheduler:
             return False, "String edge conditions are not supported at runtime yet."
         if not callable(edge.condition):
             return False, "Edge condition is not callable."
-        context = ConditionContext(
+        context = ConditionContext.create(
             invocation_input=invocation.input,
-            invocation_context=deepcopy(invocation.context),
-            session_context=deepcopy(session.context),
+            invocation_context=invocation.context,
+            session_context=session.context,
             outputs=invocation.outputs.scoped(edge.scope_node_ids),
             edge_id=edge.local_id or edge.id,
             source_node_id=edge.local_from_node or edge.from_node,

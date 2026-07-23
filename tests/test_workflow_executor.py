@@ -6,7 +6,7 @@ import time
 import unittest
 
 from autoagent import AutoAgentApp
-from autoagent.core.runtime import InMemoryRuntimeStore, SessionBusyError
+from autoagent.core.runtime import RuntimeStore, SessionBusyError
 from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
@@ -537,30 +537,27 @@ class WorkflowExecutorTests(unittest.TestCase):
 
     def test_hook_read_views_cannot_mutate_runtime_owned_data(self) -> None:
         def condition(ctx) -> bool:
-            with self.assertRaises(TypeError):
-                ctx.source_output["items"][0] = 9
-            with self.assertRaises(TypeError):
-                ctx.outputs.latest("start")["items"][0] = 9
+            ctx.source_output["items"][0] = 9
+            ctx.outputs.latest("start")["items"][0] = 9
             return True
 
         def mapping(ctx) -> dict[str, int]:
-            with self.assertRaises(TypeError):
-                ctx.invocation_input["request"]["items"][0] = 9
+            ctx.invocation_input["request"]["items"][0] = 9
             with self.assertRaises(TypeError):
                 ctx.invocation_context.data["invalid"] = True
             with self.assertRaises(TypeError):
                 ctx.session_context.data["invalid"] = True
-            with self.assertRaises(TypeError):
-                ctx.incoming[0].value["items"][0] = 9
-            return {"value": ctx.incoming[0].value["items"][0]}
+            incoming = ctx.incoming[0].value
+            value = incoming["items"][0]
+            incoming["items"][0] = 9
+            return {"value": value}
 
         def binding(ctx) -> None:
-            with self.assertRaises(TypeError):
-                ctx.output["value"] = 9
-            with self.assertRaises(TypeError):
-                ctx.outputs.latest("start")["items"][0] = 9
-            ctx.invocation_context.data["bound"] = ctx.output["value"]
-            ctx.session_context.data["saved_output"] = ctx.output
+            value = ctx.output["value"]
+            ctx.output["value"] = 9
+            ctx.outputs.latest("start")["items"][0] = 9
+            ctx.invocation_context.data["bound"] = value
+            ctx.session_context.data["saved_output"] = {"value": value}
 
         workflow = Workflow(id="readonly_hooks")
         workflow.add_node(lambda request: {"items": [1]}, node_id="start")
@@ -1166,10 +1163,25 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         thread.start()
         self.assertTrue(started.wait(timeout=1))
+        before = app.runtime_store.find_session(
+            namespace=app.namespace,
+            workflow_id=workflow.id,
+            session_key="shared-session",
+        )
+        assert before is not None
+        before_invocation = before.get_current_invocation()
 
         with self.assertRaises(SessionBusyError):
             app.invoke(workflow, session_id="shared-session")
 
+        after = app.runtime_store.find_session(
+            namespace=app.namespace,
+            workflow_id=workflow.id,
+            session_key="shared-session",
+        )
+        self.assertIs(before, after)
+        assert after is not None
+        self.assertIs(before_invocation, after.get_current_invocation())
         release.set()
         thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
@@ -1379,7 +1391,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             policy=NodePolicy(
                 replication=ReplicationPolicy(
                     count=3,
-                    output_aggregator=sum,
+                    output_aggregator=lambda ctx: sum(ctx.replica_outputs),
                     max_parallelism=2,
                 )
             ),
@@ -1403,10 +1415,10 @@ class WorkflowExecutorTests(unittest.TestCase):
             "square",
             policy=EdgePolicy(
                 map=MapPolicy(
-                    item_selector=lambda output: [
-                        {"value": item} for item in output
+                    item_selector=lambda ctx: [
+                        {"value": item} for item in ctx.input
                     ],
-                    output_aggregator=lambda outputs: tuple(outputs),
+                    output_aggregator=lambda ctx: tuple(ctx.item_outputs),
                     max_parallelism=2,
                 )
             ),
@@ -1538,7 +1550,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge(
             "source",
             "target",
-            policy=EdgePolicy(map=MapPolicy(item_selector=lambda _output: 1)),
+            policy=EdgePolicy(map=MapPolicy(item_selector=lambda _ctx: 1)),
         )
 
         invocation = AutoAgentApp().invoke(workflow)
@@ -1566,7 +1578,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             "source",
             "target",
             policy=EdgePolicy(
-                map=MapPolicy(item_selector=lambda output: list(output))
+                map=MapPolicy(item_selector=lambda ctx: list(ctx.input))
             ),
         )
 
@@ -1596,8 +1608,8 @@ class WorkflowExecutorTests(unittest.TestCase):
             "target",
             policy=EdgePolicy(
                 map=MapPolicy(
-                    item_selector=lambda output: [
-                        {"value": item} for item in output
+                    item_selector=lambda ctx: [
+                        {"value": item} for item in ctx.input
                     ]
                 )
             ),
@@ -1610,20 +1622,31 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(operator_executions, 0)
 
     def test_async_map_hooks_and_operator_are_supported(self) -> None:
-        async def select_items(output):
+        seen_contexts: list[tuple[str, str, bool]] = []
+
+        async def select_items(ctx):
             await asyncio.sleep(0)
-            return [{"value": item} for item in output]
+            seen_contexts.append(
+                ("selector", ctx.node_id, ctx.outputs.has("source"))
+            )
+            self.assertEqual("shared", ctx.invocation_input["request"]["id"])
+            ctx.invocation_input["request"]["id"] = "selector-local"
+            return [{"value": item} for item in ctx.input]
 
         async def square(value: int) -> int:
             await asyncio.sleep(0)
             return value * value
 
-        async def aggregate(outputs):
+        async def aggregate(ctx):
             await asyncio.sleep(0)
-            return tuple(outputs)
+            seen_contexts.append(
+                ("aggregator", ctx.node_id, ctx.outputs.has("source"))
+            )
+            self.assertEqual("shared", ctx.invocation_input["request"]["id"])
+            return tuple(ctx.item_outputs)
 
         workflow = Workflow(id="async_map_hooks")
-        workflow.add_node(lambda: [1, 2, 3], node_id="source")
+        workflow.add_node(lambda request: [1, 2, 3], node_id="source")
         workflow.add_node(square, node_id="square")
         workflow.add_edge(
             "source",
@@ -1636,9 +1659,19 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = AutoAgentApp().invoke(
+            workflow,
+            input={"request": {"id": "shared"}},
+        )
 
         self.assertEqual(invocation.result, {"output": (1, 4, 9)})
+        self.assertEqual(
+            [
+                ("selector", "square", True),
+                ("aggregator", "square", True),
+            ],
+            seen_contexts,
+        )
 
     def test_async_map_failure_cancels_remaining_units_and_skips_aggregation(self) -> None:
         aggregated = False
@@ -1649,10 +1682,10 @@ class WorkflowExecutorTests(unittest.TestCase):
             await asyncio.sleep(1)
             return value
 
-        async def aggregate(outputs):
+        async def aggregate(ctx):
             nonlocal aggregated
             aggregated = True
-            return outputs
+            return ctx.item_outputs
 
         workflow = Workflow(id="map_failure_cancellation")
         workflow.add_node(lambda: [0, 1, 2], node_id="source")
@@ -1662,8 +1695,8 @@ class WorkflowExecutorTests(unittest.TestCase):
             "process",
             policy=EdgePolicy(
                 map=MapPolicy(
-                    item_selector=lambda output: [
-                        {"value": item} for item in output
+                    item_selector=lambda ctx: [
+                        {"value": item} for item in ctx.input
                     ],
                     output_aggregator=aggregate,
                     max_parallelism=3,
@@ -1685,9 +1718,9 @@ class WorkflowExecutorTests(unittest.TestCase):
             await asyncio.sleep(0)
             return value
 
-        async def aggregate(outputs):
+        async def aggregate(ctx):
             await asyncio.sleep(0)
-            return sum(outputs)
+            return sum(ctx.replica_outputs)
 
         workflow = Workflow(id="async_replication_aggregator")
         workflow.add_node(

@@ -25,13 +25,17 @@ from autoagent.core.operators import (
 from autoagent.core.runtime import (
     DirectOperatorExecution,
     InvocationExecutionMailbox,
+    MapAggregationContext,
+    MapItemSelectionContext,
     NodeExecution,
     ParallelExecutionSummary,
     ParallelOperatorExecution,
     ResourceUsage,
+    ReplicationAggregationContext,
     RuntimeErrorInfo,
     RuntimeConcurrencyController,
 )
+from autoagent.core.runtime.context import HookContextSnapshot
 from autoagent.core.runtime.hooks import invoke_hook_async
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.workflow import BackoffPolicy, MapPolicy
@@ -55,6 +59,7 @@ class NodeExecutionJob:
     map_policy: MapPolicy | None = None
     concurrency_key: str | None = None
     recovery: bool = False
+    hook_context: HookContextSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,7 @@ class ResolvedNodeExecutionJob:
     map_policy: MapPolicy | None = None
     concurrency_key: str | None = None
     recovery: bool = False
+    hook_context: HookContextSnapshot | None = None
     concurrency_controller: RuntimeConcurrencyController | None = None
     thread_pool: ThreadPoolExecutor | None = None
 
@@ -173,6 +179,7 @@ class NodeExecutor:
                 map_policy=job.map_policy,
                 concurrency_key=job.concurrency_key,
                 recovery=job.recovery,
+                hook_context=job.hook_context,
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
             )
@@ -399,7 +406,7 @@ async def _prepare_units(
             selected = (
                 await invoke_hook_async(
                     job.map_policy.item_selector,
-                    deepcopy(job.input),
+                    _map_selection_context(job),
                 )
                 if job.map_policy.item_selector is not None
                 else deepcopy(job.input)
@@ -821,7 +828,7 @@ async def _aggregate_unit_results(
             output = (
                 await invoke_hook_async(
                     job.map_policy.output_aggregator,
-                    deepcopy(outputs),
+                    _map_aggregation_context(job, outputs),
                 )
                 if job.map_policy is not None
                 and job.map_policy.output_aggregator is not None
@@ -831,7 +838,7 @@ async def _aggregate_unit_results(
             replication = job.node_ir.policy.replication
             output = await invoke_hook_async(
                 replication.output_aggregator,
-                deepcopy(outputs),
+                _replication_aggregation_context(job, outputs),
             )
         else:
             output = outputs[0]
@@ -866,6 +873,58 @@ async def _aggregate_unit_results(
         operator_executions=retained_executions,
         resource_usage=ResourceUsage(duration_ms=duration_ms),
     )
+
+
+def _map_selection_context(
+    job: ResolvedNodeExecutionJob,
+) -> MapItemSelectionContext:
+    common = _require_hook_context(job)
+    return MapItemSelectionContext(
+        invocation_input=common.invocation_input,
+        invocation_context=common.invocation_context,
+        session_context=common.session_context,
+        outputs=common.outputs,
+        node_id=job.node_ir.local_id or job.node_ir.id,
+        input=deepcopy(job.input),
+    )
+
+
+def _map_aggregation_context(
+    job: ResolvedNodeExecutionJob,
+    outputs: list[Any],
+) -> MapAggregationContext:
+    common = _require_hook_context(job)
+    return MapAggregationContext(
+        invocation_input=common.invocation_input,
+        invocation_context=common.invocation_context,
+        session_context=common.session_context,
+        outputs=common.outputs,
+        node_id=job.node_ir.local_id or job.node_ir.id,
+        item_outputs=deepcopy(outputs),
+    )
+
+
+def _replication_aggregation_context(
+    job: ResolvedNodeExecutionJob,
+    outputs: list[Any],
+) -> ReplicationAggregationContext:
+    common = _require_hook_context(job)
+    return ReplicationAggregationContext(
+        invocation_input=common.invocation_input,
+        invocation_context=common.invocation_context,
+        session_context=common.session_context,
+        outputs=common.outputs,
+        node_id=job.node_ir.local_id or job.node_ir.id,
+        replica_outputs=deepcopy(outputs),
+    )
+
+
+def _require_hook_context(
+    job: ResolvedNodeExecutionJob,
+) -> HookContextSnapshot:
+    if job.hook_context is None:
+        raise RuntimeError("NodeExecutionJob is missing its Workflow hook context.")
+    return job.hook_context.isolate()
 
 
 def _attempt_reason(

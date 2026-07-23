@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -13,7 +14,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
-from autoagent.core.runtime.database_models import (
+from autoagent.core.runtime.backends.models import (
     InvocationRow,
     RuntimeDatabaseBase,
     RuntimeEventRow,
@@ -24,10 +25,9 @@ from autoagent.core.runtime.database_models import (
 from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.runtime.invocation import Invocation
-from autoagent.core.runtime.serialization import JsonRuntimeSerializer
 from autoagent.core.runtime.session import Session
-from autoagent.core.runtime.snapshot import ExecutionSnapshot, capture_execution_state
-from autoagent.core.runtime.store import InMemoryRuntimeStore
+from autoagent.core.runtime.snapshot import ExecutionSnapshot
+from autoagent.core.runtime.store import RuntimeStore
 from autoagent.core.runtime.time import utc_timestamp_ms
 
 
@@ -42,14 +42,13 @@ class _PersistenceItem:
     done: asyncio.Future[None] | None = None
 
 
-class DatabaseRuntimeStore(InMemoryRuntimeStore):
-    """In-memory runtime center with a fair asynchronous SQL backend."""
+class DatabaseBackend:
+    """SQLite/PostgreSQL durability for one authoritative ``RuntimeStore``."""
 
     def __init__(
         self,
         database_url: str | Path,
         *,
-        serializer: JsonRuntimeSerializer | None = None,
         echo: bool = False,
         queue_high_watermark_bytes: int = 64 * 1024 * 1024,
         queue_low_watermark_bytes: int | None = None,
@@ -59,7 +58,6 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         batch_max_delay_ms: int = 5,
         snapshot_interval: int = 50,
     ) -> None:
-        super().__init__(serializer=serializer)
         if queue_high_watermark_bytes < 1:
             raise ValueError("queue_high_watermark_bytes must be positive.")
         low = (
@@ -76,6 +74,8 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             raise ValueError("Expected low < high < hard byte watermarks.")
         if batch_max_items < 1 or batch_max_bytes < 1 or batch_max_delay_ms < 0:
             raise ValueError("Invalid persistence batch limits.")
+        if snapshot_interval < 1:
+            raise ValueError("snapshot_interval must be positive.")
 
         self.database_url = _resolve_database_url(database_url)
         self.engine: AsyncEngine = create_async_engine(
@@ -92,7 +92,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         self.batch_max_items = batch_max_items
         self.batch_max_bytes = batch_max_bytes
         self.batch_max_delay_ms = batch_max_delay_ms
-        self.snapshot_interval = max(1, snapshot_interval)
+        self.snapshot_interval = snapshot_interval
 
         self._database_loop = RuntimeEventLoop(
             name="autoagent-persistence-runtime"
@@ -109,15 +109,32 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         self._pending_bytes = 0
         self._inflight_bytes = 0
         self._pending_count = 0
+        self._inflight_count = 0
         self._admission_pressure = False
         self._persistence_error: BaseException | None = None
         self._fatal_persistence_error: BaseException | None = None
         self._workflow_version_ids: dict[tuple[str, str, str, str], UUID] = {}
         self._durable_sequences: dict[UUID, int] = {}
+        self._store: RuntimeStore | None = None
 
     @classmethod
-    def from_path(cls, path: str | Path, **kwargs: Any) -> DatabaseRuntimeStore:
+    def from_path(cls, path: str | Path, **kwargs: Any) -> DatabaseBackend:
         return cls(Path(path), **kwargs)
+
+    def bind(self, store: RuntimeStore) -> None:
+        if self._store is not None and self._store is not store:
+            raise RuntimeError("A DatabaseBackend can belong to only one RuntimeStore.")
+        self._store = store
+
+    @property
+    def store(self) -> RuntimeStore:
+        if self._store is None:
+            raise RuntimeError("DatabaseBackend is not attached to a RuntimeStore.")
+        return self._store
+
+    @property
+    def serializer(self):
+        return self.store.serializer
 
     @property
     def pending_persistence_bytes(self) -> int:
@@ -127,7 +144,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
     @property
     def pending_persistence_count(self) -> int:
         with self._pressure_lock:
-            return self._pending_count
+            return self._pending_count + self._inflight_count
 
     @property
     def admission_paused(self) -> bool:
@@ -143,7 +160,6 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             pressure = self._admission_pressure
         return (
             pressure
-            or self._persistence_error is not None
             or self._fatal_persistence_error is not None
         )
 
@@ -170,33 +186,50 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         if not self._database_loop.is_current():
             if not self._initialized:
                 await self.engine.dispose()
+                self._database_loop.stop()
                 return
-            await self._database_loop.arun(self.aclose())
-            self._database_loop.stop()
+            try:
+                await self._database_loop.arun(self.aclose())
+            finally:
+                self._database_loop.stop()
             return
         if self._closing:
             return
         self._closing = True
-        await self.aflush()
-        if self._worker is not None:
-            assert self._queue_event is not None
-            self._queue_event.set()
-            await self._worker
-            self._worker = None
-        await self.engine.dispose()
-        self._initialized = False
+        try:
+            await self.aflush()
+        finally:
+            if self._worker is not None:
+                assert self._queue_event is not None
+                self._queue_event.set()
+                await self._worker
+                self._worker = None
+            await self.engine.dispose()
+            self._initialized = False
 
     async def aflush(self) -> None:
         if not self._database_loop.is_current():
             await self._database_loop.arun(self.aflush())
             return
         await self.ainitialize()
-        while self.pending_persistence_count or self._inflight_bytes:
+        while self.pending_persistence_count:
             await asyncio.sleep(0.001)
         if self._fatal_persistence_error is not None:
             raise RuntimeError("Runtime persistence failed permanently.") from (
                 self._fatal_persistence_error
             )
+
+    async def await_capacity(self) -> None:
+        if self._fatal_persistence_error is not None:
+            raise RuntimeError("Runtime persistence is unavailable.") from (
+                self._fatal_persistence_error
+            )
+        while self.pending_persistence_bytes >= self.queue_hard_watermark_bytes:
+            if self._fatal_persistence_error is not None:
+                raise RuntimeError("Runtime persistence is unavailable.") from (
+                    self._fatal_persistence_error
+                )
+            await asyncio.sleep(0.005)
 
     async def asave_workflow_snapshot(
         self,
@@ -209,9 +242,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             snapshot.definition_hash,
             snapshot.operator_manifest_hash,
         )
-        existed = key in self.workflow_versions
-        await super().asave_workflow_snapshot(namespace, snapshot)
-        if existed:
+        if key in self._workflow_version_ids:
             return
         version_id = uuid4()
         self._workflow_version_ids[key] = version_id
@@ -242,14 +273,6 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             barrier=True,
         )
 
-    async def aget_or_create_session(self, **kwargs: Any) -> Session:
-        session_key = kwargs.get("session_key")
-        if session_key is not None:
-            existing = await self.afind_session(**kwargs)
-            if existing is not None:
-                return existing
-        return await super().aget_or_create_session(**kwargs)
-
     async def afind_session(
         self,
         *,
@@ -257,13 +280,6 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         workflow_id: str,
         session_key: str,
     ) -> Session | None:
-        value = await super().afind_session(
-            namespace=namespace,
-            workflow_id=workflow_id,
-            session_key=session_key,
-        )
-        if value is not None:
-            return value
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.afind_session(
@@ -284,7 +300,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         if row is None:
             return None
         if row.current_invocation_id is not None:
-            session, _ = await self.arebuild_execution(
+            session, _ = await self.store.arebuild_execution(
                 UUID(row.current_invocation_id)
             )
             return session
@@ -296,33 +312,23 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             created_at_ms=row.created_at_ms,
             updated_at_ms=row.updated_at_ms,
         )
-        with self._lock:
-            self.sessions[session.id] = session
-            self.session_keys[
-                (session.namespace, session.workflow_id, session.session_key)
-            ] = session.id
         return session
-
-    async def aclaim_waiting_session(self, **kwargs: Any) -> Session:
-        session = await self.afind_session(
-            namespace=kwargs["namespace"],
-            workflow_id=kwargs["workflow_id"],
-            session_key=kwargs["session_key"],
-        )
-        if session is None:
-            raise KeyError(f"Unknown session: {kwargs['session_key']}")
-        return await super().aclaim_waiting_session(**kwargs)
 
     async def aadmit_invocation(
         self,
-        session_id: UUID,
+        session: Session,
         invocation: Invocation,
-    ) -> Session:
+        snapshot: ExecutionSnapshot,
+    ) -> None:
+        if not self._database_loop.is_current():
+            await self._database_loop.arun(
+                self.aadmit_invocation(session, invocation, snapshot)
+            )
+            return
         if self.admission_paused:
             raise RuntimeError(
                 "Runtime persistence backlog is above the admission watermark."
             )
-        session = await super().aadmit_invocation(session_id, invocation)
         key = (
             session.namespace,
             session.workflow_id,
@@ -334,11 +340,10 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             version_id = await self._load_workflow_version_id(key)
         if version_id is None:
             raise RuntimeError("Workflow version metadata is not durable.")
-        snapshot = self.execution_snapshots[(invocation.id, 0)]
         encoded_snapshot = self.serializer.dumps(snapshot.state)
         admission = {
-            "session": session,
-            "invocation": invocation,
+            "session": deepcopy(snapshot.state["session"]),
+            "invocation": deepcopy(snapshot.state["invocation"]),
             "workflow_version_id": version_id,
             "snapshot": snapshot,
         }
@@ -353,31 +358,25 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             ),
             barrier=True,
         )
-        return session
-
-    async def aapply_event(
+    async def aappend_event(
         self,
         session: Session,
         invocation: Invocation,
         event: RuntimeEvent,
         *,
-        node_execution_ids: tuple[UUID, ...] = (),
         durability_barrier: bool = False,
-    ) -> RuntimeEvent:
-        while self.pending_persistence_bytes >= self.queue_hard_watermark_bytes:
-            if self._fatal_persistence_error is not None:
-                raise RuntimeError("Runtime persistence is unavailable.") from (
-                    self._fatal_persistence_error
+    ) -> None:
+        if not self._database_loop.is_current():
+            await self._database_loop.arun(
+                self.aappend_event(
+                    session,
+                    invocation,
+                    event,
+                    durability_barrier=durability_barrier,
                 )
-            await asyncio.sleep(0.005)
-
+            )
+            return
         encoded_payload = self.serializer.dumps(event.payload)
-        applied = await super().aapply_event(
-            session,
-            invocation,
-            event,
-            node_execution_ids=node_execution_ids,
-        )
         await self._enqueue(
             _PersistenceItem(
                 kind="event",
@@ -388,29 +387,30 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
                     "invocation_state": invocation.state,
                     "execution_mode": invocation.execution_mode,
                     "updated_at_ms": invocation.updated_at_ms,
+                    "session_updated_at_ms": session.updated_at_ms,
                 },
                 encoded=encoded_payload,
                 size_bytes=len(encoded_payload) + 256,
             ),
             barrier=durability_barrier,
         )
-        if event.sequence % self.snapshot_interval == 0:
-            snapshot = ExecutionSnapshot.capture(
-                session,
-                invocation,
-                through_sequence=event.sequence,
-            )
-            await self.asave_execution_snapshot(snapshot)
-        return applied
 
     async def asave_execution_snapshot(
         self,
         snapshot: ExecutionSnapshot,
         *,
+        session_id: UUID | None,
         durability_barrier: bool = False,
     ) -> None:
-        await InMemoryRuntimeStore.asave_execution_snapshot(self, snapshot)
-        session_id = self.invocation_sessions.get(snapshot.invocation_id)
+        if not self._database_loop.is_current():
+            await self._database_loop.arun(
+                self.asave_execution_snapshot(
+                    snapshot,
+                    session_id=session_id,
+                    durability_barrier=durability_barrier,
+                )
+            )
+            return
         encoded = self.serializer.dumps(snapshot.state)
         await self._enqueue(
             _PersistenceItem(
@@ -430,12 +430,6 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         *,
         at_or_before_sequence: int | None = None,
     ) -> ExecutionSnapshot | None:
-        value = await super().aload_execution_snapshot(
-            invocation_id,
-            at_or_before_sequence=at_or_before_sequence,
-        )
-        if value is not None:
-            return value
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.aload_execution_snapshot(
@@ -459,15 +453,13 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             )
         if row is None:
             return None
-        snapshot = ExecutionSnapshot(
+        return ExecutionSnapshot(
             id=UUID(row.id),
             invocation_id=invocation_id,
             through_sequence=row.through_sequence,
             state=self.serializer.loads(row.state_json),
             created_at_ms=row.created_at_ms,
         )
-        await InMemoryRuntimeStore.asave_execution_snapshot(self, snapshot)
-        return snapshot
 
     async def alist_runtime_events(
         self,
@@ -477,14 +469,6 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         before_sequence: int | None = None,
         limit: int = 1000,
     ) -> tuple[RuntimeEvent, ...]:
-        memory = await super().alist_runtime_events(
-            invocation_id=invocation_id,
-            after_sequence=after_sequence,
-            before_sequence=before_sequence,
-            limit=limit,
-        )
-        if memory:
-            return memory
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_runtime_events(
@@ -511,7 +495,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             ).all()
         if before_sequence is not None:
             rows.reverse()
-        return tuple(
+        events = tuple(
             RuntimeEvent(
                 id=UUID(row.id),
                 invocation_id=invocation_id,
@@ -523,36 +507,17 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             )
             for row in rows
         )
-
-    async def arebuild_execution(
-        self,
-        invocation_id: UUID,
-        *,
-        through_sequence: int | None = None,
-    ) -> tuple[Session, Invocation]:
-        session, invocation = await super().arebuild_execution(
-            invocation_id,
-            through_sequence=through_sequence,
-        )
-        if through_sequence is None:
-            events = await self.alist_runtime_events(
-                invocation_id=invocation_id,
-                limit=1_000_000,
+        if events:
+            self._durable_sequences[invocation_id] = max(
+                self._durable_sequences.get(invocation_id, 0),
+                events[-1].sequence,
             )
-            with self._lock:
-                self.sessions[session.id] = session
-                self.invocations[invocation.id] = invocation
-                self.invocation_sessions[invocation.id] = session.id
-                self.runtime_events[invocation.id] = list(events)
-                self._durable_sequences[invocation.id] = (
-                    events[-1].sequence if events else 0
-                )
-        return session, invocation
+        return events
 
     def persistence_status(self, invocation_id: UUID) -> str:
         if self._fatal_persistence_error is not None:
             return "error"
-        invocation = self.invocations.get(invocation_id)
+        invocation = self.store.invocations.get(invocation_id)
         if invocation is None:
             raise KeyError(f"Unknown Invocation: {invocation_id}")
         return (
@@ -620,6 +585,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
                 self._pending_bytes -= batch_bytes
                 self._pending_count -= len(batch)
                 self._inflight_bytes += batch_bytes
+                self._inflight_count += len(batch)
             retry_delay = 0.05
             while True:
                 try:
@@ -627,7 +593,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
                 except asyncio.CancelledError:
                     raise
                 except (OperationalError, DBAPIError) as exc:
-                    if isinstance(exc, DBAPIError) and not exc.connection_invalidated:
+                    if not _is_retryable_database_error(exc):
                         self._fail_batch_permanently(batch, exc)
                         break
                     self._persistence_error = exc
@@ -654,6 +620,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
                     break
             with self._pressure_lock:
                 self._inflight_bytes -= batch_bytes
+                self._inflight_count -= len(batch)
 
     async def _take_batch(self) -> list[_PersistenceItem]:
         batch: list[_PersistenceItem] = []
@@ -669,11 +636,13 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             self._ready_set.discard(key)
             queue = self._queues[key]
             item = queue.popleft()
+            deferred_for_size = False
             if (
                 batch
                 and total_bytes + item.size_bytes > self.batch_max_bytes
             ):
                 queue.appendleft(item)
+                deferred_for_size = True
             else:
                 batch.append(item)
                 total_bytes += item.size_bytes
@@ -682,6 +651,8 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
                 self._ready_set.add(key)
             else:
                 del self._queues[key]
+            if deferred_for_size:
+                break
             if any(value.done is not None for value in batch):
                 break
             if total_bytes >= self.batch_max_bytes:
@@ -743,40 +714,40 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
         item: _PersistenceItem,
     ) -> None:
         value = item.value
-        session: Session = value["session"]
-        invocation: Invocation = value["invocation"]
+        session = value["session"]
+        invocation = value["invocation"]
         version_id: UUID = value["workflow_version_id"]
         snapshot: ExecutionSnapshot = value["snapshot"]
-        session_row = await database.get(SessionRow, str(session.id))
+        session_row = await database.get(SessionRow, session["id"])
         session_values = {
-            "namespace": session.namespace,
-            "workflow_id": session.workflow_id,
-            "session_key": session.session_key,
-            "current_invocation_id": str(invocation.id),
-            "created_at_ms": session.created_at_ms,
-            "updated_at_ms": session.updated_at_ms,
+            "namespace": session["namespace"],
+            "workflow_id": session["workflow_id"],
+            "session_key": session["session_key"],
+            "current_invocation_id": invocation["id"],
+            "created_at_ms": session["created_at_ms"],
+            "updated_at_ms": session["updated_at_ms"],
         }
         if session_row is None:
-            database.add(SessionRow(id=str(session.id), **session_values))
+            database.add(SessionRow(id=session["id"], **session_values))
         else:
             for key, data in session_values.items():
                 setattr(session_row, key, data)
-        invocation_row = await database.get(InvocationRow, str(invocation.id))
+        invocation_row = await database.get(InvocationRow, invocation["id"])
         invocation_values = {
-            "session_id": str(session.id),
+            "session_id": session["id"],
             "workflow_version_id": str(version_id),
-            "entry_node_id": invocation.entry_node_id,
-            "state": invocation.state,
-            "execution_mode": invocation.execution_mode,
+            "entry_node_id": invocation["entry_node_id"],
+            "state": invocation["state"],
+            "execution_mode": invocation["execution_mode"],
             "durable_sequence": 0,
-            "created_at_ms": invocation.created_at_ms,
-            "updated_at_ms": invocation.updated_at_ms,
+            "created_at_ms": invocation["created_at_ms"],
+            "updated_at_ms": invocation["updated_at_ms"],
         }
         if invocation_row is None:
-            database.add(InvocationRow(id=str(invocation.id), **invocation_values))
+            database.add(InvocationRow(id=invocation["id"], **invocation_values))
         snapshot_row = await database.scalar(
             select(RuntimeSnapshotRow).where(
-                RuntimeSnapshotRow.invocation_id == str(invocation.id),
+                RuntimeSnapshotRow.invocation_id == invocation["id"],
                 RuntimeSnapshotRow.through_sequence == 0,
             )
         )
@@ -784,7 +755,7 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             database.add(
                 RuntimeSnapshotRow(
                     id=str(snapshot.id),
-                    invocation_id=str(invocation.id),
+                    invocation_id=invocation["id"],
                     through_sequence=0,
                     state_json=_text(item.encoded),
                     created_at_ms=snapshot.created_at_ms,
@@ -801,21 +772,36 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             (str(event.invocation_id), event.sequence)
             for event in events
         ]
-        existing = set(
-            (
-                await database.execute(
-                    select(
+        existing_rows = (
+            await database.scalars(
+                select(RuntimeEventRow).where(
+                    tuple_(
                         RuntimeEventRow.invocation_id,
                         RuntimeEventRow.sequence,
-                    ).where(
-                        tuple_(
-                            RuntimeEventRow.invocation_id,
-                            RuntimeEventRow.sequence,
-                        ).in_(identities)
-                    )
+                    ).in_(identities)
                 )
-            ).all()
-        )
+            )
+        ).all()
+        existing = {
+            (row.invocation_id, row.sequence): row
+            for row in existing_rows
+        }
+        for item, event in zip(items, events, strict=True):
+            row = existing.get((str(event.invocation_id), event.sequence))
+            if row is None:
+                continue
+            if (
+                row.id != str(event.id)
+                or row.schema_version != event.schema_version
+                or row.type != event.type
+                or row.occurred_at_ms != event.occurred_at_ms
+                or row.payload_json != _text(item.encoded)
+            ):
+                raise RuntimeError(
+                    "RuntimeEvent sequence already contains different data: "
+                    f"invocation_id={event.invocation_id}, "
+                    f"sequence={event.sequence}."
+                )
         database.add_all(
             [
                 RuntimeEventRow(
@@ -862,6 +848,34 @@ class DatabaseRuntimeStore(InMemoryRuntimeStore):
             row.execution_mode = item.value["execution_mode"]
             row.durable_sequence = max(row.durable_sequence, event.sequence)
             row.updated_at_ms = item.value["updated_at_ms"]
+
+        final_by_session: dict[str, _PersistenceItem] = {}
+        for item in items:
+            if item.session_id is None:
+                continue
+            session_id = str(item.session_id)
+            previous = final_by_session.get(session_id)
+            if (
+                previous is None
+                or previous.value["session_updated_at_ms"]
+                < item.value["session_updated_at_ms"]
+            ):
+                final_by_session[session_id] = item
+        if final_by_session:
+            session_rows = (
+                await database.scalars(
+                    select(SessionRow).where(
+                        SessionRow.id.in_(tuple(final_by_session))
+                    )
+                )
+            ).all()
+            for row in session_rows:
+                row.updated_at_ms = max(
+                    row.updated_at_ms,
+                    final_by_session[row.id].value[
+                        "session_updated_at_ms"
+                    ],
+                )
 
     async def _persist_snapshots(
         self,
@@ -949,6 +963,39 @@ def _text(payload: bytes | None) -> str:
     return payload.decode("utf-8")
 
 
+def _is_retryable_database_error(error: DBAPIError) -> bool:
+    if error.connection_invalidated:
+        return True
+    original = error.orig
+    code = (
+        getattr(original, "sqlstate", None)
+        or getattr(original, "pgcode", None)
+    )
+    if isinstance(code, str) and (
+        code.startswith("08")
+        or code in {
+            "40001",  # serialization_failure
+            "40P01",  # deadlock_detected
+            "55P03",  # lock_not_available
+            "53300",  # too_many_connections
+            "57P01",  # admin_shutdown
+        }
+    ):
+        return True
+    message = str(original).lower()
+    return any(
+        marker in message
+        for marker in (
+            "database is locked",
+            "database is busy",
+            "temporarily unavailable",
+            "connection reset",
+            "connection refused",
+            "connection closed",
+        )
+    )
+
+
 def _resolve_database_url(value: str | Path) -> str:
     if isinstance(value, Path):
         return f"sqlite+aiosqlite:///{value.expanduser().resolve()}"
@@ -966,6 +1013,6 @@ def _resolve_database_url(value: str | Path) -> str:
         or text.startswith("postgresql+asyncpg://")
     ):
         raise ValueError(
-            "V1 DatabaseRuntimeStore supports SQLite and PostgreSQL only."
+            "V1 DatabaseBackend supports SQLite and PostgreSQL only."
         )
     return text

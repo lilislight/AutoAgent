@@ -284,7 +284,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             fallback_calls += 1
             return "fallback"
 
-        def broken_aggregator(_outputs: list[str]) -> str:
+        def broken_aggregator(_ctx) -> str:
             raise ValueError("cannot aggregate")
 
         workflow = Workflow(id="aggregation_failure_boundary")

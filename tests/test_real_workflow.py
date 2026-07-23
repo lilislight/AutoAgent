@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autoagent.core.runtime import DatabaseRuntimeStore, InMemoryRuntimeStore
+from autoagent.core.runtime import DatabaseBackend, RuntimeStore
 from real_workflow import (
     EscalationPacket,
     PublishedResolution,
@@ -19,7 +19,7 @@ from real_workflow import (
 def build_test_app():
     """Keep unit tests isolated from the durable demonstration database."""
 
-    return build_incident_response_app(runtime_store=InMemoryRuntimeStore())
+    return build_incident_response_app(runtime_store=RuntimeStore())
 
 
 class RealWorkflowTests(unittest.TestCase):
@@ -27,7 +27,8 @@ class RealWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "demo.sqlite3"
             app, _ = build_incident_response_app(database_path=database_path)
-            self.assertIsInstance(app.runtime_store, DatabaseRuntimeStore)
+            self.assertIsInstance(app.runtime_store, RuntimeStore)
+            self.assertIsInstance(app.runtime_store.backend, DatabaseBackend)
             app.close()
 
     def test_compiler_expands_selected_child_path_without_diagnostics(self) -> None:

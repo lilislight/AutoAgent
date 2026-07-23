@@ -340,9 +340,9 @@ class RuntimeSerializerTests(unittest.TestCase):
         self.assertEqual(Message(role="user", content="hello"), message)
 
     def test_app_rejects_serializer_different_from_store_owner(self) -> None:
-        from autoagent.core.runtime import InMemoryRuntimeStore
+        from autoagent.core.runtime import RuntimeStore
 
-        store = InMemoryRuntimeStore(serializer=JsonRuntimeSerializer())
+        store = RuntimeStore(serializer=JsonRuntimeSerializer())
         with self.assertRaisesRegex(ValueError, "owned by runtime_store"):
             AutoAgentApp(
                 runtime_store=store,

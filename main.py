@@ -20,7 +20,13 @@ from autoagent import (
     TimeoutPolicy,
     Workflow,
 )
-from autoagent.core.runtime import ConditionContext, OutputBindingContext
+from autoagent.core.runtime import (
+    ConditionContext,
+    MapAggregationContext,
+    MapItemSelectionContext,
+    OutputBindingContext,
+    ReplicationAggregationContext,
+)
 
 
 def collect_incident_signal(
@@ -153,11 +159,11 @@ def plan_remediation(
 
 
 def select_action_items(
-    actions: list[dict[str, str]],
+    ctx: MapItemSelectionContext,
 ) -> Iterable[Mapping[str, Any]]:
     """Map each planned action to one execute_action Operator input."""
 
-    return [dict(action) for action in actions]
+    return [dict(action) for action in ctx.input]
 
 
 async def execute_action(
@@ -175,9 +181,9 @@ async def execute_action(
 
 
 def aggregate_action_results(
-    outputs: list[dict[str, object]],
+    ctx: MapAggregationContext,
 ) -> dict[str, object]:
-    return {"results": outputs}
+    return {"results": ctx.item_outputs}
 
 
 def review_remediation(results: list[dict[str, object]]) -> dict[str, object]:
@@ -193,11 +199,11 @@ def review_remediation(results: list[dict[str, object]]) -> dict[str, object]:
 
 
 def select_best_review(
-    outputs: list[dict[str, object]],
+    ctx: ReplicationAggregationContext,
 ) -> dict[str, object]:
     """Replication aggregator producing the logical review node output."""
 
-    return max(outputs, key=lambda output: int(output["score"]))
+    return max(ctx.replica_outputs, key=lambda output: int(output["score"]))
 
 
 def refine_remediation(

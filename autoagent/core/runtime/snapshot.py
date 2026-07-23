@@ -102,12 +102,115 @@ def restore_execution_state(state: dict[str, Any]) -> tuple[Session, Invocation]
     return session, invocation
 
 
-def diff_execution_state(
+_MUTABLE_SESSION_FIELDS = (
+    "context",
+    "current_invocation_id",
+    "updated_at_ms",
+)
+
+_MUTABLE_INVOCATION_FIELDS = (
+    "state",
+    "execution_mode",
+    "event_sequence",
+    "context",
+    "result",
+    "scheduler",
+    "error",
+    "deferred_error",
+    "deferred_terminal_state",
+    "updated_at_ms",
+)
+
+_MUTABLE_NODE_EXECUTION_FIELDS = (
+    "state",
+    "input",
+    "output",
+    "error",
+    "idempotency_key",
+    "recovery_of_execution_id",
+    "recovery_attempt",
+    "incoming_activations",
+    "execution_scope",
+    "operator_executions",
+    "edge_evaluations",
+    "resource_usage",
+    "started_at_ms",
+    "ended_at_ms",
+    "updated_at_ms",
+)
+
+
+def build_boundary_state_operations(
     previous: dict[str, Any],
-    current: dict[str, Any],
+    session: Session,
+    invocation: Invocation,
+    *,
+    node_execution_ids: tuple[UUID, ...] = (),
 ) -> tuple[StateOperation, ...]:
+    """Build one boundary delta from explicit mutable runtime sections.
+
+    Invocation identity, input, Workflow identity, and creation timestamps are
+    immutable after admission and therefore never scanned. NodeExecution
+    changes are addressed directly by id instead of diffing the complete
+    execution history.
+    """
+
     operations: list[StateOperation] = []
-    _diff_value(previous, current, (), operations)
+    current_session = session.to_record()
+    previous_session = previous["session"]
+    _replace_changed_fields(
+        operations,
+        section="session",
+        previous=previous_session,
+        current=current_session,
+        fields=_MUTABLE_SESSION_FIELDS,
+    )
+
+    current_invocation = invocation.to_record(session.id)
+    previous_invocation = previous["invocation"]
+    _replace_changed_fields(
+        operations,
+        section="invocation",
+        previous=previous_invocation,
+        current=current_invocation,
+        fields=_MUTABLE_INVOCATION_FIELDS,
+    )
+
+    previous_executions = previous.get("node_executions", [])
+    previous_indexes = {
+        str(record["id"]): index
+        for index, record in enumerate(previous_executions)
+    }
+    seen: set[UUID] = set()
+    for execution_id in node_execution_ids:
+        if execution_id in seen:
+            continue
+        seen.add(execution_id)
+        execution = invocation.get_node_execution(execution_id)
+        if execution is None:
+            raise KeyError(
+                f"Boundary references unknown NodeExecution: {execution_id}"
+            )
+        record = execution.to_record(invocation.id)
+        previous_index = previous_indexes.get(str(execution_id))
+        if previous_index is None:
+            operations.append(
+                StateOperation(
+                    op="add",
+                    path=("node_executions", len(previous_executions)),
+                    value=deepcopy(record),
+                )
+            )
+            previous_executions = [*previous_executions, record]
+            previous_indexes[str(execution_id)] = len(previous_executions) - 1
+        elif previous_executions[previous_index] != record:
+            _replace_changed_fields(
+                operations,
+                section=("node_executions", previous_index),
+                previous=previous_executions[previous_index],
+                current=record,
+                fields=_MUTABLE_NODE_EXECUTION_FIELDS,
+            )
     return tuple(operations)
 
 
@@ -115,7 +218,40 @@ def apply_state_operations(
     state: dict[str, Any],
     operations: tuple[StateOperation, ...],
 ) -> dict[str, Any]:
-    result = deepcopy(state)
+    if not operations:
+        return state
+    if not all(_is_boundary_operation(operation) for operation in operations):
+        result = deepcopy(state)
+        for operation in operations:
+            _apply_operation(result, operation)
+        return result
+
+    # Boundary operations only replace top-level aggregate fields or fields on
+    # one NodeExecution record. Clone those containers once instead of copying
+    # the complete Invocation history for every Event.
+    result = dict(state)
+    if any(operation.path[0] == "session" for operation in operations):
+        result["session"] = dict(state["session"])
+    if any(operation.path[0] == "invocation" for operation in operations):
+        result["invocation"] = dict(state["invocation"])
+    node_operations = [
+        operation
+        for operation in operations
+        if operation.path[0] == "node_executions"
+    ]
+    if node_operations:
+        result["node_executions"] = list(state.get("node_executions", []))
+        cloned_indexes: set[int] = set()
+        for operation in node_operations:
+            if len(operation.path) != 3:
+                continue
+            index = int(operation.path[1])
+            if index in cloned_indexes:
+                continue
+            result["node_executions"][index] = dict(
+                result["node_executions"][index]
+            )
+            cloned_indexes.add(index)
     for operation in operations:
         _apply_operation(result, operation)
     return result
@@ -136,6 +272,16 @@ def reduce_execution_state(
             continue
         if through_sequence is not None and event.sequence > through_sequence:
             break
+        expected = cursor + 1
+        if event.sequence != expected:
+            raise ValueError(
+                "RuntimeEvent journal is not contiguous: "
+                f"expected sequence {expected}, got {event.sequence}."
+            )
+        if event.invocation_id != snapshot.invocation_id:
+            raise ValueError(
+                "RuntimeEvent invocation does not match ExecutionSnapshot."
+            )
         if event.role != "boundary":
             continue
         raw_operations = event.payload.get("operations")
@@ -152,52 +298,44 @@ def reduce_execution_state(
     return restore_execution_state(state)
 
 
-def _diff_value(
-    previous: Any,
-    current: Any,
-    path: tuple[str | int, ...],
+def _replace_changed_fields(
     operations: list[StateOperation],
+    *,
+    section: str | tuple[str | int, ...],
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    fields: tuple[str, ...],
 ) -> None:
-    if type(previous) is not type(current):
+    prefix = (section,) if isinstance(section, str) else section
+    for field in fields:
+        if previous.get(field) == current.get(field):
+            continue
         operations.append(
-            StateOperation(op="replace", path=path, value=deepcopy(current))
-        )
-        return
-    if isinstance(previous, dict):
-        previous_keys = set(previous)
-        current_keys = set(current)
-        for key in sorted(previous_keys - current_keys):
-            operations.append(StateOperation(op="remove", path=(*path, key)))
-        for key in sorted(current_keys - previous_keys):
-            operations.append(
-                StateOperation(
-                    op="add",
-                    path=(*path, key),
-                    value=deepcopy(current[key]),
-                )
+            StateOperation(
+                op="replace",
+                path=(*prefix, field),
+                value=deepcopy(current.get(field)),
             )
-        for key in sorted(previous_keys & current_keys):
-            _diff_value(previous[key], current[key], (*path, key), operations)
-        return
-    if isinstance(previous, list):
-        shared = min(len(previous), len(current))
-        for index in range(shared):
-            _diff_value(previous[index], current[index], (*path, index), operations)
-        for index in range(len(previous) - 1, len(current) - 1, -1):
-            operations.append(StateOperation(op="remove", path=(*path, index)))
-        for index in range(shared, len(current)):
-            operations.append(
-                StateOperation(
-                    op="add",
-                    path=(*path, index),
-                    value=deepcopy(current[index]),
-                )
-            )
-        return
-    if previous != current:
-        operations.append(
-            StateOperation(op="replace", path=path, value=deepcopy(current))
         )
+
+
+def _is_boundary_operation(operation: StateOperation) -> bool:
+    path = operation.path
+    if operation.op == "replace":
+        return (
+            len(path) == 2
+            and path[0] in {"session", "invocation"}
+        ) or (
+            len(path) == 3
+            and path[0] == "node_executions"
+            and isinstance(path[1], int)
+        )
+    return (
+        operation.op == "add"
+        and len(path) == 2
+        and path[0] == "node_executions"
+        and isinstance(path[1], int)
+    )
 
 
 def _apply_operation(root: dict[str, Any], operation: StateOperation) -> None:

@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from concurrent.futures import Future
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
 
 from autoagent import (
     AutoAgentApp,
-    DatabaseRuntimeStore,
+    DatabaseBackend,
     EdgePolicy,
     FailurePolicy,
+    JsonRuntimeSerializer,
     MapPolicy,
     NodePolicy,
     RecoveryPolicy,
@@ -23,20 +26,26 @@ from autoagent import (
     WorkflowPolicy,
 )
 from autoagent.core.runtime import (
-    InMemoryRuntimeStore,
     Invocation,
     RuntimeEvent,
+    RuntimeStore,
+    build_boundary_state_operations,
     capture_execution_state,
-    diff_execution_state,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
+from autoagent.core.runtime.backends.database import (
+    _PersistenceItem,
+    _is_retryable_database_error,
+)
+from autoagent.core.runtime.backends.models import SessionRow
 
 
-class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
+class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.path = Path(self.directory.name) / "runtime.db"
-        self.store = DatabaseRuntimeStore.from_path(self.path)
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(backend=self.backend)
 
     async def asyncTearDown(self) -> None:
         await self.store.aclose()
@@ -46,13 +55,13 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.ainitialize()
 
         async def table_names() -> set[str]:
-            async with self.store.engine.connect() as connection:
+            async with self.backend.engine.connect() as connection:
                 rows = await connection.execute(
                     text("SELECT name FROM sqlite_master WHERE type = 'table'")
                 )
                 return set(rows.scalars())
 
-        names = await self.store._database_loop.arun(table_names())
+        names = await self.backend._database_loop.arun(table_names())
         self.assertEqual(
             {
                 "workflow_versions",
@@ -65,7 +74,7 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def table_columns(table_name: str) -> set[str]:
-            async with self.store.engine.connect() as connection:
+            async with self.backend.engine.connect() as connection:
                 return set(
                     await connection.run_sync(
                         lambda sync_connection: {
@@ -77,15 +86,238 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-        invocation_columns = await self.store._database_loop.arun(
+        invocation_columns = await self.backend._database_loop.arun(
             table_columns("invocations")
         )
-        workflow_columns = await self.store._database_loop.arun(
+        workflow_columns = await self.backend._database_loop.arun(
             table_columns("workflow_versions")
         )
         self.assertNotIn("state_json", invocation_columns)
         self.assertNotIn("snapshot_json", workflow_columns)
         self.assertNotIn("operator_manifests_json", workflow_columns)
+
+    async def test_admission_serialization_failure_leaves_session_unclaimed(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        serializer = JsonRuntimeSerializer(max_inline_bytes=2_048)
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(
+            backend=self.backend,
+            serializer=serializer,
+        )
+        workflow = Workflow(id="atomic_admission")
+        workflow.add_node(lambda value: len(value), node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        with self.assertRaisesRegex(Exception, "max_inline_bytes"):
+            await app.ainvoke(
+                workflow,
+                input={"value": "x" * 10_000},
+                session_id="same",
+            )
+
+        session = self.store.find_session(
+            namespace="default",
+            workflow_id=workflow.id,
+            session_key="same",
+        )
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertIsNone(session.get_current_invocation())
+        self.assertEqual({}, self.store.invocations)
+        self.assertEqual({}, self.store._pending_admissions)
+        await app.aclose()
+
+    async def test_event_serialization_failure_restores_committed_runtime(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        serializer = JsonRuntimeSerializer(max_inline_bytes=10_000)
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(
+            backend=self.backend,
+            serializer=serializer,
+        )
+        workflow = Workflow(id="atomic_event")
+        workflow.add_node(lambda: "x" * 6_000, node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        with self.assertRaisesRegex(Exception, "max_inline_bytes"):
+            await app.ainvoke(workflow, session_id="same")
+
+        session = self.store.find_session(
+            namespace="default",
+            workflow_id=workflow.id,
+            session_key="same",
+        )
+        assert session is not None
+        invocation = session.get_current_invocation()
+        assert invocation is not None
+        self.assertEqual(2, invocation.event_sequence)
+        self.assertEqual(
+            capture_execution_state(session, invocation),
+            self.store.committed_state(invocation.id),
+        )
+        self.assertEqual(
+            2,
+            len(self.store.runtime_events[invocation.id]),
+        )
+        await app.aclose()
+
+    async def test_fatal_backend_before_event_acceptance_restores_genesis(
+        self,
+    ) -> None:
+        workflow = Workflow(id="fatal_event_acceptance")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        entry = app.register_workflow(workflow)
+        await self.store.asave_workflow_snapshot(
+            app.namespace,
+            entry.workflow_snapshot,
+        )
+        session = await self.store.aget_or_create_session(
+            namespace=app.namespace,
+            workflow_id=workflow.id,
+            session_key="same",
+        )
+        invocation = Invocation(
+            workflow_id=workflow.id,
+            workflow_version=entry.workflow_ir.workflow_version,
+            workflow_definition_hash=entry.workflow_ir.definition_hash,
+            workflow_operator_manifest_hash=(
+                entry.workflow_snapshot.operator_manifest_hash
+            ),
+            entry_node_id="node",
+        )
+        session = await self.store.aadmit_invocation(
+            session.id,
+            invocation,
+        )
+        self.backend._fatal_persistence_error = RuntimeError("offline")
+
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await app.workflow_executor.ainvoke(
+                workflow_ir=entry.workflow_ir,
+                session=session,
+                invocation=invocation,
+            )
+
+        self.assertEqual("created", invocation.state)
+        self.assertEqual(0, invocation.event_sequence)
+        self.assertEqual([], self.store.runtime_events[invocation.id])
+        self.backend._fatal_persistence_error = None
+        await app.aclose()
+
+    async def test_batch_byte_limit_finishes_current_batch(self) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            batch_max_bytes=1_000,
+            batch_max_delay_ms=0,
+        )
+        self.store = RuntimeStore(backend=self.backend)
+        session_id = Invocation(
+            workflow_id="batch",
+            workflow_version=1,
+            entry_node_id="node",
+        ).id
+        key = str(session_id)
+        self.backend._queues[key] = deque(
+            [
+                _PersistenceItem(
+                    kind="event",
+                    session_id=session_id,
+                    invocation_id=None,
+                    value=None,
+                    encoded=b"x",
+                    size_bytes=700,
+                ),
+                _PersistenceItem(
+                    kind="event",
+                    session_id=session_id,
+                    invocation_id=None,
+                    value=None,
+                    encoded=b"x",
+                    size_bytes=700,
+                ),
+            ]
+        )
+        self.backend._ready_sessions.append(key)
+        self.backend._ready_set.add(key)
+
+        first = await asyncio.wait_for(
+            self.backend._take_batch(),
+            timeout=0.1,
+        )
+        second = await asyncio.wait_for(
+            self.backend._take_batch(),
+            timeout=0.1,
+        )
+
+        self.assertEqual([700], [item.size_bytes for item in first])
+        self.assertEqual([700], [item.size_bytes for item in second])
+
+    async def test_session_row_timestamp_tracks_committed_events(self) -> None:
+        workflow = Workflow(id="session_timestamp")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(workflow, session_id="same")
+        await self.store.aflush()
+        session = self.store.sessions[
+            self.store.invocation_sessions[invocation.id]
+        ]
+
+        async def load_updated_at() -> int:
+            async with self.backend._database_sessions() as database:
+                row = await database.scalar(
+                    select(SessionRow).where(
+                        SessionRow.id == str(session.id)
+                    )
+                )
+                assert row is not None
+                return row.updated_at_ms
+
+        persisted = await self.backend._database_loop.arun(
+            load_updated_at()
+        )
+        self.assertEqual(session.updated_at_ms, persisted)
+        await app.aclose()
+
+    def test_snapshot_interval_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "snapshot_interval"):
+            DatabaseBackend.from_path(self.path, snapshot_interval=0)
+
+    def test_retryable_database_errors_are_classified_explicitly(self) -> None:
+        locked = OperationalError(
+            "INSERT",
+            {},
+            OSError("database is locked"),
+            connection_invalidated=False,
+        )
+        invalid_query = OperationalError(
+            "INSERT",
+            {},
+            OSError("no such table"),
+            connection_invalidated=False,
+        )
+        self.assertTrue(_is_retryable_database_error(locked))
+        self.assertFalse(_is_retryable_database_error(invalid_query))
+
+    def test_transient_error_pauses_admission_only_at_byte_watermark(self) -> None:
+        self.backend._persistence_error = OperationalError(
+            "INSERT",
+            {},
+            OSError("database is locked"),
+            connection_invalidated=False,
+        )
+
+        self.assertFalse(self.backend.admission_paused)
+        with self.backend._pressure_lock:
+            self.backend._pending_bytes = (
+                self.backend.queue_high_watermark_bytes
+            )
+        self.assertTrue(self.backend.admission_paused)
 
     async def test_sqlite_round_trip_rebuilds_from_genesis_and_boundary_events(self) -> None:
         workflow = Workflow(id="database_round_trip")
@@ -98,7 +330,8 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         await app.aclose()
 
-        reopened = DatabaseRuntimeStore.from_path(self.path)
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened = RuntimeStore(backend=self.backend)
         self.store = reopened
         events = await reopened.alist_runtime_events(
             invocation_id=invocation.id,
@@ -113,6 +346,33 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             [event.sequence for event in events],
         )
         self.assertTrue(all(event.role == "boundary" for event in events))
+
+    async def test_rebuild_from_periodic_snapshot_caches_complete_event_history(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(self.path, snapshot_interval=2)
+        self.store = RuntimeStore(backend=self.backend)
+        workflow = Workflow(id="snapshot_event_cache")
+        workflow.add_node(lambda value: value + 1, node_id="increment")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(workflow, input={"value": 1})
+        await app.aclose()
+
+        self.backend = DatabaseBackend.from_path(self.path, snapshot_interval=2)
+        reopened = RuntimeStore(backend=self.backend)
+        self.store = reopened
+        _, rebuilt = await reopened.arebuild_execution(invocation.id)
+        cached = await reopened.alist_runtime_events(
+            invocation_id=invocation.id,
+            limit=10_000,
+        )
+
+        self.assertEqual("completed", rebuilt.state)
+        self.assertEqual(
+            list(range(1, rebuilt.event_sequence + 1)),
+            [event.sequence for event in cached],
+        )
 
     async def test_sequences_restart_at_one_for_each_invocation(self) -> None:
         workflow = Workflow(id="per_invocation_sequence")
@@ -167,12 +427,53 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         await app.aclose()
 
     async def test_postgresql_url_uses_generic_async_dialect(self) -> None:
-        store = DatabaseRuntimeStore("postgresql://user:pass@localhost/runtime")
+        backend = DatabaseBackend("postgresql://user:pass@localhost/runtime")
         try:
-            self.assertEqual("postgresql", store.engine.dialect.name)
-            self.assertTrue(store.database_url.startswith("postgresql+asyncpg://"))
+            self.assertEqual("postgresql", backend.engine.dialect.name)
+            self.assertTrue(backend.database_url.startswith("postgresql+asyncpg://"))
         finally:
-            await store.aclose()
+            await backend.aclose()
+
+    async def test_runtime_serialization_runs_on_persistence_thread(self) -> None:
+        class RecordingSerializer(JsonRuntimeSerializer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.dump_threads: list[str] = []
+
+            def dumps(self, value) -> bytes:
+                self.dump_threads.append(threading.current_thread().name)
+                return super().dumps(value)
+
+        await self.store.aclose()
+        serializer = RecordingSerializer()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            snapshot_interval=1,
+        )
+        self.store = RuntimeStore(
+            backend=self.backend,
+            serializer=serializer,
+        )
+        execution_threads: list[str] = []
+
+        async def run() -> str:
+            execution_threads.append(threading.current_thread().name)
+            return "done"
+
+        workflow = Workflow(id="persistence_thread_serialization")
+        workflow.add_node(run, node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        invocation = await app.ainvoke(workflow)
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual(["autoagent-runtime-default"], execution_threads)
+        self.assertTrue(serializer.dump_threads)
+        self.assertEqual(
+            {"autoagent-persistence-runtime"},
+            set(serializer.dump_threads),
+        )
+        await app.aclose()
 
     async def test_wait_and_resume_are_durable_barriers(self) -> None:
         workflow = Workflow(id="database_wait_resume")
@@ -186,7 +487,8 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("waiting", waiting.state)
         await app.aclose()
 
-        reopened = DatabaseRuntimeStore.from_path(self.path)
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened = RuntimeStore(backend=self.backend)
         self.store = reopened
         restarted = AutoAgentApp(runtime_store=reopened)
         resumed = await restarted.aresume(
@@ -199,7 +501,7 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"output": {"approved": True}}, resumed.result)
 
     async def test_transient_database_failure_retries_without_losing_events(self) -> None:
-        class FlakyStore(DatabaseRuntimeStore):
+        class FlakyBackend(DatabaseBackend):
             failures_remaining = 1
 
             async def _persist_batch(self, batch) -> None:
@@ -217,7 +519,9 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        flaky = FlakyStore.from_path(self.path)
+        flaky_backend = FlakyBackend.from_path(self.path)
+        flaky = RuntimeStore(backend=flaky_backend)
+        self.backend = flaky_backend
         self.store = flaky
         workflow = Workflow(id="database_retry_queue")
         workflow.add_node(lambda: "ok", node_id="node")
@@ -225,14 +529,15 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         invocation = await app.ainvoke(workflow)
         await flaky.aflush()
         await app.aclose()
-        reopened = DatabaseRuntimeStore.from_path(self.path)
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened = RuntimeStore(backend=self.backend)
         self.store = reopened
         events = await reopened.alist_runtime_events(
             invocation_id=invocation.id,
             limit=10_000,
         )
 
-        self.assertEqual(0, flaky.failures_remaining)
+        self.assertEqual(0, flaky_backend.failures_remaining)
         self.assertEqual(
             list(range(1, len(events) + 1)),
             [event.sequence for event in events],
@@ -241,7 +546,7 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_return_does_not_wait_for_event_persistence(self) -> None:
         release = threading.Event()
 
-        class SlowStore(DatabaseRuntimeStore):
+        class SlowBackend(DatabaseBackend):
             async def _persist_batch(self, batch) -> None:
                 if any(item.kind == "event" for item in batch):
                     while not release.is_set():
@@ -249,7 +554,9 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        slow = SlowStore.from_path(self.path)
+        slow_backend = SlowBackend.from_path(self.path)
+        slow = RuntimeStore(backend=slow_backend)
+        self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="nonblocking_terminal")
         workflow.add_node(lambda: "done", node_id="node")
@@ -270,7 +577,7 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         release = threading.Event()
 
-        class SlowStore(DatabaseRuntimeStore):
+        class SlowBackend(DatabaseBackend):
             async def _persist_batch(self, batch) -> None:
                 if any(item.kind == "event" for item in batch):
                     while not release.is_set():
@@ -278,12 +585,14 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        slow = SlowStore.from_path(
+        slow_backend = SlowBackend.from_path(
             self.path,
             queue_low_watermark_bytes=128,
             queue_high_watermark_bytes=512,
             queue_hard_watermark_bytes=1024 * 1024,
         )
+        slow = RuntimeStore(backend=slow_backend)
+        self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="byte_backpressure")
         workflow.add_node(lambda: "done", node_id="node")
@@ -302,7 +611,7 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         await app.aclose()
 
     async def test_boundary_events_are_coalesced_into_database_batches(self) -> None:
-        class RecordingStore(DatabaseRuntimeStore):
+        class RecordingBackend(DatabaseBackend):
             event_batch_sizes: list[int]
 
             def __init__(self, *args, **kwargs) -> None:
@@ -316,10 +625,12 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        recording = RecordingStore.from_path(
+        recording_backend = RecordingBackend.from_path(
             self.path,
             batch_max_delay_ms=10,
         )
+        recording = RuntimeStore(backend=recording_backend)
+        self.backend = recording_backend
         self.store = recording
         workflow = Workflow(id="batch_events")
         workflow.add_node(lambda: "done", node_id="node")
@@ -328,13 +639,13 @@ class DatabaseRuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         await app.ainvoke(workflow)
         await recording.aflush()
 
-        self.assertGreater(max(recording.event_batch_sizes), 1)
+        self.assertGreater(max(recording_backend.event_batch_sizes), 1)
         await app.aclose()
 
 
 class BoundaryEventTests(unittest.TestCase):
     def test_simple_node_emits_only_semantic_boundary_roles(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="boundary_roles")
         workflow.add_node(lambda value: value, node_id="node")
@@ -357,7 +668,7 @@ class BoundaryEventTests(unittest.TestCase):
         self.assertFalse(any("ready_queue" in event.type for event in events))
 
     def test_reducer_rebuilds_exact_node_phase_by_boundary_sequence(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="boundary_rebuild")
         workflow.add_node(lambda value: value.upper(), node_id="node")
@@ -391,8 +702,53 @@ class BoundaryEventTests(unittest.TestCase):
         self.assertEqual("HELLO", output_ready.node_executions[0].output)
         self.assertEqual(1, len(output_ready.node_executions[0].operator_executions))
 
+    def test_boundary_operations_replace_only_explicit_aggregate_fields(self) -> None:
+        store = RuntimeStore()
+        app = AutoAgentApp(runtime_store=store)
+        workflow = Workflow(id="explicit_boundary_operations")
+        workflow.add_node(lambda: "first", node_id="first")
+        workflow.add_node(lambda value: value, node_id="second")
+        workflow.add_edge("first", "second")
+
+        invocation = app.invoke(workflow)
+        events = asyncio.run(
+            store.alist_runtime_events(invocation_id=invocation.id, limit=10_000)
+        )
+
+        for event in events:
+            for operation in event.payload["operations"]:
+                path = operation["path"]
+                self.assertIn(
+                    path[0],
+                    {"session", "invocation", "node_executions"},
+                )
+                if path[0] == "node_executions":
+                    self.assertIn(len(path), {2, 3})
+                    self.assertIsInstance(path[1], int)
+                    if len(path) == 3:
+                        self.assertIsInstance(path[2], str)
+                else:
+                    self.assertEqual(2, len(path))
+                    self.assertIsInstance(path[1], str)
+
+        committed = next(
+            event
+            for event in events
+            if event.boundary == "node.committed"
+            and event.payload["detail"]["node_id"] == "first"
+        )
+        committed_paths = {
+            tuple(operation["path"])
+            for operation in committed.payload["operations"]
+        }
+        self.assertNotIn(("node_executions", 0, "output"), committed_paths)
+        self.assertNotIn(
+            ("node_executions", 0, "operator_executions"),
+            committed_paths,
+        )
+
     def test_map_selector_units_are_not_persisted_at_input_boundary(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="map_input_boundary")
         workflow.add_node(lambda values: values, node_id="source")
@@ -401,8 +757,8 @@ class BoundaryEventTests(unittest.TestCase):
             "source",
             "target",
             policy=EdgePolicy(
-                map=MapPolicy(item_selector=lambda values: [
-                    {"value": value} for value in values
+                map=MapPolicy(item_selector=lambda ctx: [
+                    {"value": value} for value in ctx.input
                 ])
             ),
         )
@@ -424,7 +780,7 @@ class BoundaryEventTests(unittest.TestCase):
         self.assertEqual([], target.operator_executions)
 
     def test_map_unit_count_does_not_expand_event_or_execution_records(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="bounded_map_history")
         workflow.add_node(lambda: list(range(100)), node_id="source")
@@ -434,8 +790,8 @@ class BoundaryEventTests(unittest.TestCase):
             "target",
             policy=EdgePolicy(
                 map=MapPolicy(
-                    item_selector=lambda values: [
-                        {"value": value} for value in values
+                    item_selector=lambda ctx: [
+                        {"value": value} for value in ctx.input
                     ],
                     max_parallelism=20,
                 )
@@ -497,7 +853,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         )
         workflow.add_node(forbidden, node_id="forbidden")
         workflow.add_edge("safe", "forbidden")
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         entry = app.register_workflow(workflow)
         session = await store.aget_or_create_session(
@@ -521,8 +877,12 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         execution = invocation.create_node_execution("safe")
         invocation.mark_node_running(execution.id)
         sequence = invocation.next_event_sequence()
-        current = capture_execution_state(session, invocation)
-        operations = diff_execution_state(previous, current)
+        operations = build_boundary_state_operations(
+            previous,
+            session,
+            invocation,
+            node_execution_ids=(execution.id,),
+        )
         await store.aapply_event(
             session,
             invocation,
@@ -586,7 +946,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         workflow.add_edge("blocked", "must_skip")
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         entry = app.register_workflow(workflow)
         session = await store.aget_or_create_session(
@@ -608,7 +968,11 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         invocation.scheduler.enqueue_ready("allowed")
         invocation.mark_running()
         sequence = invocation.next_event_sequence()
-        current = capture_execution_state(session, invocation)
+        operations = build_boundary_state_operations(
+            previous,
+            session,
+            invocation,
+        )
         await store.aapply_event(
             session,
             invocation,
@@ -620,7 +984,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
                 payload={
                     "operations": [
                         operation.model_dump(mode="python")
-                        for operation in diff_execution_state(previous, current)
+                        for operation in operations
                     ]
                 },
             ),
@@ -641,3 +1005,34 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(recovered.latest_node_execution("blocked"))
         self.assertIsNone(recovered.latest_node_execution("must_skip"))
+
+
+@unittest.skipUnless(
+    os.environ.get("AUTOAGENT_TEST_POSTGRES_URL"),
+    "AUTOAGENT_TEST_POSTGRES_URL is not configured",
+)
+class PostgreSQLDatabaseBackendIntegrationTests(
+    unittest.IsolatedAsyncioTestCase
+):
+    async def test_postgresql_round_trip(self) -> None:
+        database_url = os.environ["AUTOAGENT_TEST_POSTGRES_URL"]
+        workflow = Workflow(id=f"postgres_{os.getpid()}_{id(self)}")
+        workflow.add_node(lambda value: value + 1, node_id="node")
+        backend = DatabaseBackend(database_url)
+        store = RuntimeStore(backend=backend)
+        app = AutoAgentApp(runtime_store=store)
+        invocation = await app.ainvoke(
+            workflow,
+            input={"value": 1},
+            session_id=f"session_{id(self)}",
+        )
+        await store.aflush()
+        await app.aclose()
+
+        reopened_backend = DatabaseBackend(database_url)
+        reopened = RuntimeStore(backend=reopened_backend)
+        try:
+            _, rebuilt = await reopened.arebuild_execution(invocation.id)
+            self.assertEqual(invocation.result, rebuilt.result)
+        finally:
+            await reopened.aclose()

@@ -1,103 +1,151 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from autoagent.core.runtime.execution import NodeExecution
-from autoagent.core.runtime.readonly import to_read_only
+from autoagent.core.runtime.scheduler import ExecutionScope
 
 _MISSING = object()
 
 
 @dataclass(frozen=True)
 class NodeOutput:
-    """Output produced by one completed NodeExecution.
-
-    This is a read model, not a mutable runtime record. OutputContext rebuilds
-    it from Invocation.node_executions whenever input_mapping/condition/output
-    binding needs a stable view of completed outputs.
-    """
+    """One copied output returned by ``OutputView.timeline``."""
 
     node_execution_id: UUID
     node_id: str
     sequence: int
+    execution_scope: ExecutionScope
     value: Any
 
 
-class OutputContext:
-    """Read-only node output index rebuilt from completed node executions.
+@dataclass(frozen=True)
+class _OutputEntry:
+    node_execution_id: UUID
+    node_id: str
+    sequence: int
+    execution_scope: ExecutionScope
+    value: Any
 
-    This object is how user hooks read prior node results. It intentionally
-    exposes only completed NodeExecution.output values, never internal
-    individual parallel-unit outputs. Map and replication details are reduced
-    to a bounded summary on NodeExecution.operator_executions.
 
-    latest(node_id):
-        Returns the newest completed output for a node id. This is the default
-        read path for loops because a node can execute many times.
+class OutputIndex:
+    """Invocation-owned index of completed logical node outputs.
 
-    all(node_id):
-        Returns every completed output for a node id in execution order.
+    Entries reference the authoritative ``NodeExecution.output`` value. User
+    hooks never receive these references directly: ``OutputView`` deep-copies
+    only values that a hook actually reads.
+    """
 
-    timeline(node_ids=None):
-        Returns ordered NodeOutput records across nodes. Use this when building
-        chat/message history or trace-like input where global order matters.
+    def __init__(self, executions: list[NodeExecution] | None = None) -> None:
+        self._timeline: list[_OutputEntry] = []
+        self._by_node_id: dict[str, list[_OutputEntry]] = {}
+        for execution in sorted(executions or (), key=lambda item: item.sequence):
+            if execution.state == "completed":
+                self.add(execution)
+
+    def add(self, execution: NodeExecution) -> None:
+        entry = _OutputEntry(
+            node_execution_id=execution.id,
+            node_id=execution.node_id,
+            sequence=execution.sequence,
+            execution_scope=execution.execution_scope,
+            value=execution.output,
+        )
+        self._timeline.append(entry)
+        self._by_node_id.setdefault(entry.node_id, []).append(entry)
+
+    def view(
+        self,
+        *,
+        node_id_aliases: dict[str, str] | None = None,
+    ) -> OutputView:
+        through_sequence = self._timeline[-1].sequence if self._timeline else 0
+        return OutputView(
+            self,
+            through_sequence=through_sequence,
+            node_id_aliases=node_id_aliases,
+        )
+
+
+class OutputView:
+    """Lazy, isolated view of completed logical node outputs.
+
+    Creating a view is constant-size and does not copy historical output
+    values. ``latest``, ``all`` and ``timeline`` copy only values returned to
+    the user hook, so hook mutation cannot alter runtime-owned state.
     """
 
     def __init__(
         self,
-        outputs: list[NodeOutput] | None = None,
+        index: OutputIndex,
         *,
+        through_sequence: int,
         node_id_aliases: dict[str, str] | None = None,
     ) -> None:
-        self._timeline: list[NodeOutput] = list(outputs or [])
+        self._index = index
+        self._through_sequence = through_sequence
         self._node_id_aliases = dict(node_id_aliases or {})
-        self._by_node_id: dict[str, list[NodeOutput]] = {}
-        for output in self._timeline:
-            self._by_node_id.setdefault(output.node_id, []).append(output)
 
     def has(self, node_id: str) -> bool:
-        return bool(self._by_node_id.get(self._resolve_node_id(node_id)))
+        return self._latest_entry(node_id) is not None
 
     def latest(self, node_id: str, default: Any = _MISSING) -> Any:
-        outputs = self._by_node_id.get(self._resolve_node_id(node_id))
-        if outputs:
-            return outputs[-1].value
+        entry = self._latest_entry(node_id)
+        if entry is not None:
+            return deepcopy(entry.value)
         if default is not _MISSING:
-            return default
+            return deepcopy(default)
         raise KeyError(f"No output found for node: {node_id}")
 
     def all(self, node_id: str) -> list[Any]:
         resolved = self._resolve_node_id(node_id)
-        return [output.value for output in self._by_node_id.get(resolved, [])]
+        return [
+            deepcopy(entry.value)
+            for entry in self._index._by_node_id.get(resolved, ())
+            if entry.sequence <= self._through_sequence
+        ]
 
     def timeline(self, node_ids: list[str] | tuple[str, ...] | None = None) -> list[NodeOutput]:
-        if node_ids is None:
-            return list(self._timeline)
-        allowed = {self._resolve_node_id(node_id) for node_id in node_ids}
-        return [output for output in self._timeline if output.node_id in allowed]
+        allowed = (
+            None
+            if node_ids is None
+            else {self._resolve_node_id(node_id) for node_id in node_ids}
+        )
+        return [
+            NodeOutput(
+                node_execution_id=entry.node_execution_id,
+                node_id=entry.node_id,
+                sequence=entry.sequence,
+                execution_scope=entry.execution_scope,
+                value=deepcopy(entry.value),
+            )
+            for entry in self._index._timeline
+            if entry.sequence <= self._through_sequence
+            and (allowed is None or entry.node_id in allowed)
+        ]
 
-    def scoped(self, node_id_aliases: dict[str, str]) -> OutputContext:
+    def scoped(self, node_id_aliases: dict[str, str]) -> OutputView:
         """Return a view resolving local child Workflow ids to expanded ids."""
 
         if not node_id_aliases:
             return self
-        return OutputContext(self._timeline, node_id_aliases=node_id_aliases)
+        aliases = dict(self._node_id_aliases)
+        aliases.update(node_id_aliases)
+        return OutputView(
+            self._index,
+            through_sequence=self._through_sequence,
+            node_id_aliases=aliases,
+        )
 
     def _resolve_node_id(self, node_id: str) -> str:
         return self._node_id_aliases.get(node_id, node_id)
 
-    @classmethod
-    def from_executions(cls, executions: list[NodeExecution]) -> OutputContext:
-        outputs = [
-            NodeOutput(
-                node_execution_id=execution.id,
-                node_id=execution.node_id,
-                sequence=execution.sequence,
-                value=to_read_only(execution.output),
-            )
-            for execution in sorted(executions, key=lambda item: item.sequence)
-            if execution.state == "completed"
-        ]
-        return cls(outputs)
+    def _latest_entry(self, node_id: str) -> _OutputEntry | None:
+        resolved = self._resolve_node_id(node_id)
+        for entry in reversed(self._index._by_node_id.get(resolved, ())):
+            if entry.sequence <= self._through_sequence:
+                return entry
+        return None

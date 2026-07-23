@@ -7,6 +7,9 @@ instead of archived in this file.
 
 - Feed the unified Runtime Event protocol to optimizer inputs after event types
   have been exercised by real workloads.
+- Add terminal Invocation memory eviction only after all Runtime Events are
+  durable and no local subscriber still needs the aggregate. A later lookup
+  must rebuild it from snapshot plus Events through RuntimeStore.
 
 ## Stage 5: Higher-Level Agent Features
 
@@ -25,3 +28,9 @@ instead of archived in this file.
   updated workflow graph/version explicitly.
 - Produce reviewable Workflow patches instead of mutating active executions.
 - Evaluate patches against recorded runtime data before promotion.
+
+## Hosted Runtime (Deferred)
+
+- Before multiple runner processes can own the same durable RuntimeStore, add
+  per-Invocation leases with fencing tokens and idempotent takeover. Local V1
+  intentionally has no distributed ownership protocol.

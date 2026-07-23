@@ -77,7 +77,8 @@ preserve these rules.
 - Caller cancellation marks the Invocation and active NodeExecutions cancelled,
   cancels asynchronous tasks, detaches synchronous work, and persists the final
   state before re-raising `CancelledError`.
-- InMemoryRuntimeStore rebuilds Sessions, Invocations, contexts, scheduler
-  cursors, NodeExecutions, OperatorCalls, outputs, and waits from records.
-  Durable transactions and process-restart wait/resume require the future
-  SQLite RuntimeStore.
+- RuntimeStore is always the authoritative in-memory center. It rebuilds
+  Sessions, Invocations, contexts, scheduler cursors, NodeExecutions, logical
+  Operator executions, outputs, and waits from snapshots plus boundary Events.
+  Attaching DatabaseBackend adds asynchronous SQLite or PostgreSQL durability
+  without changing executor behavior or making database state authoritative.

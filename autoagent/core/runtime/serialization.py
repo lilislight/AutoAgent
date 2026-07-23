@@ -90,7 +90,7 @@ class JsonRuntimeSerializer(RuntimeSerializer):
     without those registrations for observation endpoints.
     """
 
-    def __init__(self, *, max_inline_bytes: int | None = 1_048_576) -> None:
+    def __init__(self, *, max_inline_bytes: int | None = None) -> None:
         if max_inline_bytes is not None and max_inline_bytes <= 0:
             raise ValueError("max_inline_bytes must be positive or None.")
         self.max_inline_bytes = max_inline_bytes

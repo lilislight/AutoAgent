@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from autoagent.core.runtime.context import (
+        MapAggregationContext,
+        MapItemSelectionContext,
+        ReplicationAggregationContext,
+    )
+else:
+    MapAggregationContext = Any
+    MapItemSelectionContext = Any
+    ReplicationAggregationContext = Any
 
 
 class FailurePolicy(BaseModel):
@@ -186,11 +197,15 @@ class ReplicationPolicy(BaseModel):
     count: int = Field(
         description="How many parallel handler units to run for one NodeExecution.",
     )
-    output_aggregator: Callable[[list[Any]], Any | Awaitable[Any]] | None = Field(
+    output_aggregator: Callable[
+        [ReplicationAggregationContext],
+        Any | Awaitable[Any],
+    ] | None = Field(
         default=None,
         description=(
-            "Required aggregation function for replication. It receives all "
-            "successful unit outputs and returns the final "
+            "Required aggregation function for replication. It receives one "
+            "ReplicationAggregationContext whose replica_outputs contains all "
+            "successful unit outputs, and returns the final "
             "NodeExecution.output consumed by downstream nodes. If any replica "
             "fails, remaining calls are cancelled when possible and this hook is "
             "not called."
@@ -254,22 +269,26 @@ class MapPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     item_selector: Callable[
-        [Any],
+        [MapItemSelectionContext],
         Iterable[Mapping[str, Any]]
         | Awaitable[Iterable[Mapping[str, Any]]],
     ] | None = Field(
         default=None,
         description=(
-            "Maps source NodeExecution.output into iterable target operator "
-            "argument mappings. Each selected mapping is copied to a dict and "
+            "Receives one MapItemSelectionContext and maps its input into "
+            "iterable target operator argument mappings. Each selected mapping is copied to a dict and "
             "becomes one map item. When omitted, the source output "
             "must itself be an iterable of argument mappings."
         ),
     )
-    output_aggregator: Callable[[list[Any]], Any | Awaitable[Any]] | None = Field(
+    output_aggregator: Callable[
+        [MapAggregationContext],
+        Any | Awaitable[Any],
+    ] | None = Field(
         default=None,
         description=(
-            "Aggregates map item outputs into the target NodeExecution.output. "
+            "Receives one MapAggregationContext and aggregates item_outputs "
+            "into the target NodeExecution.output. "
             "When omitted, outputs are collected into a list ordered by item "
             "index. If any item fails, remaining calls are cancelled when "
             "possible and this hook is not called."

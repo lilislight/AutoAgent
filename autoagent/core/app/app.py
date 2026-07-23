@@ -19,7 +19,6 @@ from autoagent.core.operators import (
 )
 from autoagent.core.operators.contract import ensure_callable_contract
 from autoagent.core.runtime import (
-    InMemoryRuntimeStore,
     Invocation,
     JsonRuntimeSerializer,
     RuntimeCodec,
@@ -91,7 +90,7 @@ class AutoAgentApp:
             operator_registry=self.operator_registry,
         )
         if runtime_store is None:
-            runtime_store = InMemoryRuntimeStore(serializer=runtime_serializer)
+            runtime_store = RuntimeStore(serializer=runtime_serializer)
         elif (
             runtime_serializer is not None
             and runtime_store.serializer is not runtime_serializer
@@ -168,9 +167,11 @@ class AutoAgentApp:
 
         if self._closed:
             return
-        self._runtime_loop.run(self._aclose_on_runtime_loop())
-        self._runtime_loop.stop()
-        self._closed = True
+        try:
+            self._runtime_loop.run(self._aclose_on_runtime_loop())
+        finally:
+            self._runtime_loop.stop()
+            self._closed = True
 
     async def aclose(self) -> None:
         """Release database pools and other RuntimeStore resources."""
@@ -178,12 +179,16 @@ class AutoAgentApp:
         if self._closed:
             return
         if self._runtime_loop.is_current():
-            await self._aclose_on_runtime_loop()
-            self._closed = True
+            try:
+                await self._aclose_on_runtime_loop()
+            finally:
+                self._closed = True
             return
-        await self._runtime_loop.arun(self._aclose_on_runtime_loop())
-        self._runtime_loop.stop()
-        self._closed = True
+        try:
+            await self._runtime_loop.arun(self._aclose_on_runtime_loop())
+        finally:
+            self._runtime_loop.stop()
+            self._closed = True
 
     async def _aclose_on_runtime_loop(self) -> None:
         await self.runtime_store.aclose()
@@ -645,14 +650,20 @@ class AutoAgentApp:
             session_id=session_id,
         )
         current = session.get_current_invocation()
+        if current is not None and current.state == "waiting":
+            raise SessionBusyError(session, current)
         if current is not None and current.state in {"created", "running"}:
-            # Recovery always starts from the durable Genesis/snapshot + event
-            # prefix, never from a mutable materialized database cache.
-            session, current = await self.runtime_store.arebuild_execution(
-                current.id
-            )
             if not self._claim_invocation_live(current.id):
                 raise SessionBusyError(session, current)
+            # Recovery always starts from the durable Genesis/snapshot + event
+            # prefix, never from a mutable materialized database cache.
+            try:
+                session, current = await self.runtime_store.arebuild_execution(
+                    current.id
+                )
+            except BaseException:
+                self._set_invocation_live(current.id, False)
+                raise
             return _PreparedInvocation(
                 workflow_ir=workflow_ir,
                 workflow_snapshot=workflow_snapshot,

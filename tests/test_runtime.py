@@ -4,17 +4,103 @@ import unittest
 
 from autoagent import AutoAgentApp, Workflow
 from autoagent.core.runtime import (
+    apply_state_operations,
+    capture_execution_state,
     DirectOperatorExecution,
-    InMemoryRuntimeStore,
+    ExecutionSnapshot,
+    RuntimeStore,
     Invocation,
     ParallelExecutionSummary,
     ParallelOperatorExecution,
+    reduce_execution_state,
+    RuntimeEvent,
+    Session,
+    StateOperation,
 )
+from autoagent.core.runtime.time import utc_timestamp_ms
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
+    def test_state_operations_copy_only_changed_aggregate_paths(self) -> None:
+        first = {"id": "first", "state": "completed"}
+        second = {"id": "second", "state": "running"}
+        state = {
+            "session": {"context": {}},
+            "invocation": {"state": "running"},
+            "node_executions": [first, second],
+        }
+
+        reduced = apply_state_operations(
+            state,
+            (
+                StateOperation(
+                    op="replace",
+                    path=("node_executions", 1, "state"),
+                    value="completed",
+                ),
+            ),
+        )
+
+        self.assertIsNot(state, reduced)
+        self.assertIs(first, reduced["node_executions"][0])
+        self.assertIsNot(second, reduced["node_executions"][1])
+        self.assertEqual("completed", reduced["node_executions"][1]["state"])
+
+    def test_reducer_rejects_non_contiguous_event_journal(self) -> None:
+        session = Session(workflow_id="flow", session_key="session")
+        invocation = Invocation(
+            workflow_id="flow",
+            workflow_version=1,
+            entry_node_id="entry",
+        )
+        session.add_invocation(invocation)
+        snapshot = ExecutionSnapshot.capture(
+            session,
+            invocation,
+            through_sequence=0,
+        )
+        event = RuntimeEvent(
+            invocation_id=invocation.id,
+            sequence=2,
+            type="routing.committed",
+            occurred_at_ms=utc_timestamp_ms(),
+            payload={"operations": []},
+        )
+
+        with self.assertRaisesRegex(ValueError, "not contiguous"):
+            reduce_execution_state(snapshot, (event,))
+
+    def test_output_view_copies_only_values_that_are_read(self) -> None:
+        copies = 0
+
+        class TrackedValue:
+            def __deepcopy__(self, memo):
+                nonlocal copies
+                copies += 1
+                return self
+
+        invocation = Invocation(
+            workflow_id="flow",
+            workflow_version=1,
+            entry_node_id="entry",
+        )
+        first = invocation.create_node_execution("first")
+        second = invocation.create_node_execution("second")
+        invocation.mark_node_completed(first.id, TrackedValue())
+        invocation.mark_node_completed(second.id, TrackedValue())
+
+        outputs = invocation.outputs
+        self.assertTrue(outputs.has("first"))
+        self.assertEqual(0, copies)
+
+        outputs.latest("second")
+        self.assertEqual(1, copies)
+
+        outputs.timeline(["first"])
+        self.assertEqual(2, copies)
+
     async def test_session_is_one_authoritative_in_memory_aggregate(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         first = await store.aget_or_create_session(
             namespace="default",
             workflow_id="chat",
@@ -32,7 +118,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.context.data["messages"][0]["content"], "hi")
 
     async def test_session_identity_includes_namespace_and_workflow(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         values = [
             await store.aget_or_create_session(
                 namespace=namespace,
@@ -48,7 +134,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, len({session.id for session in values}))
 
     async def test_admission_creates_sequence_zero_genesis_snapshot(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         session = await store.aget_or_create_session(
             namespace="default",
             workflow_id="flow",
@@ -71,7 +157,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((), events)
 
     async def test_events_are_invocation_local_contiguous_and_rebuildable(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="reducer")
         workflow.add_node(lambda: {"value": 1}, node_id="entry")
@@ -94,10 +180,27 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             rebuilt.id,
             rebuilt_session.get_current_invocation().id,
         )
+        session = store.find_session(
+            namespace="default",
+            workflow_id=workflow.id,
+            session_key="session",
+        )
+        assert session is not None
+        self.assertEqual(
+            capture_execution_state(session, invocation),
+            store.committed_state(invocation.id),
+        )
+        paged = await store._load_event_range(
+            invocation_id=invocation.id,
+            after_sequence=0,
+            before_sequence=None,
+            page_size=2,
+        )
+        self.assertEqual(events, paged)
         await app.aclose()
 
     async def test_direct_and_parallel_execution_records_round_trip(self) -> None:
-        store = InMemoryRuntimeStore()
+        store = RuntimeStore()
         session = await store.aget_or_create_session(
             namespace="default",
             workflow_id="flow",

@@ -9,7 +9,7 @@ from autoagent.core.runtime.execution import (
     NodeExecution,
     RuntimeErrorInfo,
 )
-from autoagent.core.runtime.output import OutputContext
+from autoagent.core.runtime.output import OutputIndex, OutputView
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.scheduler import SchedulerContext
 from autoagent.core.runtime.scheduler import EdgeActivation, ExecutionScope
@@ -95,6 +95,7 @@ class Invocation:
         self.result = result
         self.scheduler = scheduler or SchedulerContext()
         self.node_executions: list[NodeExecution] = list(node_executions or [])
+        self._output_index = OutputIndex(self.node_executions)
         # Worker futures are process-local and must never be serialized. Keeping
         # them on the Invocation prevents one session from consuming another
         # invocation's results when an App executes sessions concurrently.
@@ -117,8 +118,8 @@ class Invocation:
             self.scheduler.enqueue_ready(entry_node_id)
 
     @property
-    def outputs(self) -> OutputContext:
-        return OutputContext.from_executions(self.node_executions)
+    def outputs(self) -> OutputView:
+        return self._output_index.view()
 
     def mark_running(self) -> None:
         self.state = "running"
@@ -287,6 +288,7 @@ class Invocation:
 
         execution = self._require_node_execution(execution_id)
         execution.mark_completed(output)
+        self._output_index.add(execution)
         self.scheduler.enqueue_transition(
             node_execution_id=execution.id,
             node_id=execution.node_id,

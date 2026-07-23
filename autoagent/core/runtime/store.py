@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from copy import deepcopy
 from threading import RLock
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
@@ -14,9 +16,10 @@ from autoagent.core.runtime.snapshot import (
     StateOperation,
     apply_state_operations,
     capture_execution_state,
-    diff_execution_state,
     reduce_execution_state,
+    restore_execution_state,
 )
+from autoagent.core.runtime.time import utc_timestamp_ms
 
 
 class SessionBusyError(RuntimeError):
@@ -31,53 +34,39 @@ class SessionBusyError(RuntimeError):
         self.invocation_state = invocation.state
 
 
-class RuntimeStore:
-    """Authoritative in-memory aggregate and immutable boundary journal.
+class DurableBackend(Protocol):
+    """Optional durable sink/source attached to one ``RuntimeStore``.
 
-    The executor mutates its live aggregate on the App runtime loop, emits one
-    sequenced boundary delta, and applies it here. Durable implementations add a
-    downstream persistence coordinator; database state is never the live
-    execution authority.
+    A backend never owns live execution state. It receives immutable persistence
+    boundaries from RuntimeStore and may load historical data after a restart.
     """
 
-    def __init__(
-        self,
-        *,
-        serializer: JsonRuntimeSerializer | None = None,
-    ) -> None:
-        self.serializer = serializer or JsonRuntimeSerializer()
+    snapshot_interval: int
 
-    async def ainitialize(self) -> None:
-        return None
+    def bind(self, store: RuntimeStore) -> None: ...
 
-    async def aclose(self) -> None:
-        return None
+    @property
+    def admission_paused(self) -> bool: ...
+
+    @property
+    def pending_persistence_bytes(self) -> int: ...
+
+    @property
+    def pending_persistence_count(self) -> int: ...
+
+    async def ainitialize(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+    async def aflush(self) -> None: ...
+
+    async def await_capacity(self) -> None: ...
 
     async def asave_workflow_snapshot(
         self,
         namespace: str,
         snapshot: WorkflowVersionSnapshot,
-    ) -> None:
-        raise NotImplementedError
-
-    async def aload_workflow_snapshot(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        definition_hash: str,
-        operator_manifest_hash: str | None = None,
-    ) -> WorkflowVersionSnapshot | None:
-        raise NotImplementedError
-
-    async def aget_or_create_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str | None,
-    ) -> Session:
-        raise NotImplementedError
+    ) -> None: ...
 
     async def afind_session(
         self,
@@ -85,103 +74,69 @@ class RuntimeStore:
         namespace: str,
         workflow_id: str,
         session_key: str,
-    ) -> Session | None:
-        raise NotImplementedError
+    ) -> Session | None: ...
 
     async def aadmit_invocation(
         self,
-        session_id: UUID,
+        session: Session,
         invocation: Invocation,
-    ) -> Session:
-        raise NotImplementedError
+        snapshot: ExecutionSnapshot,
+    ) -> None: ...
 
-    async def aclaim_waiting_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str,
-        wait_key: str,
-        workflow_definition_hash: str | None = None,
-        workflow_operator_manifest_hash: str | None = None,
-    ) -> Session:
-        raise NotImplementedError
-
-    async def aapply_event(
+    async def aappend_event(
         self,
         session: Session,
         invocation: Invocation,
         event: RuntimeEvent,
         *,
-        node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
-    ) -> RuntimeEvent:
-        raise NotImplementedError
+        durability_barrier: bool,
+    ) -> None: ...
 
     async def asave_execution_snapshot(
         self,
         snapshot: ExecutionSnapshot,
         *,
-        durability_barrier: bool = False,
-    ) -> None:
-        raise NotImplementedError
+        session_id: UUID | None,
+        durability_barrier: bool,
+    ) -> None: ...
 
     async def aload_execution_snapshot(
         self,
         invocation_id: UUID,
         *,
-        at_or_before_sequence: int | None = None,
-    ) -> ExecutionSnapshot | None:
-        raise NotImplementedError
-
-    async def arebuild_execution(
-        self,
-        invocation_id: UUID,
-        *,
-        through_sequence: int | None = None,
-    ) -> tuple[Session, Invocation]:
-        snapshot = await self.aload_execution_snapshot(
-            invocation_id,
-            at_or_before_sequence=through_sequence,
-        )
-        if snapshot is None:
-            raise KeyError(f"No execution snapshot for Invocation: {invocation_id}")
-        events = await self.alist_runtime_events(
-            invocation_id=invocation_id,
-            after_sequence=snapshot.through_sequence,
-            before_sequence=(
-                through_sequence + 1
-                if through_sequence is not None
-                else None
-            ),
-            limit=1_000_000,
-        )
-        return reduce_execution_state(
-            snapshot,
-            events,
-            through_sequence=through_sequence,
-        )
+        at_or_before_sequence: int | None,
+    ) -> ExecutionSnapshot | None: ...
 
     async def alist_runtime_events(
         self,
         *,
         invocation_id: UUID,
-        after_sequence: int = 0,
-        before_sequence: int | None = None,
-        limit: int = 1000,
-    ) -> tuple[RuntimeEvent, ...]:
-        raise NotImplementedError
+        after_sequence: int,
+        before_sequence: int | None,
+        limit: int,
+    ) -> tuple[RuntimeEvent, ...]: ...
+
+    def persistence_status(self, invocation_id: UUID) -> str: ...
+
+    def durable_sequence(self, invocation_id: UUID) -> int: ...
 
 
-class InMemoryRuntimeStore(RuntimeStore):
-    """One-copy runtime aggregates with indexes, snapshots, and event journals."""
+class RuntimeStore:
+    """Authoritative in-memory runtime center with optional durability.
+
+    There is only one Store model. Without a backend it is memory-only; with a
+    ``DatabaseBackend`` (or a future remote backend), execution still reads and
+    writes this same in-memory aggregate while persistence happens downstream.
+    """
 
     def __init__(
         self,
         *,
+        backend: DurableBackend | None = None,
         serializer: JsonRuntimeSerializer | None = None,
     ) -> None:
-        super().__init__(serializer=serializer)
+        self.serializer = serializer or JsonRuntimeSerializer()
+        self.backend = backend
         self._lock = RLock()
         self.workflow_versions: dict[
             tuple[str, str, str, str],
@@ -197,12 +152,47 @@ class InMemoryRuntimeStore(RuntimeStore):
             ExecutionSnapshot,
         ] = {}
         self._committed_states: dict[UUID, dict[str, Any]] = {}
+        self._pending_admissions: dict[UUID, Invocation] = {}
+        if backend is not None:
+            backend.bind(self)
+
+    @property
+    def pending_persistence_bytes(self) -> int:
+        return (
+            self.backend.pending_persistence_bytes
+            if self.backend is not None
+            else 0
+        )
+
+    @property
+    def pending_persistence_count(self) -> int:
+        return (
+            self.backend.pending_persistence_count
+            if self.backend is not None
+            else 0
+        )
+
+    @property
+    def admission_paused(self) -> bool:
+        return self.backend.admission_paused if self.backend is not None else False
+
+    async def ainitialize(self) -> None:
+        if self.backend is not None:
+            await self.backend.ainitialize()
+
+    async def aclose(self) -> None:
+        if self.backend is not None:
+            await self.backend.aclose()
+
+    async def aflush(self) -> None:
+        if self.backend is not None:
+            await self.backend.aflush()
 
     def save_workflow_snapshot(
         self,
         namespace: str,
         snapshot: WorkflowVersionSnapshot,
-    ) -> None:
+    ) -> bool:
         key = (
             namespace,
             snapshot.workflow_id,
@@ -210,14 +200,18 @@ class InMemoryRuntimeStore(RuntimeStore):
             snapshot.operator_manifest_hash,
         )
         with self._lock:
+            existed = key in self.workflow_versions
             self.workflow_versions[key] = snapshot
+        return not existed
 
     async def asave_workflow_snapshot(
         self,
         namespace: str,
         snapshot: WorkflowVersionSnapshot,
     ) -> None:
-        self.save_workflow_snapshot(namespace, snapshot)
+        created = self.save_workflow_snapshot(namespace, snapshot)
+        if created and self.backend is not None:
+            await self.backend.asave_workflow_snapshot(namespace, snapshot)
 
     def load_workflow_snapshot(
         self,
@@ -260,12 +254,29 @@ class InMemoryRuntimeStore(RuntimeStore):
                 workflow_id=workflow_id,
                 session_key=session_key,
             )
-            self.sessions[session.id] = session
-            self.session_keys[key] = session.id
+            self._cache_session(session)
             return session
 
-    async def aget_or_create_session(self, **kwargs: Any) -> Session:
-        return self.get_or_create_session(**kwargs)
+    async def aget_or_create_session(
+        self,
+        *,
+        namespace: str,
+        workflow_id: str,
+        session_key: str | None,
+    ) -> Session:
+        if session_key is not None:
+            existing = await self.afind_session(
+                namespace=namespace,
+                workflow_id=workflow_id,
+                session_key=session_key,
+            )
+            if existing is not None:
+                return existing
+        return self.get_or_create_session(
+            namespace=namespace,
+            workflow_id=workflow_id,
+            session_key=session_key,
+        )
 
     def find_session(
         self,
@@ -280,18 +291,46 @@ class InMemoryRuntimeStore(RuntimeStore):
             )
             return self.sessions.get(session_id) if session_id is not None else None
 
-    async def afind_session(self, **kwargs: Any) -> Session | None:
-        return self.find_session(**kwargs)
+    async def afind_session(
+        self,
+        *,
+        namespace: str,
+        workflow_id: str,
+        session_key: str,
+    ) -> Session | None:
+        value = self.find_session(
+            namespace=namespace,
+            workflow_id=workflow_id,
+            session_key=session_key,
+        )
+        if value is not None or self.backend is None:
+            return value
+        value = await self.backend.afind_session(
+            namespace=namespace,
+            workflow_id=workflow_id,
+            session_key=session_key,
+        )
+        if value is not None:
+            with self._lock:
+                self._cache_session(value)
+        return value
 
     async def aadmit_invocation(
         self,
         session_id: UUID,
         invocation: Invocation,
     ) -> Session:
+        if self.admission_paused:
+            raise RuntimeError(
+                "Runtime persistence backlog is above the admission watermark."
+            )
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(f"Unknown session: {session_id}")
+            pending = self._pending_admissions.get(session_id)
+            if pending is not None:
+                raise SessionBusyError(session, pending)
             current = session.get_current_invocation()
             if current is not None and current.state in {
                 "created",
@@ -299,23 +338,59 @@ class InMemoryRuntimeStore(RuntimeStore):
                 "waiting",
             }:
                 raise SessionBusyError(session, current)
-            session.add_invocation(invocation)
-            self.invocations[invocation.id] = invocation
-            self.invocation_sessions[invocation.id] = session.id
-            self.runtime_events[invocation.id] = []
-            state = capture_execution_state(session, invocation)
-            self._committed_states[invocation.id] = state
+            admitted_at_ms = utc_timestamp_ms()
+            session_record = session.to_record()
+            session_record["current_invocation_id"] = str(invocation.id)
+            session_record["updated_at_ms"] = admitted_at_ms
+            state = deepcopy(
+                {
+                    "session": session_record,
+                    "invocation": invocation.to_record(session.id),
+                    "node_executions": [],
+                }
+            )
             snapshot = ExecutionSnapshot(
                 invocation_id=invocation.id,
                 through_sequence=0,
                 state=state,
             )
+            self._pending_admissions[session_id] = invocation
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            if self.backend is not None:
+                admission = asyncio.create_task(
+                    self.backend.aadmit_invocation(
+                        session,
+                        invocation,
+                        snapshot,
+                    )
+                )
+                try:
+                    await asyncio.shield(admission)
+                except asyncio.CancelledError as exc:
+                    await admission
+                    cancelled = exc
+        except BaseException:
+            with self._lock:
+                if self._pending_admissions.get(session_id) is invocation:
+                    del self._pending_admissions[session_id]
+            raise
+        with self._lock:
+            pending = self._pending_admissions.get(session_id)
+            if pending is not invocation:
+                raise RuntimeError("Invocation admission reservation was lost.")
+            del self._pending_admissions[session_id]
+            if not any(value.id == invocation.id for value in session.invocations):
+                session.invocations.append(invocation)
+            session.current_invocation_id = invocation.id
+            session.updated_at_ms = admitted_at_ms
+            self.invocations[invocation.id] = invocation
+            self.invocation_sessions[invocation.id] = session.id
+            self.runtime_events[invocation.id] = []
+            self._committed_states[invocation.id] = state
             self.execution_snapshots[(invocation.id, 0)] = snapshot
-        await InMemoryRuntimeStore.asave_execution_snapshot(
-            self,
-            snapshot,
-            durability_barrier=True,
-        )
+        if cancelled is not None:
+            raise cancelled
         return session
 
     async def aclaim_waiting_session(
@@ -328,7 +403,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         workflow_definition_hash: str | None = None,
         workflow_operator_manifest_hash: str | None = None,
     ) -> Session:
-        session = self.find_session(
+        session = await self.afind_session(
             namespace=namespace,
             workflow_id=workflow_id,
             session_key=session_key,
@@ -366,9 +441,11 @@ class InMemoryRuntimeStore(RuntimeStore):
         node_execution_ids: tuple[UUID, ...] = (),
         durability_barrier: bool = False,
     ) -> RuntimeEvent:
-        del node_execution_ids, durability_barrier
+        del node_execution_ids
         if event.invocation_id != invocation.id:
             raise ValueError("RuntimeEvent invocation does not match aggregate.")
+        if "operations" not in event.payload:
+            raise ValueError("Boundary RuntimeEvent has no state operations.")
         with self._lock:
             events = self.runtime_events.setdefault(invocation.id, [])
             expected = events[-1].sequence + 1 if events else 1
@@ -381,21 +458,84 @@ class InMemoryRuntimeStore(RuntimeStore):
                 raise KeyError(f"Unknown Invocation aggregate: {invocation.id}")
             operations = tuple(
                 StateOperation.model_validate(value)
-                for value in event.payload.get("operations", [])
+                for value in event.payload["operations"]
             )
             reduced = apply_state_operations(previous, operations)
-            live = capture_execution_state(session, invocation)
-            if reduced != live:
-                divergence = diff_execution_state(reduced, live)
-                raise ValueError(
-                    f"Boundary reducer diverged from live state at {event.type}: "
-                    f"{divergence[:5]}"
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            if self.backend is not None:
+                await self.backend.await_capacity()
+                acceptance = asyncio.create_task(
+                    self.backend.aappend_event(
+                        session,
+                        invocation,
+                        event,
+                        durability_barrier=durability_barrier,
+                    )
+                )
+                try:
+                    await asyncio.shield(acceptance)
+                except asyncio.CancelledError as exc:
+                    await acceptance
+                    cancelled = exc
+        except BaseException:
+            with self._lock:
+                self._restore_live_aggregate(
+                    session,
+                    invocation,
+                    previous,
+                )
+            raise
+        with self._lock:
+            events = self.runtime_events.setdefault(invocation.id, [])
+            expected = events[-1].sequence + 1 if events else 1
+            if event.sequence != expected:
+                raise RuntimeError(
+                    "Invocation Event sequence changed while persistence "
+                    "accepted a boundary."
                 )
             events.append(event)
             self._committed_states[invocation.id] = reduced
             self.sessions[session.id] = session
             self.invocations[invocation.id] = invocation
+        if self.backend is not None:
+            if event.sequence % self.backend.snapshot_interval == 0:
+                await self.asave_execution_snapshot(
+                    ExecutionSnapshot.capture(
+                        session,
+                        invocation,
+                        through_sequence=event.sequence,
+                    )
+                )
+        if cancelled is not None:
+            raise cancelled
         return event
+
+    def _restore_live_aggregate(
+        self,
+        session: Session,
+        invocation: Invocation,
+        state: dict[str, Any],
+    ) -> None:
+        restored_session, restored_invocation = restore_execution_state(state)
+        mailbox = invocation.execution_mailbox
+        invocation.__dict__.clear()
+        invocation.__dict__.update(restored_invocation.__dict__)
+        invocation.execution_mailbox = mailbox
+        session.context = restored_session.context
+        session.current_invocation_id = restored_session.current_invocation_id
+        session.updated_at_ms = restored_session.updated_at_ms
+        self.sessions[session.id] = session
+        self.invocations[invocation.id] = invocation
+
+    def committed_state(self, invocation_id: UUID) -> dict[str, Any]:
+        """Return the immutable-by-contract reducer baseline for event creation."""
+
+        with self._lock:
+            state = self._committed_states.get(invocation_id)
+            if state is None:
+                raise KeyError(f"Unknown Invocation aggregate: {invocation_id}")
+            return state
 
     async def asave_execution_snapshot(
         self,
@@ -403,11 +543,17 @@ class InMemoryRuntimeStore(RuntimeStore):
         *,
         durability_barrier: bool = False,
     ) -> None:
-        del durability_barrier
         with self._lock:
             self.execution_snapshots[
                 (snapshot.invocation_id, snapshot.through_sequence)
             ] = snapshot
+            session_id = self.invocation_sessions.get(snapshot.invocation_id)
+        if self.backend is not None:
+            await self.backend.asave_execution_snapshot(
+                snapshot,
+                session_id=session_id,
+                durability_barrier=durability_barrier,
+            )
 
     async def aload_execution_snapshot(
         self,
@@ -425,11 +571,20 @@ class InMemoryRuntimeStore(RuntimeStore):
                     or sequence <= at_or_before_sequence
                 )
             ]
-        return (
-            max(candidates, key=lambda value: value.through_sequence)
-            if candidates
-            else None
+        if candidates:
+            return max(candidates, key=lambda value: value.through_sequence)
+        if self.backend is None:
+            return None
+        snapshot = await self.backend.aload_execution_snapshot(
+            invocation_id,
+            at_or_before_sequence=at_or_before_sequence,
         )
+        if snapshot is not None:
+            with self._lock:
+                self.execution_snapshots[
+                    (snapshot.invocation_id, snapshot.through_sequence)
+                ] = snapshot
+        return snapshot
 
     async def arebuild_execution(
         self,
@@ -437,18 +592,43 @@ class InMemoryRuntimeStore(RuntimeStore):
         *,
         through_sequence: int | None = None,
     ) -> tuple[Session, Invocation]:
-        session, invocation = await super().arebuild_execution(
+        snapshot = await self.aload_execution_snapshot(
             invocation_id,
+            at_or_before_sequence=through_sequence,
+        )
+        if snapshot is None:
+            raise KeyError(f"No execution snapshot for Invocation: {invocation_id}")
+        events = await self._load_event_range(
+            invocation_id=invocation_id,
+            after_sequence=snapshot.through_sequence,
+            before_sequence=(
+                through_sequence + 1
+                if through_sequence is not None
+                else None
+            ),
+        )
+        session, invocation = reduce_execution_state(
+            snapshot,
+            events,
             through_sequence=through_sequence,
         )
         if through_sequence is None:
+            all_events = events
+            if (
+                snapshot.through_sequence > 0
+                and invocation_id not in self.runtime_events
+                and self.backend is not None
+            ):
+                all_events = await self._load_event_range(
+                    invocation_id=invocation_id,
+                    after_sequence=0,
+                    before_sequence=None,
+                )
             with self._lock:
-                self.sessions[session.id] = session
+                self._cache_session(session)
                 self.invocations[invocation.id] = invocation
                 self.invocation_sessions[invocation.id] = session.id
-                self.session_keys[
-                    (session.namespace, session.workflow_id, session.session_key)
-                ] = session.id
+                self.runtime_events[invocation.id] = list(all_events)
                 self._committed_states[invocation.id] = capture_execution_state(
                     session,
                     invocation,
@@ -466,6 +646,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         if after_sequence < 0 or limit < 1:
             raise ValueError("Invalid RuntimeEvent page.")
         with self._lock:
+            known_in_memory = invocation_id in self.runtime_events
             values = [
                 event
                 for event in self.runtime_events.get(invocation_id, [])
@@ -475,6 +656,60 @@ class InMemoryRuntimeStore(RuntimeStore):
                     or event.sequence < before_sequence
                 )
             ]
-        if before_sequence is not None:
-            return tuple(values[-limit:])
-        return tuple(values[:limit])
+        if known_in_memory:
+            return tuple(values[-limit:] if before_sequence is not None else values[:limit])
+        if self.backend is None:
+            return ()
+        return await self.backend.alist_runtime_events(
+            invocation_id=invocation_id,
+            after_sequence=after_sequence,
+            before_sequence=before_sequence,
+            limit=limit,
+        )
+
+    def persistence_status(self, invocation_id: UUID) -> str:
+        if invocation_id not in self.invocations:
+            raise KeyError(f"Unknown Invocation: {invocation_id}")
+        if self.backend is None:
+            return "memory_only"
+        return self.backend.persistence_status(invocation_id)
+
+    def durable_sequence(self, invocation_id: UUID) -> int:
+        return (
+            self.backend.durable_sequence(invocation_id)
+            if self.backend is not None
+            else 0
+        )
+
+    async def _load_event_range(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int,
+        before_sequence: int | None,
+        page_size: int = 10_000,
+    ) -> tuple[RuntimeEvent, ...]:
+        """Load an event range without a silent maximum-invocation limit."""
+
+        values: list[RuntimeEvent] = []
+        cursor = after_sequence
+        while True:
+            page = await self.alist_runtime_events(
+                invocation_id=invocation_id,
+                after_sequence=cursor,
+                before_sequence=before_sequence,
+                limit=page_size,
+            )
+            if not page:
+                break
+            values.extend(page)
+            cursor = page[-1].sequence
+            if len(page) < page_size:
+                break
+        return tuple(values)
+
+    def _cache_session(self, session: Session) -> None:
+        self.sessions[session.id] = session
+        self.session_keys[
+            (session.namespace, session.workflow_id, session.session_key)
+        ] = session.id

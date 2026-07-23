@@ -1,10 +1,13 @@
 from autoagent.core.runtime.context import (
     ConditionContext,
+    ContextSnapshot,
     IncomingOutput,
     InputMappingContext,
     InvocationContext,
+    MapAggregationContext,
+    MapItemSelectionContext,
     OutputBindingContext,
-    ReadOnlyRuntimeContext,
+    ReplicationAggregationContext,
     RuntimeContext,
     SessionContext,
 )
@@ -22,7 +25,7 @@ from autoagent.core.runtime.execution import (
 from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventRole
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
-from autoagent.core.runtime.output import NodeOutput, OutputContext
+from autoagent.core.runtime.output import NodeOutput, OutputView
 from autoagent.core.runtime.scheduler import (
     EdgeActivation,
     EdgeResolution,
@@ -39,8 +42,8 @@ from autoagent.core.runtime.snapshot import (
     RuntimeBoundary,
     StateOperation,
     apply_state_operations,
+    build_boundary_state_operations,
     capture_execution_state,
-    diff_execution_state,
     reduce_execution_state,
 )
 from autoagent.core.runtime.status import (
@@ -52,8 +55,12 @@ from autoagent.core.runtime.status import (
     OperatorExecutionStateValue,
     ParallelOperatorExecutionKind,
 )
-from autoagent.core.runtime.store import InMemoryRuntimeStore, RuntimeStore, SessionBusyError
-from autoagent.core.runtime.database_store import DatabaseRuntimeStore
+from autoagent.core.runtime.store import (
+    DurableBackend,
+    RuntimeStore,
+    SessionBusyError,
+)
+from autoagent.core.runtime.backends import DatabaseBackend
 from autoagent.core.runtime.serialization import (
     ArtifactRef,
     JsonRuntimeSerializer,
@@ -67,6 +74,7 @@ from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
 __all__ = [
     "ArtifactRef",
     "ConditionContext",
+    "ContextSnapshot",
     "DirectOperatorExecution",
     "DirectOperatorExecutionReason",
     "EdgeActivation",
@@ -76,7 +84,6 @@ __all__ = [
     "EdgeResolutionStateValue",
     "ExecutionScope",
     "ExecutionSnapshot",
-    "InMemoryRuntimeStore",
     "InputMappingContext",
     "IncomingOutput",
     "Invocation",
@@ -85,6 +92,8 @@ __all__ = [
     "InvocationStateValue",
     "JsonRuntimeSerializer",
     "LoopIteration",
+    "MapAggregationContext",
+    "MapItemSelectionContext",
     "NodeExecution",
     "NodeExecutionStateValue",
     "NodeExecutionRequest",
@@ -96,8 +105,8 @@ __all__ = [
     "ParallelOperatorExecution",
     "ParallelOperatorExecutionKind",
     "OutputBindingContext",
-    "OutputContext",
-    "ReadOnlyRuntimeContext",
+    "OutputView",
+    "ReplicationAggregationContext",
     "ResourceUsage",
     "RuntimeErrorInfo",
     "RuntimeEvent",
@@ -111,16 +120,17 @@ __all__ = [
     "RuntimeSerializationError",
     "RuntimeSerializer",
     "RuntimeStore",
+    "DurableBackend",
     "SchedulerContext",
     "Session",
     "SessionBusyError",
     "SessionContext",
-    "DatabaseRuntimeStore",
+    "DatabaseBackend",
     "TimestampMs",
     "WaitingExecution",
     "utc_timestamp_ms",
     "capture_execution_state",
+    "build_boundary_state_operations",
     "apply_state_operations",
-    "diff_execution_state",
     "reduce_execution_state",
 ]

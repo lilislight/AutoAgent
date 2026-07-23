@@ -13,18 +13,24 @@ from autoagent import (
     AutoAgentServer,
     CapabilityRef,
     CapabilitySelectionPolicy,
+    DatabaseBackend,
     EdgePolicy,
     MapPolicy,
     NodePolicy,
     ReplicationPolicy,
     ResourcePolicy,
     RetryPolicy,
-    DatabaseRuntimeStore,
     SystemCommand,
     TimeoutPolicy,
     Workflow,
 )
-from autoagent.core.runtime import OutputBindingContext, RuntimeStore
+from autoagent.core.runtime import (
+    MapAggregationContext,
+    MapItemSelectionContext,
+    OutputBindingContext,
+    ReplicationAggregationContext,
+    RuntimeStore,
+)
 
 
 SECURITY_REVIEW_FAILURE_RATE = 0.4
@@ -321,8 +327,9 @@ def mock_llm_plan_investigation(
 
 
 def select_investigation_tasks(
-    plan: InvestigationPlan,
+    ctx: MapItemSelectionContext,
 ) -> list[dict[str, object]]:
+    plan = ctx.input
     return [
         {"task": task, "incident": plan.incident}
         for task in sorted(plan.tasks, key=lambda item: item.priority)
@@ -351,8 +358,8 @@ def gather_evidence(
     )
 
 
-def aggregate_evidence(outputs: list[EvidenceItem]) -> list[EvidenceItem]:
-    return sorted(outputs, key=lambda item: item.task_id)
+def aggregate_evidence(ctx: MapAggregationContext) -> list[EvidenceItem]:
+    return sorted(ctx.item_outputs, key=lambda item: item.task_id)
 
 
 def mock_llm_synthesize_findings(
@@ -542,9 +549,11 @@ def mock_llm_make_final_decision(review: CompositeReview) -> FinalDecision:
     )
 
 
-def select_conservative_decision(outputs: list[FinalDecision]) -> FinalDecision:
+def select_conservative_decision(
+    ctx: ReplicationAggregationContext,
+) -> FinalDecision:
     return max(
-        outputs,
+        ctx.replica_outputs,
         key=lambda decision: (
             decision.requires_human,
             not decision.approved,
@@ -635,8 +644,6 @@ def build_investigation_workflow() -> Workflow:
         node_id="synthesize_findings",
         input_mapping=lambda ctx: {
             "plan": ctx.outputs.latest("plan_investigation"),
-            # OutputContext exposes mutable containers as immutable snapshots.
-            # Convert the map result back to the operator's declared list input.
             "evidence": list(ctx.outputs.latest("gather_evidence")),
             "attempt": len(ctx.outputs.all("synthesize_findings")) + 1,
             "previous_feedback": (
@@ -900,7 +907,9 @@ def build_incident_response_app(
     if runtime_store is None:
         resolved_database_path = Path(database_path or DEFAULT_RUNTIME_DATABASE)
         resolved_database_path.parent.mkdir(parents=True, exist_ok=True)
-        runtime_store = DatabaseRuntimeStore.from_path(resolved_database_path)
+        runtime_store = RuntimeStore(
+            backend=DatabaseBackend.from_path(resolved_database_path)
+        )
 
     app = AutoAgentApp(namespace="real-workflow", runtime_store=runtime_store)
     for model_type in _RUNTIME_MODELS:

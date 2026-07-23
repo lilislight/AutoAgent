@@ -131,7 +131,9 @@ class WorkflowDiagramTests(unittest.TestCase):
                     from_node="source",
                     to_node="target",
                     policy=EdgePolicy(
-                        map=MapPolicy(output_aggregator=lambda outputs: outputs)
+                        map=MapPolicy(
+                            output_aggregator=lambda ctx: ctx.item_outputs
+                        )
                     ),
                 )
             ],

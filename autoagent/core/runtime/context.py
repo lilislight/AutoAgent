@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from autoagent.core.runtime.readonly import to_mutable_record, to_read_only
+from autoagent.core.runtime.output import OutputView
 
 
 class RuntimeContext(BaseModel):
@@ -36,8 +38,8 @@ class RuntimeContext(BaseModel):
 
     def to_record(self) -> dict[str, Any]:
         return {
-            "data": to_mutable_record(self.data),
-            "metadata": to_mutable_record(self.metadata),
+            "data": deepcopy(self.data),
+            "metadata": deepcopy(self.metadata),
         }
 
     @classmethod
@@ -65,22 +67,27 @@ class InvocationContext(RuntimeContext):
     """
 
 
-@dataclass(frozen=True)
-class ReadOnlyRuntimeContext:
-    """Immutable snapshot of a SessionContext or InvocationContext."""
+@dataclass(frozen=True, slots=True)
+class ContextSnapshot:
+    """Isolated context copy for non-writing Workflow hooks.
+
+    The top-level mappings are read-only. Nested values preserve their original
+    Python container types and belong to this snapshot, so even accidental
+    nested mutation cannot reach the authoritative Runtime Context.
+    """
 
     data: Mapping[str, Any]
     metadata: Mapping[str, Any]
 
     @classmethod
-    def from_context(cls, context: RuntimeContext) -> ReadOnlyRuntimeContext:
+    def capture(cls, context: RuntimeContext) -> ContextSnapshot:
         return cls(
-            data=to_read_only(context.data),
-            metadata=to_read_only(context.metadata),
+            data=MappingProxyType(deepcopy(context.data)),
+            metadata=MappingProxyType(deepcopy(context.metadata)),
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IncomingOutput:
     """Read-only value carried by one selected incoming edge.
 
@@ -95,96 +102,206 @@ class IncomingOutput:
     value: Any
 
 
+@dataclass(frozen=True, slots=True)
+class HookContextSnapshot:
+    """Common fields shared by every non-writing Workflow hook."""
+
+    invocation_input: Mapping[str, Any]
+    invocation_context: ContextSnapshot
+    session_context: ContextSnapshot
+    outputs: OutputView
+
+    def isolate(self) -> HookContextSnapshot:
+        """Create a phase-local copy without copying indexed node outputs."""
+
+        return HookContextSnapshot(
+            invocation_input=MappingProxyType(
+                deepcopy(dict(self.invocation_input))
+            ),
+            invocation_context=ContextSnapshot(
+                data=MappingProxyType(deepcopy(dict(self.invocation_context.data))),
+                metadata=MappingProxyType(
+                    deepcopy(dict(self.invocation_context.metadata))
+                ),
+            ),
+            session_context=ContextSnapshot(
+                data=MappingProxyType(deepcopy(dict(self.session_context.data))),
+                metadata=MappingProxyType(
+                    deepcopy(dict(self.session_context.metadata))
+                ),
+            ),
+            outputs=self.outputs,
+        )
+
+
+def capture_hook_context(
+    *,
+    invocation_input: Mapping[str, Any],
+    invocation_context: InvocationContext,
+    session_context: SessionContext,
+    outputs: OutputView,
+) -> HookContextSnapshot:
+    return HookContextSnapshot(
+        invocation_input=MappingProxyType(deepcopy(dict(invocation_input))),
+        invocation_context=ContextSnapshot.capture(invocation_context),
+        session_context=ContextSnapshot.capture(session_context),
+        outputs=outputs,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class InputMappingContext:
-    """Read-only view passed to input_mapping functions.
+    """Context passed to a Node input mapping."""
 
-    It can read the invocation input, session/invocation context snapshots, and
-    completed node outputs. It must not mutate runtime state. NodeExecutor builds
-    this object before calling a node's input_mapping.
-    """
+    invocation_input: Mapping[str, Any]
+    invocation_context: ContextSnapshot
+    session_context: ContextSnapshot
+    outputs: OutputView
+    node_id: str
+    incoming: tuple[IncomingOutput, ...] = ()
 
-    def __init__(
-        self,
+    @classmethod
+    def create(
+        cls,
         *,
         invocation_input: Mapping[str, Any],
         invocation_context: InvocationContext,
         session_context: SessionContext,
-        outputs: Any,
+        outputs: OutputView,
         node_id: str,
         incoming: tuple[IncomingOutput, ...] = (),
-    ) -> None:
-        self.invocation_input = to_read_only(invocation_input)
-        self.invocation_context = ReadOnlyRuntimeContext.from_context(
-            invocation_context
+    ) -> InputMappingContext:
+        common = capture_hook_context(
+            invocation_input=invocation_input,
+            invocation_context=invocation_context,
+            session_context=session_context,
+            outputs=outputs,
         )
-        self.session_context = ReadOnlyRuntimeContext.from_context(session_context)
-        self.outputs = outputs
-        self.node_id = node_id
-        self.incoming = tuple(
-            IncomingOutput(
-                edge_id=item.edge_id,
-                source_node_id=item.source_node_id,
-                source_execution_id=item.source_execution_id,
-                value=to_read_only(item.value),
-            )
-            for item in incoming
+        return cls(
+            invocation_input=common.invocation_input,
+            invocation_context=common.invocation_context,
+            session_context=common.session_context,
+            outputs=common.outputs,
+            node_id=node_id,
+            incoming=tuple(
+                IncomingOutput(
+                    edge_id=item.edge_id,
+                    source_node_id=item.source_node_id,
+                    source_execution_id=item.source_execution_id,
+                    value=deepcopy(item.value),
+                )
+                for item in incoming
+            ),
         )
 
 
+@dataclass(frozen=True, slots=True)
 class ConditionContext:
-    """Read-only view passed to edge condition functions.
+    """Context passed to an Edge condition."""
 
-    Conditions have the same read environment as input_mapping plus edge/source
-    metadata. Scheduler builds this object while processing a completed source
-    NodeExecution. A false condition only means this edge is not selected.
-    """
+    invocation_input: Mapping[str, Any]
+    invocation_context: ContextSnapshot
+    session_context: ContextSnapshot
+    outputs: OutputView
+    edge_id: str
+    source_node_id: str
+    target_node_id: str
+    source_output: Any
 
-    def __init__(
-        self,
+    @classmethod
+    def create(
+        cls,
         *,
         invocation_input: Mapping[str, Any],
         invocation_context: InvocationContext,
         session_context: SessionContext,
-        outputs: Any,
+        outputs: OutputView,
         edge_id: str,
         source_node_id: str,
         target_node_id: str,
         source_output: Any,
-    ) -> None:
-        self.invocation_input = to_read_only(invocation_input)
-        self.invocation_context = ReadOnlyRuntimeContext.from_context(
-            invocation_context
+    ) -> ConditionContext:
+        common = capture_hook_context(
+            invocation_input=invocation_input,
+            invocation_context=invocation_context,
+            session_context=session_context,
+            outputs=outputs,
         )
-        self.session_context = ReadOnlyRuntimeContext.from_context(session_context)
-        self.outputs = outputs
-        self.edge_id = edge_id
-        self.source_node_id = source_node_id
-        self.target_node_id = target_node_id
-        self.source_output = to_read_only(source_output)
+        return cls(
+            invocation_input=common.invocation_input,
+            invocation_context=common.invocation_context,
+            session_context=common.session_context,
+            outputs=common.outputs,
+            edge_id=edge_id,
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            source_output=deepcopy(source_output),
+        )
 
 
+@dataclass(frozen=True, slots=True)
+class MapItemSelectionContext:
+    """Context passed to ``MapPolicy.item_selector``."""
+
+    invocation_input: Mapping[str, Any]
+    invocation_context: ContextSnapshot
+    session_context: ContextSnapshot
+    outputs: OutputView
+    node_id: str
+    input: Any
+
+
+@dataclass(frozen=True, slots=True)
+class MapAggregationContext:
+    """Context passed to a map output aggregator."""
+
+    invocation_input: Mapping[str, Any]
+    invocation_context: ContextSnapshot
+    session_context: ContextSnapshot
+    outputs: OutputView
+    node_id: str
+    item_outputs: list[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplicationAggregationContext:
+    """Context passed to a replication output aggregator."""
+
+    invocation_input: Mapping[str, Any]
+    invocation_context: ContextSnapshot
+    session_context: ContextSnapshot
+    outputs: OutputView
+    node_id: str
+    replica_outputs: list[Any]
+
+
+@dataclass(frozen=True, slots=True)
 class OutputBindingContext:
-    """Mutable user-context view passed to output_binding functions.
+    """Transactional context passed to a Node output binding."""
 
-    Output binding runs after NodeExecutor has produced an output and before the
-    NodeExecution is marked completed. It may mutate session_context and
-    invocation_context. Invocation input, current output, prior outputs,
-    scheduler state, and execution history are read-only.
-    """
+    invocation_input: Mapping[str, Any]
+    invocation_context: InvocationContext
+    session_context: SessionContext
+    outputs: OutputView
+    node_id: str
+    output: Any
 
-    def __init__(
-        self,
+    @classmethod
+    def create(
+        cls,
         *,
         invocation_input: Mapping[str, Any],
         invocation_context: InvocationContext,
         session_context: SessionContext,
-        outputs: Any,
+        outputs: OutputView,
         node_id: str,
         output: Any,
-    ) -> None:
-        self.invocation_input = to_read_only(invocation_input)
-        self.invocation_context = invocation_context
-        self.session_context = session_context
-        self.outputs = outputs
-        self.node_id = node_id
-        self.output = to_read_only(output)
+    ) -> OutputBindingContext:
+        return cls(
+            invocation_input=MappingProxyType(deepcopy(dict(invocation_input))),
+            invocation_context=invocation_context,
+            session_context=session_context,
+            outputs=outputs,
+            node_id=node_id,
+            output=deepcopy(output),
+        )

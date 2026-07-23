@@ -629,11 +629,11 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertIs(policy, workflow_ir.nodes["limited"].policy)
 
     def test_edge_map_policy_is_carried_into_edge_ir(self):
-        def select_items(output):
-            return output["items"]
+        def select_items(ctx):
+            return ctx.input["items"]
 
-        def aggregate(outputs):
-            return {"items": outputs}
+        def aggregate(ctx):
+            return {"items": ctx.item_outputs}
 
         policy = EdgePolicy(
             map=MapPolicy(

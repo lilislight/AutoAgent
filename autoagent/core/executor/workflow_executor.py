@@ -23,9 +23,9 @@ from autoagent.core.runtime import (
     RuntimeStore,
     RuntimeBoundary,
     Session,
-    capture_execution_state,
-    diff_execution_state,
+    build_boundary_state_operations,
 )
+from autoagent.core.runtime.context import capture_hook_context
 from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance_key
 from autoagent.core.runtime.hooks import invoke_hook_async, run_sync
 from autoagent.core.runtime.time import utc_timestamp_ms
@@ -62,7 +62,6 @@ class WorkflowExecutor:
         self.scheduler = scheduler or Scheduler()
         self.node_executor = node_executor or NodeExecutor()
         self.runtime_store = runtime_store
-        self._committed_states: dict[UUID, dict[str, Any]] = {}
 
     async def _commit_boundary(
         self,
@@ -77,12 +76,13 @@ class WorkflowExecutor:
         """Generate a sequenced state event, then apply it to RuntimeStore."""
 
         sequence = invocation.next_event_sequence()
-        current_state = capture_execution_state(session, invocation)
-        previous_state = self._committed_states.get(
-            invocation.id,
-            current_state,
+        previous_state = self.runtime_store.committed_state(invocation.id)
+        operations = build_boundary_state_operations(
+            previous_state,
+            session,
+            invocation,
+            node_execution_ids=node_execution_ids,
         )
-        operations = diff_execution_state(previous_state, current_state)
         event = RuntimeEvent(
             invocation_id=invocation.id,
             sequence=sequence,
@@ -107,7 +107,6 @@ class WorkflowExecutor:
             node_execution_ids=node_execution_ids,
             durability_barrier=durability_barrier,
         )
-        self._committed_states[invocation.id] = current_state
         return applied
 
     def invoke(
@@ -136,10 +135,6 @@ class WorkflowExecutor:
         session: Session,
         invocation: Invocation,
     ) -> Invocation:
-        self._committed_states.setdefault(
-            invocation.id,
-            capture_execution_state(session, invocation),
-        )
         self.scheduler.initialize(workflow_ir=workflow_ir, invocation=invocation)
         try:
             return await self._drive(
@@ -149,6 +144,9 @@ class WorkflowExecutor:
             )
         except asyncio.CancelledError:
             await self._cancel_invocation(session=session, invocation=invocation)
+            raise
+        except BaseException:
+            await self.node_executor.abandon(invocation.execution_mailbox)
             raise
 
     async def arecover(
@@ -168,11 +166,6 @@ class WorkflowExecutor:
         """
 
         del workflow_snapshot
-        self._committed_states[invocation.id] = capture_execution_state(
-            session,
-            invocation,
-        )
-
         if invocation.state not in {"created", "running"}:
             return invocation
         if invocation.workflow_definition_hash != workflow_ir.definition_hash:
@@ -503,10 +496,6 @@ class WorkflowExecutor:
         output: Any = _MISSING,
     ) -> Invocation:
         try:
-            self._committed_states[invocation.id] = capture_execution_state(
-                session,
-                invocation,
-            )
             return await self._aresume_impl(
                 workflow_ir=workflow_ir,
                 session=session,
@@ -779,6 +768,12 @@ class WorkflowExecutor:
                     map_policy=map_policy,
                     concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
                     recovery=invocation.execution_mode == "recovery",
+                    hook_context=capture_hook_context(
+                        invocation_input=invocation.input,
+                        invocation_context=invocation.context,
+                        session_context=session.context,
+                        outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
+                    ),
                 )
             )
 
@@ -936,10 +931,10 @@ class WorkflowExecutor:
         if callable(node_ir.input_plan):
             return await invoke_hook_async(
                 node_ir.input_plan,
-                InputMappingContext(
+                InputMappingContext.create(
                     invocation_input=invocation.input,
-                    invocation_context=deepcopy(invocation.context),
-                    session_context=deepcopy(session.context),
+                    invocation_context=invocation.context,
+                    session_context=session.context,
                     outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
                     node_id=node_ir.local_id or node_ir.id,
                     incoming=scoped_incoming,
@@ -1032,7 +1027,7 @@ class WorkflowExecutor:
         try:
             await invoke_hook_async(
                 node_ir.output_binding,
-                OutputBindingContext(
+                OutputBindingContext.create(
                     invocation_input=invocation.input,
                     invocation_context=invocation.context,
                     session_context=session.context,

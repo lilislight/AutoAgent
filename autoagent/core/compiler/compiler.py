@@ -120,6 +120,7 @@ class WorkflowCompiler:
             definition_hash="pending",
             name=workflow.name,
             description=workflow.description,
+            policy=workflow.policy,
             nodes=nodes,
             edges=edges,
             graph=graph,
@@ -1183,8 +1184,8 @@ class WorkflowCompiler:
                     "max_node_executions_per_invocation": (
                         policy.resource.max_node_executions_per_invocation
                     ),
-                    "max_operator_calls_per_invocation": (
-                        policy.resource.max_operator_calls_per_invocation
+                    "max_operator_attempts_per_invocation": (
+                        policy.resource.max_operator_attempts_per_invocation
                     ),
                     "max_runtime_ms_per_invocation": (
                         policy.resource.max_runtime_ms_per_invocation

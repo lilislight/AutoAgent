@@ -38,7 +38,17 @@ class RuntimeEventLoop:
     def submit(self, awaitable: Awaitable[T]) -> Future[T]:
         self.start()
         assert self._loop is not None
-        return asyncio.run_coroutine_threadsafe(awaitable, self._loop)
+        completed = Event()
+
+        async def tracked() -> T:
+            try:
+                return await awaitable
+            finally:
+                completed.set()
+
+        future = asyncio.run_coroutine_threadsafe(tracked(), self._loop)
+        setattr(future, "_autoagent_completed", completed)
+        return future
 
     def run(self, awaitable: Awaitable[T]) -> T:
         if self.is_current():
@@ -54,9 +64,20 @@ class RuntimeEventLoop:
         future = self.submit(awaitable)
         # Polling avoids relying on a restricted host's cross-thread self-pipe
         # to wake the caller loop when the concurrent Future completes.
-        while not future.done():
-            await asyncio.sleep(0.001)
-        return future.result()
+        try:
+            while not future.done():
+                await asyncio.sleep(0.001)
+            return future.result()
+        except asyncio.CancelledError:
+            # Cancellation belongs to the invocation, not merely to this
+            # caller-side proxy. Forward it to the App runtime loop and wait
+            # until WorkflowExecutor has cancelled its workers and committed
+            # the terminal boundary.
+            future.cancel()
+            completed = getattr(future, "_autoagent_completed")
+            while not completed.is_set():
+                await asyncio.sleep(0.001)
+            raise
 
     def stop(self) -> None:
         loop = self._loop

@@ -332,9 +332,9 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual("completed", invocation.state)
         self.assertEqual({"output": "HELLO"}, invocation.result)
-        call = invocation.node_executions[0].operator_calls[0]
+        call = invocation.node_executions[0].operator_executions[0]
         self.assertEqual("direct_uppercase", call.operator_id)
-        self.assertEqual(2, call.operator_manifest.version)
+        self.assertFalse(hasattr(call, "operator_manifest"))
 
     def test_pydantic_input_is_validated_and_passed_to_operator(self) -> None:
         app = AutoAgentApp()
@@ -393,7 +393,7 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual(invalid.state, "failed")
         self.assertEqual(invalid.error.code, "INPUT_MAPPING_INVALID")
-        self.assertEqual(invalid.node_executions[0].operator_calls, [])
+        self.assertEqual(invalid.node_executions[0].operator_executions, [])
         self.assertEqual(valid.result, {"output": "Design"})
         self.assertEqual(calls, 1)
 
@@ -417,7 +417,7 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual(invocation.result, {"output": "default:docs"})
         self.assertEqual(
-            invocation.node_executions[0].operator_calls[0].operator_id,
+            invocation.node_executions[0].operator_executions[0].operator_id,
             "default_search",
         )
 
@@ -449,7 +449,7 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual(invocation.result, {"output": "priority:docs"})
         self.assertEqual(
-            invocation.node_executions[0].operator_calls[0].operator_id,
+            invocation.node_executions[0].operator_executions[0].operator_id,
             "priority_search",
         )
 
@@ -482,7 +482,7 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual(invocation.result, {"output": "a:docs"})
         self.assertEqual(
-            invocation.node_executions[0].operator_calls[0].operator_id,
+            invocation.node_executions[0].operator_executions[0].operator_id,
             "a_search",
         )
 
@@ -515,7 +515,7 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual(invocation.result, {"output": "a:docs"})
         self.assertEqual(
-            invocation.node_executions[0].operator_calls[0].operator_id,
+            invocation.node_executions[0].operator_executions[0].operator_id,
             "a_available",
         )
 
@@ -565,7 +565,7 @@ class OperatorExecutionTests(unittest.TestCase):
 
         self.assertEqual(invocation.result, {"output": "exact:input"})
         self.assertEqual(
-            invocation.node_executions[0].operator_calls[0].operator_id,
+            invocation.node_executions[0].operator_executions[0].operator_id,
             "exact_operator",
         )
 
@@ -636,12 +636,12 @@ class OperatorExecutionTests(unittest.TestCase):
         invocation = app.invoke(workflow, input={"value": "input"})
 
         self.assertEqual(invocation.result, {"output": "fallback:input"})
-        calls = invocation.node_executions[0].operator_calls
+        calls = invocation.node_executions[0].operator_executions
         self.assertEqual([call.operator_id for call in calls], [
             "failing_operator",
             "fallback_operator",
         ])
-        self.assertEqual([call.kind for call in calls], ["normal", "fallback"])
+        self.assertEqual([call.reason for call in calls], ["normal", "fallback"])
         self.assertEqual([call.state for call in calls], ["failed", "completed"])
 
     def test_invalid_operator_output_enters_fallback(self) -> None:
@@ -668,7 +668,7 @@ class OperatorExecutionTests(unittest.TestCase):
         invocation = app.invoke(workflow, input={"value": 3})
 
         self.assertEqual(invocation.result, {"output": 6})
-        calls = invocation.node_executions[0].operator_calls
+        calls = invocation.node_executions[0].operator_executions
         self.assertEqual([call.state for call in calls], ["failed", "completed"])
         self.assertEqual(calls[0].error.code, "OPERATOR_OUTPUT_INVALID")
 
@@ -699,7 +699,7 @@ class OperatorExecutionTests(unittest.TestCase):
         invocation = app.invoke(workflow, input={"value": "input"})
 
         self.assertEqual(invocation.state, "failed")
-        calls = invocation.node_executions[0].operator_calls
+        calls = invocation.node_executions[0].operator_executions
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].operator_id, "failing_operator")
 

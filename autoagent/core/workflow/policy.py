@@ -6,6 +6,22 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class FailurePolicy(BaseModel):
+    """Unhandled branch-failure behavior for one Workflow Invocation."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    mode: Literal["fail_fast", "continue_active_branches"] = "fail_fast"
+
+
+class WorkflowPolicy(BaseModel):
+    """Workflow-wide execution policy."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    failure: FailurePolicy = Field(default_factory=FailurePolicy)
+
+
 class CapabilitySelectionPolicy(BaseModel):
     """Operator selection rule for abstract capability references."""
 
@@ -22,7 +38,7 @@ class CapabilitySelectionPolicy(BaseModel):
     allow_fallback: bool = Field(
         default=True,
         description=(
-            "Whether execution may try another operator after an OperatorCall "
+            "Whether execution may try another operator after an OperatorExecution "
             "failure. Mapping, binding, condition, and aggregation failures do "
             "not enter operator fallback."
         ),
@@ -71,7 +87,7 @@ class BackoffPolicy(BaseModel):
 
 
 class RetryPolicy(BaseModel):
-    """Retry rule for OperatorCall failures inside one NodeExecution."""
+    """Retry rule for OperatorExecution failures inside one NodeExecution."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -132,7 +148,7 @@ class ResourcePolicy(BaseModel):
 
     These limits apply to the same node_id inside one workflow Invocation.
     WorkflowExecutor checks node execution count before creating another
-    NodeExecution. NodeExecutor checks operator call count and accumulated
+    NodeExecution. NodeExecutor checks Operator attempt count and accumulated
     runtime while executing the node.
     """
 
@@ -145,11 +161,11 @@ class ResourcePolicy(BaseModel):
             "Invocation. Used to stop runaway loops."
         ),
     )
-    max_operator_calls_per_invocation: int | None = Field(
+    max_operator_attempts_per_invocation: int | None = Field(
         default=None,
         description=(
-            "Maximum concrete OperatorCall records allowed for this node_id in "
-            "one Invocation. Retry, fallback, map, and replication all count."
+            "Maximum actual Operator handler attempts for this node_id in one "
+            "Invocation. Parallel summaries contribute their attempt_count."
         ),
     )
     max_runtime_ms_per_invocation: int | None = Field(
@@ -168,13 +184,13 @@ class ReplicationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     count: int = Field(
-        description="How many OperatorCalls to create for one NodeExecution.",
+        description="How many parallel handler units to run for one NodeExecution.",
     )
     output_aggregator: Callable[[list[Any]], Any | Awaitable[Any]] | None = Field(
         default=None,
         description=(
             "Required aggregation function for replication. It receives all "
-            "successful OperatorCall outputs and returns the final "
+            "successful unit outputs and returns the final "
             "NodeExecution.output consumed by downstream nodes. If any replica "
             "fails, remaining calls are cancelled when possible and this hook is "
             "not called."
@@ -182,7 +198,7 @@ class ReplicationPolicy(BaseModel):
     )
     max_parallelism: int | None = Field(
         default=None,
-        description="Maximum replica OperatorCalls this node may run concurrently.",
+        description="Maximum replica handler units this node may run concurrently.",
     )
 
 
@@ -227,7 +243,7 @@ class NodePolicy(BaseModel):
         description=(
             "Maximum concurrent logical NodeExecutions for this node across "
             "sessions in one App process. MapPolicy/ReplicationPolicy "
-            "max_parallelism separately limits internal OperatorCalls."
+            "max_parallelism separately limits internal handler units."
         ),
     )
 
@@ -246,7 +262,7 @@ class MapPolicy(BaseModel):
         description=(
             "Maps source NodeExecution.output into iterable target operator "
             "argument mappings. Each selected mapping is copied to a dict and "
-            "becomes one map_item OperatorCall. When omitted, the source output "
+            "becomes one map item. When omitted, the source output "
             "must itself be an iterable of argument mappings."
         ),
     )
@@ -261,7 +277,7 @@ class MapPolicy(BaseModel):
     )
     max_parallelism: int | None = Field(
         default=None,
-        description="Maximum map item OperatorCalls to execute concurrently.",
+        description="Maximum map items to execute concurrently.",
     )
 
 
@@ -275,6 +291,6 @@ class EdgePolicy(BaseModel):
         description=(
             "Optional map/fan-out behavior. If present, this edge creates one "
             "target NodeExecution whose NodeExecutor performs multiple "
-            "map_item OperatorCalls and aggregates their outputs."
+            "map item handler units and aggregates their outputs."
         ),
     )

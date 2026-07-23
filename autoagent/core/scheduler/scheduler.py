@@ -94,7 +94,7 @@ class Scheduler:
                 )
             elif transition.state == "failed":
                 execution = invocation.get_node_execution(transition.node_execution_id)
-                invocation.mark_failed(
+                error = (
                     execution.error
                     if execution is not None and execution.error is not None
                     else RuntimeErrorInfo(
@@ -106,6 +106,99 @@ class Scheduler:
                         },
                     )
                 )
+                if workflow_ir.policy.failure.mode == "fail_fast":
+                    invocation.mark_failed(error)
+                    continue
+                invocation.defer_terminal(error, state="failed")
+                if execution is not None:
+                    self._advance_blocked_execution(
+                        workflow_ir=workflow_ir,
+                        invocation=invocation,
+                        execution=execution,
+                        reason=error.code,
+                    )
+
+    def skip_ready_request(
+        self,
+        *,
+        workflow_ir: WorkflowIR,
+        invocation: Invocation,
+        request: NodeExecutionRequest,
+    ) -> None:
+        """Resolve a recovery-blocked node as a skipped branch."""
+
+        targets = self._skip_node_instance(
+            workflow_ir=workflow_ir,
+            invocation=invocation,
+            node_id=request.node_id,
+            scope=request.execution_scope,
+        )
+        self._resolve_node_instances(
+            workflow_ir=workflow_ir,
+            invocation=invocation,
+            targets=targets,
+        )
+
+    def _advance_blocked_execution(
+        self,
+        *,
+        workflow_ir: WorkflowIR,
+        invocation: Invocation,
+        execution: NodeExecution,
+        reason: str,
+    ) -> None:
+        targets: list[tuple[str, ExecutionScope]] = []
+        boundaries: set[tuple[str, ExecutionScope]] = set()
+        for edge_id in workflow_ir.graph.outgoing_edges.get(execution.node_id, ()):
+            edge = workflow_ir.edges[edge_id]
+            execution.add_edge_evaluation(
+                edge_id=edge.id,
+                target_node_id=edge.to_node,
+                state="skipped",
+                selected=False,
+                reason=reason,
+            )
+            boundary = self._boundary_owner(
+                workflow_ir,
+                edge,
+                execution.execution_scope,
+            )
+            if boundary is not None:
+                loop_scope = self._loop_scope(
+                    execution.execution_scope,
+                    boundary.id,
+                )
+                invocation.scheduler.resolve_loop_boundary(
+                    loop_region_id=boundary.id,
+                    loop_scope=loop_scope,
+                    edge_id=edge.id,
+                    state="skipped",
+                )
+                boundaries.add((boundary.id, loop_scope))
+            else:
+                target_scope = self._target_scope(
+                    workflow_ir,
+                    edge,
+                    execution.execution_scope,
+                )
+                invocation.scheduler.resolve_edge(
+                    edge.id,
+                    state="skipped",
+                    scope=target_scope,
+                )
+                targets.append((edge.to_node, target_scope))
+        self._resolve_node_instances(
+            workflow_ir=workflow_ir,
+            invocation=invocation,
+            targets=targets,
+        )
+        for loop_region_id, loop_scope in boundaries:
+            self._finalize_loop_boundary(
+                workflow_ir=workflow_ir,
+                invocation=invocation,
+                loop_region=workflow_ir.graph.loop_regions[loop_region_id],
+                loop_scope=loop_scope,
+            )
 
     async def _advance_completed(
         self,

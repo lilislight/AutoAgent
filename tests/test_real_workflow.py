@@ -93,37 +93,34 @@ class RealWorkflowTests(unittest.TestCase):
         self.assertIn("latest_incident_decision", session.context.data)
         events = asyncio.run(
             app.runtime_store.alist_runtime_events(
-                session_id=session.id,
                 invocation_id=invocation.id,
                 limit=10_000,
             )
         )
-        self.assertIn("invocation.context_updated", [event.type for event in events])
-        self.assertIn("session.context_updated", [event.type for event in events])
+        self.assertEqual(
+            list(range(1, len(events) + 1)),
+            [event.sequence for event in events],
+        )
 
         map_execution = invocation.latest_node_execution(
             "investigation/gather_evidence"
         )
-        self.assertEqual(len(map_execution.operator_calls), 3)
-        self.assertEqual(
-            [call.kind for call in map_execution.operator_calls],
-            ["map_item", "map_item", "map_item"],
-        )
+        self.assertEqual(len(map_execution.operator_executions), 1)
+        self.assertEqual("map", map_execution.operator_executions[0].kind)
+        self.assertEqual(3, map_execution.operator_executions[0].summary.call_count)
 
         replicated = invocation.latest_node_execution("final_decision")
-        self.assertEqual(len(replicated.operator_calls), 3)
-        self.assertEqual(
-            [call.kind for call in replicated.operator_calls],
-            ["replica", "replica", "replica"],
-        )
+        self.assertEqual(len(replicated.operator_executions), 1)
+        self.assertEqual("replication", replicated.operator_executions[0].kind)
+        self.assertEqual(3, replicated.operator_executions[0].summary.call_count)
 
         fallback_execution = invocation.latest_node_execution("reliability_review")
         self.assertEqual(
-            [call.operator_id for call in fallback_execution.operator_calls],
+            [call.operator_id for call in fallback_execution.operator_executions],
             ["slow_reliability_review", "reliability_review_fallback"],
         )
         self.assertEqual(
-            [call.state for call in fallback_execution.operator_calls],
+            [call.state for call in fallback_execution.operator_executions],
             ["failed", "completed"],
         )
 
@@ -161,11 +158,11 @@ class RealWorkflowTests(unittest.TestCase):
         failed = invocation.latest_node_execution("security_review")
         self.assertEqual(failed.state, "failed")
         self.assertEqual(
-            [call.kind for call in failed.operator_calls],
+            [call.reason for call in failed.operator_executions],
             ["normal", "retry"],
         )
         self.assertTrue(
-            all(call.error is not None for call in failed.operator_calls)
+            all(call.error is not None for call in failed.operator_executions)
         )
 
     def test_manual_approval_wait_branch_resumes_without_touching_normal_paths(

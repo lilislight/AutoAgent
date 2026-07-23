@@ -215,7 +215,13 @@ class PersistenceIdentityTests(unittest.TestCase):
         app = AutoAgentApp()
 
         invocation = app.invoke(workflow, input={"value": "hello"}, session_id="s1")
-        loaded = app.runtime_store.load_invocation(invocation.id)
+        session = app.runtime_store.find_session(
+            namespace=app.namespace,
+            workflow_id=workflow.id,
+            session_key="s1",
+        )
+        assert session is not None
+        loaded = session.get_current_invocation()
 
         self.assertIsNotNone(loaded)
         assert loaded is not None

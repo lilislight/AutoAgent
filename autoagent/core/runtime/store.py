@@ -1,36 +1,25 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from copy import deepcopy
 from threading import RLock
 from typing import Any
-from collections.abc import Iterable
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
-from autoagent.core.runtime.event import (
-    RuntimeEvent,
-    RuntimeEventDraft,
-    invocation_checkpoint_events,
-    session_context_event,
-    sort_runtime_event_drafts,
-)
-from autoagent.core.runtime.execution import NodeExecution, OperatorCall
+from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
-    RuntimeBoundary,
+    StateOperation,
+    apply_state_operations,
     capture_execution_state,
+    diff_execution_state,
     reduce_execution_state,
 )
-from autoagent.core.runtime.sinks import RuntimeEventSink, emit_to_sinks
 
 
 class SessionBusyError(RuntimeError):
-    """Raised when a session already owns an unfinished Invocation."""
-
     def __init__(self, session: Session, invocation: Invocation) -> None:
         super().__init__(
             "Session already has an active invocation: "
@@ -42,36 +31,92 @@ class SessionBusyError(RuntimeError):
         self.invocation_state = invocation.state
 
 
-class RuntimeStore(ABC):
-    """Authoritative in-memory Runtime center and event-journal contract.
+class RuntimeStore:
+    """Authoritative in-memory aggregate and immutable boundary journal.
 
-    Executors generate sequenced RuntimeEvents and call ``aapply_event``. The
-    Store atomically applies their reducer state, retains the latest Session /
-    Invocation materialization, and exposes replay journals to subscribers.
-    A database is a downstream durable backend rather than the execution source
-    of truth. Recovery rebuilds from a Genesis/periodic ExecutionSnapshot plus
-    boundary events; Python stacks and per-Operator database rows are excluded.
+    The executor mutates its live aggregate on the App runtime loop, emits one
+    sequenced boundary delta, and applies it here. Durable implementations add a
+    downstream persistence coordinator; database state is never the live
+    execution authority.
     """
-
-    serializer: JsonRuntimeSerializer
 
     def __init__(
         self,
         *,
-        event_sinks: Iterable[RuntimeEventSink] = (),
+        serializer: JsonRuntimeSerializer | None = None,
     ) -> None:
-        self.event_sinks: tuple[RuntimeEventSink, ...] = tuple(event_sinks)
-
-    async def aemit_runtime_events(self, events: tuple[RuntimeEvent, ...]) -> None:
-        """Notify diagnostic/event consumers after a store operation succeeds."""
-
-        await emit_to_sinks(self.event_sinks, events)
+        self.serializer = serializer or JsonRuntimeSerializer()
 
     async def ainitialize(self) -> None:
-        """Initialize backing resources; in-memory stores require no work."""
+        return None
 
     async def aclose(self) -> None:
-        """Release backing resources; in-memory stores require no work."""
+        return None
+
+    async def asave_workflow_snapshot(
+        self,
+        namespace: str,
+        snapshot: WorkflowVersionSnapshot,
+    ) -> None:
+        raise NotImplementedError
+
+    async def aload_workflow_snapshot(
+        self,
+        *,
+        namespace: str,
+        workflow_id: str,
+        definition_hash: str,
+        operator_manifest_hash: str | None = None,
+    ) -> WorkflowVersionSnapshot | None:
+        raise NotImplementedError
+
+    async def aget_or_create_session(
+        self,
+        *,
+        namespace: str,
+        workflow_id: str,
+        session_key: str | None,
+    ) -> Session:
+        raise NotImplementedError
+
+    async def afind_session(
+        self,
+        *,
+        namespace: str,
+        workflow_id: str,
+        session_key: str,
+    ) -> Session | None:
+        raise NotImplementedError
+
+    async def aadmit_invocation(
+        self,
+        session_id: UUID,
+        invocation: Invocation,
+    ) -> Session:
+        raise NotImplementedError
+
+    async def aclaim_waiting_session(
+        self,
+        *,
+        namespace: str,
+        workflow_id: str,
+        session_key: str,
+        wait_key: str,
+        workflow_definition_hash: str | None = None,
+        workflow_operator_manifest_hash: str | None = None,
+    ) -> Session:
+        raise NotImplementedError
+
+    async def aapply_event(
+        self,
+        session: Session,
+        invocation: Invocation,
+        event: RuntimeEvent,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+    ) -> RuntimeEvent:
+        raise NotImplementedError
 
     async def asave_execution_snapshot(
         self,
@@ -79,8 +124,6 @@ class RuntimeStore(ABC):
         *,
         durability_barrier: bool = False,
     ) -> None:
-        """Store a Genesis or periodic restart image."""
-
         raise NotImplementedError
 
     async def aload_execution_snapshot(
@@ -103,327 +146,63 @@ class RuntimeStore(ABC):
         )
         if snapshot is None:
             raise KeyError(f"No execution snapshot for Invocation: {invocation_id}")
-        collected: list[RuntimeEvent] = []
-        cursor = snapshot.through_sequence
-        while True:
-            page = await self.alist_runtime_events(
-                invocation_id=invocation_id,
-                after_sequence=cursor,
-                limit=10_000,
-            )
-            if not page:
-                break
-            eligible = tuple(
-                event
-                for event in page
-                if through_sequence is None
-                or event.sequence <= through_sequence
-            )
-            collected.extend(eligible)
-            if not eligible or len(eligible) < len(page):
-                break
-            cursor = eligible[-1].sequence
-            if len(page) < 10_000:
-                break
+        events = await self.alist_runtime_events(
+            invocation_id=invocation_id,
+            after_sequence=snapshot.through_sequence,
+            before_sequence=(
+                through_sequence + 1
+                if through_sequence is not None
+                else None
+            ),
+            limit=1_000_000,
+        )
         return reduce_execution_state(
             snapshot,
-            tuple(collected),
+            events,
             through_sequence=through_sequence,
         )
 
-    async def acommit_boundary(
-        self,
-        session: Session,
-        invocation: Invocation,
-        boundary: RuntimeBoundary,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
-        detail: dict[str, Any] | None = None,
-    ) -> RuntimeEvent:
-        """Compatibility helper; executors should construct and apply events."""
-
-        sequence = invocation.next_event_sequence()
-        event = RuntimeEvent(
-            namespace=session.namespace,
-            workflow_id=session.workflow_id,
-            session_id=session.id,
-            invocation_id=invocation.id,
-            sequence=sequence,
-            type=boundary,
-            entity_type="invocation",
-            entity_id=str(invocation.id),
-            occurred_at_ms=invocation.updated_at_ms,
-            role="boundary",
-            boundary=boundary,
-            payload={
-                "detail": deepcopy(detail or {}),
-                "reducer_state": capture_execution_state(session, invocation),
-            },
-        )
-        return await self.aapply_event(
-            session,
-            invocation,
-            event,
-            node_execution_ids=node_execution_ids,
-            durability_barrier=durability_barrier,
-        )
-
-    async def aapply_event(
-        self,
-        session: Session,
-        invocation: Invocation,
-        event: RuntimeEvent,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
-    ) -> RuntimeEvent:
-        """Apply an Executor-produced event to the in-memory Runtime center."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def asave_workflow_snapshot(
-        self,
-        namespace: str,
-        snapshot: WorkflowVersionSnapshot,
-    ) -> None:
-        """Persist or confirm one immutable compiled Workflow version."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aload_workflow_snapshot(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        definition_hash: str,
-        operator_manifest_hash: str | None = None,
-    ) -> WorkflowVersionSnapshot | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def asave_session(self, session: Session) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def asave_session_context(self, session: Session) -> None:
-        """Persist Session fields/context without rewriting invocation history."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aload_session(self, session_id: UUID) -> Session | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aget_or_create_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str | None,
-    ) -> Session:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def afind_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str,
-    ) -> Session | None:
-        """Load an existing session by its external identity without creating it."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aclaim_waiting_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str,
-        wait_key: str,
-        workflow_definition_hash: str | None = None,
-        workflow_operator_manifest_hash: str | None = None,
-    ) -> Session:
-        """Atomically claim one waiting invocation for resume processing."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def asave_invocation(
-        self,
-        session_id: UUID,
-        invocation: Invocation,
-    ) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aadmit_invocation(
-        self,
-        session_id: UUID,
-        invocation: Invocation,
-    ) -> Session:
-        """Atomically reject an active session or attach and persist invocation."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aload_invocation(self, invocation_id: UUID) -> Invocation | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def alist_active_invocations(self) -> tuple[Invocation, ...]:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def arecover_interrupted_invocations(self) -> tuple[Invocation, ...]:
-        """Force unfinished local work to ``interrupted`` without replay.
-
-        This is a low-level maintenance/testing primitive, not the application
-        crash-recovery entrypoint. AutoAgentApp owns compatibility checks and
-        asks WorkflowExecutor to replay recoverable work lazily after the
-        Workflow and Operator registries are available.
-        """
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def alist_workflow_snapshots(
-        self,
-        *,
-        namespace: str | None = None,
-        workflow_id: str | None = None,
-    ) -> tuple[WorkflowVersionSnapshot, ...]:
-        """List compiled graph versions available to observation clients."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def alist_sessions(
-        self,
-        *,
-        namespace: str | None = None,
-        workflow_id: str | None = None,
-    ) -> tuple[Session, ...]:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def alist_session_invocations(
-        self,
-        session_id: UUID,
-    ) -> tuple[Invocation, ...]:
-        raise NotImplementedError
-
-    @abstractmethod
     async def alist_runtime_events(
         self,
         *,
-        session_id: UUID | None = None,
-        invocation_id: UUID | None = None,
+        invocation_id: UUID,
         after_sequence: int = 0,
         before_sequence: int | None = None,
         limit: int = 1000,
-        visibility: str | None = None,
     ) -> tuple[RuntimeEvent, ...]:
-        """Read immutable events in Session sequence order."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def asave_projection_checkpoint(
-        self,
-        *,
-        invocation_id: UUID,
-        through_sequence: int,
-        projection: dict[str, Any],
-    ) -> None:
-        """Persist a rebuildable observation projection at an event cursor."""
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def aload_projection_checkpoint(
-        self,
-        *,
-        invocation_id: UUID,
-        at_or_before_sequence: int | None = None,
-    ) -> tuple[int, dict[str, Any]] | None:
-        """Load the newest projection no later than the optional cursor."""
-
         raise NotImplementedError
 
 
 class InMemoryRuntimeStore(RuntimeStore):
-    """In-memory store backed by database-shaped record tables.
-
-    The dictionaries below intentionally mirror future database tables. Tests
-    should assert against this behavior because tracing APIs, database stores,
-    and resume logic should all expose the same logical structure.
-    """
+    """One-copy runtime aggregates with indexes, snapshots, and event journals."""
 
     def __init__(
         self,
         *,
         serializer: JsonRuntimeSerializer | None = None,
-        event_sinks: Iterable[RuntimeEventSink] = (),
     ) -> None:
-        super().__init__(event_sinks=event_sinks)
+        super().__init__(serializer=serializer)
         self._lock = RLock()
-        self.serializer = serializer or JsonRuntimeSerializer()
         self.workflow_versions: dict[
             tuple[str, str, str, str],
-            dict[str, Any],
+            WorkflowVersionSnapshot,
         ] = {}
-        # Sessions table keyed by internal session UUID. session_keys is the
-        # unique lookup index for `(namespace, workflow_id, external key)`.
-        self.sessions: dict[UUID, dict[str, Any]] = {}
+        self.sessions: dict[UUID, Session] = {}
         self.session_keys: dict[tuple[str, str, str | None], UUID] = {}
-
-        # Invocations table plus relation index from session to invocation ids.
-        self.invocations: dict[UUID, dict[str, Any]] = {}
-        self.session_invocations: dict[UUID, list[UUID]] = {}
-
-        # Node execution table plus relation index from invocation to execution
-        # ids. Each NodeExecution is a logical node execution, not an operator
-        # call attempt.
-        self.node_executions: dict[UUID, dict[str, Any]] = {}
-        self.invocation_node_executions: dict[UUID, list[UUID]] = {}
-
-        # Operator call table plus relation index from node execution to
-        # concrete operator calls. Retry/fallback/map/replication all append
-        # rows here.
-        self.operator_calls: dict[UUID, dict[str, Any]] = {}
-        self.node_operator_calls: dict[UUID, list[UUID]] = {}
-
-        # Immutable event table and per-Invocation sequence index. Events are kept
-        # separately from materialized Invocation records so replay cursors and
-        # observation clients never depend on mutable latest-state rows.
-        self.runtime_events: dict[UUID, dict[str, Any]] = {}
-        self.invocation_runtime_events: dict[UUID, list[UUID]] = {}
-
-        # Execution images are authoritative recovery compaction points. The
-        # Genesis snapshot always uses sequence zero.
-        self.execution_snapshots: dict[tuple[UUID, int], dict[str, Any]] = {}
-
-        # Rebuildable observation cache keyed by Invocation and event cursor.
-        # This is not execution state and may be deleted without data loss.
-        self.projection_checkpoints: dict[
+        self.invocations: dict[UUID, Invocation] = {}
+        self.invocation_sessions: dict[UUID, UUID] = {}
+        self.runtime_events: dict[UUID, list[RuntimeEvent]] = {}
+        self.execution_snapshots: dict[
             tuple[UUID, int],
-            dict[str, Any],
+            ExecutionSnapshot,
         ] = {}
+        self._committed_states: dict[UUID, dict[str, Any]] = {}
 
     def save_workflow_snapshot(
         self,
         namespace: str,
         snapshot: WorkflowVersionSnapshot,
     ) -> None:
-        """Store the same portable record a durable Store writes to its table."""
-
         key = (
             namespace,
             snapshot.workflow_id,
@@ -431,14 +210,14 @@ class InMemoryRuntimeStore(RuntimeStore):
             snapshot.operator_manifest_hash,
         )
         with self._lock:
-            existing = self.workflow_versions.get(key)
-            record = snapshot.model_dump(mode="python")
-            if existing is not None and existing != record:
-                raise ValueError(
-                    "Workflow snapshot identity collision: "
-                    f"{snapshot.workflow_id}/{snapshot.definition_hash}"
-                )
-            self.workflow_versions[key] = deepcopy(record)
+            self.workflow_versions[key] = snapshot
+
+    async def asave_workflow_snapshot(
+        self,
+        namespace: str,
+        snapshot: WorkflowVersionSnapshot,
+    ) -> None:
+        self.save_workflow_snapshot(namespace, snapshot)
 
     def load_workflow_snapshot(
         self,
@@ -449,244 +228,95 @@ class InMemoryRuntimeStore(RuntimeStore):
         operator_manifest_hash: str | None = None,
     ) -> WorkflowVersionSnapshot | None:
         with self._lock:
-            if operator_manifest_hash is not None:
-                record = self.workflow_versions.get(
-                    (
-                        namespace,
-                        workflow_id,
-                        definition_hash,
-                        operator_manifest_hash,
-                    )
-                )
-            else:
-                matches = [
-                    value
-                    for key, value in self.workflow_versions.items()
-                    if key[:3] == (namespace, workflow_id, definition_hash)
-                ]
-                if len(matches) > 1:
-                    raise ValueError(
-                        "operator_manifest_hash is required when a Workflow "
-                        "definition has multiple Operator environments."
-                    )
-                record = matches[0] if matches else None
-            return (
-                WorkflowVersionSnapshot.model_validate(deepcopy(record))
-                if record is not None
-                else None
-            )
-
-    async def asave_workflow_snapshot(
-        self,
-        namespace: str,
-        snapshot: WorkflowVersionSnapshot,
-    ) -> None:
-        self.save_workflow_snapshot(namespace, snapshot)
-
-    async def acommit_boundary(
-        self,
-        session: Session,
-        invocation: Invocation,
-        boundary: RuntimeBoundary,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
-        detail: dict[str, Any] | None = None,
-    ) -> RuntimeEvent:
-        sequence = invocation.next_event_sequence()
-        event = RuntimeEvent(
-            namespace=session.namespace,
-            workflow_id=session.workflow_id,
-            session_id=session.id,
-            invocation_id=invocation.id,
-            sequence=sequence,
-            type=boundary,
-            entity_type="invocation",
-            entity_id=str(invocation.id),
-            occurred_at_ms=invocation.updated_at_ms,
-            role="boundary",
-            boundary=boundary,
-            payload={
-                "detail": deepcopy(detail or {}),
-                "reducer_state": capture_execution_state(session, invocation),
-            },
-        )
-        return await self.aapply_event(
-            session,
-            invocation,
-            event,
-            node_execution_ids=node_execution_ids,
-            durability_barrier=durability_barrier,
-        )
-
-    async def aapply_event(
-        self,
-        session: Session,
-        invocation: Invocation,
-        event: RuntimeEvent,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
-    ) -> RuntimeEvent:
-        del durability_barrier
-        with self._lock:
-            previous_session = self.sessions.get(session.id)
-            previous = self.load_invocation(invocation.id)
-            if previous_session is None or previous is None:
-                raise KeyError(f"Unknown Invocation hierarchy: {invocation.id}")
-
-            changed_ids = tuple(dict.fromkeys(node_execution_ids))
-            self.sessions[session.id] = deepcopy(session.to_record())
-            self.invocations[invocation.id] = deepcopy(
-                invocation.to_record(session.id)
-            )
-            for execution_id in changed_ids:
-                execution = invocation.get_node_execution(execution_id)
-                if execution is None:
-                    raise KeyError(f"Unknown NodeExecution: {execution_id}")
-                self._save_node_execution(invocation.id, execution)
-
-            expected_sequence = max(
-                (
-                    int(self.runtime_events[event_id]["sequence"])
-                    for event_id in self.invocation_runtime_events.get(
-                        invocation.id, ()
-                    )
-                ),
-                default=0,
-            ) + 1
-            if event.sequence != expected_sequence:
-                raise ValueError(
-                    "Executor event sequence is not contiguous: "
-                    f"expected={expected_sequence}, actual={event.sequence}."
-                )
-            self.runtime_events[event.id] = event.model_dump(mode="python")
-            self.invocation_runtime_events.setdefault(invocation.id, []).append(
-                event.id
-            )
-
-            drafts = invocation_checkpoint_events(
-                previous,
-                invocation,
-                changed_node_execution_ids=frozenset(map(str, changed_ids)),
-            )
-            if previous_session.get("context") != session.context.to_record():
-                drafts.append(
-                    session_context_event(
-                        session_id=session.id,
-                        invocation_id=invocation.id,
-                        context=session.context.to_record(),
-                        occurred_at_ms=session.updated_at_ms,
-                    )
-                )
-            sort_runtime_event_drafts(drafts)
-            observation_events = self._append_event_drafts(
-                session.id,
-                invocation.id,
-                tuple(drafts),
-                commit_id=event.commit_id,
-            )
-            if observation_events:
-                invocation.event_sequence = observation_events[-1].sequence
-                self.invocations[invocation.id] = deepcopy(
-                    invocation.to_record(session.id)
-                )
-
-        await self.aemit_runtime_events((event, *observation_events))
-        interval = int(getattr(self, "snapshot_interval", 50))
-        if event.sequence % max(1, interval) == 0:
-            await self.asave_execution_snapshot(
-                ExecutionSnapshot.capture(session, invocation)
-            )
-        return event
-
-    async def asave_execution_snapshot(
-        self,
-        snapshot: ExecutionSnapshot,
-        *,
-        durability_barrier: bool = False,
-    ) -> None:
-        del durability_barrier
-        with self._lock:
-            key = (snapshot.invocation_id, snapshot.through_sequence)
-            existing = self.execution_snapshots.get(key)
-            record = snapshot.model_dump(mode="python")
-            if existing is not None and existing != record:
-                raise ValueError(f"Execution snapshot collision: {key}")
-            self.execution_snapshots[key] = deepcopy(record)
-
-    async def aload_execution_snapshot(
-        self,
-        invocation_id: UUID,
-        *,
-        at_or_before_sequence: int | None = None,
-    ) -> ExecutionSnapshot | None:
-        with self._lock:
-            candidates = [
-                (sequence, record)
-                for (candidate_id, sequence), record in self.execution_snapshots.items()
-                if candidate_id == invocation_id
-                and (
-                    at_or_before_sequence is None
-                    or sequence <= at_or_before_sequence
-                )
+            matches = [
+                snapshot
+                for key, snapshot in self.workflow_versions.items()
+                if key[0] == namespace
+                and key[1] == workflow_id
+                and key[2] == definition_hash
+                and (operator_manifest_hash is None or key[3] == operator_manifest_hash)
             ]
-            if not candidates:
-                return None
-            _, record = max(candidates, key=lambda item: item[0])
-            return ExecutionSnapshot.model_validate(deepcopy(record))
+        if len(matches) > 1 and operator_manifest_hash is None:
+            raise ValueError("operator_manifest_hash is required for this version.")
+        return matches[0] if matches else None
 
-    async def aload_workflow_snapshot(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        definition_hash: str,
-        operator_manifest_hash: str | None = None,
-    ) -> WorkflowVersionSnapshot | None:
-        return self.load_workflow_snapshot(
-            namespace=namespace,
-            workflow_id=workflow_id,
-            definition_hash=definition_hash,
-            operator_manifest_hash=operator_manifest_hash,
-        )
+    async def aload_workflow_snapshot(self, **kwargs: Any) -> WorkflowVersionSnapshot | None:
+        return self.load_workflow_snapshot(**kwargs)
 
-    async def asave_session(self, session: Session) -> None:
-        events = self.save_session(session)
-        await self.aemit_runtime_events(events)
-
-    async def asave_session_context(self, session: Session) -> None:
-        events = self.save_session_context(session)
-        await self.aemit_runtime_events(events)
-
-    async def aload_session(self, session_id: UUID) -> Session | None:
-        return self.load_session(session_id)
-
-    async def aget_or_create_session(
+    def get_or_create_session(
         self,
         *,
         namespace: str,
         workflow_id: str,
         session_key: str | None,
     ) -> Session:
-        return self.get_or_create_session(
-            namespace=namespace,
-            workflow_id=workflow_id,
-            session_key=session_key,
-        )
+        key = (namespace, workflow_id, session_key)
+        with self._lock:
+            session_id = self.session_keys.get(key)
+            if session_id is not None:
+                return self.sessions[session_id]
+            session = Session(
+                namespace=namespace,
+                workflow_id=workflow_id,
+                session_key=session_key,
+            )
+            self.sessions[session.id] = session
+            self.session_keys[key] = session.id
+            return session
 
-    async def afind_session(
+    async def aget_or_create_session(self, **kwargs: Any) -> Session:
+        return self.get_or_create_session(**kwargs)
+
+    def find_session(
         self,
         *,
         namespace: str,
         workflow_id: str,
         session_key: str,
     ) -> Session | None:
-        return self.find_session(
-            namespace=namespace,
-            workflow_id=workflow_id,
-            session_key=session_key,
+        with self._lock:
+            session_id = self.session_keys.get(
+                (namespace, workflow_id, session_key)
+            )
+            return self.sessions.get(session_id) if session_id is not None else None
+
+    async def afind_session(self, **kwargs: Any) -> Session | None:
+        return self.find_session(**kwargs)
+
+    async def aadmit_invocation(
+        self,
+        session_id: UUID,
+        invocation: Invocation,
+    ) -> Session:
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                raise KeyError(f"Unknown session: {session_id}")
+            current = session.get_current_invocation()
+            if current is not None and current.state in {
+                "created",
+                "running",
+                "waiting",
+            }:
+                raise SessionBusyError(session, current)
+            session.add_invocation(invocation)
+            self.invocations[invocation.id] = invocation
+            self.invocation_sessions[invocation.id] = session.id
+            self.runtime_events[invocation.id] = []
+            state = capture_execution_state(session, invocation)
+            self._committed_states[invocation.id] = state
+            snapshot = ExecutionSnapshot(
+                invocation_id=invocation.id,
+                through_sequence=0,
+                state=state,
+            )
+            self.execution_snapshots[(invocation.id, 0)] = snapshot
+        await InMemoryRuntimeStore.asave_execution_snapshot(
+            self,
+            snapshot,
+            durability_barrier=True,
         )
+        return session
 
     async def aclaim_waiting_session(
         self,
@@ -698,526 +328,153 @@ class InMemoryRuntimeStore(RuntimeStore):
         workflow_definition_hash: str | None = None,
         workflow_operator_manifest_hash: str | None = None,
     ) -> Session:
-        session, events = self.claim_waiting_session(
+        session = self.find_session(
             namespace=namespace,
             workflow_id=workflow_id,
             session_key=session_key,
-            wait_key=wait_key,
-            workflow_definition_hash=workflow_definition_hash,
-            workflow_operator_manifest_hash=workflow_operator_manifest_hash,
         )
+        if session is None:
+            raise KeyError(f"Unknown session: {session_key}")
         invocation = session.get_current_invocation()
-        if invocation is not None and events:
-            invocation.event_sequence = events[-1].sequence
-        await self.aemit_runtime_events(events)
+        if invocation is None:
+            raise ValueError("Session does not have a current Invocation.")
+        if invocation.state != "waiting":
+            if invocation.state in {"created", "running"}:
+                raise SessionBusyError(session, invocation)
+            raise ValueError("Session does not have a waiting Invocation.")
+        if (
+            workflow_definition_hash is not None
+            and invocation.workflow_definition_hash != workflow_definition_hash
+        ):
+            raise ValueError("Waiting Invocation uses another Workflow definition.")
+        if (
+            workflow_operator_manifest_hash is not None
+            and invocation.workflow_operator_manifest_hash
+            != workflow_operator_manifest_hash
+        ):
+            raise ValueError("Waiting Invocation uses another Operator environment.")
+        if wait_key not in invocation.scheduler.waiting_executions:
+            raise KeyError(f"Unknown wait key: {wait_key}")
         return session
 
-    async def asave_invocation(
+    async def aapply_event(
         self,
-        session_id: UUID,
+        session: Session,
         invocation: Invocation,
-    ) -> None:
-        events = self.save_invocation(session_id, invocation)
-        if events:
-            invocation.event_sequence = events[-1].sequence
-        await self.aemit_runtime_events(events)
-
-    async def aadmit_invocation(
-        self,
-        session_id: UUID,
-        invocation: Invocation,
-    ) -> Session:
-        session, events = self.admit_invocation(session_id, invocation)
-        await self.asave_execution_snapshot(
-            ExecutionSnapshot.capture(
-                session,
-                invocation,
-                through_sequence=0,
-            ),
-            durability_barrier=True,
-        )
-        if events:
-            invocation.event_sequence = events[-1].sequence
-        await self.aemit_runtime_events(events)
-        return session
-
-    async def aload_invocation(self, invocation_id: UUID) -> Invocation | None:
-        return self.load_invocation(invocation_id)
-
-    async def alist_active_invocations(self) -> tuple[Invocation, ...]:
-        return self.list_active_invocations()
-
-    async def arecover_interrupted_invocations(self) -> tuple[Invocation, ...]:
-        return self.recover_interrupted_invocations()
-
-    async def alist_workflow_snapshots(
-        self,
+        event: RuntimeEvent,
         *,
-        namespace: str | None = None,
-        workflow_id: str | None = None,
-    ) -> tuple[WorkflowVersionSnapshot, ...]:
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+    ) -> RuntimeEvent:
+        del node_execution_ids, durability_barrier
+        if event.invocation_id != invocation.id:
+            raise ValueError("RuntimeEvent invocation does not match aggregate.")
         with self._lock:
-            values = [
-                WorkflowVersionSnapshot.model_validate(deepcopy(record))
-                for key, record in self.workflow_versions.items()
-                if (namespace is None or key[0] == namespace)
-                and (workflow_id is None or key[1] == workflow_id)
-            ]
-        values.sort(key=lambda item: (item.workflow_id, item.definition_hash))
-        return tuple(values)
-
-    async def alist_sessions(
-        self,
-        *,
-        namespace: str | None = None,
-        workflow_id: str | None = None,
-    ) -> tuple[Session, ...]:
-        with self._lock:
-            ids = [
-                session_id
-                for session_id, record in self.sessions.items()
-                if (namespace is None or record["namespace"] == namespace)
-                and (workflow_id is None or record["workflow_id"] == workflow_id)
-            ]
-        values = [
-            session
-            for session_id in ids
-            if (session := self.load_session(session_id)) is not None
-        ]
-        values.sort(key=lambda item: (item.created_at_ms, str(item.id)))
-        return tuple(values)
-
-    async def alist_session_invocations(
-        self,
-        session_id: UUID,
-    ) -> tuple[Invocation, ...]:
-        session = self.load_session(session_id)
-        return session.list_invocations() if session is not None else ()
-
-    async def alist_runtime_events(
-        self,
-        *,
-        session_id: UUID | None = None,
-        invocation_id: UUID | None = None,
-        after_sequence: int = 0,
-        before_sequence: int | None = None,
-        limit: int = 1000,
-        visibility: str | None = None,
-    ) -> tuple[RuntimeEvent, ...]:
-        _validate_event_query(
-            session_id,
-            invocation_id,
-            after_sequence,
-            before_sequence,
-            limit,
-        )
-        with self._lock:
-            records = list(self.runtime_events.values())
-        values = [
-            RuntimeEvent.model_validate(deepcopy(record))
-            for record in records
-            if (session_id is None or str(record["session_id"]) == str(session_id))
-            and (
-                invocation_id is None
-                or str(record["invocation_id"]) == str(invocation_id)
+            events = self.runtime_events.setdefault(invocation.id, [])
+            expected = events[-1].sequence + 1 if events else 1
+            if event.sequence != expected:
+                raise ValueError(
+                    f"Expected event sequence {expected}, got {event.sequence}."
+                )
+            previous = self._committed_states.get(invocation.id)
+            if previous is None:
+                raise KeyError(f"Unknown Invocation aggregate: {invocation.id}")
+            operations = tuple(
+                StateOperation.model_validate(value)
+                for value in event.payload.get("operations", [])
             )
-            and int(record["sequence"]) > after_sequence
-            and (
-                before_sequence is None
-                or int(record["sequence"]) < before_sequence
-            )
-            and (visibility is None or record["visibility"] == visibility)
-        ]
-        values.sort(
-            key=lambda item: item.sequence,
-            reverse=before_sequence is not None,
-        )
-        page = values[:limit]
-        if before_sequence is not None:
-            page.reverse()
-        return tuple(page)
+            reduced = apply_state_operations(previous, operations)
+            live = capture_execution_state(session, invocation)
+            if reduced != live:
+                divergence = diff_execution_state(reduced, live)
+                raise ValueError(
+                    f"Boundary reducer diverged from live state at {event.type}: "
+                    f"{divergence[:5]}"
+                )
+            events.append(event)
+            self._committed_states[invocation.id] = reduced
+            self.sessions[session.id] = session
+            self.invocations[invocation.id] = invocation
+        return event
 
-    async def asave_projection_checkpoint(
+    async def asave_execution_snapshot(
         self,
+        snapshot: ExecutionSnapshot,
         *,
-        invocation_id: UUID,
-        through_sequence: int,
-        projection: dict[str, Any],
+        durability_barrier: bool = False,
     ) -> None:
-        if through_sequence < 0:
-            raise ValueError("through_sequence cannot be negative.")
+        del durability_barrier
         with self._lock:
-            if invocation_id not in self.invocations:
-                raise KeyError(f"Unknown invocation: {invocation_id}")
-            self.projection_checkpoints[(invocation_id, through_sequence)] = {
-                "projection": deepcopy(projection),
-            }
+            self.execution_snapshots[
+                (snapshot.invocation_id, snapshot.through_sequence)
+            ] = snapshot
 
-    async def aload_projection_checkpoint(
+    async def aload_execution_snapshot(
         self,
-        *,
         invocation_id: UUID,
+        *,
         at_or_before_sequence: int | None = None,
-    ) -> tuple[int, dict[str, Any]] | None:
+    ) -> ExecutionSnapshot | None:
         with self._lock:
             candidates = [
-                (sequence, record)
-                for (candidate_id, sequence), record in self.projection_checkpoints.items()
+                snapshot
+                for (candidate_id, sequence), snapshot in self.execution_snapshots.items()
                 if candidate_id == invocation_id
                 and (
                     at_or_before_sequence is None
                     or sequence <= at_or_before_sequence
                 )
             ]
-            if not candidates:
-                return None
-            sequence, record = max(candidates, key=lambda value: value[0])
-            return sequence, deepcopy(record["projection"])
+        return (
+            max(candidates, key=lambda value: value.through_sequence)
+            if candidates
+            else None
+        )
 
-    def save_session(self, session: Session) -> tuple[RuntimeEvent, ...]:
-        with self._lock:
-            collected: list[RuntimeEvent] = []
-            record = session.to_record()
-            self.sessions[session.id] = deepcopy(record)
-            self.session_keys[
-                (session.namespace, session.workflow_id, session.session_key)
-            ] = session.id
-            self.session_invocations.setdefault(session.id, [])
-            for invocation in session.invocations:
-                collected.extend(self.save_invocation(session.id, invocation))
-            return tuple(collected)
-
-    def save_session_context(self, session: Session) -> tuple[RuntimeEvent, ...]:
-        with self._lock:
-            previous = self.sessions.get(session.id)
-            if previous is None:
-                raise KeyError(f"Unknown session: {session.id}")
-            self.sessions[session.id] = deepcopy(session.to_record())
-            self.session_keys[
-                (session.namespace, session.workflow_id, session.session_key)
-            ] = session.id
-            if (
-                previous.get("context") != session.context.to_record()
-                and session.current_invocation_id is not None
-                and session.current_invocation_id in self.invocations
-            ):
-                return self._append_event_drafts(
-                    session.id,
-                    session.current_invocation_id,
-                    (
-                        session_context_event(
-                            session_id=session.id,
-                            invocation_id=session.current_invocation_id,
-                            context=session.context.to_record(),
-                            occurred_at_ms=session.updated_at_ms,
-                        ),
-                    ),
-                )
-            return ()
-
-    def load_session(self, session_id: UUID) -> Session | None:
-        with self._lock:
-            record = self.sessions.get(session_id)
-            if record is None:
-                return None
-
-            invocations = [
-                invocation
-                for invocation_id in self.session_invocations.get(session_id, [])
-                if (invocation := self.load_invocation(invocation_id)) is not None
-            ]
-            return Session.from_record(deepcopy(record), invocations=invocations)
-
-    def get_or_create_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str | None,
-    ) -> tuple[Session, tuple[RuntimeEvent, ...]]:
-        with self._lock:
-            key = (namespace, workflow_id, session_key)
-            session_id = self.session_keys.get(key)
-            if session_id is not None:
-                session = self.load_session(session_id)
-                if session is not None:
-                    return session
-
-            session = Session(
-                namespace=namespace,
-                workflow_id=workflow_id,
-                session_key=session_key,
-            )
-            self.save_session(session)
-            return session
-
-    def find_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str,
-    ) -> Session | None:
-        with self._lock:
-            session_id = self.session_keys.get((namespace, workflow_id, session_key))
-            return self.load_session(session_id) if session_id is not None else None
-
-    def claim_waiting_session(
-        self,
-        *,
-        namespace: str,
-        workflow_id: str,
-        session_key: str,
-        wait_key: str,
-        workflow_definition_hash: str | None = None,
-        workflow_operator_manifest_hash: str | None = None,
-    ) -> Session:
-        with self._lock:
-            session_id = self.session_keys.get((namespace, workflow_id, session_key))
-            if session_id is None:
-                raise KeyError(f"Unknown session: {session_key}")
-            session = self.load_session(session_id)
-            if session is None:
-                raise KeyError(f"Unknown session: {session_key}")
-            invocation = session.get_current_invocation()
-            if invocation is None:
-                raise ValueError("Session does not have a current Invocation.")
-            if invocation.state != "waiting":
-                if invocation.state in {"created", "running"}:
-                    raise SessionBusyError(session, invocation)
-                raise ValueError("Session does not have a waiting Invocation.")
-            if (
-                workflow_definition_hash is not None
-                and invocation.workflow_definition_hash != workflow_definition_hash
-            ):
-                raise ValueError(
-                    "Waiting Invocation belongs to a different Workflow definition."
-                )
-            if (
-                workflow_operator_manifest_hash is not None
-                and invocation.workflow_operator_manifest_hash
-                != workflow_operator_manifest_hash
-            ):
-                raise ValueError(
-                    "Waiting Invocation belongs to a different Operator manifest "
-                    "environment."
-                )
-            if wait_key not in invocation.scheduler.waiting_executions:
-                raise KeyError(f"Unknown wait key: {wait_key}")
-            invocation.mark_running()
-            events = self.save_invocation(session.id, invocation)
-            return session, events
-
-    def save_invocation(
-        self,
-        session_id: UUID,
-        invocation: Invocation,
-    ) -> tuple[RuntimeEvent, ...]:
-        with self._lock:
-            if session_id not in self.sessions:
-                raise KeyError(f"Unknown session: {session_id}")
-
-            previous = self.load_invocation(invocation.id)
-
-            self.invocations[invocation.id] = deepcopy(invocation.to_record(session_id))
-            invocation_ids = self.session_invocations.setdefault(session_id, [])
-            if invocation.id not in invocation_ids:
-                invocation_ids.append(invocation.id)
-
-            self.invocation_node_executions[invocation.id] = []
-            for execution in invocation.node_executions:
-                self._save_node_execution(invocation.id, execution)
-            drafts = invocation_checkpoint_events(previous, invocation)
-            return self._append_event_drafts(session_id, invocation.id, tuple(drafts))
-
-    def admit_invocation(
-        self,
-        session_id: UUID,
-        invocation: Invocation,
-    ) -> tuple[Session, tuple[RuntimeEvent, ...]]:
-        """Perform session admission and persistence under one store lock.
-
-        `created` is treated as active because another caller must not enter the
-        gap between admission and WorkflowExecutor.mark_running(). Interrupted
-        invocations are historical recovery outcomes and do not block a new one.
-        """
-
-        with self._lock:
-            session = self.load_session(session_id)
-            if session is None:
-                raise KeyError(f"Unknown session: {session_id}")
-            current = session.get_current_invocation()
-            if current is not None and current.state in {
-                "created",
-                "running",
-                "waiting",
-            }:
-                raise SessionBusyError(session, current)
-            session.add_invocation(invocation)
-            events = self.save_session(session)
-            return session, events
-
-    def load_invocation(self, invocation_id: UUID) -> Invocation | None:
-        with self._lock:
-            record = self.invocations.get(invocation_id)
-            if record is None:
-                return None
-
-            node_executions = [
-                execution
-                for execution_id in self.invocation_node_executions.get(invocation_id, [])
-                if (execution := self._load_node_execution(execution_id)) is not None
-            ]
-            node_executions.sort(key=lambda execution: execution.sequence)
-            return Invocation.from_record(
-                deepcopy(record),
-                node_executions=node_executions,
-            )
-
-    def list_active_invocations(self) -> tuple[Invocation, ...]:
-        active_states = {"created", "running", "waiting"}
-        invocations = []
-        for invocation_id, record in self.invocations.items():
-            if record.get("state") in active_states:
-                invocation = self.load_invocation(invocation_id)
-                if invocation is not None:
-                    invocations.append(invocation)
-        return tuple(invocations)
-
-    def recover_interrupted_invocations(self) -> tuple[Invocation, ...]:
-        """Restore active invocations and mark running executions interrupted.
-
-        This is the minimal crash recovery primitive. It does not replay Python
-        frames. It rebuilds runtime objects from records, turns any in-flight
-        NodeExecution into `interrupted`, saves the changed records, and returns
-        the affected invocations so WorkflowExecutor can decide the next action.
-        """
-
-        recovered = []
-        for invocation in self.list_active_invocations():
-            interrupted = invocation.recover_interrupted_executions()
-            if interrupted:
-                session_id = UUID(str(self.invocations[invocation.id]["session_id"]))
-                self.save_invocation(session_id, invocation)
-                recovered.append(invocation)
-        return tuple(recovered)
-
-    def _save_node_execution(
+    async def arebuild_execution(
         self,
         invocation_id: UUID,
-        execution: NodeExecution,
-    ) -> None:
-        self.node_executions[execution.id] = deepcopy(
-            execution.to_record(invocation_id)
+        *,
+        through_sequence: int | None = None,
+    ) -> tuple[Session, Invocation]:
+        session, invocation = await super().arebuild_execution(
+            invocation_id,
+            through_sequence=through_sequence,
         )
-        execution_ids = self.invocation_node_executions.setdefault(invocation_id, [])
-        if execution.id not in execution_ids:
-            execution_ids.append(execution.id)
+        if through_sequence is None:
+            with self._lock:
+                self.sessions[session.id] = session
+                self.invocations[invocation.id] = invocation
+                self.invocation_sessions[invocation.id] = session.id
+                self.session_keys[
+                    (session.namespace, session.workflow_id, session.session_key)
+                ] = session.id
+                self._committed_states[invocation.id] = capture_execution_state(
+                    session,
+                    invocation,
+                )
+        return session, invocation
 
-        self.node_operator_calls[execution.id] = []
-        for call in execution.operator_calls:
-            self._save_operator_call(execution.id, call)
-
-    def _load_node_execution(self, execution_id: UUID) -> NodeExecution | None:
-        record = self.node_executions.get(execution_id)
-        if record is None:
-            return None
-
-        operator_calls = []
-        for call_id in self.node_operator_calls.get(execution_id, []):
-            operator_call = self._load_operator_call(call_id)
-            if operator_call is not None:
-                operator_calls.append(operator_call)
-        operator_calls.sort(key=lambda call: call.call_no)
-        return NodeExecution.from_record(
-            deepcopy(record),
-            operator_calls=operator_calls,
-        )
-
-    def _save_operator_call(
+    async def alist_runtime_events(
         self,
-        node_execution_id: UUID,
-        call: OperatorCall,
-    ) -> None:
-        self.operator_calls[call.id] = deepcopy(
-            call.to_record(node_execution_id)
-        )
-        call_ids = self.node_operator_calls.setdefault(
-            node_execution_id,
-            [],
-        )
-        if call.id not in call_ids:
-            call_ids.append(call.id)
-
-    def _load_operator_call(
-        self,
-        call_id: UUID,
-    ) -> OperatorCall | None:
-        record = self.operator_calls.get(call_id)
-        if record is None:
-            return None
-        return OperatorCall.from_record(deepcopy(record))
-
-    def _append_event_drafts(
-        self,
-        session_id: UUID,
+        *,
         invocation_id: UUID,
-        drafts: tuple[RuntimeEventDraft, ...],
-        commit_id: UUID | None = None,
+        after_sequence: int = 0,
+        before_sequence: int | None = None,
+        limit: int = 1000,
     ) -> tuple[RuntimeEvent, ...]:
-        if not drafts:
-            return ()
-        session_record = self.sessions.get(session_id)
-        invocation_record = self.invocations.get(invocation_id)
-        if session_record is None:
-            raise KeyError(f"Unknown session: {session_id}")
-        if invocation_record is None:
-            raise KeyError(f"Unknown invocation: {invocation_id}")
-        event_ids = self.invocation_runtime_events.setdefault(invocation_id, [])
-        next_sequence = max(
-            int(invocation_record.get("event_sequence", 0)),
-            max(
-                (
-                    int(self.runtime_events[event_id]["sequence"])
-                    for event_id in event_ids
-                ),
-                default=0,
-            ),
-        ) + 1
-        values: list[RuntimeEvent] = []
-        resolved_commit_id = commit_id or uuid4()
-        for offset, draft in enumerate(drafts):
-            runtime_event = draft.materialize(
-                namespace=str(session_record["namespace"]),
-                workflow_id=str(session_record["workflow_id"]),
-                session_id=session_id,
-                invocation_id=invocation_id,
-                sequence=next_sequence + offset,
-                commit_id=resolved_commit_id,
-            )
-            self.runtime_events[runtime_event.id] = runtime_event.model_dump(
-                mode="python"
-            )
-            event_ids.append(runtime_event.id)
-            values.append(runtime_event)
-        invocation_record["event_sequence"] = values[-1].sequence
-        return tuple(values)
-
-
-def _validate_event_query(
-    session_id: UUID | None,
-    invocation_id: UUID | None,
-    after_sequence: int,
-    before_sequence: int | None,
-    limit: int,
-) -> None:
-    if session_id is None and invocation_id is None:
-        raise ValueError("session_id or invocation_id is required.")
-    if after_sequence < 0:
-        raise ValueError("after_sequence cannot be negative.")
-    if before_sequence is not None and before_sequence <= 0:
-        raise ValueError("before_sequence must be positive.")
-    if before_sequence is not None and after_sequence >= before_sequence:
-        raise ValueError("after_sequence must be less than before_sequence.")
-    if limit <= 0 or limit > 10_000:
-        raise ValueError("limit must be between 1 and 10000.")
+        if after_sequence < 0 or limit < 1:
+            raise ValueError("Invalid RuntimeEvent page.")
+        with self._lock:
+            values = [
+                event
+                for event in self.runtime_events.get(invocation_id, [])
+                if event.sequence > after_sequence
+                and (
+                    before_sequence is None
+                    or event.sequence < before_sequence
+                )
+            ]
+        if before_sequence is not None:
+            return tuple(values[-limit:])
+        return tuple(values[:limit])

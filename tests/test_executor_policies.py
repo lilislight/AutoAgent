@@ -112,13 +112,13 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             )
 
             invocation = await AutoAgentApp().ainvoke(workflow)
-            calls = invocation.latest_node_execution("slow").operator_calls
+            calls = invocation.latest_node_execution("slow").operator_executions
 
             self.assertEqual(invocation.state, "failed")
             self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
             self.assertEqual(started, 2)
             self.assertEqual(cancelled, 2)
-            self.assertEqual([call.kind for call in calls], ["normal", "retry"])
+            self.assertEqual([call.reason for call in calls], ["normal", "retry"])
             self.assertTrue(
                 all(call.error.code == "OPERATOR_TIMEOUT" for call in calls)
             )
@@ -169,8 +169,8 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(stored.state, "failed")
         self.assertEqual(execution.state, "failed")
         self.assertIsNone(execution.output)
-        self.assertEqual(len(execution.operator_calls), 1)
-        self.assertIsNone(execution.operator_calls[0].output)
+        self.assertEqual(len(execution.operator_executions), 1)
+        self.assertIsNone(execution.operator_executions[0].output)
         self.assertFalse(stored.execution_mailbox.has_pending())
 
     def test_sync_operator_late_result_after_cancellation_is_discarded(self) -> None:
@@ -212,7 +212,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             self.assertEqual(stored.state, "cancelled")
             self.assertEqual(execution.state, "cancelled")
             self.assertIsNone(execution.output)
-            self.assertEqual(execution.operator_calls, [])
+            self.assertEqual(execution.operator_executions, [])
             self.assertFalse(stored.execution_mailbox.has_pending())
 
         asyncio.run(scenario())
@@ -301,14 +301,17 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         )
 
         invocation = app.invoke(workflow)
-        calls = invocation.latest_node_execution("sample").operator_calls
+        calls = invocation.latest_node_execution("sample").operator_executions
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "OUTPUT_AGGREGATION_FAILED")
         self.assertEqual(primary_calls, 2)
         self.assertEqual(fallback_calls, 0)
-        self.assertEqual([call.operator_id for call in calls], ["primary", "primary"])
-        self.assertTrue(all(call.kind == "replica" for call in calls))
+        self.assertEqual(1, len(calls))
+        self.assertEqual("replication", calls[0].kind)
+        self.assertEqual(("primary",), calls[0].operator_ids)
+        self.assertEqual(2, calls[0].summary.call_count)
+        self.assertEqual(2, calls[0].summary.attempt_count)
 
 
 if __name__ == "__main__":

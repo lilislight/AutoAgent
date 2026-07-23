@@ -22,7 +22,7 @@ InvocationStateValue = Literal[
 NodeExecutionStateValue = Literal[
     "created",      # Object allocated, not yet ready for execution.
     "ready",        # Created from a ready request, not yet running.
-    "running",      # NodeExecutor is executing OperatorCalls.
+    "running",      # NodeExecutor is executing the logical operator work.
     "waiting",      # External resume is required before graph can advance.
     "completed",    # Final logical output is available.
     "failed",       # Final logical error is available.
@@ -31,25 +31,25 @@ NodeExecutionStateValue = Literal[
     "interrupted",  # Process loss interrupted a running node execution.
 ]
 
-# OperatorCall state is the concrete operator-call state inside one
-# NodeExecution. NodeExecutor updates this record for tracing and recovery.
-OperatorCallStateValue = Literal[
-    "created",      # Call record allocated, operator not yet called.
-    "running",      # Operator call is in progress.
-    "completed",    # This concrete call returned output.
-    "failed",       # This concrete call raised/returned an error.
-    "interrupted",  # Process loss happened while this call was running.
+# One logical OperatorExecution belongs to one NodeExecution. Direct executions
+# describe retry/fallback attempts; map/replication use one parallel summary.
+OperatorExecutionStateValue = Literal[
+    "running",
+    "completed",
+    "failed",
+    "interrupted",
 ]
 
-# OperatorCallKind explains why NodeExecutor created a concrete operator
-# call. It affects aggregation/retry behavior but is not visible as graph state.
-OperatorCallKind = Literal[
-    "normal",    # First ordinary call for a NodeExecution.
-    "retry",     # Repeated call after a failure under RetryPolicy.
-    "fallback",  # Call using a fallback selected operator.
-    "map_item",  # Per-item call created by EdgePolicy.map.
-    "replica",   # Parallel/sample call created by ReplicationPolicy.
-    "recover",   # Recovery-specific call after an interruption.
+DirectOperatorExecutionReason = Literal[
+    "normal",
+    "retry",
+    "fallback",
+    "recovery",
+]
+
+ParallelOperatorExecutionKind = Literal[
+    "map",
+    "replication",
 ]
 
 # EdgeEvaluation state is written by scheduler after inspecting an outgoing edge.

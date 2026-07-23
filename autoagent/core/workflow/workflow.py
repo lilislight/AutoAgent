@@ -11,7 +11,7 @@ from autoagent.core.workflow.edge import Edge
 from autoagent.core.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.core.workflow.mapping import InputMapping, OutputBinding
 from autoagent.core.workflow.node import Node
-from autoagent.core.workflow.policy import EdgePolicy
+from autoagent.core.workflow.policy import EdgePolicy, WorkflowPolicy
 
 if TYPE_CHECKING:
     from autoagent.core.compiler import WorkflowCompiler
@@ -63,6 +63,10 @@ class Workflow(BaseModel):
         description=(
             "Optional human-readable explanation of the Workflow purpose."
         ),
+    )
+    policy: WorkflowPolicy = Field(
+        default_factory=WorkflowPolicy,
+        description="Workflow-wide failure behavior.",
     )
     metadata: dict[str, Any] = Field(
         default_factory=dict,

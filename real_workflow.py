@@ -570,7 +570,7 @@ def publish_resolution(
 
 
 def bind_normalized_incident_context(context: OutputBindingContext) -> None:
-    """Expose the normalized incident as Invocation-scoped trace data."""
+    """Expose the normalized incident through Invocation Context."""
 
     incident = context.output
     context.invocation_context.data["normalized_incident"] = {
@@ -649,7 +649,7 @@ def build_investigation_workflow() -> Workflow:
             timeout=TimeoutPolicy(timeout_ms=5_000),
             resource=ResourcePolicy(
                 max_node_executions_per_invocation=3,
-                max_operator_calls_per_invocation=3,
+                max_operator_attempts_per_invocation=3,
                 max_runtime_ms_per_invocation=10_000,
             ),
         ),
@@ -889,7 +889,7 @@ def build_incident_response_app(
     """Create the demo App with runtime-resolved Operators registered.
 
     The reliability review node intentionally uses a CapabilityRef so the UI can
-    show a primary OperatorCall timing out and a fallback OperatorCall finishing
+    show a primary Operator execution timing out and a fallback execution finishing
     successfully inside the same NodeExecution. By default the example stores
     durable runtime data in ``.autoagent/real-workflow.sqlite3`` so the tracing
     server and UI can inspect historical invocations across restarts.

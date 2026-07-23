@@ -831,7 +831,7 @@ class WorkflowCompilerTests(unittest.TestCase):
                 "resource",
                 NodePolicy(
                     resource=ResourcePolicy(
-                        max_operator_calls_per_invocation=-1,
+                        max_operator_attempts_per_invocation=-1,
                     )
                 ),
                 "POLICY_RESOURCE_INVALID",
@@ -852,7 +852,7 @@ class WorkflowCompilerTests(unittest.TestCase):
     def test_resource_policy_validation_covers_invocation_scope_limits(self):
         cases = [
             ResourcePolicy(max_node_executions_per_invocation=0),
-            ResourcePolicy(max_operator_calls_per_invocation=0),
+            ResourcePolicy(max_operator_attempts_per_invocation=0),
             ResourcePolicy(max_runtime_ms_per_invocation=0),
         ]
 

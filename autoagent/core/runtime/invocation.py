@@ -80,6 +80,8 @@ class Invocation:
         execution_mailbox: InvocationExecutionMailbox | None = None,
         execution_mode: ExecutionMode = "normal",
         event_sequence: int = 0,
+        deferred_error: RuntimeErrorInfo | None = None,
+        deferred_terminal_state: str | None = None,
     ) -> None:
         self.id = id or uuid4()
         self.workflow_id = workflow_id
@@ -102,6 +104,8 @@ class Invocation:
         # the Genesis snapshot; the first event is therefore sequence one.
         self.event_sequence = event_sequence
         self.error = error
+        self.deferred_error = deferred_error
+        self.deferred_terminal_state = deferred_terminal_state
         self.created_at_ms = created_at_ms or utc_timestamp_ms()
         self.updated_at_ms = updated_at_ms or self.created_at_ms
 
@@ -134,15 +138,21 @@ class Invocation:
         self.state = "completed"
         self.result = result
         self.error = None
+        self.deferred_error = None
+        self.deferred_terminal_state = None
         self.updated_at_ms = utc_timestamp_ms()
 
     def mark_failed(self, error: RuntimeErrorInfo) -> None:
         self.state = "failed"
         self.error = error
+        self.deferred_error = None
+        self.deferred_terminal_state = None
         self.updated_at_ms = utc_timestamp_ms()
 
     def mark_cancelled(self) -> None:
         self.state = "cancelled"
+        self.deferred_error = None
+        self.deferred_terminal_state = None
         self.updated_at_ms = utc_timestamp_ms()
 
     def mark_interrupted(self, error: RuntimeErrorInfo | None = None) -> None:
@@ -158,6 +168,20 @@ class Invocation:
             code="INVOCATION_INTERRUPTED",
             message="Invocation could not be recovered after process loss.",
         )
+        self.deferred_error = None
+        self.deferred_terminal_state = None
+        self.updated_at_ms = utc_timestamp_ms()
+
+    def defer_terminal(
+        self,
+        error: RuntimeErrorInfo,
+        *,
+        state: str,
+    ) -> None:
+        if state not in {"failed", "interrupted"}:
+            raise ValueError("Deferred terminal state must be failed or interrupted.")
+        self.deferred_error = error
+        self.deferred_terminal_state = state
         self.updated_at_ms = utc_timestamp_ms()
 
     def create_node_execution(
@@ -215,17 +239,14 @@ class Invocation:
 
         return sum(1 for execution in self.node_executions if execution.node_id == node_id)
 
-    def count_operator_calls(self, node_id: str) -> int:
-        """Count concrete OperatorCalls for one node_id in this Invocation.
-
-        NodeExecutor should use this before creating another OperatorCall when
-        enforcing ResourcePolicy.max_operator_calls_per_invocation.
-        """
+    def count_operator_attempts(self, node_id: str) -> int:
+        """Count actual handler attempts, including summarized parallel work."""
 
         return sum(
-            len(execution.operator_calls)
+            operator_execution.attempt_count
             for execution in self.node_executions
             if execution.node_id == node_id
+            for operator_execution in execution.operator_executions
         )
 
     def sum_node_runtime_ms(self, node_id: str) -> int:
@@ -405,6 +426,12 @@ class Invocation:
             "result": self.result,
             "scheduler": self.scheduler.to_record(),
             "error": self.error.to_record() if self.error else None,
+            "deferred_error": (
+                self.deferred_error.to_record()
+                if self.deferred_error is not None
+                else None
+            ),
+            "deferred_terminal_state": self.deferred_terminal_state,
             "created_at_ms": self.created_at_ms,
             "updated_at_ms": self.updated_at_ms,
         }
@@ -436,6 +463,10 @@ class Invocation:
             scheduler=SchedulerContext.from_record(record.get("scheduler")),
             node_executions=list(node_executions or []),
             error=RuntimeErrorInfo.from_record(record.get("error")),
+            deferred_error=RuntimeErrorInfo.from_record(
+                record.get("deferred_error")
+            ),
+            deferred_terminal_state=record.get("deferred_terminal_state"),
             created_at_ms=coerce_timestamp_ms(
                 record.get("created_at_ms", record.get("created_at"))
             ),

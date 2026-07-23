@@ -10,13 +10,16 @@ from autoagent.core.runtime.context import (
 )
 from autoagent.core.runtime.concurrency import RuntimeConcurrencyController
 from autoagent.core.runtime.execution import (
+    DirectOperatorExecution,
     EdgeEvaluation,
     NodeExecution,
-    OperatorCall,
+    OperatorExecution,
+    ParallelExecutionSummary,
+    ParallelOperatorExecution,
     ResourceUsage,
     RuntimeErrorInfo,
 )
-from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventDraft, RuntimeEventRole
+from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventRole
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.output import NodeOutput, OutputContext
@@ -34,17 +37,20 @@ from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
     RuntimeBoundary,
+    StateOperation,
+    apply_state_operations,
     capture_execution_state,
+    diff_execution_state,
     reduce_execution_state,
 )
-from autoagent.core.runtime.sinks import LoggingEventSink, RuntimeEventSink
 from autoagent.core.runtime.status import (
     EdgeEvaluationStateValue,
     EdgeResolutionStateValue,
+    DirectOperatorExecutionReason,
     InvocationStateValue,
     NodeExecutionStateValue,
-    OperatorCallKind,
-    OperatorCallStateValue,
+    OperatorExecutionStateValue,
+    ParallelOperatorExecutionKind,
 )
 from autoagent.core.runtime.store import InMemoryRuntimeStore, RuntimeStore, SessionBusyError
 from autoagent.core.runtime.database_store import DatabaseRuntimeStore
@@ -61,6 +67,8 @@ from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
 __all__ = [
     "ArtifactRef",
     "ConditionContext",
+    "DirectOperatorExecution",
+    "DirectOperatorExecutionReason",
     "EdgeActivation",
     "EdgeEvaluation",
     "EdgeEvaluationStateValue",
@@ -76,26 +84,26 @@ __all__ = [
     "InvocationContext",
     "InvocationStateValue",
     "JsonRuntimeSerializer",
-    "LoggingEventSink",
     "LoopIteration",
     "NodeExecution",
     "NodeExecutionStateValue",
     "NodeExecutionRequest",
     "NodeExecutionTransition",
     "NodeOutput",
-    "OperatorCall",
-    "OperatorCallKind",
-    "OperatorCallStateValue",
+    "OperatorExecution",
+    "OperatorExecutionStateValue",
+    "ParallelExecutionSummary",
+    "ParallelOperatorExecution",
+    "ParallelOperatorExecutionKind",
     "OutputBindingContext",
     "OutputContext",
     "ReadOnlyRuntimeContext",
     "ResourceUsage",
     "RuntimeErrorInfo",
     "RuntimeEvent",
-    "RuntimeEventDraft",
     "RuntimeEventRole",
     "RuntimeBoundary",
-    "RuntimeEventSink",
+    "StateOperation",
     "RuntimeContext",
     "RuntimeConcurrencyController",
     "RuntimeCodec",
@@ -112,5 +120,7 @@ __all__ = [
     "WaitingExecution",
     "utc_timestamp_ms",
     "capture_execution_state",
+    "apply_state_operations",
+    "diff_execution_state",
     "reduce_execution_state",
 ]

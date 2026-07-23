@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import inspect
 import random
 from collections.abc import Mapping
@@ -13,7 +14,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from autoagent.core.compiler import NodeIR
-from autoagent.core.executor.result import NodeExecutionResult, OperatorCallResult
+from autoagent.core.executor.result import NodeExecutionResult
 from autoagent.core.operators import (
     CapabilityRegistry,
     Operator,
@@ -22,14 +23,17 @@ from autoagent.core.operators import (
     OperatorResolver,
 )
 from autoagent.core.runtime import (
+    DirectOperatorExecution,
     InvocationExecutionMailbox,
     NodeExecution,
-    OperatorCall,
+    ParallelExecutionSummary,
+    ParallelOperatorExecution,
     ResourceUsage,
     RuntimeErrorInfo,
     RuntimeConcurrencyController,
 )
 from autoagent.core.runtime.hooks import invoke_hook_async
+from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.workflow import BackoffPolicy, MapPolicy
 from autoagent.core.workflow.capability import SystemCommand, WAIT_SYSTEM_COMMAND_ID
 
@@ -47,9 +51,8 @@ class NodeExecutionJob:
     node_ir: NodeIR
     node_execution: NodeExecution
     input: Any
-    max_operator_calls: int | None = None
+    max_operator_attempts: int | None = None
     map_policy: MapPolicy | None = None
-    prepared_map_inputs: tuple[Any, ...] | None = None
     concurrency_key: str | None = None
     recovery: bool = False
 
@@ -67,9 +70,8 @@ class ResolvedNodeExecutionJob:
     node_execution: NodeExecution
     operators: tuple[Operator, ...]
     input: Any
-    max_operator_calls: int | None = None
+    max_operator_attempts: int | None = None
     map_policy: MapPolicy | None = None
-    prepared_map_inputs: tuple[Any, ...] | None = None
     concurrency_key: str | None = None
     recovery: bool = False
     concurrency_controller: RuntimeConcurrencyController | None = None
@@ -146,8 +148,8 @@ class NodeExecutor:
                 )
                 continue
 
-            if job.max_operator_calls is not None:
-                operators = operators[:job.max_operator_calls]
+            if job.max_operator_attempts is not None:
+                operators = operators[:job.max_operator_attempts]
             if not operators:
                 mailbox.put_completed(
                     NodeExecutionResult(
@@ -155,7 +157,7 @@ class NodeExecutor:
                         state="failed",
                         error=RuntimeErrorInfo(
                             code="RESOURCE_LIMIT_EXCEEDED",
-                            message="Operator call limit exceeded.",
+                            message="Operator attempt limit exceeded.",
                             detail={"node_id": job.node_ir.id},
                         ),
                     )
@@ -167,9 +169,8 @@ class NodeExecutor:
                 node_execution=job.node_execution,
                 operators=operators,
                 input=job.input,
-                max_operator_calls=job.max_operator_calls,
+                max_operator_attempts=job.max_operator_attempts,
                 map_policy=job.map_policy,
-                prepared_map_inputs=job.prepared_map_inputs,
                 concurrency_key=job.concurrency_key,
                 recovery=job.recovery,
                 concurrency_controller=self.concurrency_controller,
@@ -305,9 +306,14 @@ async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecution
     input_error = _validate_unit_inputs(job, units)
     if input_error is not None:
         return _failed_result(job, input_error)
-    budget = _CallBudget(job.max_operator_calls)
-    call_sequence = _CallSequence(len(job.node_execution.operator_calls))
-    unit_results = await _execute_units(
+    budget = _CallBudget(job.max_operator_attempts)
+    call_sequence = _CallSequence(
+        sum(
+            execution.attempt_count
+            for execution in job.node_execution.operator_executions
+        )
+    )
+    unit_results, peak_parallelism = await _execute_units(
         job,
         units,
         budget,
@@ -319,6 +325,8 @@ async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecution
         job,
         unit_results,
         unit_kind=unit_kind,
+        unit_count=len(units),
+        peak_parallelism=peak_parallelism,
     )
 
 
@@ -327,11 +335,11 @@ class _UnitResult:
     index: int
     output: Any | None
     error: RuntimeErrorInfo | None
-    calls: list[OperatorCallResult]
+    attempts: list[DirectOperatorExecution]
 
 
 class _CallBudget:
-    """OperatorCall budget shared by cooperative map/replica Tasks."""
+    """Operator-attempt budget shared by cooperative map/replica Tasks."""
 
     def __init__(self, remaining: int | None) -> None:
         self.remaining = remaining
@@ -387,13 +395,14 @@ async def _prepare_units(
         )
 
     if job.map_policy is not None:
-        if job.prepared_map_inputs is not None:
-            return list(enumerate(job.prepared_map_inputs)), "map_item"
         try:
             selected = (
-                await invoke_hook_async(job.map_policy.item_selector, job.input)
+                await invoke_hook_async(
+                    job.map_policy.item_selector,
+                    deepcopy(job.input),
+                )
                 if job.map_policy.item_selector is not None
-                else job.input
+                else deepcopy(job.input)
             )
             units = _map_units(job, selected)
         except Exception as exc:
@@ -404,12 +413,49 @@ async def _prepare_units(
             )
         if isinstance(units, RuntimeErrorInfo):
             return units
+        if (
+            policy is not None
+            and policy.recovery is not None
+            and policy.recovery.mode == "idempotent"
+        ):
+            units = [
+                (
+                    index,
+                    {
+                        **value,
+                        "idempotency_key": (
+                            f"{job.node_execution.idempotency_key}:{index}"
+                        ),
+                    },
+                )
+                for index, value in units
+            ]
         return units, "map_item"
 
     if replication is not None:
-        return [(index, job.input) for index in range(replication.count)], "replica"
+        units = [
+            (index, deepcopy(job.input))
+            for index in range(replication.count)
+        ]
+        if (
+            policy.recovery is not None
+            and policy.recovery.mode == "idempotent"
+        ):
+            units = [
+                (
+                    index,
+                    {
+                        **value,
+                        "idempotency_key": (
+                            f"{job.node_execution.idempotency_key}:{index}"
+                        ),
+                    },
+                )
+                for index, value in units
+            ]
+        return units, "replica"
 
-    return [(0, job.input)], "normal"
+    return [(0, deepcopy(job.input))], "normal"
 
 
 def _map_units(
@@ -420,8 +466,8 @@ def _map_units(
 
     The selector owns both fan-out and per-item input construction. Its outer
     result must therefore be an iterable, while every item must be a Mapping
-    representing one complete OperatorCall input. This validation runs before
-    any OperatorCall is created, so selector/data-shaping errors never enter
+    representing one complete OperatorExecution input. This validation runs before
+    any OperatorExecution is created, so selector/data-shaping errors never enter
     retry or capability fallback.
     """
 
@@ -483,7 +529,7 @@ def _validate_unit_inputs(
     job: ResolvedNodeExecutionJob,
     units: list[tuple[int, Any]],
 ) -> RuntimeErrorInfo | None:
-    """Validate final unit inputs before creating any OperatorCall.
+    """Validate final unit inputs before creating any operator attempt.
 
     Node input always represents named Operator arguments. A mismatch against
     the compiled node/capability contract is a data-construction error, so
@@ -559,19 +605,27 @@ async def _execute_units(
     *,
     unit_kind: str,
     max_parallelism: int,
-) -> list[_UnitResult]:
+) -> tuple[list[_UnitResult], int]:
     semaphore = asyncio.Semaphore(max_parallelism)
+    active = 0
+    peak_parallelism = 0
 
     async def execute(unit_index: int, unit_input: Any) -> _UnitResult:
+        nonlocal active, peak_parallelism
         async with semaphore:
-            return await _execute_unit(
-                job,
-                unit_input,
-                budget,
-                call_sequence,
-                unit_kind=unit_kind,
-                unit_index=unit_index,
-            )
+            active += 1
+            peak_parallelism = max(peak_parallelism, active)
+            try:
+                return await _execute_unit(
+                    job,
+                    unit_input,
+                    budget,
+                    call_sequence,
+                    unit_kind=unit_kind,
+                    unit_index=unit_index,
+                )
+            finally:
+                active -= 1
 
     pending = {
         asyncio.create_task(execute(unit_index, unit_input))
@@ -601,7 +655,7 @@ async def _execute_units(
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-    return results
+    return results, peak_parallelism
 
 
 async def _execute_unit(
@@ -613,48 +667,49 @@ async def _execute_unit(
     unit_kind: str,
     unit_index: int,
 ) -> _UnitResult:
-    calls: list[OperatorCallResult] = []
+    attempts: list[DirectOperatorExecution] = []
     retry = job.node_ir.policy.retry if job.node_ir.policy is not None else None
     max_attempts = retry.max_attempts if retry is not None else 1
     for operator_index, operator in enumerate(job.operators):
         for attempt_index in range(max_attempts):
             if not budget.consume():
-                return _UnitResult(unit_index, None, _operator_budget_error(job), calls)
-            kind = _call_kind(
-                unit_kind,
+                return _UnitResult(
+                    unit_index,
+                    None,
+                    _operator_budget_error(job),
+                    attempts,
+                )
+            reason = _attempt_reason(
                 operator_index,
                 attempt_index,
                 recovery=job.recovery,
             )
-            call = OperatorCall(
+            attempt = DirectOperatorExecution(
                 operator_id=operator.id,
-                operator_manifest=operator.manifest,
-                call_no=call_sequence.next(),
-                kind=kind,
-                item_index=unit_index if unit_kind == "map_item" else None,
-                replica_index=unit_index if unit_kind == "replica" else None,
+                sequence=call_sequence.next(),
+                reason=reason,
+                input=deepcopy(unit_input),
             )
-            call.mark_running(unit_input)
 
             started_ns = perf_counter_ns()
             try:
                 output = await _invoke_operator(job, operator, unit_input)
                 _validate_operator_output(job, operator, output)
                 duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
-                call.resource_usage = ResourceUsage(duration_ms=duration_ms)
-                call.mark_completed(output)
-                calls.append(_call_result(call))
-                return _UnitResult(unit_index, output, None, calls)
+                attempt.resource_usage = ResourceUsage(duration_ms=duration_ms)
+                attempt.mark_completed(output)
+                attempts.append(attempt)
+                return _UnitResult(unit_index, output, None, attempts)
             except Exception as exc:
                 duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
                 error = _operator_error(job, operator, exc)
-                call.resource_usage = ResourceUsage(duration_ms=duration_ms)
-                call.mark_failed(error)
-                calls.append(_call_result(call))
+                attempt.resource_usage = ResourceUsage(duration_ms=duration_ms)
+                attempt.mark_failed(error)
+                attempts.append(attempt)
                 if attempt_index + 1 < max_attempts:
                     await asyncio.sleep(_retry_delay_seconds(retry.backoff, attempt_index))
 
-    return _UnitResult(unit_index, None, calls[-1].error, calls)
+    return _UnitResult(unit_index, None, attempts[-1].error, attempts)
 
 
 async def _invoke_operator(
@@ -699,7 +754,7 @@ async def _invoke_operator(
         )
     except TimeoutError as exc:
         raise _OperatorTimedOut(
-            "Operator call exceeded TimeoutPolicy.",
+            "Operator attempt exceeded TimeoutPolicy.",
             execution_may_continue=not operator.is_async,
         ) from exc
 
@@ -709,68 +764,111 @@ async def _aggregate_unit_results(
     unit_results: list[_UnitResult],
     *,
     unit_kind: str,
+    unit_count: int,
+    peak_parallelism: int,
 ) -> NodeExecutionResult:
     unit_results.sort(key=lambda item: item.index)
-    calls = tuple(
+    attempts = tuple(
         sorted(
-            (call for item in unit_results for call in item.calls),
-            key=lambda call: call.call_no,
+            (attempt for item in unit_results for attempt in item.attempts),
+            key=lambda attempt: attempt.sequence,
         )
     )
-    duration_ms = sum(call.resource_usage.duration_ms for call in calls)
+    duration_ms = sum(
+        attempt.resource_usage.duration_ms
+        for attempt in attempts
+    )
+    is_parallel = unit_kind in {"map_item", "replica"}
+    parallel_execution = (
+        _parallel_execution(
+            unit_kind=unit_kind,
+            attempts=attempts,
+            unit_results=unit_results,
+            unit_count=unit_count,
+            peak_parallelism=peak_parallelism,
+        )
+        if is_parallel
+        else None
+    )
+    retained_executions = (
+        (parallel_execution,)
+        if parallel_execution is not None
+        else attempts
+    )
     failed = next((item for item in unit_results if item.error is not None), None)
     if failed is not None:
+        if parallel_execution is not None:
+            parallel_execution.state = "failed"
+            parallel_execution.error = failed.error
+            parallel_execution.ended_at_ms = max(
+                (
+                    attempt.ended_at_ms or attempt.started_at_ms
+                    for attempt in attempts
+                ),
+                default=parallel_execution.started_at_ms,
+            )
         return NodeExecutionResult(
             node_execution_id=job.node_execution.id,
             state="failed",
             error=failed.error,
-            operator_calls=calls,
+            operator_executions=retained_executions,
             resource_usage=ResourceUsage(duration_ms=duration_ms),
         )
 
-    outputs = [item.output for item in unit_results]
+    outputs = [deepcopy(item.output) for item in unit_results]
     try:
         if unit_kind == "map_item":
             output = (
-                await invoke_hook_async(job.map_policy.output_aggregator, outputs)
+                await invoke_hook_async(
+                    job.map_policy.output_aggregator,
+                    deepcopy(outputs),
+                )
                 if job.map_policy is not None
                 and job.map_policy.output_aggregator is not None
                 else outputs
             )
         elif unit_kind == "replica":
             replication = job.node_ir.policy.replication
-            output = await invoke_hook_async(replication.output_aggregator, outputs)
+            output = await invoke_hook_async(
+                replication.output_aggregator,
+                deepcopy(outputs),
+            )
         else:
             output = outputs[0]
         _validate_final_output(job, output)
     except Exception as exc:
+        error = RuntimeErrorInfo(
+            code=(
+                "NODE_OUTPUT_INVALID"
+                if isinstance(exc, _NodeOutputInvalid)
+                else "OUTPUT_AGGREGATION_FAILED"
+            ),
+            message=str(exc),
+            detail={"node_id": job.node_ir.id, "error_type": type(exc).__name__},
+        )
+        if parallel_execution is not None:
+            parallel_execution.state = "failed"
+            parallel_execution.error = error
         return NodeExecutionResult(
             node_execution_id=job.node_execution.id,
             state="failed",
-            error=RuntimeErrorInfo(
-                code=(
-                    "NODE_OUTPUT_INVALID"
-                    if isinstance(exc, _NodeOutputInvalid)
-                    else "OUTPUT_AGGREGATION_FAILED"
-                ),
-                message=str(exc),
-                detail={"node_id": job.node_ir.id, "error_type": type(exc).__name__},
-            ),
-            operator_calls=calls,
+            error=error,
+            operator_executions=retained_executions,
             resource_usage=ResourceUsage(duration_ms=duration_ms),
         )
 
+    if parallel_execution is not None:
+        parallel_execution.state = "completed"
     return NodeExecutionResult(
         node_execution_id=job.node_execution.id,
         state="completed",
         output=output,
-        operator_calls=calls,
+        operator_executions=retained_executions,
         resource_usage=ResourceUsage(duration_ms=duration_ms),
     )
 
 
-def _call_kind(
-    unit_kind: str,
+def _attempt_reason(
     operator_index: int,
     attempt_index: int,
     *,
@@ -781,37 +879,85 @@ def _call_kind(
     if operator_index > 0:
         return "fallback"
     if recovery:
-        return "recover"
-    return unit_kind
+        return "recovery"
+    return "normal"
 
 
-def _call_result(
-    call: OperatorCall,
-) -> OperatorCallResult:
-    return OperatorCallResult(
-        id=call.id,
-        call_no=call.call_no,
-        operator_id=call.operator_id,
-        operator_manifest=call.operator_manifest,
-        kind=call.kind,
-        state=call.state,
-        input=call.input,
-        output=call.output,
-        error=call.error,
-        resource_usage=call.resource_usage,
-        item_index=call.item_index,
-        replica_index=call.replica_index,
-        created_at_ms=call.created_at_ms,
-        started_at_ms=call.started_at_ms,
-        ended_at_ms=call.ended_at_ms,
+def _parallel_execution(
+    *,
+    unit_kind: str,
+    attempts: tuple[DirectOperatorExecution, ...],
+    unit_results: list[_UnitResult],
+    unit_count: int,
+    peak_parallelism: int,
+) -> ParallelOperatorExecution:
+    durations = [
+        attempt.resource_usage.duration_ms
+        for attempt in attempts
+    ]
+    failures = [
+        {
+            "code": attempt.error.code,
+            "message": attempt.error.message,
+            "operator_id": attempt.operator_id,
+        }
+        for attempt in attempts
+        if attempt.error is not None
+    ][:8]
+    completed_units = sum(
+        1
+        for result in unit_results
+        if result.error is None
+    )
+    failed_units = sum(
+        1
+        for result in unit_results
+        if result.error is not None
+    )
+    summary = ParallelExecutionSummary(
+        call_count=unit_count,
+        attempt_count=len(attempts),
+        success_count=completed_units,
+        failure_count=failed_units,
+        cancelled_count=max(0, unit_count - completed_units - failed_units),
+        retry_count=sum(
+            1 for attempt in attempts if attempt.reason == "retry"
+        ),
+        fallback_count=sum(
+            1 for attempt in attempts if attempt.reason == "fallback"
+        ),
+        total_duration_ms=sum(durations),
+        min_duration_ms=min(durations) if durations else None,
+        max_duration_ms=max(durations) if durations else None,
+        peak_parallelism=peak_parallelism,
+        failure_samples=tuple(failures),
+    )
+    started_at_ms = min(
+        (attempt.started_at_ms for attempt in attempts),
+        default=utc_timestamp_ms(),
+    )
+    ended_at_ms = max(
+        (
+            attempt.ended_at_ms or attempt.started_at_ms
+            for attempt in attempts
+        ),
+        default=started_at_ms,
+    )
+    return ParallelOperatorExecution(
+        kind="map" if unit_kind == "map_item" else "replication",
+        summary=summary,
+        operator_ids=tuple(dict.fromkeys(attempt.operator_id for attempt in attempts)),
+        state="running",
+        started_at_ms=started_at_ms,
+        ended_at_ms=ended_at_ms,
     )
 
 
 def _operator_budget_error(job: ResolvedNodeExecutionJob) -> RuntimeErrorInfo:
     return RuntimeErrorInfo(
         code="RESOURCE_LIMIT_EXCEEDED",
-        message="Operator call limit exceeded.",
-        detail={"node_id": job.node_ir.id, "resource": "operator_calls"},
+        message="Operator attempt limit exceeded.",
+        detail={"node_id": job.node_ir.id, "resource": "operator_executions"},
     )
 
 

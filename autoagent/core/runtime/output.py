@@ -30,8 +30,8 @@ class OutputContext:
 
     This object is how user hooks read prior node results. It intentionally
     exposes only completed NodeExecution.output values, never internal
-    OperatorCall outputs. Map and replication details remain trace data on
-    NodeExecution.operator_calls.
+    individual parallel-unit outputs. Map and replication details are reduced
+    to a bounded summary on NodeExecution.operator_executions.
 
     latest(node_id):
         Returns the newest completed output for a node id. This is the default

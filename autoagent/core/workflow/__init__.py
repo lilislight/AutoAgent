@@ -8,6 +8,7 @@ from autoagent.core.workflow.policy import (
     BackoffPolicy,
     CapabilitySelectionPolicy,
     EdgePolicy,
+    FailurePolicy,
     MapPolicy,
     NodePolicy,
     ReplicationPolicy,
@@ -15,6 +16,7 @@ from autoagent.core.workflow.policy import (
     ResourcePolicy,
     RetryPolicy,
     TimeoutPolicy,
+    WorkflowPolicy,
 )
 from autoagent.core.workflow.workflow import Workflow
 
@@ -26,6 +28,7 @@ __all__ = [
     "DiagramNode",
     "Edge",
     "EdgePolicy",
+    "FailurePolicy",
     "MapPolicy",
     "Node",
     "NodePolicy",
@@ -40,6 +43,7 @@ __all__ = [
     "SystemCommand",
     "TimeoutPolicy",
     "Workflow",
+    "WorkflowPolicy",
     "WorkflowDiagram",
     "workflow_hook",
 ]

@@ -28,7 +28,7 @@ class WorkflowVersionSnapshot(BaseModel):
 
     Operator manifests are recorded beside the graph but are excluded from the
     definition hash. This preserves late-bound Capability selection while still
-    giving recovery enough information to validate the concrete OperatorCall.
+    giving recovery enough information to validate the concrete OperatorExecution.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -142,6 +142,7 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
     return {
         "ir_version": workflow_ir.ir_version,
         "workflow_version": workflow_ir.workflow_version,
+        "policy": _canonicalize(workflow_ir.policy),
         "nodes": nodes,
         "edges": edges,
         "entry_node_ids": list(workflow_ir.entry_node_ids),

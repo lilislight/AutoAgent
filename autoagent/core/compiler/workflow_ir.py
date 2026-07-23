@@ -8,6 +8,7 @@ from autoagent.core.operators.contract import SchemaContract
 from autoagent.core.workflow.policy import (
     EdgePolicy,
     NodePolicy,
+    WorkflowPolicy,
 )
 
 
@@ -122,12 +123,12 @@ class NodeIR(BaseModel):
     )
     input_contract: SchemaContract = Field(
         description=(
-            "Compiled named-argument input contract for each OperatorCall."
+            "Compiled named-argument input contract for each OperatorExecution."
         ),
     )
     operator_output_contract: SchemaContract = Field(
         description=(
-            "Compiled output contract for each individual OperatorCall before "
+            "Compiled output contract for each individual OperatorExecution before "
             "map or replication aggregation."
         ),
     )
@@ -244,6 +245,10 @@ class WorkflowIR(BaseModel):
     description: str | None = Field(
         default=None,
         description="Optional Workflow display description retained for observation.",
+    )
+    policy: WorkflowPolicy = Field(
+        default_factory=WorkflowPolicy,
+        description="Compiled Workflow failure behavior.",
     )
     nodes: dict[str, NodeIR] = Field(
         default_factory=dict,

@@ -17,7 +17,7 @@ class OperatorManifest(BaseModel):
     change ``version`` when implementation behavior changes in a way that affects
     persisted work. Input/output hashes protect the named-argument protocol, and
     crash recovery is owned by NodePolicy because the whole Node phase, not an
-    individual OperatorCall, is the unit that may be replayed.
+    individual OperatorExecution, is the unit that may be replayed.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

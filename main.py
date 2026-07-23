@@ -363,7 +363,7 @@ def build_workflow() -> Workflow:
             timeout=TimeoutPolicy(timeout_ms=5000),
             resource=ResourcePolicy(
                 max_node_executions_per_invocation=4,
-                max_operator_calls_per_invocation=8,
+                max_operator_attempts_per_invocation=8,
                 max_runtime_ms_per_invocation=15000,
             ),
             max_concurrency=4,

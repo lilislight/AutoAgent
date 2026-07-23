@@ -143,6 +143,9 @@ class AutoAgentApp:
     async def astart(self) -> None:
         """Initialize App runtime resources from asynchronous code."""
 
+        if not self._runtime_loop.is_current():
+            await self._runtime_loop.arun(self.astart())
+            return
         if self._closed:
             raise RuntimeError("AutoAgentApp is closed.")
         await self.runtime_store.ainitialize()
@@ -174,7 +177,11 @@ class AutoAgentApp:
 
         if self._closed:
             return
-        await self._aclose_on_runtime_loop()
+        if self._runtime_loop.is_current():
+            await self._aclose_on_runtime_loop()
+            self._closed = True
+            return
+        await self._runtime_loop.arun(self._aclose_on_runtime_loop())
         self._runtime_loop.stop()
         self._closed = True
 
@@ -395,6 +402,15 @@ class AutoAgentApp:
         There is intentionally no manual crash-recovery option in V1.
         """
 
+        if not self._runtime_loop.is_current():
+            return await self._runtime_loop.arun(
+                self.ainvoke(
+                    workflow,
+                    input=input,
+                    session_id=session_id,
+                    entry_node_id=entry_node_id,
+                )
+            )
         self._ensure_open()
 
         prepared = await self._prepare_invocation(
@@ -430,6 +446,15 @@ class AutoAgentApp:
     ) -> _PreparedInvocation:
         """Durably admit work without introducing background-task semantics."""
 
+        if not self._runtime_loop.is_current():
+            return await self._runtime_loop.arun(
+                self._aadmit_invocation(
+                    workflow,
+                    input=input,
+                    session_id=session_id,
+                    entry_node_id=entry_node_id,
+                )
+            )
         self._ensure_open()
         return await self._prepare_invocation(
             workflow,
@@ -446,6 +471,10 @@ class AutoAgentApp:
     ) -> Invocation:
         """Execute work already admitted by the Server."""
 
+        if not self._runtime_loop.is_current():
+            return await self._runtime_loop.arun(
+                self._aexecute_admitted(prepared, input=input)
+            )
         try:
             if prepared.recover_existing:
                 recovered = await self.workflow_executor.arecover(
@@ -499,6 +528,15 @@ class AutoAgentApp:
         restart when a durable RuntimeStore is used.
         """
 
+        if not self._runtime_loop.is_current():
+            return await self._runtime_loop.arun(
+                self.aresume(
+                    workflow,
+                    session_id=session_id,
+                    wait_key=wait_key,
+                    output=output,
+                )
+            )
         self._ensure_open()
 
         workflow_ir = self._get_or_compile_workflow(workflow)

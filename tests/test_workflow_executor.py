@@ -1187,6 +1187,67 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(results[0].state, "completed")
 
+    def test_same_session_rejects_invoke_while_waiting(self) -> None:
+        """invoke on a session with a waiting invocation raises SessionBusyError."""
+
+        workflow = Workflow(id="busy_while_waiting")
+        workflow.add_node(SystemCommand(id="wait"), node_id="approval")
+        app = AutoAgentApp()
+
+        waiting = app.invoke(
+            workflow,
+            input={"wait_key": "step-1"},
+            session_id="shared-session",
+        )
+        self.assertEqual(waiting.state, "waiting")
+
+        with self.assertRaises(SessionBusyError):
+            app.invoke(workflow, session_id="shared-session")
+
+        # The session still holds the waiting invocation, unaffected.
+        session = app.runtime_store.find_session(
+            namespace=app.namespace,
+            workflow_id=workflow.id,
+            session_key="shared-session",
+        )
+        assert session is not None
+        current = session.get_current_invocation()
+        assert current is not None
+        self.assertEqual(current.id, waiting.id)
+        self.assertEqual(current.state, "waiting")
+
+    def test_same_session_allows_invoke_after_completed(self) -> None:
+        """After the waiting invocation is resumed and completed, a new invoke
+        on the same session succeeds."""
+
+        workflow = Workflow(id="reuse_session")
+        workflow.add_node(SystemCommand(id="wait"), node_id="approval")
+        app = AutoAgentApp()
+
+        waiting = app.invoke(
+            workflow,
+            input={"wait_key": "step-1"},
+            session_id="shared-session",
+        )
+        self.assertEqual(waiting.state, "waiting")
+
+        resumed = app.resume(
+            workflow,
+            session_id="shared-session",
+            wait_key="step-1",
+            output={"approved": True},
+        )
+        self.assertEqual(resumed.state, "completed")
+
+        # Same session, new invocation — should succeed.
+        second = app.invoke(
+            workflow,
+            input={"wait_key": "step-2"},
+            session_id="shared-session",
+        )
+        self.assertEqual(second.state, "waiting")
+        self.assertNotEqual(second.id, waiting.id)
+
     def test_different_sessions_have_isolated_execution_mailboxes(self) -> None:
         gate = threading.Barrier(2)
         results: dict[str, object] = {}

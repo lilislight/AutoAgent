@@ -180,6 +180,7 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 queue_hard_watermark_bytes=16 * 1024 * 1024,
                 batch_max_delay_ms=0,
                 recovery_event_interval=1_000,
+                queue_admission_timeout_ms=0,
             )
             store = RuntimeStore(backend=backend)
             app = AutoAgentApp(runtime_store=store)

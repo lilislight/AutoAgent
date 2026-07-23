@@ -317,9 +317,31 @@ class RuntimeStore:
         invocation: Invocation,
     ) -> Session:
         if self.admission_paused:
-            raise RuntimeError(
-                "Runtime persistence backlog is above the admission watermark."
+            timeout_ms = (
+                self.backend.queue_admission_timeout_ms
+                if self.backend is not None
+                else 0
             )
+            if timeout_ms == 0:
+                raise RuntimeError(
+                    "Runtime persistence backlog is above the admission "
+                    "watermark."
+                )
+            # Poll until admission resumes or the timeout elapses.
+            # Multiple callers for the same session may wait concurrently.
+            # After the queue drains, the RLock and _pending_admissions dict
+            # (just below) serialize admission so only one succeeds and the
+            # rest receive SessionBusyError.
+            import time as _time
+            started = _time.monotonic()
+            deadline_s = timeout_ms / 1_000
+            while self.admission_paused:
+                if _time.monotonic() - started >= deadline_s:
+                    raise TimeoutError(
+                        "Runtime persistence backlog did not clear "
+                        f"within {timeout_ms:.0f} ms."
+                    )
+                await asyncio.sleep(0.05)
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:

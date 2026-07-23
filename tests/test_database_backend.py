@@ -30,6 +30,7 @@ from autoagent.core.runtime import (
     Invocation,
     RuntimeEvent,
     RuntimeStore,
+    SessionBusyError,
     build_boundary_state_operations,
     capture_execution_state,
 )
@@ -338,6 +339,12 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
     def test_recovery_event_interval_must_be_positive(self) -> None:
         with self.assertRaisesRegex(ValueError, "recovery_event_interval"):
             DatabaseBackend.from_path(self.path, recovery_event_interval=0)
+
+    def test_admission_timeout_must_be_non_negative(self) -> None:
+        with self.assertRaisesRegex(ValueError, "queue_admission_timeout_ms"):
+            DatabaseBackend.from_path(
+                self.path, queue_admission_timeout_ms=-1
+            )
 
     def test_retryable_database_errors_are_classified_explicitly(self) -> None:
         locked = OperationalError(
@@ -821,6 +828,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             queue_low_watermark_bytes=128,
             queue_high_watermark_bytes=512,
             queue_hard_watermark_bytes=1024 * 1024,
+            queue_admission_timeout_ms=0,
         )
         slow = RuntimeStore(backend=slow_backend)
         self.backend = slow_backend
@@ -839,6 +847,168 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         await slow.aflush()
         second = await app.ainvoke(workflow, session_id="second")
         self.assertEqual("completed", second.state)
+        await app.aclose()
+
+    async def test_admission_timeout_zero_rejects_immediately(self) -> None:
+        """queue_admission_timeout_ms=0 restores the immediate-error behavior."""
+
+        release = threading.Event()
+
+        class SlowBackend(DatabaseBackend):
+            async def _persist_batch(self, batch) -> None:
+                if any(item.kind == "event" for item in batch):
+                    while not release.is_set():
+                        await asyncio.sleep(0.001)
+                await super()._persist_batch(batch)
+
+        await self.store.aclose()
+        slow_backend = SlowBackend.from_path(
+            self.path,
+            queue_low_watermark_bytes=128,
+            queue_high_watermark_bytes=512,
+            queue_hard_watermark_bytes=1024 * 1024,
+            queue_admission_timeout_ms=0,
+        )
+        slow = RuntimeStore(backend=slow_backend)
+        self.backend = slow_backend
+        self.store = slow
+        workflow = Workflow(id="timeout_zero")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=slow)
+        first = await app.ainvoke(workflow, session_id="first")
+
+        self.assertEqual("completed", first.state)
+        self.assertTrue(slow.admission_paused)
+        with self.assertRaisesRegex(RuntimeError, "backlog"):
+            await app.ainvoke(workflow, session_id="second")
+
+        release.set()
+        await slow.aflush()
+        await app.aclose()
+
+    async def test_admission_timeout_succeeds_when_queue_drains(self) -> None:
+        """The caller waits for admission to resume within the timeout.
+
+        The queue is allowed to drain after a brief block, so the waiting
+        accept path should succeed instead of raising TimeoutError.
+        """
+
+        release = threading.Event()
+
+        class SlowBackend(DatabaseBackend):
+            async def _persist_batch(self, batch) -> None:
+                if any(item.kind == "event" for item in batch):
+                    while not release.is_set():
+                        await asyncio.sleep(0.001)
+                await super()._persist_batch(batch)
+
+        await self.store.aclose()
+        slow_backend = SlowBackend.from_path(
+            self.path,
+            queue_low_watermark_bytes=128,
+            queue_high_watermark_bytes=512,
+            queue_hard_watermark_bytes=1024 * 1024,
+            queue_admission_timeout_ms=5_000,
+        )
+        slow = RuntimeStore(backend=slow_backend)
+        self.backend = slow_backend
+        self.store = slow
+        workflow = Workflow(id="timeout_drain")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=slow)
+
+        first = await app.ainvoke(workflow, session_id="first")
+        self.assertEqual("completed", first.state)
+        self.assertTrue(slow.admission_paused)
+
+        # Release the writer in the background so the queue drains.
+        release.set()
+
+        second = await app.ainvoke(workflow, session_id="second")
+        self.assertEqual("completed", second.state)
+        await slow.aflush()
+        self.assertFalse(slow.admission_paused)
+        await app.aclose()
+
+    async def test_admission_timeout_raises_when_queue_stalls(self) -> None:
+        """Admission blocks until the timeout, then raises TimeoutError."""
+
+        release = threading.Event()
+
+        class BlockedBackend(DatabaseBackend):
+            async def _persist_batch(self, batch) -> None:
+                if any(item.kind == "event" for item in batch):
+                    while not release.is_set():
+                        await asyncio.sleep(0.001)
+                await super()._persist_batch(batch)
+
+        await self.store.aclose()
+        blocked = BlockedBackend.from_path(
+            self.path,
+            queue_low_watermark_bytes=128,
+            queue_high_watermark_bytes=512,
+            queue_hard_watermark_bytes=1024 * 1024,
+            queue_admission_timeout_ms=200,
+        )
+        slow = RuntimeStore(backend=blocked)
+        self.backend = blocked
+        self.store = slow
+        workflow = Workflow(id="admission_timeout")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=slow)
+
+        first = await app.ainvoke(workflow, session_id="first")
+        self.assertEqual("completed", first.state)
+        self.assertTrue(slow.admission_paused)
+
+        with self.assertRaisesRegex(TimeoutError, "did not clear"):
+            await app.ainvoke(workflow, session_id="stalled")
+
+        release.set()
+        await slow.aflush()
+        await app.aclose()
+
+    async def test_default_admission_timeout_is_nonzero(self) -> None:
+        """The default timeout allows waiting, not immediate rejection."""
+
+        self.assertEqual(30_000, self.backend.queue_admission_timeout_ms)
+
+    async def test_waiting_session_rejects_new_invoke_with_database(self) -> None:
+        """Persistent session with a waiting invocation rejects new invoke."""
+
+        workflow = Workflow(id="persistent_waiting_guard")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        waiting = await app.ainvoke(
+            workflow,
+            input={"wait_key": "approval"},
+            session_id="shared-session",
+        )
+        self.assertEqual("waiting", waiting.state)
+
+        with self.assertRaises(SessionBusyError):
+            await app.ainvoke(
+                workflow,
+                session_id="shared-session",
+            )
+
+        # After resume, new invoke on same session should succeed.
+        resumed = await app.aresume(
+            workflow,
+            session_id="shared-session",
+            wait_key="approval",
+            output={"approved": True},
+        )
+        self.assertEqual("completed", resumed.state)
+
+        second = await app.ainvoke(
+            workflow,
+            input={"wait_key": "second"},
+            session_id="shared-session",
+        )
+        self.assertEqual("waiting", second.state)
+        self.assertNotEqual(second.id, waiting.id)
         await app.aclose()
 
     async def test_boundary_events_are_coalesced_into_database_batches(self) -> None:

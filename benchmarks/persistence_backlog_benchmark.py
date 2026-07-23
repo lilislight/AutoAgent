@@ -92,6 +92,10 @@ def _database_sizes(path: Path) -> dict[str, Any]:
                 "FROM runtime_events GROUP BY type ORDER BY type"
             ).fetchall()
         }
+    wal_path = path.with_suffix(".db-wal")
+    shm_path = path.with_suffix(".db-shm")
+    wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+    shm_bytes = shm_path.stat().st_size if shm_path.exists() else 0
     return {
         "database_event_count": int(event_count),
         "database_event_json_bytes": int(event_bytes),
@@ -103,6 +107,8 @@ def _database_sizes(path: Path) -> dict[str, Any]:
         "database_artifact_payload_bytes": int(artifact_bytes),
         "database_page_bytes": page_size * page_count,
         "database_file_bytes": path.stat().st_size,
+        "database_wal_bytes": wal_bytes,
+        "database_shm_bytes": shm_bytes,
         "database_event_json_bytes_by_type": event_bytes_by_type,
     }
 
@@ -121,6 +127,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             queue_hard_watermark_bytes=args.queue_hard_bytes,
             batch_max_delay_ms=0,
             recovery_event_interval=args.recovery_event_interval,
+            queue_admission_timeout_ms=100,
         )
         store = RuntimeStore(backend=backend)
         app = AutoAgentApp(runtime_store=store)
@@ -215,7 +222,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         workflow,
                         session_id="backpressure-probe",
                     )
-                except RuntimeError as exc:
+                except (RuntimeError, TimeoutError) as exc:
                     rejection = str(exc)
 
             release_events.set()

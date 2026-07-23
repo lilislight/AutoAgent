@@ -19,3 +19,26 @@
 也可以单独run一个fastapi服务。app的生命周期管理不应该由AutoAgentServer来持有。
 
 - 修改所有记录时间和计算耗时，都改成ns，当写event或者持久化时才转成ms的float，然后为input maaping/output binding/map/replcatin/等待线程池/等待调度/edge执行等等操作都记录耗时，不添加event，而是修改event的fileds，留下accureed_at_ms作为event发生时间，加一个offset_ms：float作为offset用于同一个发生时间的来判断先后，然后加一个timing，来存储所有的耗时，不同类型event只放存在的耗时字段。
+
+- 需要加一下针对用户的event或者message策略。因为现有event都不是给用户看的，都是用于trace或者debug，需要一套东西给用户或者build在这个workflow上面的UI使用。
+
+### 当前代码区域是我让deepseek v4 pro改的内容：
+
+#### 1. SQLite 启用 WAL 模式
+- `database.py`：connect 时自动 `PRAGMA journal_mode=WAL` + `synchronous=NORMAL`
+- 写入吞吐 2.3x，flush 快 38%
+
+#### 2. Admission 背压超时等待
+- `database.py`：新增 `queue_admission_timeout_ms`（默认 30s，0=立即拒绝）
+- `store.py`：积压时轮询等待而非立刻报错，超时抛 `TimeoutError`
+- `server/app.py`：`TimeoutError` → 503
+
+#### 3. Benchmark
+- `persistence_backlog_benchmark.py`：加 WAL 文件大小统计
+- `sqlite_write_benchmark.py`：新增 DELETE vs WAL 原始写入对比
+
+#### 4. 测试
+- 新增 8 个测试：admission timeout 行为(5) + waiting session 拒绝(2) + session 重用(1)
+- 修复 2 个旧测试加 `queue_admission_timeout_ms=0`
+- 全量 106 passed / 1 skipped
+

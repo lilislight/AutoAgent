@@ -8,7 +8,7 @@ from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import event, select, text, tuple_
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -68,6 +68,7 @@ class DatabaseBackend:
         batch_max_delay_ms: int = 5,
         recovery_event_interval: int = 200,
         artifact_policy: ArtifactPolicy | None = None,
+        queue_admission_timeout_ms: float = 30_000,
     ) -> None:
         if queue_high_watermark_bytes < 1:
             raise ValueError("queue_high_watermark_bytes must be positive.")
@@ -87,6 +88,8 @@ class DatabaseBackend:
             raise ValueError("Invalid persistence batch limits.")
         if recovery_event_interval < 1:
             raise ValueError("recovery_event_interval must be positive.")
+        if queue_admission_timeout_ms < 0:
+            raise ValueError("queue_admission_timeout_ms must be non-negative.")
 
         self.database_url = _resolve_database_url(database_url)
         self.engine: AsyncEngine = create_async_engine(
@@ -105,6 +108,7 @@ class DatabaseBackend:
         self.batch_max_delay_ms = batch_max_delay_ms
         self.recovery_event_interval = recovery_event_interval
         self.artifact_policy = artifact_policy or ArtifactPolicy()
+        self.queue_admission_timeout_ms = queue_admission_timeout_ms
 
         self._database_loop = RuntimeEventLoop(
             name="autoagent-persistence-runtime"
@@ -200,6 +204,22 @@ class DatabaseBackend:
         async with self._initialize_lock:
             if not self._initialized:
                 self._queue_event = asyncio.Event()
+                # Enable WAL mode with NORMAL synchronous for SQLite backends.
+                # WAL separates writers from readers so the persistence loop
+                # can consume events while WorkflowExecutor checks durable
+                # sequences; NORMAL synchronous avoids per-transaction fsync
+                # while protecting the database structure.
+                @event.listens_for(self.engine.sync_engine, "connect")
+                def _set_sqlite_pragma(
+                    dbapi_connection: Any,
+                    connection_record: Any,
+                ) -> None:
+                    if self.database_url.startswith("sqlite"):
+                        cursor = dbapi_connection.cursor()
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.execute("PRAGMA synchronous=NORMAL")
+                        cursor.close()
+
                 async with self.engine.begin() as connection:
                     await connection.run_sync(
                         RuntimeDatabaseBase.metadata.create_all

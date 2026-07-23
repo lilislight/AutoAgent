@@ -1,4 +1,4 @@
-from autoagent.core.app import AutoAgentApp, SubmittedInvocation, get_default_app
+from autoagent.core.app import AutoAgentApp, get_default_app
 from autoagent.core.operators import (
     Capability,
     Operator,
@@ -6,7 +6,6 @@ from autoagent.core.operators import (
     OperatorContractWarning,
     OperatorManifest,
     ParameterContract,
-    RecoveryMode,
     SchemaContract,
     capability,
     operator,
@@ -28,6 +27,7 @@ from autoagent.core.workflow import (
     OperatorRef,
     ResourcePolicy,
     ReplicationPolicy,
+    RecoveryPolicy,
     RetryPolicy,
     SystemCommand,
     TimeoutPolicy,
@@ -41,7 +41,7 @@ from autoagent.core.runtime import (
     LoggingEventSink,
     RuntimeCodec,
     RuntimeEventSink,
-    SQLiteRuntimeStore,
+    DatabaseRuntimeStore,
 )
 from autoagent.core.server import AutoAgentServer
 
@@ -73,13 +73,12 @@ __all__ = [
     "ParameterContract",
     "ResourcePolicy",
     "ReplicationPolicy",
-    "RecoveryMode",
+    "RecoveryPolicy",
     "RetryPolicy",
     "RuntimeCodec",
     "RuntimeEventSink",
     "SchemaContract",
-    "SQLiteRuntimeStore",
-    "SubmittedInvocation",
+    "DatabaseRuntimeStore",
     "SystemCommand",
     "TimeoutPolicy",
     "Workflow",

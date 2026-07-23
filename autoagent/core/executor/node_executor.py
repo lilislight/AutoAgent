@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import random
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from time import perf_counter_ns
@@ -34,9 +34,6 @@ from autoagent.core.workflow import BackoffPolicy, MapPolicy
 from autoagent.core.workflow.capability import SystemCommand, WAIT_SYSTEM_COMMAND_ID
 
 
-OperatorCallCheckpoint = Callable[[OperatorCall], Awaitable[None]]
-
-
 @dataclass(frozen=True)
 class NodeExecutionJob:
     """Prepared unit of work submitted by WorkflowExecutor.
@@ -52,9 +49,9 @@ class NodeExecutionJob:
     input: Any
     max_operator_calls: int | None = None
     map_policy: MapPolicy | None = None
+    prepared_map_inputs: tuple[Any, ...] | None = None
     concurrency_key: str | None = None
     recovery: bool = False
-    operator_call_checkpoint: OperatorCallCheckpoint | None = None
 
 
 @dataclass(frozen=True)
@@ -72,9 +69,9 @@ class ResolvedNodeExecutionJob:
     input: Any
     max_operator_calls: int | None = None
     map_policy: MapPolicy | None = None
+    prepared_map_inputs: tuple[Any, ...] | None = None
     concurrency_key: str | None = None
     recovery: bool = False
-    operator_call_checkpoint: OperatorCallCheckpoint | None = None
     concurrency_controller: RuntimeConcurrencyController | None = None
     thread_pool: ThreadPoolExecutor | None = None
 
@@ -172,9 +169,9 @@ class NodeExecutor:
                 input=job.input,
                 max_operator_calls=job.max_operator_calls,
                 map_policy=job.map_policy,
+                prepared_map_inputs=job.prepared_map_inputs,
                 concurrency_key=job.concurrency_key,
                 recovery=job.recovery,
-                operator_call_checkpoint=job.operator_call_checkpoint,
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
             )
@@ -390,6 +387,8 @@ async def _prepare_units(
         )
 
     if job.map_policy is not None:
+        if job.prepared_map_inputs is not None:
+            return list(enumerate(job.prepared_map_inputs)), "map_item"
         try:
             selected = (
                 await invoke_hook_async(job.map_policy.item_selector, job.input)
@@ -636,11 +635,6 @@ async def _execute_unit(
                 replica_index=unit_index if unit_kind == "replica" else None,
             )
             call.mark_running(unit_input)
-            checkpoint_error = await _checkpoint_operator_call(job, call)
-            if checkpoint_error is not None:
-                call.mark_failed(checkpoint_error)
-                calls.append(_call_result(call))
-                return _UnitResult(unit_index, None, checkpoint_error, calls)
 
             started_ns = perf_counter_ns()
             try:
@@ -649,20 +643,14 @@ async def _execute_unit(
                 duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
                 call.resource_usage = ResourceUsage(duration_ms=duration_ms)
                 call.mark_completed(output)
-                checkpoint_error = await _checkpoint_operator_call(job, call)
                 calls.append(_call_result(call))
-                if checkpoint_error is not None:
-                    return _UnitResult(unit_index, None, checkpoint_error, calls)
                 return _UnitResult(unit_index, output, None, calls)
             except Exception as exc:
                 duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
                 error = _operator_error(job, operator, exc)
                 call.resource_usage = ResourceUsage(duration_ms=duration_ms)
                 call.mark_failed(error)
-                checkpoint_error = await _checkpoint_operator_call(job, call)
                 calls.append(_call_result(call))
-                if checkpoint_error is not None:
-                    return _UnitResult(unit_index, None, checkpoint_error, calls)
                 if attempt_index + 1 < max_attempts:
                     await asyncio.sleep(_retry_delay_seconds(retry.backoff, attempt_index))
 
@@ -817,29 +805,6 @@ def _call_result(
         started_at_ms=call.started_at_ms,
         ended_at_ms=call.ended_at_ms,
     )
-
-
-async def _checkpoint_operator_call(
-    job: ResolvedNodeExecutionJob,
-    call: OperatorCall,
-) -> RuntimeErrorInfo | None:
-    checkpoint = job.operator_call_checkpoint
-    if checkpoint is None:
-        return None
-    try:
-        await checkpoint(call)
-    except Exception as exc:
-        return RuntimeErrorInfo(
-            code="RUNTIME_CHECKPOINT_FAILED",
-            message=str(exc),
-            detail={
-                "node_id": job.node_ir.id,
-                "operator_id": call.operator_id,
-                "operator_call_id": str(call.id),
-                "error_type": type(exc).__name__,
-            },
-        )
-    return None
 
 
 def _operator_budget_error(job: ResolvedNodeExecutionJob) -> RuntimeErrorInfo:

@@ -8,7 +8,6 @@ from typing import Any
 from autoagent.core.operators.contract import OperatorContract, callable_contract
 from autoagent.core.operators.manifest import (
     OperatorManifest,
-    RecoveryMode,
     callable_operator_id,
 )
 
@@ -29,7 +28,6 @@ class Operator:
         handler: Callable[..., Any],
         capability_id: str | None = None,
         version: str | int = 1,
-        recovery_mode: RecoveryMode = "never",
         priority: int = 0,
         enabled: bool = True,
         metadata: dict[str, Any] | None = None,
@@ -50,14 +48,11 @@ class Operator:
             raise ValueError("Operator capability_id cannot be empty.")
         if isinstance(version, str) and not version.strip():
             raise ValueError("Operator version cannot be empty.")
-        if recovery_mode not in {"never", "replay_safe", "idempotent"}:
-            raise ValueError(f"Unsupported Operator recovery_mode: {recovery_mode}")
 
         self._id = resolved_id
         self._handler = handler
         self._capability_id = resolved_capability_id
         self._version = version
-        self._recovery_mode = recovery_mode
         self._priority = priority
         self._enabled = enabled
         self._contract = contract
@@ -84,12 +79,6 @@ class Operator:
         return self._version
 
     @property
-    def recovery_mode(self) -> RecoveryMode:
-        """Crash behavior consumed by durable recovery, never normal retry."""
-
-        return self._recovery_mode
-
-    @property
     def manifest(self) -> OperatorManifest:
         """Return the immutable compatibility record persisted with execution."""
 
@@ -98,7 +87,6 @@ class Operator:
             version=self.version,
             capability_id=self.capability_id,
             contract=self.contract,
-            recovery_mode=self.recovery_mode,
         )
 
     @property
@@ -159,8 +147,7 @@ class Operator:
         explicit operator_id they use module/qualified-name identity. Compiler
         supplies a node-stable binding id so distinct Callable objects become
         distinct Operators while repeated use of one object can reuse it.
-        Direct Operators keep version 1 and ``never`` recovery unless the
-        developer binds an explicit Operator object with different metadata.
+        Direct Operators keep version 1 compatibility metadata.
         """
 
         return cls(id=operator_id or callable_operator_id(handler), handler=handler)

@@ -136,6 +136,9 @@ class NodeExecutionRequest:
     node_id: str
     activations: tuple[EdgeActivation, ...] = ()
     execution_scope: ExecutionScope = ()
+    idempotency_key: str | None = None
+    recovery_of_execution_id: UUID | None = None
+    recovery_attempt: int = 0
 
     @property
     def source_execution_ids(self) -> tuple[UUID, ...]:
@@ -150,6 +153,13 @@ class NodeExecutionRequest:
             "execution_scope": [
                 frame.to_record() for frame in self.execution_scope
             ],
+            "idempotency_key": self.idempotency_key,
+            "recovery_of_execution_id": (
+                str(self.recovery_of_execution_id)
+                if self.recovery_of_execution_id is not None
+                else None
+            ),
+            "recovery_attempt": self.recovery_attempt,
         }
 
     @classmethod
@@ -164,6 +174,13 @@ class NodeExecutionRequest:
                 LoopIteration.from_record(item)
                 for item in record.get("execution_scope", [])
             ),
+            idempotency_key=record.get("idempotency_key"),
+            recovery_of_execution_id=(
+                UUID(str(record["recovery_of_execution_id"]))
+                if record.get("recovery_of_execution_id") is not None
+                else None
+            ),
+            recovery_attempt=int(record.get("recovery_attempt", 0)),
         )
 
 
@@ -312,11 +329,17 @@ class SchedulerContext:
         *,
         activations: tuple[EdgeActivation, ...] = (),
         execution_scope: ExecutionScope = (),
+        idempotency_key: str | None = None,
+        recovery_of_execution_id: UUID | None = None,
+        recovery_attempt: int = 0,
     ) -> NodeExecutionRequest:
         request = NodeExecutionRequest(
             node_id=node_id,
             activations=activations,
             execution_scope=execution_scope,
+            idempotency_key=idempotency_key,
+            recovery_of_execution_id=recovery_of_execution_id,
+            recovery_attempt=recovery_attempt,
         )
         self.ready_queue.append(request)
         return request

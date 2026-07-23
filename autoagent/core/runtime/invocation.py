@@ -13,7 +13,7 @@ from autoagent.core.runtime.output import OutputContext
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.scheduler import SchedulerContext
 from autoagent.core.runtime.scheduler import EdgeActivation, ExecutionScope
-from autoagent.core.runtime.status import InvocationStateValue
+from autoagent.core.runtime.status import ExecutionMode, InvocationStateValue
 from autoagent.core.runtime.time import TimestampMs, coerce_timestamp_ms, utc_timestamp_ms
 
 
@@ -78,6 +78,8 @@ class Invocation:
         updated_at_ms: TimestampMs | None = None,
         initialize_entry: bool = True,
         execution_mailbox: InvocationExecutionMailbox | None = None,
+        execution_mode: ExecutionMode = "normal",
+        event_sequence: int = 0,
     ) -> None:
         self.id = id or uuid4()
         self.workflow_id = workflow_id
@@ -95,6 +97,10 @@ class Invocation:
         # them on the Invocation prevents one session from consuming another
         # invocation's results when an App executes sessions concurrently.
         self.execution_mailbox = execution_mailbox or InvocationExecutionMailbox()
+        self.execution_mode: ExecutionMode = execution_mode
+        # Runtime events are ordered per Invocation. Sequence zero belongs to
+        # the Genesis snapshot; the first event is therefore sequence one.
+        self.event_sequence = event_sequence
         self.error = error
         self.created_at_ms = created_at_ms or utc_timestamp_ms()
         self.updated_at_ms = updated_at_ms or self.created_at_ms
@@ -113,6 +119,12 @@ class Invocation:
     def mark_running(self) -> None:
         self.state = "running"
         self.updated_at_ms = utc_timestamp_ms()
+
+    def next_event_sequence(self) -> int:
+        """Allocate the next sequence before an Executor emits an event."""
+
+        self.event_sequence += 1
+        return self.event_sequence
 
     def mark_waiting(self) -> None:
         self.state = "waiting"
@@ -386,6 +398,8 @@ class Invocation:
             "workflow_operator_manifest_hash": self.workflow_operator_manifest_hash,
             "entry_node_id": self.entry_node_id,
             "state": self.state,
+            "execution_mode": self.execution_mode,
+            "event_sequence": self.event_sequence,
             "input": dict(self.input),
             "context": self.context.to_record(),
             "result": self.result,
@@ -412,6 +426,8 @@ class Invocation:
             ),
             entry_node_id=str(record["entry_node_id"]),
             state=record["state"],
+            execution_mode=record.get("execution_mode", "normal"),
+            event_sequence=int(record.get("event_sequence", 0)),
             input=dict(record.get("input", {})),
             context=InvocationContext.from_record(
                 record.get("context", {"data": record.get("data", {})})

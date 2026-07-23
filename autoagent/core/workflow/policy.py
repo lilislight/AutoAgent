@@ -91,6 +91,32 @@ class RetryPolicy(BaseModel):
     )
 
 
+class RecoveryPolicy(BaseModel):
+    """Crash-recovery rule for one logical Node execution.
+
+    Recovery is deliberately a Node concern: the whole Node phase may be
+    replayed after the last durable boundary, including mapping, all Operator
+    calls, aggregation, and binding.  It is independent from ``RetryPolicy``,
+    which only handles failures observed by a live NodeExecutor.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    mode: Literal["never", "replay_safe", "idempotent"] = Field(
+        default="never",
+        description=(
+            "never interrupts recovery at this Node; replay_safe permits a "
+            "whole-Node replay; idempotent additionally requires the executor "
+            "to supply the stable logical Node idempotency key to external work."
+        ),
+    )
+    max_attempts: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum crash-recovery replays for one logical Node occurrence.",
+    )
+
+
 class TimeoutPolicy(BaseModel):
     """Timeout rule for one node attempt."""
 
@@ -172,6 +198,13 @@ class NodePolicy(BaseModel):
     retry: RetryPolicy | None = Field(
         default=None,
         description="Retry rule for failed attempts.",
+    )
+    recovery: RecoveryPolicy | None = Field(
+        default=None,
+        description=(
+            "Whole-Node crash recovery policy. Omitted is equivalent to "
+            "RecoveryPolicy(mode='never')."
+        ),
     )
     timeout: TimeoutPolicy | None = Field(
         default=None,

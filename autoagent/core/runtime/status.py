@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+ExecutionMode = Literal["normal", "recovery"]
+
 # Invocation state is the coarse state of one app.invoke()/workflow.invoke()
 # request. WorkflowExecutor updates it around the scheduling/execution loop.
 InvocationStateValue = Literal[

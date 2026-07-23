@@ -1097,6 +1097,23 @@ class WorkflowCompiler:
                             )
                         )
 
+            if policy.recovery is not None and policy.recovery.mode == "idempotent":
+                parameter_names = {
+                    parameter.name for parameter in node.input_contract.parameters
+                }
+                if "idempotency_key" not in parameter_names:
+                    diagnostics.append(
+                        Diagnostic(
+                            code="POLICY_RECOVERY_IDEMPOTENCY_KEY_REQUIRED",
+                            severity="error",
+                            message=(
+                                "Idempotent RecoveryPolicy requires the Operator "
+                                "input contract to accept idempotency_key."
+                            ),
+                            subject=node_id,
+                        )
+                    )
+
             if policy.timeout is not None and policy.timeout.timeout_ms <= 0:
                 diagnostics.append(
                     Diagnostic(

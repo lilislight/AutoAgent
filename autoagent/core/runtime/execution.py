@@ -307,6 +307,7 @@ class NodeExecution:
     incoming_activations: tuple[EdgeActivation, ...] = ()
     execution_scope: ExecutionScope = ()
     operator_calls: list[OperatorCall] = field(default_factory=list)
+    operator_inputs: tuple[Any, ...] | None = None
     edge_evaluations: list[EdgeEvaluation] = field(default_factory=list)
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
     started_at_ms: TimestampMs | None = None
@@ -428,6 +429,11 @@ class NodeExecution:
             "edge_evaluations": [
                 evaluation.to_record() for evaluation in self.edge_evaluations
             ],
+            "operator_inputs": (
+                list(self.operator_inputs)
+                if self.operator_inputs is not None
+                else None
+            ),
             "resource_usage": self.resource_usage.to_record(),
             "started_at_ms": self.started_at_ms,
             "ended_at_ms": self.ended_at_ms,
@@ -466,6 +472,11 @@ class NodeExecution:
                 for item in record.get("execution_scope", [])
             ),
             operator_calls=list(operator_calls or []),
+            operator_inputs=(
+                tuple(record["operator_inputs"])
+                if record.get("operator_inputs") is not None
+                else None
+            ),
             edge_evaluations=[
                 EdgeEvaluation.from_record(item)
                 for item in record.get("edge_evaluations", [])

@@ -19,7 +19,7 @@ from autoagent import (
     ReplicationPolicy,
     ResourcePolicy,
     RetryPolicy,
-    SQLiteRuntimeStore,
+    DatabaseRuntimeStore,
     SystemCommand,
     TimeoutPolicy,
     Workflow,
@@ -900,7 +900,7 @@ def build_incident_response_app(
     if runtime_store is None:
         resolved_database_path = Path(database_path or DEFAULT_RUNTIME_DATABASE)
         resolved_database_path.parent.mkdir(parents=True, exist_ok=True)
-        runtime_store = SQLiteRuntimeStore.from_path(resolved_database_path)
+        runtime_store = DatabaseRuntimeStore.from_path(resolved_database_path)
 
     app = AutoAgentApp(namespace="real-workflow", runtime_store=runtime_store)
     for model_type in _RUNTIME_MODELS:

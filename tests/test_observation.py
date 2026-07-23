@@ -202,10 +202,13 @@ class TraceQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             before_sequence=reverse_page.previous_before_sequence,
             limit=2,
         )
-        self.assertEqual(all_events[-2:], reverse_page.events)
         self.assertEqual(
-            all_events[-4:-2],
-            previous_page.events,
+            [event.id for event in all_events[-2:]],
+            [event.id for event in reverse_page.events],
+        )
+        self.assertEqual(
+            [event.id for event in all_events[-4:-2]],
+            [event.id for event in previous_page.events],
         )
 
     async def test_runtime_payloads_are_redacted_without_changing_store_data(self) -> None:

@@ -106,109 +106,6 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         self.assertEqual([("second", 3)], observed_binding)
 
-    def test_operator_call_is_checkpointed_before_user_handler_runs(self) -> None:
-        async def scenario() -> None:
-            handler_started = asyncio.Event()
-            release_handler = asyncio.Event()
-
-            async def handler(value: str) -> str:
-                handler_started.set()
-                await release_handler.wait()
-                return value.upper()
-
-            workflow = Workflow(id="operator_call_checkpoint")
-            workflow.add_node(handler, node_id="work")
-            app = AutoAgentApp()
-
-            task = asyncio.create_task(
-                app.ainvoke(
-                    workflow,
-                    input={"value": "hello"},
-                    session_id="checkpoint-session",
-                )
-            )
-            await asyncio.wait_for(handler_started.wait(), timeout=1)
-
-            session = app.runtime_store.find_session(
-                namespace=app.namespace,
-                workflow_id=workflow.id,
-                session_key="checkpoint-session",
-            )
-            self.assertIsNotNone(session)
-            invocation = session.get_current_invocation()
-            self.assertIsNotNone(invocation)
-            execution = invocation.node_executions[0]
-            self.assertEqual(execution.state, "running")
-            self.assertEqual(len(execution.operator_calls), 1)
-            persisted_call = execution.operator_calls[0]
-            self.assertEqual(persisted_call.state, "running")
-            self.assertEqual(persisted_call.input, {"value": "hello"})
-
-            release_handler.set()
-            completed = await asyncio.wait_for(task, timeout=1)
-            stored = app.runtime_store.load_invocation(completed.id)
-            final_call = stored.node_executions[0].operator_calls[0]
-            self.assertEqual(final_call.id, persisted_call.id)
-            self.assertEqual(final_call.state, "completed")
-            self.assertEqual(final_call.output, "HELLO")
-
-        asyncio.run(scenario())
-
-    def test_operator_call_start_checkpoint_failure_prevents_user_code(self) -> None:
-        class FailingStartStore(InMemoryRuntimeStore):
-            async def acheckpoint_operator_call(self, **kwargs) -> None:
-                if kwargs["call"].state == "running":
-                    raise OSError("checkpoint unavailable")
-                await super().acheckpoint_operator_call(**kwargs)
-
-        calls = 0
-
-        def handler() -> str:
-            nonlocal calls
-            calls += 1
-            return "should-not-run"
-
-        workflow = Workflow(id="operator_start_checkpoint_failure")
-        workflow.add_node(handler, node_id="work")
-        invocation = AutoAgentApp(runtime_store=FailingStartStore()).invoke(workflow)
-
-        self.assertEqual(calls, 0)
-        self.assertEqual(invocation.state, "failed")
-        self.assertEqual(
-            invocation.node_executions[0].error.code,
-            "RUNTIME_CHECKPOINT_FAILED",
-        )
-
-    def test_operator_call_completion_checkpoint_failure_is_not_retried(self) -> None:
-        class FailingCompletionStore(InMemoryRuntimeStore):
-            async def acheckpoint_operator_call(self, **kwargs) -> None:
-                if kwargs["call"].state != "running":
-                    raise OSError("checkpoint unavailable")
-                await super().acheckpoint_operator_call(**kwargs)
-
-        calls = 0
-
-        def handler() -> str:
-            nonlocal calls
-            calls += 1
-            return "completed-side-effect"
-
-        workflow = Workflow(id="operator_completion_checkpoint_failure")
-        workflow.add_node(
-            handler,
-            node_id="work",
-            policy=NodePolicy(retry=RetryPolicy(max_attempts=3)),
-        )
-        app = AutoAgentApp(runtime_store=FailingCompletionStore())
-        invocation = app.invoke(workflow)
-
-        self.assertEqual(calls, 1)
-        self.assertEqual(invocation.state, "failed")
-        execution = invocation.node_executions[0]
-        self.assertEqual(execution.error.code, "RUNTIME_CHECKPOINT_FAILED")
-        self.assertEqual(len(execution.operator_calls), 1)
-        self.assertEqual(execution.operator_calls[0].state, "completed")
-
     def test_app_invoke_executes_simple_chain(self) -> None:
         workflow = Workflow(id="simple_chain")
         workflow.add_node(start_message, node_id="start")
@@ -548,13 +445,17 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_sync_invoke_rejects_running_event_loop(self) -> None:
+    def test_sync_and_async_invocation_can_be_mixed(self) -> None:
         async def scenario() -> None:
             workflow = Workflow(id="sync_in_async")
             workflow.add_node(lambda: "done", node_id="node")
+            app = AutoAgentApp()
 
-            with self.assertRaisesRegex(RuntimeError, "await ainvoke"):
-                AutoAgentApp().invoke(workflow)
+            sync_result = app.invoke(workflow, session_id="sync")
+            async_result = await app.ainvoke(workflow, session_id="async")
+            self.assertEqual("completed", sync_result.state)
+            self.assertEqual("completed", async_result.state)
+            app.close()
 
         asyncio.run(scenario())
 
@@ -1835,8 +1736,8 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(fallback_calls, 0)
         calls = invocation.latest_node_execution("node").operator_calls
         self.assertEqual([call.operator_id for call in calls], ["binding_primary"])
-        self.assertEqual(invocation.context.data, {"partial": True})
-        self.assertEqual(session.context.data, {"partial": True})
+        self.assertEqual(invocation.context.data, {})
+        self.assertEqual(session.context.data, {})
 
     def test_unselected_entries_are_skipped_before_fan_in(self) -> None:
         workflow = Workflow(id="selected_multi_entry")

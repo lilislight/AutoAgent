@@ -5,14 +5,13 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any
 from collections.abc import Iterable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.event import (
     RuntimeEvent,
     RuntimeEventDraft,
     invocation_checkpoint_events,
-    operator_call_checkpoint_events,
     session_context_event,
     sort_runtime_event_drafts,
 )
@@ -20,6 +19,12 @@ from autoagent.core.runtime.execution import NodeExecution, OperatorCall
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
 from autoagent.core.runtime.session import Session
+from autoagent.core.runtime.snapshot import (
+    ExecutionSnapshot,
+    RuntimeBoundary,
+    capture_execution_state,
+    reduce_execution_state,
+)
 from autoagent.core.runtime.sinks import RuntimeEventSink, emit_to_sinks
 
 
@@ -38,25 +43,14 @@ class SessionBusyError(RuntimeError):
 
 
 class RuntimeStore(ABC):
-    """Persistence boundary for sessions, invocations, and execution records.
+    """Authoritative in-memory Runtime center and event-journal contract.
 
-    RuntimeStore is the only layer that should know whether runtime data lives
-    in memory, a database, or a tracing backend. Business objects keep convenient
-    methods, while the store serializes them into database-shaped records.
-
-    A durable store must persist enough data to rebuild:
-      - Session and its SessionContext.
-      - Invocation state, InvocationContext, scheduler queues, and wait entries.
-      - NodeExecution records and their OperatorCall trace records.
-
-    Crash recovery starts from store records, not live Python call stacks.
-    AutoAgentApp compares the persisted Workflow/Operator environment and either
-    asks WorkflowExecutor to replay the whole node or marks the old Invocation
-    interrupted. RuntimeStore never executes user code itself.
-
-    Execution-path checkpoints update the Invocation control record, optional
-    SessionContext, and only the NodeExecution rows changed in that control-loop
-    turn. Materialized state and generated Runtime Events commit atomically.
+    Executors generate sequenced RuntimeEvents and call ``aapply_event``. The
+    Store atomically applies their reducer state, retains the latest Session /
+    Invocation materialization, and exposes replay journals to subscribers.
+    A database is a downstream durable backend rather than the execution source
+    of truth. Recovery rebuilds from a Genesis/periodic ExecutionSnapshot plus
+    boundary events; Python stacks and per-Operator database rows are excluded.
     """
 
     serializer: JsonRuntimeSerializer
@@ -78,6 +72,115 @@ class RuntimeStore(ABC):
 
     async def aclose(self) -> None:
         """Release backing resources; in-memory stores require no work."""
+
+    async def asave_execution_snapshot(
+        self,
+        snapshot: ExecutionSnapshot,
+        *,
+        durability_barrier: bool = False,
+    ) -> None:
+        """Store a Genesis or periodic restart image."""
+
+        raise NotImplementedError
+
+    async def aload_execution_snapshot(
+        self,
+        invocation_id: UUID,
+        *,
+        at_or_before_sequence: int | None = None,
+    ) -> ExecutionSnapshot | None:
+        raise NotImplementedError
+
+    async def arebuild_execution(
+        self,
+        invocation_id: UUID,
+        *,
+        through_sequence: int | None = None,
+    ) -> tuple[Session, Invocation]:
+        snapshot = await self.aload_execution_snapshot(
+            invocation_id,
+            at_or_before_sequence=through_sequence,
+        )
+        if snapshot is None:
+            raise KeyError(f"No execution snapshot for Invocation: {invocation_id}")
+        collected: list[RuntimeEvent] = []
+        cursor = snapshot.through_sequence
+        while True:
+            page = await self.alist_runtime_events(
+                invocation_id=invocation_id,
+                after_sequence=cursor,
+                limit=10_000,
+            )
+            if not page:
+                break
+            eligible = tuple(
+                event
+                for event in page
+                if through_sequence is None
+                or event.sequence <= through_sequence
+            )
+            collected.extend(eligible)
+            if not eligible or len(eligible) < len(page):
+                break
+            cursor = eligible[-1].sequence
+            if len(page) < 10_000:
+                break
+        return reduce_execution_state(
+            snapshot,
+            tuple(collected),
+            through_sequence=through_sequence,
+        )
+
+    async def acommit_boundary(
+        self,
+        session: Session,
+        invocation: Invocation,
+        boundary: RuntimeBoundary,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+        detail: dict[str, Any] | None = None,
+    ) -> RuntimeEvent:
+        """Compatibility helper; executors should construct and apply events."""
+
+        sequence = invocation.next_event_sequence()
+        event = RuntimeEvent(
+            namespace=session.namespace,
+            workflow_id=session.workflow_id,
+            session_id=session.id,
+            invocation_id=invocation.id,
+            sequence=sequence,
+            type=boundary,
+            entity_type="invocation",
+            entity_id=str(invocation.id),
+            occurred_at_ms=invocation.updated_at_ms,
+            role="boundary",
+            boundary=boundary,
+            payload={
+                "detail": deepcopy(detail or {}),
+                "reducer_state": capture_execution_state(session, invocation),
+            },
+        )
+        return await self.aapply_event(
+            session,
+            invocation,
+            event,
+            node_execution_ids=node_execution_ids,
+            durability_barrier=durability_barrier,
+        )
+
+    async def aapply_event(
+        self,
+        session: Session,
+        invocation: Invocation,
+        event: RuntimeEvent,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+    ) -> RuntimeEvent:
+        """Apply an Executor-produced event to the in-memory Runtime center."""
+
+        raise NotImplementedError
 
     @abstractmethod
     async def asave_workflow_snapshot(
@@ -160,38 +263,6 @@ class RuntimeStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def acheckpoint_invocation(
-        self,
-        session: Session,
-        invocation: Invocation,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-    ) -> None:
-        """Atomically persist one execution-loop delta and its Runtime Events.
-
-        The Invocation control record always changes because Scheduler queues,
-        InvocationContext, state, result, or error may have changed. Only the
-        listed NodeExecution rows and their OperatorCalls are rewritten. The
-        supplied Session contributes SessionContext to the same transaction.
-        """
-
-        raise NotImplementedError
-
-    @abstractmethod
-    async def acheckpoint_operator_call(
-        self,
-        *,
-        session_id: UUID,
-        invocation_id: UUID,
-        node_execution_id: UUID,
-        node_id: str,
-        call: OperatorCall,
-    ) -> None:
-        """Insert a running OperatorCall or update its terminal state atomically."""
-
-        raise NotImplementedError
-
-    @abstractmethod
     async def aadmit_invocation(
         self,
         session_id: UUID,
@@ -264,18 +335,6 @@ class RuntimeStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def aappend_runtime_events(
-        self,
-        *,
-        session_id: UUID,
-        invocation_id: UUID,
-        drafts: tuple[RuntimeEventDraft, ...],
-    ) -> tuple[RuntimeEvent, ...]:
-        """Append non-checkpoint events such as user-visible output deltas."""
-
-        raise NotImplementedError
-
-    @abstractmethod
     async def asave_projection_checkpoint(
         self,
         *,
@@ -341,11 +400,15 @@ class InMemoryRuntimeStore(RuntimeStore):
         self.operator_calls: dict[UUID, dict[str, Any]] = {}
         self.node_operator_calls: dict[UUID, list[UUID]] = {}
 
-        # Immutable event table and per-session sequence index. Events are kept
+        # Immutable event table and per-Invocation sequence index. Events are kept
         # separately from materialized Invocation records so replay cursors and
         # observation clients never depend on mutable latest-state rows.
         self.runtime_events: dict[UUID, dict[str, Any]] = {}
-        self.session_runtime_events: dict[UUID, list[UUID]] = {}
+        self.invocation_runtime_events: dict[UUID, list[UUID]] = {}
+
+        # Execution images are authoritative recovery compaction points. The
+        # Genesis snapshot always uses sequence zero.
+        self.execution_snapshots: dict[tuple[UUID, int], dict[str, Any]] = {}
 
         # Rebuildable observation cache keyed by Invocation and event cursor.
         # This is not execution state and may be deleted without data loss.
@@ -420,6 +483,159 @@ class InMemoryRuntimeStore(RuntimeStore):
     ) -> None:
         self.save_workflow_snapshot(namespace, snapshot)
 
+    async def acommit_boundary(
+        self,
+        session: Session,
+        invocation: Invocation,
+        boundary: RuntimeBoundary,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+        detail: dict[str, Any] | None = None,
+    ) -> RuntimeEvent:
+        sequence = invocation.next_event_sequence()
+        event = RuntimeEvent(
+            namespace=session.namespace,
+            workflow_id=session.workflow_id,
+            session_id=session.id,
+            invocation_id=invocation.id,
+            sequence=sequence,
+            type=boundary,
+            entity_type="invocation",
+            entity_id=str(invocation.id),
+            occurred_at_ms=invocation.updated_at_ms,
+            role="boundary",
+            boundary=boundary,
+            payload={
+                "detail": deepcopy(detail or {}),
+                "reducer_state": capture_execution_state(session, invocation),
+            },
+        )
+        return await self.aapply_event(
+            session,
+            invocation,
+            event,
+            node_execution_ids=node_execution_ids,
+            durability_barrier=durability_barrier,
+        )
+
+    async def aapply_event(
+        self,
+        session: Session,
+        invocation: Invocation,
+        event: RuntimeEvent,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+    ) -> RuntimeEvent:
+        del durability_barrier
+        with self._lock:
+            previous_session = self.sessions.get(session.id)
+            previous = self.load_invocation(invocation.id)
+            if previous_session is None or previous is None:
+                raise KeyError(f"Unknown Invocation hierarchy: {invocation.id}")
+
+            changed_ids = tuple(dict.fromkeys(node_execution_ids))
+            self.sessions[session.id] = deepcopy(session.to_record())
+            self.invocations[invocation.id] = deepcopy(
+                invocation.to_record(session.id)
+            )
+            for execution_id in changed_ids:
+                execution = invocation.get_node_execution(execution_id)
+                if execution is None:
+                    raise KeyError(f"Unknown NodeExecution: {execution_id}")
+                self._save_node_execution(invocation.id, execution)
+
+            expected_sequence = max(
+                (
+                    int(self.runtime_events[event_id]["sequence"])
+                    for event_id in self.invocation_runtime_events.get(
+                        invocation.id, ()
+                    )
+                ),
+                default=0,
+            ) + 1
+            if event.sequence != expected_sequence:
+                raise ValueError(
+                    "Executor event sequence is not contiguous: "
+                    f"expected={expected_sequence}, actual={event.sequence}."
+                )
+            self.runtime_events[event.id] = event.model_dump(mode="python")
+            self.invocation_runtime_events.setdefault(invocation.id, []).append(
+                event.id
+            )
+
+            drafts = invocation_checkpoint_events(
+                previous,
+                invocation,
+                changed_node_execution_ids=frozenset(map(str, changed_ids)),
+            )
+            if previous_session.get("context") != session.context.to_record():
+                drafts.append(
+                    session_context_event(
+                        session_id=session.id,
+                        invocation_id=invocation.id,
+                        context=session.context.to_record(),
+                        occurred_at_ms=session.updated_at_ms,
+                    )
+                )
+            sort_runtime_event_drafts(drafts)
+            observation_events = self._append_event_drafts(
+                session.id,
+                invocation.id,
+                tuple(drafts),
+                commit_id=event.commit_id,
+            )
+            if observation_events:
+                invocation.event_sequence = observation_events[-1].sequence
+                self.invocations[invocation.id] = deepcopy(
+                    invocation.to_record(session.id)
+                )
+
+        await self.aemit_runtime_events((event, *observation_events))
+        interval = int(getattr(self, "snapshot_interval", 50))
+        if event.sequence % max(1, interval) == 0:
+            await self.asave_execution_snapshot(
+                ExecutionSnapshot.capture(session, invocation)
+            )
+        return event
+
+    async def asave_execution_snapshot(
+        self,
+        snapshot: ExecutionSnapshot,
+        *,
+        durability_barrier: bool = False,
+    ) -> None:
+        del durability_barrier
+        with self._lock:
+            key = (snapshot.invocation_id, snapshot.through_sequence)
+            existing = self.execution_snapshots.get(key)
+            record = snapshot.model_dump(mode="python")
+            if existing is not None and existing != record:
+                raise ValueError(f"Execution snapshot collision: {key}")
+            self.execution_snapshots[key] = deepcopy(record)
+
+    async def aload_execution_snapshot(
+        self,
+        invocation_id: UUID,
+        *,
+        at_or_before_sequence: int | None = None,
+    ) -> ExecutionSnapshot | None:
+        with self._lock:
+            candidates = [
+                (sequence, record)
+                for (candidate_id, sequence), record in self.execution_snapshots.items()
+                if candidate_id == invocation_id
+                and (
+                    at_or_before_sequence is None
+                    or sequence <= at_or_before_sequence
+                )
+            ]
+            if not candidates:
+                return None
+            _, record = max(candidates, key=lambda item: item[0])
+            return ExecutionSnapshot.model_validate(deepcopy(record))
+
     async def aload_workflow_snapshot(
         self,
         *,
@@ -490,6 +706,9 @@ class InMemoryRuntimeStore(RuntimeStore):
             workflow_definition_hash=workflow_definition_hash,
             workflow_operator_manifest_hash=workflow_operator_manifest_hash,
         )
+        invocation = session.get_current_invocation()
+        if invocation is not None and events:
+            invocation.event_sequence = events[-1].sequence
         await self.aemit_runtime_events(events)
         return session
 
@@ -499,38 +718,8 @@ class InMemoryRuntimeStore(RuntimeStore):
         invocation: Invocation,
     ) -> None:
         events = self.save_invocation(session_id, invocation)
-        await self.aemit_runtime_events(events)
-
-    async def acheckpoint_invocation(
-        self,
-        session: Session,
-        invocation: Invocation,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-    ) -> None:
-        events = self.checkpoint_invocation(
-            session,
-            invocation,
-            node_execution_ids=node_execution_ids,
-        )
-        await self.aemit_runtime_events(events)
-
-    async def acheckpoint_operator_call(
-        self,
-        *,
-        session_id: UUID,
-        invocation_id: UUID,
-        node_execution_id: UUID,
-        node_id: str,
-        call: OperatorCall,
-    ) -> None:
-        events = self.checkpoint_operator_call(
-            session_id=session_id,
-            invocation_id=invocation_id,
-            node_execution_id=node_execution_id,
-            node_id=node_id,
-            call=call,
-        )
+        if events:
+            invocation.event_sequence = events[-1].sequence
         await self.aemit_runtime_events(events)
 
     async def aadmit_invocation(
@@ -539,6 +728,16 @@ class InMemoryRuntimeStore(RuntimeStore):
         invocation: Invocation,
     ) -> Session:
         session, events = self.admit_invocation(session_id, invocation)
+        await self.asave_execution_snapshot(
+            ExecutionSnapshot.capture(
+                session,
+                invocation,
+                through_sequence=0,
+            ),
+            durability_barrier=True,
+        )
+        if events:
+            invocation.event_sequence = events[-1].sequence
         await self.aemit_runtime_events(events)
         return session
 
@@ -637,18 +836,6 @@ class InMemoryRuntimeStore(RuntimeStore):
         if before_sequence is not None:
             page.reverse()
         return tuple(page)
-
-    async def aappend_runtime_events(
-        self,
-        *,
-        session_id: UUID,
-        invocation_id: UUID,
-        drafts: tuple[RuntimeEventDraft, ...],
-    ) -> tuple[RuntimeEvent, ...]:
-        with self._lock:
-            events = self._append_event_drafts(session_id, invocation_id, drafts)
-        await self.aemit_runtime_events(events)
-        return events
 
     async def asave_projection_checkpoint(
         self,
@@ -843,95 +1030,6 @@ class InMemoryRuntimeStore(RuntimeStore):
             drafts = invocation_checkpoint_events(previous, invocation)
             return self._append_event_drafts(session_id, invocation.id, tuple(drafts))
 
-    def checkpoint_invocation(
-        self,
-        session: Session,
-        invocation: Invocation,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-    ) -> tuple[RuntimeEvent, ...]:
-        """Persist one control-loop delta under the Store lock.
-
-        Unlike ``save_invocation``, this method never rebuilds the Invocation's
-        child index. Existing historical NodeExecutions remain untouched and
-        only explicitly listed rows are inserted or updated.
-        """
-
-        with self._lock:
-            previous_session = self.sessions.get(session.id)
-            if previous_session is None:
-                raise KeyError(f"Unknown session: {session.id}")
-            previous = self.load_invocation(invocation.id)
-            if previous is None:
-                raise KeyError(f"Unknown invocation: {invocation.id}")
-            if str(self.invocations[invocation.id]["session_id"]) != str(session.id):
-                raise ValueError("Invocation does not belong to the supplied session.")
-
-            self.invocations[invocation.id] = deepcopy(
-                invocation.to_record(session.id)
-            )
-            changed_ids = tuple(dict.fromkeys(node_execution_ids))
-            for execution_id in changed_ids:
-                execution = invocation.get_node_execution(execution_id)
-                if execution is None:
-                    raise KeyError(f"Unknown NodeExecution: {execution_id}")
-                self._save_node_execution(invocation.id, execution)
-
-            session_record = session.to_record()
-            self.sessions[session.id] = deepcopy(session_record)
-            self.session_keys[
-                (session.namespace, session.workflow_id, session.session_key)
-            ] = session.id
-
-            drafts = invocation_checkpoint_events(
-                previous,
-                invocation,
-                changed_node_execution_ids=frozenset(map(str, changed_ids)),
-            )
-            if previous_session.get("context") != session.context.to_record():
-                drafts.append(
-                    session_context_event(
-                        session_id=session.id,
-                        invocation_id=invocation.id,
-                        context=session.context.to_record(),
-                        occurred_at_ms=session.updated_at_ms,
-                    )
-                )
-            sort_runtime_event_drafts(drafts)
-            return self._append_event_drafts(session.id, invocation.id, tuple(drafts))
-
-    def checkpoint_operator_call(
-        self,
-        *,
-        session_id: UUID,
-        invocation_id: UUID,
-        node_execution_id: UUID,
-        node_id: str,
-        call: OperatorCall,
-    ) -> tuple[RuntimeEvent, ...]:
-        """Persist one call transition without mutating the live Invocation."""
-
-        with self._lock:
-            invocation_record = self.invocations.get(invocation_id)
-            execution_record = self.node_executions.get(node_execution_id)
-            if invocation_record is None:
-                raise KeyError(f"Unknown invocation: {invocation_id}")
-            if str(invocation_record["session_id"]) != str(session_id):
-                raise ValueError("Invocation does not belong to the supplied session.")
-            if execution_record is None:
-                raise KeyError(f"Unknown NodeExecution: {node_execution_id}")
-            if str(execution_record["invocation_id"]) != str(invocation_id):
-                raise ValueError("NodeExecution does not belong to the Invocation.")
-
-            previous = self._load_operator_call(call.id)
-            self._save_operator_call(node_execution_id, call)
-            drafts = operator_call_checkpoint_events(
-                previous,
-                call,
-                node_id=node_id,
-            )
-            return self._append_event_drafts(session_id, invocation_id, tuple(drafts))
-
     def admit_invocation(
         self,
         session_id: UUID,
@@ -1065,6 +1163,7 @@ class InMemoryRuntimeStore(RuntimeStore):
         session_id: UUID,
         invocation_id: UUID,
         drafts: tuple[RuntimeEventDraft, ...],
+        commit_id: UUID | None = None,
     ) -> tuple[RuntimeEvent, ...]:
         if not drafts:
             return ()
@@ -1074,9 +1173,19 @@ class InMemoryRuntimeStore(RuntimeStore):
             raise KeyError(f"Unknown session: {session_id}")
         if invocation_record is None:
             raise KeyError(f"Unknown invocation: {invocation_id}")
-        event_ids = self.session_runtime_events.setdefault(session_id, [])
-        next_sequence = len(event_ids) + 1
+        event_ids = self.invocation_runtime_events.setdefault(invocation_id, [])
+        next_sequence = max(
+            int(invocation_record.get("event_sequence", 0)),
+            max(
+                (
+                    int(self.runtime_events[event_id]["sequence"])
+                    for event_id in event_ids
+                ),
+                default=0,
+            ),
+        ) + 1
         values: list[RuntimeEvent] = []
+        resolved_commit_id = commit_id or uuid4()
         for offset, draft in enumerate(drafts):
             runtime_event = draft.materialize(
                 namespace=str(session_record["namespace"]),
@@ -1084,12 +1193,14 @@ class InMemoryRuntimeStore(RuntimeStore):
                 session_id=session_id,
                 invocation_id=invocation_id,
                 sequence=next_sequence + offset,
+                commit_id=resolved_commit_id,
             )
             self.runtime_events[runtime_event.id] = runtime_event.model_dump(
                 mode="python"
             )
             event_ids.append(runtime_event.id)
             values.append(runtime_event)
+        invocation_record["event_sequence"] = values[-1].sequence
         return tuple(values)
 
 

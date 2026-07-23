@@ -169,19 +169,16 @@ class PersistenceIdentityTests(unittest.TestCase):
             id="normalize",
             version="1",
             handler=first,
-            recovery_mode="replay_safe",
         )
         second_operator = Operator(
             id="normalize",
             version="1",
             handler=second,
-            recovery_mode="replay_safe",
         )
         upgraded_operator = Operator(
             id="normalize",
             version="2",
             handler=second,
-            recovery_mode="replay_safe",
         )
 
         self.assertEqual(first_operator.manifest, second_operator.manifest)
@@ -189,12 +186,11 @@ class PersistenceIdentityTests(unittest.TestCase):
             first_operator.manifest.manifest_hash,
             upgraded_operator.manifest.manifest_hash,
         )
-        self.assertEqual("replay_safe", first_operator.manifest.recovery_mode)
 
     def test_snapshot_collects_registered_operator_manifest(self) -> None:
         app = AutoAgentApp()
 
-        @app.operator("echo_v2", version=2, recovery_mode="idempotent")
+        @app.operator("echo_v2", version=2)
         def registered(value: str) -> str:
             return value
 
@@ -211,7 +207,6 @@ class PersistenceIdentityTests(unittest.TestCase):
             for manifest in result.workflow_snapshot.operator_manifests
         }
         self.assertEqual(2, manifests["echo_v2"].version)
-        self.assertEqual("idempotent", manifests["echo_v2"].recovery_mode)
         json.dumps(result.workflow_snapshot.model_dump(mode="json"))
 
     def test_app_persists_definition_hash_on_invocation(self) -> None:

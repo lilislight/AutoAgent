@@ -3,9 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from autoagent.core.operators.manifest import RecoveryMode
-
-
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -15,7 +12,6 @@ def capability(
     operator_id: str | None = None,
     description: str | None = None,
     version: str | int = 1,
-    recovery_mode: RecoveryMode = "never",
     priority: int = 0,
     metadata: dict[str, Any] | None = None,
 ) -> Callable[[F], F]:
@@ -28,7 +24,6 @@ def capability(
         operator_id=operator_id,
         description=description,
         version=version,
-        recovery_mode=recovery_mode,
         priority=priority,
         metadata=metadata,
     )
@@ -39,7 +34,6 @@ def operator(
     *,
     capability: str | None = None,
     version: str | int = 1,
-    recovery_mode: RecoveryMode = "never",
     priority: int = 0,
     enabled: bool = True,
     metadata: dict[str, Any] | None = None,
@@ -52,7 +46,6 @@ def operator(
         operator_id,
         capability=capability,
         version=version,
-        recovery_mode=recovery_mode,
         priority=priority,
         enabled=enabled,
         metadata=metadata,

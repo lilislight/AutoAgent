@@ -12,6 +12,7 @@ from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
 
 RuntimeEventChannel = Literal["runtime", "output"]
 RuntimeEventVisibility = Literal["internal", "user"]
+RuntimeEventRole = Literal["observation", "boundary"]
 RuntimeEntityType = Literal[
     "invocation",
     "invocation_context",
@@ -26,7 +27,7 @@ RuntimeEntityType = Literal[
 class RuntimeEvent(BaseModel):
     """Immutable ordered fact consumed by tracing, streaming, and optimization.
 
-    `sequence` is monotonic inside one Session and is the authoritative ordering
+    `sequence` is monotonic inside one Invocation and is the authoritative ordering
     key. `occurred_at_ms` is an absolute UTC instant used only for display and
     duration placement; concurrent events may share the same millisecond.
     """
@@ -39,6 +40,10 @@ class RuntimeEvent(BaseModel):
     session_id: UUID
     invocation_id: UUID
     sequence: int = Field(ge=1)
+    schema_version: int = Field(default=1, ge=1)
+    role: RuntimeEventRole = "observation"
+    boundary: str | None = None
+    commit_id: UUID = Field(default_factory=uuid4)
     type: str = Field(min_length=1)
     entity_type: RuntimeEntityType
     entity_id: str | None = None
@@ -52,7 +57,7 @@ class RuntimeEvent(BaseModel):
 
 @dataclass(frozen=True)
 class RuntimeEventDraft:
-    """Event without Store-owned identity, Session sequence, or scope fields."""
+    """Event without identity, Invocation sequence, or scope fields."""
 
     type: str
     entity_type: RuntimeEntityType
@@ -62,6 +67,8 @@ class RuntimeEventDraft:
     edge_id: str | None = None
     channel: RuntimeEventChannel = "runtime"
     visibility: RuntimeEventVisibility = "internal"
+    role: RuntimeEventRole = "observation"
+    boundary: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
     def materialize(
@@ -72,7 +79,11 @@ class RuntimeEventDraft:
         session_id: UUID,
         invocation_id: UUID,
         sequence: int,
+        commit_id: UUID | None = None,
     ) -> RuntimeEvent:
+        values: dict[str, Any] = {}
+        if commit_id is not None:
+            values["commit_id"] = commit_id
         return RuntimeEvent(
             namespace=namespace,
             workflow_id=workflow_id,
@@ -87,7 +98,10 @@ class RuntimeEventDraft:
             occurred_at_ms=self.occurred_at_ms,
             channel=self.channel,
             visibility=self.visibility,
+            role=self.role,
+            boundary=self.boundary,
             payload=self.payload,
+            **values,
         )
 
 
@@ -206,17 +220,6 @@ def session_context_event(
         occurred_at_ms=occurred_at_ms or utc_timestamp_ms(),
         payload={"invocation_id": str(invocation_id), "context": context},
     )
-
-
-def operator_call_checkpoint_events(
-    previous: Any | None,
-    current: Any,
-    *,
-    node_id: str,
-) -> list[RuntimeEventDraft]:
-    """Describe one independently persisted OperatorCall transition."""
-
-    return _operator_call_events(previous, current, node_id)
 
 
 def _node_execution_events(previous: Any, current: Any) -> list[RuntimeEventDraft]:

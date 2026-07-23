@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import RLock
@@ -17,7 +16,6 @@ from autoagent.core.operators import (
     Operator,
     OperatorRegistry,
     OperatorResolver,
-    RecoveryMode,
 )
 from autoagent.core.operators.contract import ensure_callable_contract
 from autoagent.core.runtime import (
@@ -29,7 +27,7 @@ from autoagent.core.runtime import (
     Session,
     SessionBusyError,
 )
-from autoagent.core.runtime.hooks import run_sync
+from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.workflow import Workflow
 
 
@@ -49,26 +47,6 @@ class WorkflowRegistryEntry:
         self.workflow = workflow
         self.workflow_ir = workflow_ir
         self.workflow_snapshot = workflow_snapshot
-
-
-class SubmittedInvocation:
-    """Process-local handle returned when an invocation is started in background.
-
-    The RuntimeStore remains the durable source of truth. This object only lets
-    service adapters return the admitted IDs immediately and optionally await
-    the background task if they are running in the same process.
-    """
-
-    def __init__(
-        self,
-        *,
-        session_id: UUID,
-        invocation: Invocation,
-        task: asyncio.Task[Invocation],
-    ) -> None:
-        self.session_id = session_id
-        self.invocation = invocation
-        self.task = task
 
 
 class _PreparedInvocation:
@@ -145,12 +123,29 @@ class AutoAgentApp:
         # the row as crash residue.
         self._live_invocation_ids: set[UUID] = set()
         self._live_invocation_lock = RLock()
-        self._background_tasks: dict[UUID, asyncio.Task[Invocation]] = {}
+        self._runtime_loop = RuntimeEventLoop(
+            name=f"autoagent-runtime-{self.namespace}"
+        )
+        self._closed = False
 
     def register_runtime_codec(self, codec: RuntimeCodec) -> None:
         """Register one trusted custom persistence codec before loading records."""
 
         self.runtime_serializer.register_codec(codec)
+
+    def start(self) -> None:
+        """Initialize App runtime resources from synchronous code."""
+
+        if self._closed:
+            raise RuntimeError("AutoAgentApp is closed.")
+        self._runtime_loop.run(self.runtime_store.ainitialize())
+
+    async def astart(self) -> None:
+        """Initialize App runtime resources from asynchronous code."""
+
+        if self._closed:
+            raise RuntimeError("AutoAgentApp is closed.")
+        await self.runtime_store.ainitialize()
 
     def register_runtime_model(
         self,
@@ -168,20 +163,22 @@ class AutoAgentApp:
     def close(self) -> None:
         """Release Store resources from synchronous application code."""
 
-        run_sync(
-            self.aclose(),
-            api_name="close",
-            async_api_name="aclose",
-        )
+        if self._closed:
+            return
+        self._runtime_loop.run(self._aclose_on_runtime_loop())
+        self._runtime_loop.stop()
+        self._closed = True
 
     async def aclose(self) -> None:
         """Release database pools and other RuntimeStore resources."""
 
-        if self._background_tasks:
-            await asyncio.gather(
-                *tuple(self._background_tasks.values()),
-                return_exceptions=True,
-            )
+        if self._closed:
+            return
+        await self._aclose_on_runtime_loop()
+        self._runtime_loop.stop()
+        self._closed = True
+
+    async def _aclose_on_runtime_loop(self) -> None:
         await self.runtime_store.aclose()
 
     def register_workflow(self, workflow: Workflow) -> WorkflowRegistryEntry:
@@ -226,7 +223,6 @@ class AutoAgentApp:
         operator_id: str | None = None,
         capability_id: str | None = None,
         version: str | int = 1,
-        recovery_mode: RecoveryMode = "never",
         priority: int = 0,
         enabled: bool = True,
         metadata: dict[str, Any] | None = None,
@@ -259,7 +255,6 @@ class AutoAgentApp:
                 handler=handler,
                 capability_id=capability_id,
                 version=version,
-                recovery_mode=recovery_mode,
                 priority=priority,
                 enabled=enabled,
                 metadata=metadata,
@@ -274,7 +269,6 @@ class AutoAgentApp:
         operator_id: str | None = None,
         description: str | None = None,
         version: str | int = 1,
-        recovery_mode: RecoveryMode = "never",
         priority: int = 0,
         metadata: dict[str, Any] | None = None,
     ) -> Callable[[F], F]:
@@ -303,7 +297,6 @@ class AutoAgentApp:
                 handler=handler,
                 capability_id=resolved_capability_id,
                 version=version,
-                recovery_mode=recovery_mode,
                 priority=priority,
                 metadata=metadata,
             )
@@ -326,7 +319,6 @@ class AutoAgentApp:
         *,
         capability: str | None = None,
         version: str | int = 1,
-        recovery_mode: RecoveryMode = "never",
         priority: int = 0,
         enabled: bool = True,
         metadata: dict[str, Any] | None = None,
@@ -339,7 +331,6 @@ class AutoAgentApp:
                 operator_id=operator_id,
                 capability_id=capability,
                 version=version,
-                recovery_mode=recovery_mode,
                 priority=priority,
                 enabled=enabled,
                 metadata=metadata,
@@ -367,19 +358,17 @@ class AutoAgentApp:
     ) -> Invocation:
         """Invoke a Workflow from synchronous code.
 
-        Async applications must call await ainvoke(); synchronously blocking an
-        active event loop is intentionally rejected.
+        Sync and async entrypoints share the same App-owned Runtime loop.
         """
 
-        return run_sync(
+        self._ensure_open()
+        return self._runtime_loop.run(
             self.ainvoke(
                 workflow,
                 input=input,
                 session_id=session_id,
                 entry_node_id=entry_node_id,
             ),
-            api_name="invoke",
-            async_api_name="ainvoke",
         )
 
     async def ainvoke(
@@ -406,6 +395,8 @@ class AutoAgentApp:
         There is intentionally no manual crash-recovery option in V1.
         """
 
+        self._ensure_open()
+
         prepared = await self._prepare_invocation(
             workflow,
             input=input,
@@ -420,19 +411,7 @@ class AutoAgentApp:
                     session=prepared.session,
                     invocation=prepared.invocation,
                 )
-                if recovered.state != "interrupted":
-                    return recovered
-                self._set_invocation_live(prepared.invocation.id, False)
-                session = await self.runtime_store.aload_session(prepared.session.id)
-                if session is None:
-                    raise RuntimeError("Recovered Session disappeared.")
-                prepared = await self._prepare_fresh_invocation(
-                    workflow_ir=prepared.workflow_ir,
-                    workflow_snapshot=prepared.workflow_snapshot,
-                    session=session,
-                    entry_node_id=prepared.invocation.entry_node_id,
-                    input=input,
-                )
+                return recovered
             return await self.workflow_executor.ainvoke(
                 workflow_ir=prepared.workflow_ir,
                 session=prepared.session,
@@ -441,77 +420,48 @@ class AutoAgentApp:
         finally:
             self._set_invocation_live(prepared.invocation.id, False)
 
-    async def asubmit(
+    async def _aadmit_invocation(
         self,
         workflow: Workflow,
         input: dict[str, Any] | None = None,
         *,
         session_id: str | None = None,
         entry_node_id: str | None = None,
-    ) -> SubmittedInvocation:
-        """Admit an invocation and continue executing it in a background task.
+    ) -> _PreparedInvocation:
+        """Durably admit work without introducing background-task semantics."""
 
-        This is the server/UI entrypoint. The invocation is already persisted
-        before this method returns, so clients can immediately subscribe to its
-        event stream. The returned task is process-local and is removed from the
-        App registry when it finishes.
-        """
-
-        prepared = await self._prepare_invocation(
+        self._ensure_open()
+        return await self._prepare_invocation(
             workflow,
             input=input,
             session_id=session_id,
             entry_node_id=entry_node_id,
         )
 
-        async def run_prepared() -> Invocation:
-            try:
-                if prepared.recover_existing:
-                    recovered = await self.workflow_executor.arecover(
-                        workflow_ir=prepared.workflow_ir,
-                        workflow_snapshot=prepared.workflow_snapshot,
-                        session=prepared.session,
-                        invocation=prepared.invocation,
-                    )
-                    if recovered.state != "interrupted":
-                        return recovered
-                    self._set_invocation_live(prepared.invocation.id, False)
-                    session = await self.runtime_store.aload_session(prepared.session.id)
-                    if session is None:
-                        raise RuntimeError("Recovered Session disappeared.")
-                    fresh = await self._prepare_fresh_invocation(
-                        workflow_ir=prepared.workflow_ir,
-                        workflow_snapshot=prepared.workflow_snapshot,
-                        session=session,
-                        entry_node_id=prepared.invocation.entry_node_id,
-                        input=input,
-                    )
-                    try:
-                        return await self.workflow_executor.ainvoke(
-                            workflow_ir=fresh.workflow_ir,
-                            session=fresh.session,
-                            invocation=fresh.invocation,
-                        )
-                    finally:
-                        self._set_invocation_live(fresh.invocation.id, False)
-                return await self.workflow_executor.ainvoke(
+    async def _aexecute_admitted(
+        self,
+        prepared: _PreparedInvocation,
+        *,
+        input: dict[str, Any] | None,
+    ) -> Invocation:
+        """Execute work already admitted by the Server."""
+
+        try:
+            if prepared.recover_existing:
+                recovered = await self.workflow_executor.arecover(
                     workflow_ir=prepared.workflow_ir,
+                    workflow_snapshot=prepared.workflow_snapshot,
                     session=prepared.session,
                     invocation=prepared.invocation,
                 )
-            finally:
-                self._set_invocation_live(prepared.invocation.id, False)
-
-        task = asyncio.create_task(run_prepared())
-        self._background_tasks[prepared.invocation.id] = task
-        task.add_done_callback(
-            lambda finished: self._background_tasks.pop(prepared.invocation.id, None)
-        )
-        return SubmittedInvocation(
-            session_id=prepared.session.id,
-            invocation=prepared.invocation,
-            task=task,
-        )
+                return recovered
+            return await self.workflow_executor.ainvoke(
+                workflow_ir=prepared.workflow_ir,
+                session=prepared.session,
+                invocation=prepared.invocation,
+            )
+        finally:
+            self._set_invocation_live(prepared.invocation.id, False)
 
     def resume(
         self,
@@ -523,15 +473,14 @@ class AutoAgentApp:
     ) -> Invocation:
         """Resume one wait from synchronous code."""
 
-        return run_sync(
+        self._ensure_open()
+        return self._runtime_loop.run(
             self.aresume(
                 workflow,
                 session_id=session_id,
                 wait_key=wait_key,
                 output=output,
             ),
-            api_name="resume",
-            async_api_name="aresume",
         )
 
     async def aresume(
@@ -549,6 +498,8 @@ class AutoAgentApp:
         consumed wait key cannot be resumed again, including after process
         restart when a durable RuntimeStore is used.
         """
+
+        self._ensure_open()
 
         workflow_ir = self._get_or_compile_workflow(workflow)
         workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
@@ -657,6 +608,11 @@ class AutoAgentApp:
         )
         current = session.get_current_invocation()
         if current is not None and current.state in {"created", "running"}:
+            # Recovery always starts from the durable Genesis/snapshot + event
+            # prefix, never from a mutable materialized database cache.
+            session, current = await self.runtime_store.arebuild_execution(
+                current.id
+            )
             if not self._claim_invocation_live(current.id):
                 raise SessionBusyError(session, current)
             return _PreparedInvocation(
@@ -755,3 +711,7 @@ class AutoAgentApp:
                 self._live_invocation_ids.add(invocation_id)
             else:
                 self._live_invocation_ids.discard(invocation_id)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("AutoAgentApp is closed.")

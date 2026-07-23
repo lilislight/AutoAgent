@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autoagent.core.runtime import InMemoryRuntimeStore, SQLiteRuntimeStore
+from autoagent.core.runtime import DatabaseRuntimeStore, InMemoryRuntimeStore
 from real_workflow import (
     EscalationPacket,
     PublishedResolution,
@@ -27,7 +27,7 @@ class RealWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "demo.sqlite3"
             app, _ = build_incident_response_app(database_path=database_path)
-            self.assertIsInstance(app.runtime_store, SQLiteRuntimeStore)
+            self.assertIsInstance(app.runtime_store, DatabaseRuntimeStore)
             app.close()
 
     def test_compiler_expands_selected_child_path_without_diagnostics(self) -> None:

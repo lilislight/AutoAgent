@@ -16,7 +16,7 @@ from autoagent.core.runtime.execution import (
     ResourceUsage,
     RuntimeErrorInfo,
 )
-from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventDraft
+from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventDraft, RuntimeEventRole
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.output import NodeOutput, OutputContext
@@ -31,6 +31,12 @@ from autoagent.core.runtime.scheduler import (
     WaitingExecution,
 )
 from autoagent.core.runtime.session import Session
+from autoagent.core.runtime.snapshot import (
+    ExecutionSnapshot,
+    RuntimeBoundary,
+    capture_execution_state,
+    reduce_execution_state,
+)
 from autoagent.core.runtime.sinks import LoggingEventSink, RuntimeEventSink
 from autoagent.core.runtime.status import (
     EdgeEvaluationStateValue,
@@ -41,7 +47,7 @@ from autoagent.core.runtime.status import (
     OperatorCallStateValue,
 )
 from autoagent.core.runtime.store import InMemoryRuntimeStore, RuntimeStore, SessionBusyError
-from autoagent.core.runtime.sqlite_store import SQLiteRuntimeStore
+from autoagent.core.runtime.database_store import DatabaseRuntimeStore
 from autoagent.core.runtime.serialization import (
     ArtifactRef,
     JsonRuntimeSerializer,
@@ -61,6 +67,7 @@ __all__ = [
     "EdgeResolution",
     "EdgeResolutionStateValue",
     "ExecutionScope",
+    "ExecutionSnapshot",
     "InMemoryRuntimeStore",
     "InputMappingContext",
     "IncomingOutput",
@@ -86,6 +93,8 @@ __all__ = [
     "RuntimeErrorInfo",
     "RuntimeEvent",
     "RuntimeEventDraft",
+    "RuntimeEventRole",
+    "RuntimeBoundary",
     "RuntimeEventSink",
     "RuntimeContext",
     "RuntimeConcurrencyController",
@@ -98,8 +107,10 @@ __all__ = [
     "Session",
     "SessionBusyError",
     "SessionContext",
-    "SQLiteRuntimeStore",
+    "DatabaseRuntimeStore",
     "TimestampMs",
     "WaitingExecution",
     "utc_timestamp_ms",
+    "capture_execution_state",
+    "reduce_execution_state",
 ]

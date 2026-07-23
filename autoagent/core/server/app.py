@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -110,6 +111,7 @@ class AutoAgentServer:
             bootstrap_event_limit=bootstrap_event_limit,
             event_page_size=event_page_size,
         )
+        self._invocation_tasks: dict[UUID, asyncio.Task[Any]] = {}
         self.api = self._build_api()
 
     def run(
@@ -133,6 +135,11 @@ class AutoAgentServer:
             try:
                 yield
             finally:
+                if self._invocation_tasks:
+                    await asyncio.gather(
+                        *tuple(self._invocation_tasks.values()),
+                        return_exceptions=True,
+                    )
                 await self.agent.aclose()
 
         api = FastAPI(
@@ -215,7 +222,7 @@ class AutoAgentServer:
             if entry is None:
                 raise HTTPException(status_code=404, detail=f"Unknown Workflow: {workflow_id}")
             try:
-                submitted = await self.agent.asubmit(
+                admitted = await self.agent._aadmit_invocation(
                     entry.workflow,
                     input=body.input,
                     session_id=body.session_id,
@@ -223,11 +230,19 @@ class AutoAgentServer:
                 )
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            task = asyncio.create_task(
+                self.agent._aexecute_admitted(admitted, input=body.input)
+            )
+            invocation_id = admitted.invocation.id
+            self._invocation_tasks[invocation_id] = task
+            task.add_done_callback(
+                lambda _: self._invocation_tasks.pop(invocation_id, None)
+            )
             return InvocationSubmitResponse(
                 workflow_id=workflow_id,
-                session_id=submitted.session_id,
-                invocation_id=submitted.invocation.id,
-                state=submitted.invocation.state,
+                session_id=admitted.session.id,
+                invocation_id=admitted.invocation.id,
+                state=admitted.invocation.state,
             )
 
         @api.post(

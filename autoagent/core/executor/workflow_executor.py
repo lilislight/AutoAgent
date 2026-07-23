@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 from uuid import UUID
@@ -9,7 +10,6 @@ from autoagent.core.compiler import NodeIR, WorkflowIR, WorkflowVersionSnapshot
 from autoagent.core.executor.node_executor import (
     NodeExecutionJob,
     NodeExecutor,
-    OperatorCallCheckpoint,
 )
 from autoagent.core.executor.result import NodeExecutionResult
 from autoagent.core.runtime import (
@@ -17,11 +17,13 @@ from autoagent.core.runtime import (
     IncomingOutput,
     Invocation,
     NodeExecution,
-    OperatorCall,
     OutputBindingContext,
     RuntimeErrorInfo,
+    RuntimeEvent,
     RuntimeStore,
+    RuntimeBoundary,
     Session,
+    capture_execution_state,
 )
 from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance_key
 from autoagent.core.runtime.hooks import invoke_hook_async, run_sync
@@ -59,6 +61,43 @@ class WorkflowExecutor:
         self.node_executor = node_executor or NodeExecutor()
         self.runtime_store = runtime_store
 
+    async def _commit_boundary(
+        self,
+        session: Session,
+        invocation: Invocation,
+        boundary: RuntimeBoundary,
+        *,
+        node_execution_ids: tuple[UUID, ...] = (),
+        durability_barrier: bool = False,
+        detail: dict[str, Any] | None = None,
+    ) -> RuntimeEvent:
+        """Generate a sequenced state event, then apply it to RuntimeStore."""
+
+        event = RuntimeEvent(
+            namespace=session.namespace,
+            workflow_id=session.workflow_id,
+            session_id=session.id,
+            invocation_id=invocation.id,
+            sequence=invocation.next_event_sequence(),
+            type=boundary,
+            entity_type="invocation",
+            entity_id=str(invocation.id),
+            occurred_at_ms=invocation.updated_at_ms,
+            role="boundary",
+            boundary=boundary,
+            payload={
+                "detail": deepcopy(detail or {}),
+                "reducer_state": capture_execution_state(session, invocation),
+            },
+        )
+        return await self.runtime_store.aapply_event(
+            session,
+            invocation,
+            event,
+            node_execution_ids=node_execution_ids,
+            durability_barrier=durability_barrier,
+        )
+
     def invoke(
         self,
         *,
@@ -86,7 +125,6 @@ class WorkflowExecutor:
         invocation: Invocation,
     ) -> Invocation:
         self.scheduler.initialize(workflow_ir=workflow_ir, invocation=invocation)
-        await self.runtime_store.acheckpoint_invocation(session, invocation)
         try:
             return await self._drive(
                 workflow_ir=workflow_ir,
@@ -107,14 +145,13 @@ class WorkflowExecutor:
     ) -> Invocation:
         """Automatically continue or terminate one process-interrupted Invocation.
 
-        Recovery never restores Python stacks. A created Invocation restarts its
-        ordinary control loop. A running NodeExecution is replayed as a new
-        historical NodeExecution only when the current Workflow hash matches,
-        every possible selected Operator manifest matches the stored snapshot,
-        every Operator permits recovery, and RetryPolicy still has a whole-node
-        attempt available. Any failed check interrupts the old Invocation; no
-        user-facing manual recovery option is created.
+        Recovery never restores Python stacks. It rebuilds the durable prefix,
+        marks the execution mode as sticky ``recovery``, and follows only the
+        path Scheduler actually selects. Each selected parallel Node batch is
+        gated immediately before execution; no speculative graph scan occurs.
         """
+
+        del workflow_snapshot
 
         if invocation.state not in {"created", "running"}:
             return invocation
@@ -126,20 +163,7 @@ class WorkflowExecutor:
                 message="Current Workflow definition does not match interrupted work.",
             )
             return invocation
-        if (
-            invocation.workflow_operator_manifest_hash
-            != workflow_snapshot.operator_manifest_hash
-        ):
-            await self._interrupt_recovery(
-                session,
-                invocation,
-                code="OPERATOR_MANIFEST_CHANGED",
-                message=(
-                    "Current Operator manifests do not match the interrupted "
-                    "Invocation."
-                ),
-            )
-            return invocation
+        invocation.execution_mode = "recovery"
         if invocation.state == "created":
             return await self.ainvoke(
                 workflow_ir=workflow_ir,
@@ -160,18 +184,12 @@ class WorkflowExecutor:
                 invocation=invocation,
             )
 
-        manifest_by_id = {
-            manifest.operator_id: manifest
-            for manifest in workflow_snapshot.operator_manifests
-        }
-        jobs: list[NodeExecutionJob] = []
         changed_execution_ids: list[UUID] = []
         for interrupted in active:
             node_ir = workflow_ir.nodes.get(interrupted.node_id)
             reason = self._recovery_rejection_reason(
                 node_ir=node_ir,
                 interrupted=interrupted,
-                manifest_by_id=manifest_by_id,
             )
             if reason is not None:
                 await self._interrupt_recovery(
@@ -183,7 +201,6 @@ class WorkflowExecutor:
                 return invocation
 
         for interrupted in active:
-            node_ir = workflow_ir.nodes[interrupted.node_id]
             changed_execution_ids.append(interrupted.id)
             interrupted.mark_interrupted(
                 RuntimeErrorInfo(
@@ -196,47 +213,25 @@ class WorkflowExecutor:
                 activations=interrupted.incoming_activations,
                 execution_scope=interrupted.execution_scope,
             )
-            map_policy = self._map_policy_for_request(workflow_ir, request)
-            replacement = invocation.create_node_execution(
-                interrupted.node_id,
-                input=deepcopy(interrupted.input),
+            invocation.scheduler.enqueue_ready(
+                request.node_id,
+                activations=request.activations,
+                execution_scope=request.execution_scope,
                 idempotency_key=(
                     interrupted.idempotency_key or str(interrupted.id)
                 ),
                 recovery_of_execution_id=interrupted.id,
                 recovery_attempt=interrupted.recovery_attempt + 1,
-                incoming_activations=interrupted.incoming_activations,
-                execution_scope=interrupted.execution_scope,
-            )
-            invocation.mark_node_running(replacement.id, input=replacement.input)
-            changed_execution_ids.append(replacement.id)
-            jobs.append(
-                NodeExecutionJob(
-                    node_ir=node_ir,
-                    node_execution=replacement,
-                    input=replacement.input,
-                    max_operator_calls=self._remaining_operator_calls(
-                        invocation=invocation,
-                        node_ir=node_ir,
-                    ),
-                    map_policy=map_policy,
-                    concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
-                    recovery=True,
-                    operator_call_checkpoint=self._operator_call_checkpoint(
-                        session=session,
-                        invocation=invocation,
-                        node_execution=replacement,
-                    ),
-                )
             )
 
         invocation.mark_running()
-        await self.runtime_store.acheckpoint_invocation(
+        await self._commit_boundary(
             session,
             invocation,
+            "routing.committed",
             node_execution_ids=tuple(changed_execution_ids),
+            detail={"recovery_requeued": [str(value) for value in changed_execution_ids]},
         )
-        self.node_executor.submit_batch(jobs, mailbox=invocation.execution_mailbox)
         return await self._drive(
             workflow_ir=workflow_ir,
             session=session,
@@ -248,46 +243,16 @@ class WorkflowExecutor:
         *,
         node_ir: NodeIR | None,
         interrupted: NodeExecution,
-        manifest_by_id: dict[str, Any],
     ) -> str | None:
         if node_ir is None:
             return f"Interrupted node is absent from current Workflow: {interrupted.node_id}"
-        retry = node_ir.policy.retry if node_ir.policy is not None else None
-        max_attempts = retry.max_attempts if retry is not None else 1
-        if interrupted.recovery_attempt + 1 >= max_attempts:
+        recovery = node_ir.policy.recovery if node_ir.policy is not None else None
+        if recovery is None or recovery.mode == "never":
+            return f"Node {interrupted.node_id} does not permit crash recovery."
+        if interrupted.recovery_attempt >= recovery.max_attempts:
             return (
-                f"Node {interrupted.node_id} exhausted RetryPolicy.max_attempts "
-                "for whole-node crash replay."
+                f"Node {interrupted.node_id} exhausted RecoveryPolicy.max_attempts."
             )
-        selection = node_ir.policy.selection if node_ir.policy is not None else None
-        try:
-            operators = self.node_executor.operator_resolver.resolve_candidates(
-                node_ir.capability,
-                selection,
-            )
-        except Exception as exc:
-            return f"Node {interrupted.node_id} Operator resolution failed: {exc}"
-        for operator in operators:
-            current = operator.manifest
-            persisted = manifest_by_id.get(operator.id)
-            if persisted is None or persisted.manifest_hash != current.manifest_hash:
-                return (
-                    f"Operator manifest changed or was not persisted: {operator.id}"
-                )
-            if current.recovery_mode == "never":
-                return f"Operator does not permit automatic replay: {operator.id}"
-        for call in interrupted.operator_calls:
-            persisted_call = call.operator_manifest
-            current = next(
-                (operator.manifest for operator in operators if operator.id == call.operator_id),
-                None,
-            )
-            if (
-                persisted_call is None
-                or current is None
-                or persisted_call.manifest_hash != current.manifest_hash
-            ):
-                return f"Interrupted OperatorCall is not recovery compatible: {call.operator_id}"
         return None
 
     async def _interrupt_recovery(
@@ -305,10 +270,13 @@ class WorkflowExecutor:
             if execution.state in {"created", "ready", "running"}
         )
         invocation.interrupt_active_node_executions(error)
-        await self.runtime_store.acheckpoint_invocation(
+        await self._commit_boundary(
             session,
             invocation,
+            "recovery.interrupted",
             node_execution_ids=changed_execution_ids,
+            durability_barrier=True,
+            detail={"code": code, "message": message},
         )
 
     async def _drive(
@@ -329,18 +297,21 @@ class WorkflowExecutor:
                     invocation=invocation,
                     transitions=transitions,
                 )
-                await self.runtime_store.acheckpoint_invocation(
+                await self._commit_boundary(
                     session,
                     invocation,
+                    "routing.committed",
                     node_execution_ids=tuple(
                         transition.node_execution_id for transition in transitions
                     ),
+                    detail=self._routing_boundary_detail(invocation, transitions),
                 )
                 if invocation.state == "failed":
                     abandoned = await self._abandon_active_work(invocation)
-                    await self.runtime_store.acheckpoint_invocation(
+                    await self._commit_boundary(
                         session,
                         invocation,
+                        "invocation.failed",
                         node_execution_ids=abandoned,
                     )
                     return invocation
@@ -354,21 +325,19 @@ class WorkflowExecutor:
                     invocation=invocation,
                     ready_requests=ready_requests,
                 )
-                await self.runtime_store.acheckpoint_invocation(
-                    session,
-                    invocation,
-                    node_execution_ids=changed_execution_ids,
-                )
                 if jobs:
                     self.node_executor.submit_batch(
                         jobs,
                         mailbox=invocation.execution_mailbox,
                     )
-                if invocation.state == "failed":
+                if invocation.state in {"failed", "interrupted"}:
+                    if invocation.state == "interrupted":
+                        return invocation
                     abandoned = await self._abandon_active_work(invocation)
-                    await self.runtime_store.acheckpoint_invocation(
+                    await self._commit_boundary(
                         session,
                         invocation,
+                        "invocation.failed",
                         node_execution_ids=abandoned,
                     )
                     return invocation
@@ -388,16 +357,16 @@ class WorkflowExecutor:
                     )
                     if changed_execution_id is not None:
                         changed_execution_ids.append(changed_execution_id)
-                await self.runtime_store.acheckpoint_invocation(
-                    session,
-                    invocation,
-                    node_execution_ids=tuple(changed_execution_ids),
-                )
                 continue
 
             if invocation.scheduler.waiting_executions:
                 invocation.mark_waiting()
-                await self.runtime_store.acheckpoint_invocation(session, invocation)
+                await self._commit_boundary(
+                    session,
+                    invocation,
+                    "wait.committed",
+                    durability_barrier=True,
+                )
                 return invocation
 
             if self._is_completed(workflow_ir=workflow_ir, invocation=invocation):
@@ -407,7 +376,11 @@ class WorkflowExecutor:
                         invocation=invocation,
                     )
                 )
-                await self.runtime_store.acheckpoint_invocation(session, invocation)
+                await self._commit_boundary(
+                    session,
+                    invocation,
+                    "invocation.completed",
+                )
                 return invocation
 
             invocation.mark_failed(
@@ -416,7 +389,11 @@ class WorkflowExecutor:
                     message="Workflow has no ready, running, waiting, or completed exit node.",
                 )
             )
-            await self.runtime_store.acheckpoint_invocation(session, invocation)
+            await self._commit_boundary(
+                session,
+                invocation,
+                "invocation.failed",
+            )
             return invocation
 
     async def _cancel_invocation(
@@ -437,9 +414,10 @@ class WorkflowExecutor:
         invocation.cancel_active_node_executions(error)
         invocation.mark_cancelled()
         await self.node_executor.abandon(invocation.execution_mailbox)
-        await self.runtime_store.acheckpoint_invocation(
+        await self._commit_boundary(
             session,
             invocation,
+            "invocation.cancelled",
             node_execution_ids=changed_execution_ids,
         )
 
@@ -512,6 +490,18 @@ class WorkflowExecutor:
 
         invocation.scheduler.remove_waiting_execution(wait_key)
         final_output = node_execution.output if output is _MISSING else output
+        node_execution.output = final_output
+        await self._commit_boundary(
+            session,
+            invocation,
+            "node.output_ready",
+            node_execution_ids=(node_execution.id,),
+            detail={
+                "node_id": node_execution.node_id,
+                "node_execution_id": str(node_execution.id),
+                "resumed": True,
+            },
+        )
         await self._complete_resumed_execution(
             workflow_ir=workflow_ir,
             session=session,
@@ -519,13 +509,27 @@ class WorkflowExecutor:
             node_execution=node_execution,
             output=final_output,
         )
+        await self._commit_boundary(
+            session,
+            invocation,
+            "node.committed",
+            node_execution_ids=(node_execution.id,),
+            detail={
+                "node_id": node_execution.node_id,
+                "node_execution_id": str(node_execution.id),
+                "resumed": True,
+            },
+        )
 
         if not invocation.scheduler.waiting_executions:
             invocation.mark_running()
-        await self.runtime_store.acheckpoint_invocation(
+        await self._commit_boundary(
             session,
             invocation,
+            "resume.committed",
             node_execution_ids=(node_execution.id,),
+            durability_barrier=True,
+            detail={"wait_key": wait_key, "node_id": node_execution.node_id},
         )
         return await self._drive(
             workflow_ir=workflow_ir,
@@ -543,6 +547,29 @@ class WorkflowExecutor:
     ) -> tuple[tuple[UUID, ...], list[NodeExecutionJob]]:
         jobs: list[NodeExecutionJob] = []
         changed_execution_ids: list[UUID] = []
+
+        # Recovery is path-sensitive. Preflight exactly this selected parallel
+        # batch before creating or submitting any member so a forbidden sibling
+        # cannot race with an allowed one.
+        if invocation.execution_mode == "recovery":
+            for request in ready_requests:
+                node_ir = workflow_ir.nodes.get(request.node_id)
+                recovery = (
+                    node_ir.policy.recovery
+                    if node_ir is not None and node_ir.policy is not None
+                    else None
+                )
+                if recovery is None or recovery.mode == "never":
+                    await self._interrupt_recovery(
+                        session,
+                        invocation,
+                        code="NODE_RECOVERY_REJECTED",
+                        message=(
+                            f"Node {request.node_id} does not permit crash recovery."
+                        ),
+                    )
+                    return (), []
+
         for request in ready_requests:
             node_ir = workflow_ir.nodes.get(request.node_id)
             if node_ir is None:
@@ -562,6 +589,40 @@ class WorkflowExecutor:
                 invocation.mark_failed(resource_error)
                 return tuple(changed_execution_ids), jobs
 
+            node_execution = invocation.create_node_execution(
+                node_ir.id,
+                idempotency_key=request.idempotency_key,
+                recovery_of_execution_id=request.recovery_of_execution_id,
+                recovery_attempt=request.recovery_attempt,
+                incoming_activations=request.activations,
+                execution_scope=request.execution_scope,
+            )
+            changed_execution_ids.append(node_execution.id)
+            if node_execution.idempotency_key is None:
+                node_execution.idempotency_key = str(node_execution.id)
+            invocation.scheduler.scheduled_node_instances.add(
+                node_instance_key(node_ir.id, request.execution_scope)
+            )
+            await self._commit_boundary(
+                session,
+                invocation,
+                "node.activation_ready",
+                node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_ir.id,
+                    "node_execution_id": str(node_execution.id),
+                    "execution_scope": [
+                        frame.to_record() for frame in request.execution_scope
+                    ],
+                    "incoming_activations": [
+                        activation.to_record() for activation in request.activations
+                    ],
+                },
+            )
+
+            mapping_phase = "input_mapping"
+            mapping_failure_code = "INPUT_MAPPING_FAILED"
+            prepared_map_inputs: tuple[Any, ...] | None = None
             try:
                 map_policy = self._map_policy_for_request(workflow_ir, request)
                 node_input = await self._build_node_input(
@@ -572,22 +633,63 @@ class WorkflowExecutor:
                     request=request,
                     map_policy=map_policy,
                 )
+                if map_policy is not None:
+                    mapping_phase = "map_item_selector"
+                    mapping_failure_code = "MAP_ITEM_SELECTION_FAILED"
+                    selected = (
+                        await invoke_hook_async(map_policy.item_selector, node_input)
+                        if map_policy.item_selector is not None
+                        else node_input
+                    )
+                    selected_inputs = self._materialize_map_collection(selected)
+                    mapping_phase = "map_item_input"
+                    mapping_failure_code = "MAP_ITEM_INPUT_INVALID"
+                    prepared_map_inputs = self._validate_map_inputs(
+                        selected_inputs
+                    )
+                    node_execution.operator_inputs = prepared_map_inputs
+                recovery = (
+                    node_ir.policy.recovery
+                    if node_ir.policy is not None
+                    else None
+                )
+                if recovery is not None and recovery.mode == "idempotent":
+                    accepted = {
+                        parameter.name
+                        for parameter in node_ir.input_contract.parameters
+                    }
+                    if "idempotency_key" not in accepted:
+                        raise ValueError(
+                            "Idempotent RecoveryPolicy requires an "
+                            "idempotency_key Operator parameter."
+                        )
+                    if prepared_map_inputs is not None:
+                        prepared_map_inputs = tuple(
+                            {
+                                **value,
+                                "idempotency_key": (
+                                    f"{node_execution.idempotency_key}:{index}"
+                                ),
+                            }
+                            for index, value in enumerate(prepared_map_inputs)
+                        )
+                        node_execution.operator_inputs = prepared_map_inputs
+                    else:
+                        if not isinstance(node_input, dict):
+                            raise TypeError(
+                                "Idempotent recovery requires mapping Node input."
+                            )
+                        node_input = dict(node_input)
+                        node_input["idempotency_key"] = (
+                            node_execution.idempotency_key
+                        )
             except Exception as exc:
                 # Mapping is a workflow data-shaping phase, not an OperatorCall.
                 # Finalize the node here so retry and operator fallback cannot run.
-                node_execution = invocation.create_node_execution(
-                    node_ir.id,
-                    incoming_activations=request.activations,
-                    execution_scope=request.execution_scope,
-                )
-                changed_execution_ids.append(node_execution.id)
-                invocation.scheduler.scheduled_node_instances.add(
-                    node_instance_key(node_ir.id, request.execution_scope)
-                )
                 invocation.mark_node_failed(
                     node_execution.id,
                     RuntimeErrorInfo(
-                        code="INPUT_MAPPING_FAILED",
+                        code=mapping_failure_code,
                         message=str(exc),
                         detail={
                             "node_id": node_ir.id,
@@ -595,20 +697,30 @@ class WorkflowExecutor:
                         },
                     ),
                 )
+                await self._commit_boundary(
+                    session,
+                    invocation,
+                    "node.committed",
+                    node_execution_ids=(node_execution.id,),
+                    detail={"node_id": node_ir.id, "phase": mapping_phase},
+                )
                 continue
-            node_execution = invocation.create_node_execution(
-                node_ir.id,
-                input=node_input,
-                incoming_activations=request.activations,
-                execution_scope=request.execution_scope,
-            )
-            changed_execution_ids.append(node_execution.id)
-            if node_execution.idempotency_key is None:
-                node_execution.idempotency_key = str(node_execution.id)
-            invocation.scheduler.scheduled_node_instances.add(
-                node_instance_key(node_ir.id, request.execution_scope)
-            )
             invocation.mark_node_running(node_execution.id, input=node_input)
+            await self._commit_boundary(
+                session,
+                invocation,
+                "node.input_ready",
+                node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_ir.id,
+                    "node_execution_id": str(node_execution.id),
+                    "operator_input_count": (
+                        len(prepared_map_inputs)
+                        if prepared_map_inputs is not None
+                        else 1
+                    ),
+                },
+            )
 
             resource_error = self._check_operator_call_resource(
                 invocation=invocation,
@@ -628,16 +740,33 @@ class WorkflowExecutor:
                         node_ir=node_ir,
                     ),
                     map_policy=map_policy,
+                    prepared_map_inputs=prepared_map_inputs,
                     concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
-                    operator_call_checkpoint=self._operator_call_checkpoint(
-                        session=session,
-                        invocation=invocation,
-                        node_execution=node_execution,
-                    ),
+                    recovery=invocation.execution_mode == "recovery",
                 )
             )
 
         return tuple(changed_execution_ids), jobs
+
+    def _materialize_map_collection(self, selected: Any) -> list[Any]:
+        if isinstance(selected, (str, bytes, Mapping)):
+            raise TypeError("Map item_selector must return an iterable of mappings.")
+        try:
+            return list(selected)
+        except TypeError as exc:
+            raise TypeError(
+                "Map item_selector must return an iterable of mappings."
+            ) from exc
+
+    def _validate_map_inputs(
+        self, values: list[Any]
+    ) -> tuple[dict[str, Any], ...]:
+        prepared: list[dict[str, Any]] = []
+        for index, value in enumerate(values):
+            if not isinstance(value, Mapping):
+                raise TypeError(f"Map item {index} must be a mapping.")
+            prepared.append(dict(value))
+        return tuple(prepared)
 
     async def _apply_result(
         self,
@@ -668,6 +797,30 @@ class WorkflowExecutor:
             )
         node_execution.operator_calls.sort(key=lambda call: call.call_no)
 
+        node_ir = workflow_ir.nodes[node_execution.node_id]
+        map_policy = self._map_policy_for_execution(workflow_ir, node_execution)
+        replication = (
+            node_ir.policy.replication
+            if node_ir.policy is not None
+            else None
+        )
+        if result.state == "completed" and (
+            map_policy is not None or replication is not None
+        ):
+            await self._commit_boundary(
+                session,
+                invocation,
+                "node.call_outputs_ready",
+                node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_execution.node_id,
+                    "node_execution_id": str(node_execution.id),
+                    "operator_call_ids": [
+                        str(call.id) for call in node_execution.operator_calls
+                    ],
+                },
+            )
+
         runtime_error = self._check_runtime_resource_after_result(
             workflow_ir=workflow_ir,
             invocation=invocation,
@@ -675,9 +828,28 @@ class WorkflowExecutor:
         )
         if runtime_error is not None:
             invocation.mark_node_failed(node_execution.id, runtime_error)
+            await self._commit_boundary(
+                session,
+                invocation,
+                "node.committed",
+                node_execution_ids=(node_execution.id,),
+            )
             return node_execution.id
 
         if result.state == "completed":
+            # output_ready is the restart/debug point after Operator aggregation
+            # and before output_binding is allowed to mutate either Context.
+            node_execution.output = result.output
+            await self._commit_boundary(
+                session,
+                invocation,
+                "node.output_ready",
+                node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_execution.node_id,
+                    "node_execution_id": str(node_execution.id),
+                },
+            )
             try:
                 await self._run_output_binding(
                     workflow_ir=workflow_ir,
@@ -731,27 +903,18 @@ class WorkflowExecutor:
                     message="Node execution failed.",
                 ),
             )
+        await self._commit_boundary(
+            session,
+            invocation,
+            "node.committed",
+            node_execution_ids=(node_execution.id,),
+            detail={
+                "node_id": node_execution.node_id,
+                "node_execution_id": str(node_execution.id),
+                "state": node_execution.state,
+            },
+        )
         return node_execution.id
-
-    def _operator_call_checkpoint(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-        node_execution: NodeExecution,
-    ) -> OperatorCallCheckpoint:
-        """Bind a worker call checkpoint to its persisted runtime hierarchy."""
-
-        async def checkpoint(call: OperatorCall) -> None:
-            await self.runtime_store.acheckpoint_operator_call(
-                session_id=session.id,
-                invocation_id=invocation.id,
-                node_execution_id=node_execution.id,
-                node_id=node_execution.node_id,
-                call=call,
-            )
-
-        return checkpoint
 
     async def _build_node_input(
         self,
@@ -781,8 +944,8 @@ class WorkflowExecutor:
                 node_ir.input_plan,
                 InputMappingContext(
                     invocation_input=invocation.input,
-                    invocation_context=invocation.context,
-                    session_context=session.context,
+                    invocation_context=deepcopy(invocation.context),
+                    session_context=deepcopy(session.context),
                     outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
                     node_id=node_ir.local_id or node_ir.id,
                     incoming=scoped_incoming,
@@ -865,17 +1028,29 @@ class WorkflowExecutor:
         node_ir = workflow_ir.nodes[node_execution.node_id]
         if not callable(node_ir.output_binding):
             return
-        await invoke_hook_async(
-            node_ir.output_binding,
-            OutputBindingContext(
-                invocation_input=invocation.input,
-                invocation_context=invocation.context,
-                session_context=session.context,
-                outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
-                node_id=node_ir.local_id or node_ir.id,
-                output=output,
-            ),
-        )
+        # User hooks operate on isolated working Contexts. A successful
+        # node.committed boundary publishes both together; an exception cannot
+        # leak a half-applied Context into the authoritative Runtime.
+        original_invocation_context = invocation.context
+        original_session_context = session.context
+        invocation.context = deepcopy(original_invocation_context)
+        session.context = deepcopy(original_session_context)
+        try:
+            await invoke_hook_async(
+                node_ir.output_binding,
+                OutputBindingContext(
+                    invocation_input=invocation.input,
+                    invocation_context=invocation.context,
+                    session_context=session.context,
+                    outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
+                    node_id=node_ir.local_id or node_ir.id,
+                    output=output,
+                ),
+            )
+        except BaseException:
+            invocation.context = original_invocation_context
+            session.context = original_session_context
+            raise
 
     async def _complete_resumed_execution(
         self,
@@ -925,6 +1100,58 @@ class WorkflowExecutor:
         if len(policies) > 1:
             raise ValueError("A NodeExecution cannot be triggered by multiple MapPolicy edges.")
         return policies[0] if policies else None
+
+    def _map_policy_for_execution(
+        self,
+        workflow_ir: WorkflowIR,
+        execution: NodeExecution,
+    ) -> Any | None:
+        return self._map_policy_for_request(
+            workflow_ir,
+            NodeExecutionRequest(
+                node_id=execution.node_id,
+                activations=execution.incoming_activations,
+                execution_scope=execution.execution_scope,
+            ),
+        )
+
+    def _routing_boundary_detail(
+        self,
+        invocation: Invocation,
+        transitions: list[Any],
+    ) -> dict[str, Any]:
+        source_ids = {transition.node_execution_id for transition in transitions}
+        evaluations: list[dict[str, Any]] = []
+        for execution_id in source_ids:
+            execution = invocation.get_node_execution(execution_id)
+            if execution is None:
+                continue
+            for evaluation in execution.edge_evaluations:
+                evaluations.append(
+                    {
+                        **evaluation.to_record(),
+                        "source_node_id": execution.node_id,
+                        "source_execution_id": str(execution.id),
+                        "execution_scope": [
+                            frame.to_record() for frame in execution.execution_scope
+                        ],
+                    }
+                )
+        return {
+            "source_executions": [str(value) for value in source_ids],
+            "edge_evaluations": evaluations,
+            "edge_resolutions": [
+                value.to_record()
+                for value in invocation.scheduler.edge_resolutions.values()
+            ],
+            "loop_boundary_resolutions": [
+                value.to_record()
+                for value in invocation.scheduler.loop_boundary_resolutions.values()
+            ],
+            "next_requests": [
+                request.to_record() for request in invocation.scheduler.ready_queue
+            ],
+        }
 
     def _check_node_execution_resource(
         self,

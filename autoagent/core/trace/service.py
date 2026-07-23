@@ -354,7 +354,13 @@ class TraceQueryService:
         )
 
     def _event_view(self, event: RuntimeEvent) -> RuntimeEvent:
-        return event.model_copy(update={"payload": self._json_view(event.payload)})
+        payload = dict(event.payload)
+        if event.role == "boundary":
+            # Reducer state is backend recovery data, not a trace payload. Keep
+            # the compact semantic detail/cursor while preventing a large
+            # Invocation image from being sent to browsers on every boundary.
+            payload.pop("reducer_state", None)
+        return event.model_copy(update={"payload": self._json_view(payload)})
 
     def _projection_view(self, projection: RuntimeProjection) -> RuntimeProjection:
         return projection.model_copy(

@@ -3,30 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.core.operators.contract import OperatorContract
 
 
-RecoveryMode = Literal["never", "replay_safe", "idempotent"]
-
-
 class OperatorManifest(BaseModel):
-    """Serializable compatibility and crash-recovery contract for one Operator.
+    """Serializable compatibility contract for one Operator.
 
     The manifest deliberately does not hash Python source code. A developer must
     change ``version`` when implementation behavior changes in a way that affects
     persisted work. Input/output hashes protect the named-argument protocol, and
-    ``recovery_mode`` states whether an interrupted NodeExecution may be replayed.
-
-    Recovery modes:
-      - ``never``: process loss makes the owning Invocation terminal interrupted.
-      - ``replay_safe``: repeating the whole NodeExecution has no unsafe effects.
-      - ``idempotent``: the implementation declares repeated equivalent work
-        safe and can use the persisted NodeExecution idempotency key. V1 keeps
-        that key stable but does not inject it into an ordinary callable.
+    crash recovery is owned by NodePolicy because the whole Node phase, not an
+    individual OperatorCall, is the unit that may be replayed.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -43,9 +34,6 @@ class OperatorManifest(BaseModel):
     output_schema_hash: str = Field(
         description="Hash of the canonical generated Operator output schema."
     )
-    recovery_mode: RecoveryMode = Field(
-        description="Automatic recovery behavior after process loss."
-    )
     manifest_hash: str = Field(
         description="Hash of all compatibility fields in this manifest."
     )
@@ -58,7 +46,6 @@ class OperatorManifest(BaseModel):
         version: str | int,
         capability_id: str | None,
         contract: OperatorContract,
-        recovery_mode: RecoveryMode,
     ) -> OperatorManifest:
         """Build a stable manifest from the contract inferred at registration."""
 
@@ -70,7 +57,6 @@ class OperatorManifest(BaseModel):
             "capability_id": capability_id,
             "input_schema_hash": input_schema_hash,
             "output_schema_hash": output_schema_hash,
-            "recovery_mode": recovery_mode,
         }
         return cls(**fields, manifest_hash=_hash_json(fields))
 

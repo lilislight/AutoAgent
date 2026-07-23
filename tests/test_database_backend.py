@@ -148,7 +148,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         await app.aclose()
 
-    async def test_event_serialization_failure_restores_committed_runtime(
+    async def test_async_event_serialization_failure_keeps_runtime_consistent(
         self,
     ) -> None:
         await self.store.aclose()
@@ -162,7 +162,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow.add_node(lambda: "x" * 6_000, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
 
-        with self.assertRaisesRegex(Exception, "max_inline_bytes"):
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
             await app.ainvoke(workflow, session_id="same")
 
         session = self.store.find_session(
@@ -173,15 +173,45 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         assert session is not None
         invocation = session.get_current_invocation()
         assert invocation is not None
-        self.assertEqual(2, invocation.event_sequence)
         self.assertEqual(
             capture_execution_state(session, invocation),
             self.store.committed_state(invocation.id),
         )
         self.assertEqual(
-            2,
+            invocation.event_sequence,
             len(self.store.runtime_events[invocation.id]),
         )
+        with self.assertRaisesRegex(RuntimeError, "failed permanently"):
+            await self.store.aflush()
+        self.backend._fatal_persistence_error = None
+        await app.aclose()
+
+    async def test_event_preparation_is_submitted_without_waiting(self) -> None:
+        release = threading.Event()
+
+        class SlowAcceptanceBackend(DatabaseBackend):
+            def _prepare_event_item(self, **kwargs):
+                while not release.is_set():
+                    release.wait(0.001)
+                return super()._prepare_event_item(**kwargs)
+
+        await self.store.aclose()
+        self.backend = SlowAcceptanceBackend.from_path(self.path)
+        self.store = RuntimeStore(backend=self.backend)
+        workflow = Workflow(id="one_way_event_submission")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual(
+            invocation.event_sequence,
+            len(self.store.runtime_events[invocation.id]),
+        )
+        release.set()
+        await self.store.aflush()
+        self.assertEqual("durable", self.store.persistence_status(invocation.id))
         await app.aclose()
 
     async def test_fatal_backend_before_event_acceptance_restores_genesis(

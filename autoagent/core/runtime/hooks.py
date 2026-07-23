@@ -50,6 +50,13 @@ class RuntimeEventLoop:
         setattr(future, "_autoagent_completed", completed)
         return future
 
+    def call_soon(self, callback: Callable[..., Any], *args: Any) -> None:
+        """Submit one-way work without allocating a caller-visible Future."""
+
+        self.start()
+        assert self._loop is not None
+        self._loop.call_soon_threadsafe(callback, *args)
+
     def run(self, awaitable: Awaitable[T]) -> T:
         if self.is_current():
             close = getattr(awaitable, "close", None)

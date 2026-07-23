@@ -427,15 +427,91 @@ class DatabaseBackend:
         durability_barrier: bool = False,
     ) -> None:
         if not self._database_loop.is_current():
-            await self._database_loop.arun(
-                self.aappend_event(
-                    session,
-                    invocation,
-                    event,
-                    durability_barrier=durability_barrier,
+            if durability_barrier:
+                await self._database_loop.arun(
+                    self.aappend_event(
+                        session,
+                        invocation,
+                        event,
+                        durability_barrier=True,
+                    )
                 )
-            )
+            else:
+                if self._fatal_persistence_error is not None:
+                    raise RuntimeError(
+                        "Runtime persistence is unavailable."
+                    ) from self._fatal_persistence_error
+                self._database_loop.call_soon(
+                    self._accept_event,
+                    session.id,
+                    session.namespace,
+                    session.updated_at_ms,
+                    invocation.id,
+                    invocation.state,
+                    invocation.execution_mode,
+                    invocation.updated_at_ms,
+                    event.model_copy(deep=True),
+                )
             return
+
+        item = self._prepare_event_item(
+            session_id=session.id,
+            namespace=session.namespace,
+            session_updated_at_ms=session.updated_at_ms,
+            invocation_id=invocation.id,
+            invocation_state=invocation.state,
+            execution_mode=invocation.execution_mode,
+            invocation_updated_at_ms=invocation.updated_at_ms,
+            event=event,
+            durability_barrier=durability_barrier,
+        )
+        await self._enqueue(item, barrier=durability_barrier)
+
+    def _accept_event(
+        self,
+        session_id: UUID,
+        namespace: str,
+        session_updated_at_ms: int,
+        invocation_id: UUID,
+        invocation_state: str,
+        execution_mode: str,
+        invocation_updated_at_ms: int,
+        event: RuntimeEvent,
+    ) -> None:
+        """Prepare and enqueue an ordinary Event entirely on the DB loop."""
+
+        if self._fatal_persistence_error is not None:
+            return
+        try:
+            item = self._prepare_event_item(
+                session_id=session_id,
+                namespace=namespace,
+                session_updated_at_ms=session_updated_at_ms,
+                invocation_id=invocation_id,
+                invocation_state=invocation_state,
+                execution_mode=execution_mode,
+                invocation_updated_at_ms=invocation_updated_at_ms,
+                event=event,
+                durability_barrier=False,
+            )
+            self._enqueue_nowait(item)
+        except BaseException as exc:
+            if self._fatal_persistence_error is None:
+                self._fatal_persistence_error = exc
+
+    def _prepare_event_item(
+        self,
+        *,
+        session_id: UUID,
+        namespace: str,
+        session_updated_at_ms: int,
+        invocation_id: UUID,
+        invocation_state: str,
+        execution_mode: str,
+        invocation_updated_at_ms: int,
+        event: RuntimeEvent,
+        durability_barrier: bool,
+    ) -> _PersistenceItem:
         encoded_payload = self.serializer.dumps_unchecked(event.payload)
         if (
             self.artifact_policy.enabled
@@ -443,40 +519,37 @@ class DatabaseBackend:
         ):
             persisted_payload, artifacts = self._externalize_event_payload(
                 event.payload,
-                namespace=session.namespace,
-                invocation_id=invocation.id,
+                namespace=namespace,
+                invocation_id=invocation_id,
             )
             encoded_payload = self.serializer.dumps(persisted_payload)
         else:
             artifacts = ()
             if self.serializer.max_inline_bytes is not None:
                 encoded_payload = self.serializer.dumps(event.payload)
-        await self._enqueue(
-            _PersistenceItem(
-                kind="event",
-                session_id=session.id,
-                invocation_id=invocation.id,
-                record={
-                    "event_id": event.id,
-                    "sequence": event.sequence,
-                    "schema_version": event.schema_version,
-                    "event_type": event.type,
-                    "occurred_at_ms": event.occurred_at_ms,
-                    "invocation_state": invocation.state,
-                    "execution_mode": invocation.execution_mode,
-                    "updated_at_ms": invocation.updated_at_ms,
-                    "session_updated_at_ms": session.updated_at_ms,
-                    "force_recovery_state": durability_barrier,
-                },
-                encoded=encoded_payload,
-                artifacts=artifacts,
-                size_bytes=(
-                    len(encoded_payload)
-                    + sum(artifact.size_bytes for artifact in artifacts)
-                    + 256
-                ),
+        return _PersistenceItem(
+            kind="event",
+            session_id=session_id,
+            invocation_id=invocation_id,
+            record={
+                "event_id": event.id,
+                "sequence": event.sequence,
+                "schema_version": event.schema_version,
+                "event_type": event.type,
+                "occurred_at_ms": event.occurred_at_ms,
+                "invocation_state": invocation_state,
+                "execution_mode": execution_mode,
+                "updated_at_ms": invocation_updated_at_ms,
+                "session_updated_at_ms": session_updated_at_ms,
+                "force_recovery_state": durability_barrier,
+            },
+            encoded=encoded_payload,
+            artifacts=artifacts,
+            size_bytes=(
+                len(encoded_payload)
+                + sum(artifact.size_bytes for artifact in artifacts)
+                + 256
             ),
-            barrier=durability_barrier,
         )
 
     def _externalize_admission_state(
@@ -672,6 +745,19 @@ class DatabaseBackend:
             )
         if barrier:
             item.done = asyncio.get_running_loop().create_future()
+        self._enqueue_nowait(item)
+        if item.done is not None:
+            await item.done
+
+    def _enqueue_nowait(self, item: _PersistenceItem) -> None:
+        if not self._database_loop.is_current():
+            raise RuntimeError("Persistence items belong to the database loop.")
+        if not self._initialized or self._queue_event is None:
+            raise RuntimeError("DatabaseBackend is not initialized.")
+        if self._fatal_persistence_error is not None:
+            raise RuntimeError("Runtime persistence failed permanently.") from (
+                self._fatal_persistence_error
+            )
         key = str(item.session_id) if item.session_id is not None else "__control__"
         queue = self._queues.setdefault(key, deque())
         queue.append(item)
@@ -681,10 +767,7 @@ class DatabaseBackend:
         with self._pressure_lock:
             self._pending_bytes += item.size_bytes
             self._pending_count += 1
-        assert self._queue_event is not None
         self._queue_event.set()
-        if item.done is not None:
-            await item.done
 
     def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():

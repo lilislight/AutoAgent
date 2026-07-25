@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 
+from autoagent.core.app.settings import AutoAgentSettings
 from autoagent.core.compiler import WorkflowCompiler, WorkflowIR, WorkflowVersionSnapshot
 from autoagent.core.executor import NodeExecutor, WorkflowExecutor
 from autoagent.core.operators import (
@@ -73,13 +74,19 @@ class AutoAgentApp:
     def __init__(
         self,
         *,
-        namespace: str = "default",
+        settings: AutoAgentSettings | None = None,
+        namespace: str | None = None,
         runtime_store: RuntimeStore | None = None,
         runtime_serializer: JsonRuntimeSerializer | None = None,
         runtime_codecs: Iterable[RuntimeCodec] = (),
         runtime_models: Iterable[type[BaseModel]] = (),
     ) -> None:
-        resolved_namespace = namespace.strip()
+        resolved_settings = settings or AutoAgentSettings.from_env()
+        resolved_namespace = (
+            resolved_settings.namespace
+            if namespace is None
+            else namespace
+        ).strip()
         if not resolved_namespace:
             raise ValueError("App namespace cannot be empty.")
         self.namespace = resolved_namespace
@@ -90,7 +97,9 @@ class AutoAgentApp:
             operator_registry=self.operator_registry,
         )
         if runtime_store is None:
-            runtime_store = RuntimeStore(serializer=runtime_serializer)
+            runtime_store = resolved_settings.runtime_store(
+                serializer=runtime_serializer,
+            )
         elif (
             runtime_serializer is not None
             and runtime_store.serializer is not runtime_serializer
@@ -125,6 +134,7 @@ class AutoAgentApp:
         self._runtime_loop = RuntimeEventLoop(
             name=f"autoagent-runtime-{self.namespace}"
         )
+        self._started = False
         self._closed = False
 
     def register_runtime_codec(self, codec: RuntimeCodec) -> None:
@@ -137,7 +147,7 @@ class AutoAgentApp:
 
         if self._closed:
             raise RuntimeError("AutoAgentApp is closed.")
-        self._runtime_loop.run(self.runtime_store.ainitialize())
+        self._runtime_loop.run(self.astart())
 
     async def astart(self) -> None:
         """Initialize App runtime resources from asynchronous code."""
@@ -147,7 +157,10 @@ class AutoAgentApp:
             return
         if self._closed:
             raise RuntimeError("AutoAgentApp is closed.")
+        if self._started:
+            return
         await self.runtime_store.ainitialize()
+        self._started = True
 
     def register_runtime_model(
         self,
@@ -417,6 +430,7 @@ class AutoAgentApp:
                 )
             )
         self._ensure_open()
+        await self.astart()
 
         prepared = await self._prepare_invocation(
             workflow,
@@ -461,6 +475,7 @@ class AutoAgentApp:
                 )
             )
         self._ensure_open()
+        await self.astart()
         return await self._prepare_invocation(
             workflow,
             input=input,
@@ -543,6 +558,7 @@ class AutoAgentApp:
                 )
             )
         self._ensure_open()
+        await self.astart()
 
         workflow_ir = self._get_or_compile_workflow(workflow)
         workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)

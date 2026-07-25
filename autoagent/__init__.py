@@ -1,4 +1,4 @@
-from autoagent.core.app import AutoAgentApp, get_default_app
+from autoagent.core.app import AutoAgentApp, AutoAgentSettings, get_default_app
 from autoagent.core.operators import (
     Capability,
     Operator,
@@ -53,6 +53,7 @@ from autoagent.core.server import AutoAgentServer
 
 __all__ = [
     "AutoAgentApp",
+    "AutoAgentSettings",
     "AutoAgentServer",
     "ArtifactRef",
     "ArtifactPolicy",

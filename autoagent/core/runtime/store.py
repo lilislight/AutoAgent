@@ -151,17 +151,7 @@ class RuntimeStore:
 
     async def ainitialize(self) -> None:
         if self.backend is not None:
-            try:
-                await self.backend.ainitialize()
-            except Exception as exc:
-                assert self.persistence is not None
-                self.persistence.mark_unavailable(exc)
-                logger.exception(
-                    "Runtime persistence could not be initialized; Workflow "
-                    "execution will continue in memory and new submission "
-                    "will be limited only when the persistence backlog reaches "
-                    "its admission watermark."
-                )
+            await self.backend.ainitialize()
 
     async def aclose(self) -> None:
         if self.backend is not None:
@@ -303,23 +293,11 @@ class RuntimeStore:
         )
         if value is not None or self.backend is None:
             return value
-        try:
-            value = await self.backend.afind_session(
-                namespace=namespace,
-                workflow_id=workflow_id,
-                session_key=session_key,
-            )
-        except Exception as exc:
-            assert self.persistence is not None
-            self.persistence.mark_unavailable(exc)
-            logger.exception(
-                "Historical Session lookup is unavailable; a process-local "
-                "Session will be used so Workflow execution can continue: "
-                "workflow_id=%s session_key=%s",
-                workflow_id,
-                session_key,
-            )
-            value = None
+        value = await self.backend.afind_session(
+            namespace=namespace,
+            workflow_id=workflow_id,
+            session_key=session_key,
+        )
         if value is not None:
             with self._lock:
                 self._cache_session(value)

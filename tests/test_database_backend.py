@@ -987,7 +987,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         ):
             await app.aclose()
 
-    async def test_database_initialization_failure_keeps_memory_execution(
+    async def test_database_initialization_failure_rejects_invocation(
         self,
     ) -> None:
         class UnavailableAtStartBackend(DatabaseBackend):
@@ -1008,14 +1008,19 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=unavailable)
 
-        invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
+        with self.assertRaisesRegex(
+            OperationalError,
+            "database offline at startup",
+        ):
+            await app.astart()
+        with self.assertRaisesRegex(
+            OperationalError,
+            "database offline at startup",
+        ):
+            await app.ainvoke(workflow)
 
-        self.assertEqual("completed", invocation.state)
-        health = unavailable.persistence_health()
-        assert health is not None
-        self.assertEqual("unavailable", health.state)
-        self.assertIn("database offline at startup", health.last_error or "")
-        self.assertEqual("degraded", unavailable.persistence_status(invocation.id))
+        self.assertEqual({}, unavailable.invocations)
+        self.assertEqual({}, unavailable.runtime_events)
         await app.aclose()
 
     async def test_byte_backpressure_rejects_new_admission_until_queue_drains(

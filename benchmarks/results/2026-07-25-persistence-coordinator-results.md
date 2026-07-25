@@ -6,8 +6,8 @@ backpressure, durable cursors, and failure state out of `DatabaseBackend` into
 the sink-independent `PersistenceCoordinator`.
 
 - Python environment: repository-root `uv` environment
-- Final full suite: 252 tests passed, 1 PostgreSQL integration test skipped
-- Final full-suite elapsed time: about 26.4 seconds
+- Final full suite: 257 tests passed, 1 PostgreSQL integration test skipped
+- Final full-suite elapsed time: about 23.9 seconds
 - Before the last three edge cases were added, the 245-test suite also passed
   twice (32.657 and 32.884 seconds)
 

@@ -25,6 +25,12 @@ class RuntimeRetentionPolicy:
     max_replay_checkpoints_per_invocation: int = 8
 
     def __post_init__(self) -> None:
+        if self.mode not in {
+            "retain_all",
+            "evict_durable_terminal",
+            "lru_durable_terminal",
+        }:
+            raise ValueError(f"Unknown Runtime retention mode: {self.mode}")
         if self.max_terminal_invocations < 0:
             raise ValueError("max_terminal_invocations cannot be negative.")
         if self.max_replay_checkpoints_per_invocation < 1:

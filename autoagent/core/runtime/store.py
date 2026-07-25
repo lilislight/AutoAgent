@@ -483,19 +483,31 @@ class RuntimeStore:
         try:
             if self.backend is not None:
                 await self.backend.await_capacity()
-                acceptance = asyncio.create_task(
-                    self.backend.aappend_event(
-                        session,
-                        invocation,
-                        event,
-                        durability_barrier=durability_barrier,
+                if durability_barrier:
+                    acceptance = asyncio.create_task(
+                        self.backend.aappend_event(
+                            session,
+                            invocation,
+                            event,
+                            durability_barrier=True,
+                        )
                     )
-                )
-                try:
-                    await asyncio.shield(acceptance)
-                except asyncio.CancelledError as exc:
-                    await acceptance
-                    cancelled = exc
+                    try:
+                        await asyncio.shield(acceptance)
+                    except asyncio.CancelledError as exc:
+                        await acceptance
+                        cancelled = exc
+                else:
+                    self.backend.dispatch_event_nowait(
+                        session.id,
+                        session.namespace,
+                        session.updated_at_ms,
+                        invocation.id,
+                        invocation.state,
+                        invocation.execution_mode,
+                        invocation.updated_at_ms,
+                        event,
+                    )
         except BaseException:
             with self._lock:
                 self._restore_live_aggregate(

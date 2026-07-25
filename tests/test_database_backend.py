@@ -163,6 +163,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow.add_node(lambda: "x" * 6_000, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
 
+        # One-way dispatch defers serialization to the DB loop. The first
+        # event may succeed, but its async callback will set the fatal error;
+        # await_capacity on the second event then raises "unavailable".
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
             await app.ainvoke(workflow, session_id="same")
 

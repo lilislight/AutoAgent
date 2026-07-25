@@ -438,6 +438,35 @@ class DatabaseBackend:
             barrier=True,
         )
 
+    def dispatch_event_nowait(
+        self,
+        session_id: UUID,
+        namespace: str,
+        session_updated_at_ms: int,
+        invocation_id: UUID,
+        invocation_state: str,
+        execution_mode: str,
+        invocation_updated_at_ms: int,
+        event: RuntimeEvent,
+    ) -> None:
+        """Non-blocking dispatch: pass event by reference, copy on DB Loop."""
+
+        if self._fatal_persistence_error is not None:
+            raise RuntimeError(
+                "Runtime persistence is unavailable."
+            ) from self._fatal_persistence_error
+        self._database_loop.call_soon(
+            self._accept_event,
+            session_id,
+            namespace,
+            session_updated_at_ms,
+            invocation_id,
+            invocation_state,
+            execution_mode,
+            invocation_updated_at_ms,
+            event,
+        )
+
     async def aappend_event(
         self,
         session: Session,
@@ -498,11 +527,17 @@ class DatabaseBackend:
         invocation_updated_at_ms: int,
         event: RuntimeEvent,
     ) -> None:
-        """Prepare and enqueue an ordinary Event entirely on the DB loop."""
+        """Prepare and enqueue an ordinary Event entirely on the DB loop.
+
+        ``event`` arrives by cross-thread reference from App Loop call_soon.
+        ``model_copy`` runs here so App Loop dispatch adds zero serialization
+        or copy overhead to the execution path.
+        """
 
         if self._fatal_persistence_error is not None:
             return
         try:
+            event = event.model_copy(deep=True)
             item = self._prepare_event_item(
                 session_id=session_id,
                 namespace=namespace,

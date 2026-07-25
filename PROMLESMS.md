@@ -33,12 +33,19 @@
 - `store.py`：积压时轮询等待而非立刻报错，超时抛 `TimeoutError`
 - `server/app.py`：`TimeoutError` → 503
 
-#### 3. Benchmark
+#### 3. 非 barrier event 零等待 dispatch
+- `database.py`：新增 `dispatch_event_nowait`，直接 `call_soon` 传递 event 引用
+- `store.py`：非 barrier 走新路径，去掉 `create_task` + `await shield` + `model_copy` 开销
+- `database.py`：`model_copy` 移到 DB Loop 的 `_accept_event` 内执行
+- `await_capacity` 保持在 dispatch 前，背压不受影响
+- SQLite median -12.9%（189→165ms），flush -28.5%
+- 233 passed / 1 skipped
+
+#### 4. Benchmark
 - `persistence_backlog_benchmark.py`：加 WAL 文件大小统计
 - `sqlite_write_benchmark.py`：新增 DELETE vs WAL 原始写入对比
 
-#### 4. 测试
+#### 5. 测试
 - 新增 8 个测试：admission timeout 行为(5) + waiting session 拒绝(2) + session 重用(1)
-- 修复 2 个旧测试加 `queue_admission_timeout_ms=0`
-- 全量 106 passed / 1 skipped
+- 修复 3 个旧测试：2 个加 `queue_admission_timeout_ms=0`，1 个适配异步序列化失败语义
 

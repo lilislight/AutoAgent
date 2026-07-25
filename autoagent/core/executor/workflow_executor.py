@@ -313,6 +313,22 @@ class WorkflowExecutor:
         """Advance one Invocation until it reaches a stable public state."""
 
         while True:
+            if self.runtime_store.persistence_corrupted:
+                invocation.mark_failed(
+                    RuntimeErrorInfo(
+                        code="PERSISTENCE_LOST",
+                        message="Durable persistence is permanently unavailable.",
+                    )
+                )
+                abandoned = await self._abandon_active_work(invocation)
+                await self._commit_boundary(
+                    session,
+                    invocation,
+                    "invocation.failed",
+                    node_execution_ids=abandoned,
+                )
+                return invocation
+
             transitions = invocation.scheduler.drain_transitions()
             if transitions:
                 await self.scheduler.next(

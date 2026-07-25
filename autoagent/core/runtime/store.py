@@ -49,6 +49,9 @@ class DurableBackend(Protocol):
     def admission_paused(self) -> bool: ...
 
     @property
+    def persistence_corrupted(self) -> bool: ...
+
+    @property
     def pending_persistence_bytes(self) -> int: ...
 
     @property
@@ -61,6 +64,18 @@ class DurableBackend(Protocol):
     async def aflush(self) -> None: ...
 
     async def await_capacity(self) -> None: ...
+
+    def dispatch_event_nowait(
+        self,
+        session_id: UUID,
+        namespace: str,
+        session_updated_at_ms: int,
+        invocation_id: UUID,
+        invocation_state: str,
+        execution_mode: str,
+        invocation_updated_at_ms: int,
+        event: RuntimeEvent,
+    ) -> None: ...
 
     async def asave_workflow_snapshot(
         self,
@@ -171,6 +186,22 @@ class RuntimeStore:
     @property
     def admission_paused(self) -> bool:
         return self.backend.admission_paused if self.backend is not None else False
+
+    @property
+    def persistence_corrupted(self) -> bool:
+        """True when durable persistence is permanently unavailable.
+
+        A ``_drive()`` loop inspects this at the top of every iteration so
+        that an async serialization failure on the persistence thread stops
+        the invocation within one scheduler boundary instead of silently
+        advancing in-memory state past broken durable records.
+        """
+
+        return (
+            self.backend.persistence_corrupted
+            if self.backend is not None
+            else False
+        )
 
     async def ainitialize(self) -> None:
         if self.backend is not None:

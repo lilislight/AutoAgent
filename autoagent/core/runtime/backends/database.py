@@ -192,6 +192,10 @@ class DatabaseBackend:
             or self._fatal_persistence_error is not None
         )
 
+    @property
+    def persistence_corrupted(self) -> bool:
+        return self._fatal_persistence_error is not None
+
     async def ainitialize(self) -> None:
         if not self._database_loop.is_current():
             await self._database_loop.arun(self.ainitialize())

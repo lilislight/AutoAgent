@@ -33,11 +33,13 @@
 - `store.py`：积压时轮询等待而非立刻报错，超时抛 `TimeoutError`
 - `server/app.py`：`TimeoutError` → 503
 
-#### 3. 非 barrier event 零等待 dispatch
+#### 3. 非 barrier event 零等待 dispatch + 显式持久化健康检查
 - `database.py`：新增 `dispatch_event_nowait`，直接 `call_soon` 传递 event 引用
 - `store.py`：非 barrier 走新路径，去掉 `create_task` + `await shield` + `model_copy` 开销
 - `database.py`：`model_copy` 移到 DB Loop 的 `_accept_event` 内执行
 - `await_capacity` 保持在 dispatch 前，背压不受影响
+- `database.py` / `store.py`：新增 `persistence_corrupted` 属性
+- `workflow_executor.py`：`_drive()` 每轮循环顶检查 `persistence_corrupted`，异步序列化错误最迟一循环(~1ms) 内终止 invocation，避免内存状态和持久化的永久不一致
 - SQLite median -12.9%（189→165ms），flush -28.5%
 - 233 passed / 1 skipped
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -12,7 +13,6 @@ from sqlalchemy import event, select, text, tuple_
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.artifact import (
     ArtifactPolicy,
     EncodedArtifact,
@@ -28,7 +28,7 @@ from autoagent.core.runtime.backends.models import (
 )
 from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.runtime.hooks import RuntimeEventLoop
-from autoagent.core.runtime.invocation import Invocation
+from autoagent.core.runtime.persistence import PersistenceEnvelope
 from autoagent.core.runtime.serialization import ArtifactRef
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
@@ -38,6 +38,9 @@ from autoagent.core.runtime.snapshot import (
 )
 from autoagent.core.runtime.store import RuntimeStore
 from autoagent.core.runtime.time import utc_timestamp_ms
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,6 +53,7 @@ class _PersistenceItem:
     artifacts: tuple[EncodedArtifact, ...]
     size_bytes: int
     done: asyncio.Future[None] | None = None
+    coordinator_id: UUID | None = None
 
 
 class DatabaseBackend:
@@ -60,36 +64,20 @@ class DatabaseBackend:
         database_url: str | Path,
         *,
         echo: bool = False,
-        queue_high_watermark_bytes: int = 64 * 1024 * 1024,
-        queue_low_watermark_bytes: int | None = None,
-        queue_hard_watermark_bytes: int | None = None,
         batch_max_items: int = 256,
         batch_max_bytes: int = 4 * 1024 * 1024,
         batch_max_delay_ms: int = 5,
         recovery_event_interval: int = 200,
         artifact_policy: ArtifactPolicy | None = None,
-        queue_admission_timeout_ms: float = 30_000,
+        sqlite_synchronous: str = "FULL",
     ) -> None:
-        if queue_high_watermark_bytes < 1:
-            raise ValueError("queue_high_watermark_bytes must be positive.")
-        low = (
-            queue_high_watermark_bytes // 2
-            if queue_low_watermark_bytes is None
-            else queue_low_watermark_bytes
-        )
-        hard = (
-            queue_high_watermark_bytes * 2
-            if queue_hard_watermark_bytes is None
-            else queue_hard_watermark_bytes
-        )
-        if not 0 <= low < queue_high_watermark_bytes < hard:
-            raise ValueError("Expected low < high < hard byte watermarks.")
         if batch_max_items < 1 or batch_max_bytes < 1 or batch_max_delay_ms < 0:
             raise ValueError("Invalid persistence batch limits.")
         if recovery_event_interval < 1:
             raise ValueError("recovery_event_interval must be positive.")
-        if queue_admission_timeout_ms < 0:
-            raise ValueError("queue_admission_timeout_ms must be non-negative.")
+        normalized_synchronous = sqlite_synchronous.upper()
+        if normalized_synchronous not in {"FULL", "NORMAL"}:
+            raise ValueError("sqlite_synchronous must be FULL or NORMAL.")
 
         self.database_url = _resolve_database_url(database_url)
         self.engine: AsyncEngine = create_async_engine(
@@ -100,20 +88,18 @@ class DatabaseBackend:
             self.engine,
             expire_on_commit=False,
         )
-        self.queue_high_watermark_bytes = queue_high_watermark_bytes
-        self.queue_low_watermark_bytes = low
-        self.queue_hard_watermark_bytes = hard
         self.batch_max_items = batch_max_items
         self.batch_max_bytes = batch_max_bytes
         self.batch_max_delay_ms = batch_max_delay_ms
         self.recovery_event_interval = recovery_event_interval
         self.artifact_policy = artifact_policy or ArtifactPolicy()
-        self.queue_admission_timeout_ms = queue_admission_timeout_ms
+        self.sqlite_synchronous = normalized_synchronous
 
         self._database_loop = RuntimeEventLoop(
             name="autoagent-persistence-runtime"
         )
         self._queues: dict[str, deque[_PersistenceItem]] = {}
+        self._halted_items: deque[_PersistenceItem] = deque()
         self._ready_sessions: deque[str] = deque()
         self._ready_set: set[str] = set()
         self._queue_event: asyncio.Event | None = None
@@ -126,11 +112,7 @@ class DatabaseBackend:
         self._inflight_bytes = 0
         self._pending_count = 0
         self._inflight_count = 0
-        self._admission_pressure = False
-        self._persistence_error: BaseException | None = None
-        self._fatal_persistence_error: BaseException | None = None
         self._workflow_version_ids: dict[tuple[str, str, str, str], UUID] = {}
-        self._durable_sequences: dict[UUID, int] = {}
         self._recovery_sequences: dict[UUID, int] = {}
         self._durable_states: dict[UUID, dict[str, Any]] = {}
         self._projection_sequences: dict[UUID, int] = {}
@@ -145,6 +127,9 @@ class DatabaseBackend:
         if self._store is not None and self._store is not store:
             raise RuntimeError("A DatabaseBackend can belong to only one RuntimeStore.")
         self._store = store
+        if store.persistence is None:
+            raise RuntimeError("DatabaseBackend requires a PersistenceCoordinator.")
+        store.persistence.bind_consumer(self._wake_persistence)
 
     @property
     def store(self) -> RuntimeStore:
@@ -157,6 +142,13 @@ class DatabaseBackend:
         return self.store.serializer
 
     @property
+    def coordinator(self):
+        value = self.store.persistence
+        if value is None:
+            raise RuntimeError("DatabaseBackend has no PersistenceCoordinator.")
+        return value
+
+    @property
     def artifact_encoder(self) -> RuntimeArtifactEncoder:
         if self._artifact_encoder is None:
             self._artifact_encoder = RuntimeArtifactEncoder(
@@ -165,36 +157,17 @@ class DatabaseBackend:
             )
         return self._artifact_encoder
 
-    @property
-    def pending_persistence_bytes(self) -> int:
+    def _total_pending_count(self) -> int:
         with self._pressure_lock:
-            return self._pending_bytes + self._inflight_bytes
+            control = self._pending_count + self._inflight_count
+        return control + self.coordinator.pending_count
 
-    @property
-    def pending_persistence_count(self) -> int:
-        with self._pressure_lock:
-            return self._pending_count + self._inflight_count
+    def _wake_persistence(self) -> None:
+        self._database_loop.call_soon(self._signal_persistence)
 
-    @property
-    def admission_paused(self) -> bool:
-        pending = self.pending_persistence_bytes
-        with self._pressure_lock:
-            if pending >= self.queue_high_watermark_bytes:
-                self._admission_pressure = True
-            elif (
-                self._admission_pressure
-                and pending <= self.queue_low_watermark_bytes
-            ):
-                self._admission_pressure = False
-            pressure = self._admission_pressure
-        return (
-            pressure
-            or self._fatal_persistence_error is not None
-        )
-
-    @property
-    def persistence_corrupted(self) -> bool:
-        return self._fatal_persistence_error is not None
+    def _signal_persistence(self) -> None:
+        if self._queue_event is not None:
+            self._queue_event.set()
 
     async def ainitialize(self) -> None:
         if not self._database_loop.is_current():
@@ -208,11 +181,8 @@ class DatabaseBackend:
         async with self._initialize_lock:
             if not self._initialized:
                 self._queue_event = asyncio.Event()
-                # Enable WAL mode with NORMAL synchronous for SQLite backends.
-                # WAL separates writers from readers so the persistence loop
-                # can consume events while WorkflowExecutor checks durable
-                # sequences; NORMAL synchronous avoids per-transaction fsync
-                # while protecting the database structure.
+                # WAL is shared by every SQLite profile. FULL remains the
+                # durable default; NORMAL is an explicit performance choice.
                 @event.listens_for(self.engine.sync_engine, "connect")
                 def _set_sqlite_pragma(
                     dbapi_connection: Any,
@@ -221,7 +191,9 @@ class DatabaseBackend:
                     if self.database_url.startswith("sqlite"):
                         cursor = dbapi_connection.cursor()
                         cursor.execute("PRAGMA journal_mode=WAL")
-                        cursor.execute("PRAGMA synchronous=NORMAL")
+                        cursor.execute(
+                            f"PRAGMA synchronous={self.sqlite_synchronous}"
+                        )
                         cursor.close()
 
                 async with self.engine.begin() as connection:
@@ -261,43 +233,32 @@ class DatabaseBackend:
             await self._database_loop.arun(self.aflush())
             return
         await self.ainitialize()
-        while self.pending_persistence_count:
-            await asyncio.sleep(0.001)
-        if self._fatal_persistence_error is not None:
-            raise RuntimeError("Runtime persistence failed permanently.") from (
-                self._fatal_persistence_error
-            )
-
-    async def await_capacity(self) -> None:
-        if self._fatal_persistence_error is not None:
-            raise RuntimeError("Runtime persistence is unavailable.") from (
-                self._fatal_persistence_error
-            )
-        while self.pending_persistence_bytes >= self.queue_hard_watermark_bytes:
-            if self._fatal_persistence_error is not None:
-                raise RuntimeError("Runtime persistence is unavailable.") from (
-                    self._fatal_persistence_error
+        while self._total_pending_count():
+            health = self.coordinator.health
+            if health.state == "unavailable":
+                raise RuntimeError(
+                    health.last_error or "Persistence backend is unavailable."
                 )
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0.001)
+        await self.coordinator.flush()
 
-    async def asave_workflow_snapshot(
+    def _prepare_workflow_item(
         self,
-        namespace: str,
-        snapshot: WorkflowVersionSnapshot,
-    ) -> None:
+        envelope: PersistenceEnvelope,
+    ) -> _PersistenceItem:
+        snapshot = envelope.workflow_snapshot
+        if snapshot is None:
+            raise ValueError("Workflow persistence envelope has no snapshot.")
         key = (
-            namespace,
+            envelope.namespace,
             snapshot.workflow_id,
             snapshot.definition_hash,
             snapshot.operator_manifest_hash,
         )
-        if key in self._workflow_version_ids:
-            return
-        version_id = uuid4()
-        self._workflow_version_ids[key] = version_id
+        version_id = self._workflow_version_ids.setdefault(key, uuid4())
         record = {
             "id": version_id,
-            "namespace": namespace,
+            "namespace": envelope.namespace,
             "workflow_id": snapshot.workflow_id,
             "workflow_version": (
                 None
@@ -310,17 +271,15 @@ class DatabaseBackend:
             "operator_manifest_hash": snapshot.operator_manifest_hash,
             "created_at_ms": utc_timestamp_ms(),
         }
-        await self._enqueue(
-            _PersistenceItem(
-                kind="workflow_version",
-                session_id=None,
-                invocation_id=None,
-                record=record,
-                encoded=None,
-                artifacts=(),
-                size_bytes=512,
-            ),
-            barrier=True,
+        return _PersistenceItem(
+            kind="workflow_version",
+            session_id=None,
+            invocation_id=None,
+            record=record,
+            encoded=None,
+            artifacts=(),
+            size_bytes=envelope.estimated_bytes,
+            coordinator_id=envelope.id,
         )
 
     async def afind_session(
@@ -338,15 +297,29 @@ class DatabaseBackend:
                     session_key=session_key,
                 )
             )
+        if self.coordinator.health.state == "unavailable":
+            return None
         await self.ainitialize()
-        async with self._database_sessions() as database:
-            row = await database.scalar(
-                select(SessionRow).where(
-                    SessionRow.namespace == namespace,
-                    SessionRow.workflow_id == workflow_id,
-                    SessionRow.session_key == session_key,
+        try:
+            async with self._database_sessions() as database:
+                row = await database.scalar(
+                    select(SessionRow).where(
+                        SessionRow.namespace == namespace,
+                        SessionRow.workflow_id == workflow_id,
+                        SessionRow.session_key == session_key,
+                    )
                 )
+        except (OperationalError, DBAPIError) as exc:
+            self.coordinator.mark_retrying(exc)
+            logger.warning(
+                "Historical Session lookup is unavailable; execution may "
+                "create a process-local Session instead: workflow_id=%s "
+                "session_key=%s error=%s",
+                workflow_id,
+                session_key,
+                exc,
             )
+            return None
         if row is None:
             return None
         if row.current_invocation_id is not None:
@@ -364,36 +337,22 @@ class DatabaseBackend:
         )
         return session
 
-    async def aadmit_invocation(
+    def _prepare_admission_item(
         self,
-        session: Session,
-        invocation: Invocation,
-        snapshot: ExecutionSnapshot,
-    ) -> None:
-        if not self._database_loop.is_current():
-            await self._database_loop.arun(
-                self.aadmit_invocation(session, invocation, snapshot)
-            )
-            return
-        if self.admission_paused:
-            raise RuntimeError(
-                "Runtime persistence backlog is above the admission watermark."
-            )
-        key = (
-            session.namespace,
-            session.workflow_id,
-            invocation.workflow_definition_hash or "",
-            invocation.workflow_operator_manifest_hash or "",
-        )
-        version_id = self._workflow_version_ids.get(key)
-        if version_id is None:
-            version_id = await self._load_workflow_version_id(key)
-        if version_id is None:
-            raise RuntimeError("Workflow version metadata is not durable.")
+        envelope: PersistenceEnvelope,
+    ) -> _PersistenceItem:
+        snapshot = envelope.execution_snapshot
+        if (
+            snapshot is None
+            or envelope.session_id is None
+            or envelope.invocation_id is None
+            or envelope.workflow_key is None
+        ):
+            raise ValueError("Admission persistence envelope is incomplete.")
         persisted_state, artifacts = self._externalize_admission_state(
             snapshot.state,
-            namespace=session.namespace,
-            invocation_id=invocation.id,
+            namespace=envelope.namespace,
+            invocation_id=envelope.invocation_id,
         )
         encoded_genesis = self.serializer.dumps(persisted_state)
         session_record = snapshot.state["session"]
@@ -422,155 +381,39 @@ class DatabaseBackend:
                     "updated_at_ms",
                 )
             },
-            "workflow_version_id": version_id,
+            "workflow_key": envelope.workflow_key,
             "genesis_created_at_ms": snapshot.created_at_ms,
         }
-        await self._enqueue(
-            _PersistenceItem(
-                kind="admission",
-                session_id=session.id,
-                invocation_id=invocation.id,
-                record=admission,
-                encoded=encoded_genesis,
-                artifacts=artifacts,
-                size_bytes=(
-                    len(encoded_genesis)
-                    + sum(artifact.size_bytes for artifact in artifacts)
-                    + 1024
-                ),
+        return _PersistenceItem(
+            kind="admission",
+            session_id=envelope.session_id,
+            invocation_id=envelope.invocation_id,
+            record=admission,
+            encoded=encoded_genesis,
+            artifacts=artifacts,
+            size_bytes=(
+                len(encoded_genesis)
+                + sum(artifact.size_bytes for artifact in artifacts)
+                + 1024
             ),
-            barrier=True,
+            coordinator_id=envelope.id,
         )
-
-    def dispatch_event_nowait(
-        self,
-        session_id: UUID,
-        namespace: str,
-        session_updated_at_ms: int,
-        invocation_id: UUID,
-        invocation_state: str,
-        execution_mode: str,
-        invocation_updated_at_ms: int,
-        event: RuntimeEvent,
-    ) -> None:
-        """Non-blocking dispatch: pass event by reference, copy on DB Loop."""
-
-        if self._fatal_persistence_error is not None:
-            raise RuntimeError(
-                "Runtime persistence is unavailable."
-            ) from self._fatal_persistence_error
-        self._database_loop.call_soon(
-            self._accept_event,
-            session_id,
-            namespace,
-            session_updated_at_ms,
-            invocation_id,
-            invocation_state,
-            execution_mode,
-            invocation_updated_at_ms,
-            event,
-        )
-
-    async def aappend_event(
-        self,
-        session: Session,
-        invocation: Invocation,
-        event: RuntimeEvent,
-        *,
-        durability_barrier: bool = False,
-    ) -> None:
-        if not self._database_loop.is_current():
-            if durability_barrier:
-                await self._database_loop.arun(
-                    self.aappend_event(
-                        session,
-                        invocation,
-                        event,
-                        durability_barrier=True,
-                    )
-                )
-            else:
-                if self._fatal_persistence_error is not None:
-                    raise RuntimeError(
-                        "Runtime persistence is unavailable."
-                    ) from self._fatal_persistence_error
-                self._database_loop.call_soon(
-                    self._accept_event,
-                    session.id,
-                    session.namespace,
-                    session.updated_at_ms,
-                    invocation.id,
-                    invocation.state,
-                    invocation.execution_mode,
-                    invocation.updated_at_ms,
-                    event.model_copy(deep=True),
-                )
-            return
-
-        item = self._prepare_event_item(
-            session_id=session.id,
-            namespace=session.namespace,
-            session_updated_at_ms=session.updated_at_ms,
-            invocation_id=invocation.id,
-            invocation_state=invocation.state,
-            execution_mode=invocation.execution_mode,
-            invocation_updated_at_ms=invocation.updated_at_ms,
-            event=event,
-            durability_barrier=durability_barrier,
-        )
-        await self._enqueue(item, barrier=durability_barrier)
-
-    def _accept_event(
-        self,
-        session_id: UUID,
-        namespace: str,
-        session_updated_at_ms: int,
-        invocation_id: UUID,
-        invocation_state: str,
-        execution_mode: str,
-        invocation_updated_at_ms: int,
-        event: RuntimeEvent,
-    ) -> None:
-        """Prepare and enqueue an ordinary Event entirely on the DB loop.
-
-        ``event`` arrives by cross-thread reference from App Loop call_soon.
-        ``model_copy`` runs here so App Loop dispatch adds zero serialization
-        or copy overhead to the execution path.
-        """
-
-        if self._fatal_persistence_error is not None:
-            return
-        try:
-            event = event.model_copy(deep=True)
-            item = self._prepare_event_item(
-                session_id=session_id,
-                namespace=namespace,
-                session_updated_at_ms=session_updated_at_ms,
-                invocation_id=invocation_id,
-                invocation_state=invocation_state,
-                execution_mode=execution_mode,
-                invocation_updated_at_ms=invocation_updated_at_ms,
-                event=event,
-                durability_barrier=False,
-            )
-            self._enqueue_nowait(item)
-        except BaseException as exc:
-            if self._fatal_persistence_error is None:
-                self._fatal_persistence_error = exc
 
     def _prepare_event_item(
         self,
-        *,
-        session_id: UUID,
-        namespace: str,
-        session_updated_at_ms: int,
-        invocation_id: UUID,
-        invocation_state: str,
-        execution_mode: str,
-        invocation_updated_at_ms: int,
-        event: RuntimeEvent,
-        durability_barrier: bool,
+        envelope: PersistenceEnvelope,
     ) -> _PersistenceItem:
+        event = envelope.event
+        if (
+            event is None
+            or envelope.session_id is None
+            or envelope.invocation_id is None
+            or envelope.session_updated_at_ms is None
+            or envelope.invocation_state is None
+            or envelope.execution_mode is None
+            or envelope.invocation_updated_at_ms is None
+        ):
+            raise ValueError("Event persistence envelope is incomplete.")
         encoded_payload = self.serializer.dumps_unchecked(event.payload)
         if (
             self.artifact_policy.enabled
@@ -578,8 +421,8 @@ class DatabaseBackend:
         ):
             persisted_payload, artifacts = self._externalize_event_payload(
                 event.payload,
-                namespace=namespace,
-                invocation_id=invocation_id,
+                namespace=envelope.namespace,
+                invocation_id=envelope.invocation_id,
             )
             encoded_payload = self.serializer.dumps(persisted_payload)
         else:
@@ -588,19 +431,19 @@ class DatabaseBackend:
                 encoded_payload = self.serializer.dumps(event.payload)
         return _PersistenceItem(
             kind="event",
-            session_id=session_id,
-            invocation_id=invocation_id,
+            session_id=envelope.session_id,
+            invocation_id=envelope.invocation_id,
             record={
                 "event_id": event.id,
                 "sequence": event.sequence,
                 "schema_version": event.schema_version,
                 "event_type": event.type,
                 "occurred_at_ms": event.occurred_at_ms,
-                "invocation_state": invocation_state,
-                "execution_mode": execution_mode,
-                "updated_at_ms": invocation_updated_at_ms,
-                "session_updated_at_ms": session_updated_at_ms,
-                "force_recovery_state": durability_barrier,
+                "invocation_state": envelope.invocation_state,
+                "execution_mode": envelope.execution_mode,
+                "updated_at_ms": envelope.invocation_updated_at_ms,
+                "session_updated_at_ms": envelope.session_updated_at_ms,
+                "force_recovery_state": envelope.force_recovery_checkpoint,
             },
             encoded=encoded_payload,
             artifacts=artifacts,
@@ -609,6 +452,7 @@ class DatabaseBackend:
                 + sum(artifact.size_bytes for artifact in artifacts)
                 + 256
             ),
+            coordinator_id=envelope.id,
         )
 
     def _externalize_admission_state(
@@ -707,7 +551,11 @@ class DatabaseBackend:
         )
         self._durable_states[invocation_id] = self.serializer.loads(encoded_state)
         self._recovery_sequences[invocation_id] = sequence
-        self._durable_sequences[invocation_id] = row.durable_sequence
+        self.coordinator.remember_durable(
+            invocation_id,
+            row.durable_sequence,
+        )
+        self.coordinator.remember_admission_durable(invocation_id)
         return ExecutionSnapshot(
             invocation_id=invocation_id,
             through_sequence=sequence,
@@ -765,67 +613,27 @@ class DatabaseBackend:
             for row, payload in zip(rows, payloads, strict=True)
         )
         if events:
-            self._durable_sequences[invocation_id] = max(
-                self._durable_sequences.get(invocation_id, 0),
+            self.coordinator.remember_durable(
+                invocation_id,
                 events[-1].sequence,
             )
         return events
-
-    def persistence_status(self, invocation_id: UUID) -> str:
-        if self._fatal_persistence_error is not None:
-            return "error"
-        invocation = self.store.invocations.get(invocation_id)
-        if invocation is None:
-            raise KeyError(f"Unknown Invocation: {invocation_id}")
-        return (
-            "durable"
-            if self.durable_sequence(invocation_id) >= invocation.event_sequence
-            else "pending"
-        )
-
-    def durable_sequence(self, invocation_id: UUID) -> int:
-        return self._durable_sequences.get(invocation_id, 0)
-
-    async def _enqueue(
-        self,
-        item: _PersistenceItem,
-        *,
-        barrier: bool = False,
-    ) -> None:
-        if not self._database_loop.is_current():
-            await self._database_loop.arun(
-                self._enqueue(item, barrier=barrier)
-            )
-            return
-        await self.ainitialize()
-        if self._fatal_persistence_error is not None:
-            raise RuntimeError("Runtime persistence failed permanently.") from (
-                self._fatal_persistence_error
-            )
-        if barrier:
-            item.done = asyncio.get_running_loop().create_future()
-        self._enqueue_nowait(item)
-        if item.done is not None:
-            await item.done
 
     def _enqueue_nowait(self, item: _PersistenceItem) -> None:
         if not self._database_loop.is_current():
             raise RuntimeError("Persistence items belong to the database loop.")
         if not self._initialized or self._queue_event is None:
             raise RuntimeError("DatabaseBackend is not initialized.")
-        if self._fatal_persistence_error is not None:
-            raise RuntimeError("Runtime persistence failed permanently.") from (
-                self._fatal_persistence_error
-            )
         key = str(item.session_id) if item.session_id is not None else "__control__"
         queue = self._queues.setdefault(key, deque())
         queue.append(item)
         if key not in self._ready_set:
             self._ready_set.add(key)
             self._ready_sessions.append(key)
-        with self._pressure_lock:
-            self._pending_bytes += item.size_bytes
-            self._pending_count += 1
+        if item.coordinator_id is None:
+            with self._pressure_lock:
+                self._pending_bytes += item.size_bytes
+                self._pending_count += 1
         self._queue_event.set()
 
     def _ensure_worker(self) -> None:
@@ -838,21 +646,30 @@ class DatabaseBackend:
     async def _persistence_loop(self) -> None:
         assert self._queue_event is not None
         while True:
+            if self.coordinator.health.state == "unavailable":
+                return
+            self._import_incoming()
             if not self._ready_sessions:
                 if self._closing:
                     return
                 self._queue_event.clear()
+                self._import_incoming()
+                if self._ready_sessions:
+                    continue
                 await self._queue_event.wait()
                 continue
             batch = await self._take_batch()
             if not batch:
                 continue
-            batch_bytes = sum(item.size_bytes for item in batch)
+            control_items = [
+                item for item in batch if item.coordinator_id is None
+            ]
+            batch_bytes = sum(item.size_bytes for item in control_items)
             with self._pressure_lock:
                 self._pending_bytes -= batch_bytes
-                self._pending_count -= len(batch)
+                self._pending_count -= len(control_items)
                 self._inflight_bytes += batch_bytes
-                self._inflight_count += len(batch)
+                self._inflight_count += len(control_items)
             retry_delay = 0.05
             while True:
                 try:
@@ -861,28 +678,43 @@ class DatabaseBackend:
                     raise
                 except (OperationalError, DBAPIError) as exc:
                     if not _is_retryable_database_error(exc):
-                        self._fail_batch_permanently(batch, exc)
-                        break
-                    self._persistence_error = exc
+                        self._halt_unavailable_persistence(batch, exc)
+                        return
+                    self.coordinator.mark_retrying(exc)
+                    logger.warning(
+                        "Database persistence is retrying; Workflow execution "
+                        "continues in memory: %s",
+                        exc,
+                    )
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(5.0, retry_delay * 2)
                     continue
-                except BaseException as exc:
-                    self._fail_batch_permanently(batch, exc)
-                    break
+                except Exception as exc:
+                    self._halt_unavailable_persistence(batch, exc)
+                    return
                 else:
-                    self._persistence_error = None
+                    self.coordinator.mark_healthy()
                     advanced: set[UUID] = set()
                     for item in batch:
-                        if (
-                            item.invocation_id is not None
-                            and item.kind == "event"
-                        ):
-                            self._durable_sequences[item.invocation_id] = max(
-                                self._durable_sequences.get(item.invocation_id, 0),
+                        if item.kind == "event":
+                            assert item.invocation_id is not None
+                            advanced.add(item.invocation_id)
+                            assert item.coordinator_id is not None
+                            self.coordinator.mark_durable(
+                                item.coordinator_id,
+                                item.invocation_id,
                                 int(item.record["sequence"]),
                             )
-                            advanced.add(item.invocation_id)
+                        elif item.kind == "admission":
+                            assert item.invocation_id is not None
+                            assert item.coordinator_id is not None
+                            self.coordinator.mark_admission_durable(
+                                item.coordinator_id,
+                                item.invocation_id,
+                            )
+                        else:
+                            assert item.coordinator_id is not None
+                            self.coordinator.discard(item.coordinator_id)
                         if item.done is not None and not item.done.done():
                             item.done.set_result(None)
                     for invocation_id in advanced:
@@ -890,7 +722,48 @@ class DatabaseBackend:
                     break
             with self._pressure_lock:
                 self._inflight_bytes -= batch_bytes
-                self._inflight_count -= len(batch)
+                self._inflight_count -= len(control_items)
+
+    def _import_incoming(self) -> None:
+        for envelope in self.coordinator.take(self.batch_max_items):
+            if (
+                envelope.invocation_id is not None
+                and self.coordinator.invocation_error(envelope.invocation_id)
+                is not None
+            ):
+                self.coordinator.discard(envelope.id)
+                continue
+            try:
+                if envelope.kind == "workflow_version":
+                    item = self._prepare_workflow_item(envelope)
+                elif envelope.kind == "admission":
+                    item = self._prepare_admission_item(envelope)
+                else:
+                    item = self._prepare_event_item(envelope)
+            except Exception as exc:
+                self.coordinator.discard(envelope.id)
+                if envelope.invocation_id is not None:
+                    sequence = (
+                        envelope.event.sequence
+                        if envelope.event is not None
+                        else 0
+                    )
+                    self.coordinator.fail_invocation(
+                        envelope.invocation_id,
+                        sequence,
+                        exc,
+                    )
+                else:
+                    self.coordinator.mark_unavailable(exc)
+                logger.exception(
+                    "Persistence record preparation failed; Workflow "
+                    "execution remains available: kind=%s invocation_id=%s",
+                    envelope.kind,
+                    envelope.invocation_id,
+                )
+                continue
+            self.coordinator.adjust_size(envelope.id, item.size_bytes)
+            self._enqueue_nowait(item)
 
     async def _take_batch(self) -> list[_PersistenceItem]:
         batch: list[_PersistenceItem] = []
@@ -940,6 +813,8 @@ class DatabaseBackend:
             event_items = [item for item in batch if item.kind == "event"]
             for item in workflow_items:
                 await self._persist_workflow_version(database, item.record)
+            if workflow_items:
+                await database.flush()
             for item in admission_items:
                 await self._persist_admission(database, item)
             artifacts = tuple(
@@ -988,7 +863,21 @@ class DatabaseBackend:
         value = item.record
         session = value["session"]
         invocation = value["invocation"]
-        version_id: UUID = value["workflow_version_id"]
+        workflow_key = value["workflow_key"]
+        version_row = await database.scalar(
+            select(WorkflowVersionRow).where(
+                WorkflowVersionRow.namespace == workflow_key[0],
+                WorkflowVersionRow.workflow_id == workflow_key[1],
+                WorkflowVersionRow.definition_hash == workflow_key[2],
+                WorkflowVersionRow.operator_manifest_hash == workflow_key[3],
+            )
+        )
+        if version_row is None:
+            raise RuntimeError(
+                "Invocation genesis references workflow metadata that is not "
+                "durable yet."
+            )
+        version_id = UUID(version_row.id)
         genesis_state = self.serializer.loads(_text(item.encoded))
         session_row = await database.get(SessionRow, session["id"])
         session_values = {
@@ -1321,41 +1210,38 @@ class DatabaseBackend:
                 )
             current = _replace_runtime_artifact_refs(current, replacements)
 
-    async def _load_workflow_version_id(
-        self,
-        key: tuple[str, str, str, str],
-    ) -> UUID | None:
-        if not self._database_loop.is_current():
-            return await self._database_loop.arun(
-                self._load_workflow_version_id(key)
-            )
-        await self.ainitialize()
-        async with self._database_sessions() as database:
-            row = await database.scalar(
-                select(WorkflowVersionRow).where(
-                    WorkflowVersionRow.namespace == key[0],
-                    WorkflowVersionRow.workflow_id == key[1],
-                    WorkflowVersionRow.definition_hash == key[2],
-                    WorkflowVersionRow.operator_manifest_hash == key[3],
-                )
-            )
-        if row is None:
-            return None
-        version_id = UUID(row.id)
-        self._workflow_version_ids[key] = version_id
-        return version_id
-
-    def _fail_batch_permanently(
+    def _halt_unavailable_persistence(
         self,
         batch: list[_PersistenceItem],
         error: BaseException,
     ) -> None:
-        self._fatal_persistence_error = error
+        self.coordinator.mark_unavailable(error)
+        self._halted_items.extend(batch)
+        for queue in self._queues.values():
+            self._halted_items.extend(queue)
+        logger.error(
+            "Database persistence is unavailable; Workflow execution remains "
+            "available in memory and new submission will be limited by "
+            "persistence backlog: %s",
+            error,
+        )
         for item in batch:
             if item.done is not None and not item.done.done():
                 item.done.set_exception(
-                    RuntimeError("Runtime persistence failed permanently.")
+                    RuntimeError("Runtime persistence backend is unavailable.")
                 )
+        for queue in self._queues.values():
+            for item in queue:
+                if item.done is not None and not item.done.done():
+                    item.done.set_exception(
+                        RuntimeError("Runtime persistence backend is unavailable.")
+                    )
+        self._queues.clear()
+        self._ready_sessions.clear()
+        self._ready_set.clear()
+        with self._pressure_lock:
+            self._pending_bytes = 0
+            self._pending_count = 0
 
     def release_invocation_cache(self, invocation_id: UUID) -> None:
         self._durable_states.pop(invocation_id, None)

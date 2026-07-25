@@ -13,7 +13,13 @@ from time import perf_counter
 import tracemalloc
 from typing import Any
 
-from autoagent import AutoAgentApp, DatabaseBackend, RuntimeStore, Workflow
+from autoagent import (
+    AutoAgentApp,
+    DatabaseBackend,
+    PersistencePolicy,
+    RuntimeStore,
+    Workflow,
+)
 from autoagent.core.runtime.backends.database import _PersistenceItem
 
 
@@ -122,14 +128,19 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         backend = _BlockedEventBackend.from_path(
             database_path,
             release_events=release_events,
+            batch_max_delay_ms=0,
+            recovery_event_interval=args.recovery_event_interval,
+        )
+        persistence_policy = PersistencePolicy(
             queue_low_watermark_bytes=args.queue_high_bytes // 2,
             queue_high_watermark_bytes=args.queue_high_bytes,
             queue_hard_watermark_bytes=args.queue_hard_bytes,
-            batch_max_delay_ms=0,
-            recovery_event_interval=args.recovery_event_interval,
-            queue_admission_timeout_ms=100,
+            admission_timeout_ms=100,
         )
-        store = RuntimeStore(backend=backend)
+        store = RuntimeStore(
+            backend=backend,
+            persistence_policy=persistence_policy,
+        )
         app = AutoAgentApp(runtime_store=store)
         workflow = _build_payload_chain(
             workflow_id="persistence_backlog_benchmark",
@@ -174,13 +185,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 if (
                     high_crossed_at is None
                     and store.pending_persistence_bytes
-                    >= backend.queue_high_watermark_bytes
+                    >= persistence_policy.queue_high_watermark_bytes
                 ):
                     high_crossed_at = elapsed
                 if (
                     hard_crossed_at is None
                     and store.pending_persistence_bytes
-                    >= backend.queue_hard_watermark_bytes
+                    >= persistence_policy.queue_hard_watermark_bytes
                 ):
                     hard_crossed_at = elapsed
                 await asyncio.sleep(0.001)
@@ -198,13 +209,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if (
                 high_crossed_at is None
                 and store.pending_persistence_bytes
-                >= backend.queue_high_watermark_bytes
+                >= persistence_policy.queue_high_watermark_bytes
             ):
                 high_crossed_at = production_elapsed
             if (
                 hard_crossed_at is None
                 and store.pending_persistence_bytes
-                >= backend.queue_hard_watermark_bytes
+                >= persistence_policy.queue_hard_watermark_bytes
             ):
                 hard_crossed_at = production_elapsed
 

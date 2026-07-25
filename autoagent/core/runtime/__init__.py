@@ -25,6 +25,18 @@ from autoagent.core.runtime.execution import (
 from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventRole
 from autoagent.core.runtime.artifact import ArtifactPolicy
 from autoagent.core.runtime.retention import RuntimeRetentionPolicy
+from autoagent.core.runtime.persistence import (
+    BackendPersistenceError,
+    InvocationPersistenceError,
+    PersistenceAdmissionError,
+    PersistenceBackendState,
+    PersistenceCoordinator,
+    PersistenceEnvelope,
+    PersistenceError,
+    PersistenceHealth,
+    PersistencePolicy,
+    PersistenceStatus,
+)
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.output import NodeOutput, OutputView
@@ -107,6 +119,16 @@ __all__ = [
     "ParallelExecutionSummary",
     "ParallelOperatorExecution",
     "ParallelOperatorExecutionKind",
+    "PersistenceCoordinator",
+    "PersistenceEnvelope",
+    "PersistenceError",
+    "PersistenceAdmissionError",
+    "PersistenceBackendState",
+    "PersistenceHealth",
+    "PersistencePolicy",
+    "PersistenceStatus",
+    "InvocationPersistenceError",
+    "BackendPersistenceError",
     "OutputBindingContext",
     "OutputView",
     "ReplicationAggregationContext",

@@ -20,6 +20,8 @@ from autoagent import (
     JsonRuntimeSerializer,
     MapPolicy,
     NodePolicy,
+    PersistenceAdmissionError,
+    PersistencePolicy,
     RecoveryPolicy,
     RuntimeRetentionPolicy,
     SystemCommand,
@@ -28,6 +30,7 @@ from autoagent import (
 )
 from autoagent.core.runtime import (
     Invocation,
+    PersistenceEnvelope,
     RuntimeEvent,
     RuntimeStore,
     SessionBusyError,
@@ -107,6 +110,49 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("snapshot_json", workflow_columns)
         self.assertNotIn("operator_manifests_json", workflow_columns)
 
+    async def test_sqlite_uses_wal_with_full_durability_by_default(
+        self,
+    ) -> None:
+        await self.store.ainitialize()
+
+        async def pragmas() -> tuple[str, int]:
+            async with self.backend.engine.connect() as connection:
+                journal = await connection.execute(text("PRAGMA journal_mode"))
+                synchronous = await connection.execute(
+                    text("PRAGMA synchronous")
+                )
+                return str(journal.scalar_one()), int(synchronous.scalar_one())
+
+        journal, synchronous = await self.backend._database_loop.arun(pragmas())
+        self.assertEqual("wal", journal.lower())
+        self.assertEqual(2, synchronous)
+
+    async def test_sqlite_normal_durability_is_explicit_opt_in(self) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            sqlite_synchronous="NORMAL",
+        )
+        self.store = RuntimeStore(backend=self.backend)
+        await self.store.ainitialize()
+
+        async def synchronous_pragma() -> int:
+            async with self.backend.engine.connect() as connection:
+                result = await connection.execute(text("PRAGMA synchronous"))
+                return int(result.scalar_one())
+
+        synchronous = await self.backend._database_loop.arun(
+            synchronous_pragma()
+        )
+        self.assertEqual(1, synchronous)
+
+    def test_sqlite_durability_rejects_unknown_profile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "FULL or NORMAL"):
+            DatabaseBackend.from_path(
+                self.path,
+                sqlite_synchronous="OFF",
+            )
+
     async def test_large_admission_value_is_externalized_and_recoverable(
         self,
     ) -> None:
@@ -149,7 +195,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         await app.aclose()
 
-    async def test_async_event_serialization_failure_keeps_runtime_consistent(
+    async def test_event_serialization_failure_is_invocation_scoped(
         self,
     ) -> None:
         await self.store.aclose()
@@ -163,11 +209,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow.add_node(lambda: "x" * 6_000, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
 
-        # One-way dispatch defers serialization to the DB loop. The first
-        # event may succeed, but its async callback will set the fatal error;
-        # await_capacity on the second event then raises "unavailable".
-        with self.assertRaisesRegex(RuntimeError, "unavailable"):
-            await app.ainvoke(workflow, session_id="same")
+        invocation = await app.ainvoke(workflow, session_id="same")
 
         session = self.store.find_session(
             namespace="default",
@@ -175,8 +217,10 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             session_key="same",
         )
         assert session is not None
-        invocation = session.get_current_invocation()
-        assert invocation is not None
+        current = session.get_current_invocation()
+        assert current is not None
+        self.assertEqual(invocation.id, current.id)
+        self.assertEqual("completed", invocation.state)
         self.assertEqual(
             capture_execution_state(session, invocation),
             self.store.committed_state(invocation.id),
@@ -185,19 +229,33 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             invocation.event_sequence,
             len(self.store.runtime_events[invocation.id]),
         )
-        with self.assertRaisesRegex(RuntimeError, "failed permanently"):
+        while self.store.persistence_status(invocation.id) == "pending":
+            await asyncio.sleep(0.001)
+        self.assertEqual(
+            "unserializable",
+            self.store.persistence_status(invocation.id),
+        )
+        with self.assertRaisesRegex(RuntimeError, "sequence"):
             await self.store.aflush()
-        self.backend._fatal_persistence_error = None
-        await app.aclose()
+
+        small = Workflow(id="serialization_isolation")
+        small.add_node(lambda: "ok", node_id="node")
+        other = await app.ainvoke(small, session_id="other")
+        while self.store.persistence_status(other.id) == "pending":
+            await asyncio.sleep(0.001)
+        self.assertEqual("completed", other.state)
+        self.assertEqual("durable", self.store.persistence_status(other.id))
+        with self.assertRaisesRegex(RuntimeError, "sequence"):
+            await app.aclose()
 
     async def test_event_preparation_is_submitted_without_waiting(self) -> None:
         release = threading.Event()
 
         class SlowAcceptanceBackend(DatabaseBackend):
-            def _prepare_event_item(self, **kwargs):
+            def _prepare_event_item(self, envelope):
                 while not release.is_set():
                     release.wait(0.001)
-                return super()._prepare_event_item(**kwargs)
+                return super()._prepare_event_item(envelope)
 
         await self.store.aclose()
         self.backend = SlowAcceptanceBackend.from_path(self.path)
@@ -213,15 +271,17 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             invocation.event_sequence,
             len(self.store.runtime_events[invocation.id]),
         )
+        self.assertGreater(self.store.pending_persistence_count, 0)
+        self.assertGreater(self.store.pending_persistence_bytes, 0)
         release.set()
         await self.store.aflush()
         self.assertEqual("durable", self.store.persistence_status(invocation.id))
         await app.aclose()
 
-    async def test_fatal_backend_before_event_acceptance_restores_genesis(
+    async def test_unavailable_backend_does_not_interrupt_execution(
         self,
     ) -> None:
-        workflow = Workflow(id="fatal_event_acceptance")
+        workflow = Workflow(id="unavailable_event_acceptance")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         entry = app.register_workflow(workflow)
@@ -247,20 +307,30 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             session.id,
             invocation,
         )
-        self.backend._fatal_persistence_error = RuntimeError("offline")
+        await self.store.aflush()
+        assert self.store.persistence is not None
+        self.store.persistence.mark_unavailable(RuntimeError("offline"))
 
+        completed = await app.workflow_executor.ainvoke(
+            workflow_ir=entry.workflow_ir,
+            session=session,
+            invocation=invocation,
+        )
+
+        self.assertEqual("completed", completed.state)
+        self.assertGreater(completed.event_sequence, 0)
+        self.assertEqual(
+            "degraded",
+            self.store.persistence_status(invocation.id),
+        )
+        another = await app.ainvoke(workflow, session_id="new")
+        self.assertEqual("completed", another.state)
+        self.assertEqual(
+            "degraded",
+            self.store.persistence_status(another.id),
+        )
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
-            await app.workflow_executor.ainvoke(
-                workflow_ir=entry.workflow_ir,
-                session=session,
-                invocation=invocation,
-            )
-
-        self.assertEqual("created", invocation.state)
-        self.assertEqual(0, invocation.event_sequence)
-        self.assertEqual([], self.store.runtime_events[invocation.id])
-        self.backend._fatal_persistence_error = None
-        await app.aclose()
+            await app.aclose()
 
     async def test_batch_byte_limit_finishes_current_batch(self) -> None:
         await self.store.aclose()
@@ -344,10 +414,8 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             DatabaseBackend.from_path(self.path, recovery_event_interval=0)
 
     def test_admission_timeout_must_be_non_negative(self) -> None:
-        with self.assertRaisesRegex(ValueError, "queue_admission_timeout_ms"):
-            DatabaseBackend.from_path(
-                self.path, queue_admission_timeout_ms=-1
-            )
+        with self.assertRaisesRegex(ValueError, "admission_timeout_ms"):
+            PersistencePolicy(admission_timeout_ms=-1)
 
     def test_retryable_database_errors_are_classified_explicitly(self) -> None:
         locked = OperationalError(
@@ -364,21 +432,6 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(_is_retryable_database_error(locked))
         self.assertFalse(_is_retryable_database_error(invalid_query))
-
-    def test_transient_error_pauses_admission_only_at_byte_watermark(self) -> None:
-        self.backend._persistence_error = OperationalError(
-            "INSERT",
-            {},
-            OSError("database is locked"),
-            connection_invalidated=False,
-        )
-
-        self.assertFalse(self.backend.admission_paused)
-        with self.backend._pressure_lock:
-            self.backend._pending_bytes = (
-                self.backend.queue_high_watermark_bytes
-            )
-        self.assertTrue(self.backend.admission_paused)
 
     async def test_sqlite_round_trip_rebuilds_from_genesis_and_boundary_events(self) -> None:
         workflow = Workflow(id="database_round_trip")
@@ -504,7 +557,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row.recovery_state_json)
         await app.aclose()
 
-    async def test_wait_boundary_forces_current_recovery_state(self) -> None:
+    async def test_wait_boundary_requests_recovery_state_without_waiting(self) -> None:
         await self.store.aclose()
         self.backend = DatabaseBackend.from_path(
             self.path,
@@ -519,6 +572,8 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             input={"wait_key": "approval"},
             session_id="wait",
         )
+        self.assertEqual("waiting", invocation.state)
+        await self.store.aflush()
 
         async def load_row() -> InvocationRow:
             async with self.backend._database_sessions() as database:
@@ -527,7 +582,6 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 return row
 
         row = await self.backend._database_loop.arun(load_row())
-        self.assertEqual("waiting", invocation.state)
         self.assertEqual(invocation.event_sequence, row.recovery_sequence)
         self.assertIsNotNone(row.recovery_state_json)
         await app.aclose()
@@ -709,6 +763,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("completed", invocation.state)
         self.assertEqual(["autoagent-runtime-default"], execution_threads)
+        await self.store.aflush()
         self.assertTrue(serializer.dump_threads)
         self.assertEqual(
             {"autoagent-persistence-runtime"},
@@ -716,7 +771,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         await app.aclose()
 
-    async def test_wait_and_resume_are_durable_barriers(self) -> None:
+    async def test_wait_and_resume_can_recover_after_an_explicit_flush(self) -> None:
         workflow = Workflow(id="database_wait_resume")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
@@ -813,6 +868,156 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("durable", slow.persistence_status(invocation.id))
         await app.aclose()
 
+    async def test_wait_and_resume_do_not_wait_for_persistence(self) -> None:
+        release = threading.Event()
+
+        class BlockedBackend(DatabaseBackend):
+            async def _persist_batch(self, batch) -> None:
+                while not release.is_set():
+                    await asyncio.sleep(0.001)
+                await super()._persist_batch(batch)
+
+        await self.store.aclose()
+        blocked_backend = BlockedBackend.from_path(self.path)
+        blocked = RuntimeStore(backend=blocked_backend)
+        self.backend = blocked_backend
+        self.store = blocked
+        workflow = Workflow(id="nonblocking_wait_resume")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        app = AutoAgentApp(runtime_store=blocked)
+
+        waiting = await asyncio.wait_for(
+            app.ainvoke(
+                workflow,
+                input={"wait_key": "approval"},
+                session_id="session",
+            ),
+            timeout=1,
+        )
+        self.assertEqual("waiting", waiting.state)
+        self.assertEqual("pending", blocked.persistence_status(waiting.id))
+
+        resumed = await asyncio.wait_for(
+            app.aresume(
+                workflow,
+                session_id="session",
+                wait_key="approval",
+                output={"approved": True},
+            ),
+            timeout=1,
+        )
+        self.assertEqual("completed", resumed.state)
+        self.assertGreater(blocked.pending_persistence_count, 0)
+
+        release.set()
+        await blocked.aflush()
+        self.assertEqual("durable", blocked.persistence_status(resumed.id))
+        await app.aclose()
+
+    async def test_unavailable_database_rejects_only_after_backlog_limit(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        unavailable_backend = DatabaseBackend.from_path(self.path)
+        unavailable = RuntimeStore(
+            backend=unavailable_backend,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=8 * 1024,
+                queue_high_watermark_bytes=16 * 1024,
+                queue_hard_watermark_bytes=1024 * 1024,
+                admission_timeout_ms=50,
+            ),
+        )
+        self.backend = unavailable_backend
+        self.store = unavailable
+        workflow = Workflow(id="unavailable_backlog")
+        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
+        app = AutoAgentApp(runtime_store=unavailable)
+        await app.astart()
+        assert unavailable.persistence is not None
+        unavailable.persistence.mark_unavailable(RuntimeError("database offline"))
+
+        first = await asyncio.wait_for(
+            app.ainvoke(workflow, session_id="first"),
+            timeout=1,
+        )
+        self.assertEqual("completed", first.state)
+        self.assertTrue(unavailable.admission_paused)
+
+        with self.assertRaisesRegex(
+            PersistenceAdmissionError,
+            "database persistence is unavailable.*database offline",
+        ):
+            await app.ainvoke(workflow, session_id="second")
+
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await app.aclose()
+
+    async def test_hard_queue_limit_degrades_persistence_not_execution(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        bounded_backend = DatabaseBackend.from_path(self.path)
+        bounded = RuntimeStore(
+            backend=bounded_backend,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=32 * 1024,
+                queue_high_watermark_bytes=64 * 1024,
+                queue_hard_watermark_bytes=80 * 1024,
+                admission_timeout_ms=0,
+            ),
+        )
+        self.backend = bounded_backend
+        self.store = bounded
+        workflow = Workflow(id="hard_queue_execution_priority")
+        workflow.add_node(lambda: "x" * (128 * 1024), node_id="node")
+        app = AutoAgentApp(runtime_store=bounded)
+
+        invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual("degraded", bounded.persistence_status(invocation.id))
+        self.assertLessEqual(
+            bounded.pending_persistence_bytes,
+            80 * 1024,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "hard memory limit",
+        ):
+            await app.aclose()
+
+    async def test_database_initialization_failure_keeps_memory_execution(
+        self,
+    ) -> None:
+        class UnavailableAtStartBackend(DatabaseBackend):
+            async def ainitialize(self) -> None:
+                raise OperationalError(
+                    "CONNECT",
+                    {},
+                    OSError("database offline at startup"),
+                    connection_invalidated=True,
+                )
+
+        await self.store.aclose()
+        unavailable_backend = UnavailableAtStartBackend.from_path(self.path)
+        unavailable = RuntimeStore(backend=unavailable_backend)
+        self.backend = unavailable_backend
+        self.store = unavailable
+        workflow = Workflow(id="startup_database_failure")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=unavailable)
+
+        invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
+
+        self.assertEqual("completed", invocation.state)
+        health = unavailable.persistence_health()
+        assert health is not None
+        self.assertEqual("unavailable", health.state)
+        self.assertIn("database offline at startup", health.last_error or "")
+        self.assertEqual("degraded", unavailable.persistence_status(invocation.id))
+        await app.aclose()
+
     async def test_byte_backpressure_rejects_new_admission_until_queue_drains(
         self,
     ) -> None:
@@ -826,18 +1031,20 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        slow_backend = SlowBackend.from_path(
-            self.path,
-            queue_low_watermark_bytes=128,
-            queue_high_watermark_bytes=512,
-            queue_hard_watermark_bytes=1024 * 1024,
-            queue_admission_timeout_ms=0,
+        slow_backend = SlowBackend.from_path(self.path)
+        slow = RuntimeStore(
+            backend=slow_backend,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=8 * 1024,
+                queue_high_watermark_bytes=16 * 1024,
+                queue_hard_watermark_bytes=1024 * 1024,
+                admission_timeout_ms=0,
+            ),
         )
-        slow = RuntimeStore(backend=slow_backend)
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="byte_backpressure")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         first = await app.ainvoke(workflow, session_id="first")
 
@@ -853,7 +1060,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         await app.aclose()
 
     async def test_admission_timeout_zero_rejects_immediately(self) -> None:
-        """queue_admission_timeout_ms=0 restores the immediate-error behavior."""
+        """A zero admission timeout restores immediate rejection."""
 
         release = threading.Event()
 
@@ -865,18 +1072,20 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        slow_backend = SlowBackend.from_path(
-            self.path,
-            queue_low_watermark_bytes=128,
-            queue_high_watermark_bytes=512,
-            queue_hard_watermark_bytes=1024 * 1024,
-            queue_admission_timeout_ms=0,
+        slow_backend = SlowBackend.from_path(self.path)
+        slow = RuntimeStore(
+            backend=slow_backend,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=8 * 1024,
+                queue_high_watermark_bytes=16 * 1024,
+                queue_hard_watermark_bytes=1024 * 1024,
+                admission_timeout_ms=0,
+            ),
         )
-        slow = RuntimeStore(backend=slow_backend)
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="timeout_zero")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         first = await app.ainvoke(workflow, session_id="first")
 
@@ -906,18 +1115,20 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        slow_backend = SlowBackend.from_path(
-            self.path,
-            queue_low_watermark_bytes=128,
-            queue_high_watermark_bytes=512,
-            queue_hard_watermark_bytes=1024 * 1024,
-            queue_admission_timeout_ms=5_000,
+        slow_backend = SlowBackend.from_path(self.path)
+        slow = RuntimeStore(
+            backend=slow_backend,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=8 * 1024,
+                queue_high_watermark_bytes=16 * 1024,
+                queue_hard_watermark_bytes=1024 * 1024,
+                admission_timeout_ms=5_000,
+            ),
         )
-        slow = RuntimeStore(backend=slow_backend)
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="timeout_drain")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
 
         first = await app.ainvoke(workflow, session_id="first")
@@ -934,7 +1145,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         await app.aclose()
 
     async def test_admission_timeout_raises_when_queue_stalls(self) -> None:
-        """Admission blocks until the timeout, then raises TimeoutError."""
+        """Admission blocks until its configured persistence deadline."""
 
         release = threading.Event()
 
@@ -946,25 +1157,30 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 await super()._persist_batch(batch)
 
         await self.store.aclose()
-        blocked = BlockedBackend.from_path(
-            self.path,
-            queue_low_watermark_bytes=128,
-            queue_high_watermark_bytes=512,
-            queue_hard_watermark_bytes=1024 * 1024,
-            queue_admission_timeout_ms=200,
+        blocked = BlockedBackend.from_path(self.path)
+        slow = RuntimeStore(
+            backend=blocked,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=8 * 1024,
+                queue_high_watermark_bytes=16 * 1024,
+                queue_hard_watermark_bytes=1024 * 1024,
+                admission_timeout_ms=200,
+            ),
         )
-        slow = RuntimeStore(backend=blocked)
         self.backend = blocked
         self.store = slow
         workflow = Workflow(id="admission_timeout")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
 
         first = await app.ainvoke(workflow, session_id="first")
         self.assertEqual("completed", first.state)
         self.assertTrue(slow.admission_paused)
 
-        with self.assertRaisesRegex(TimeoutError, "did not clear"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Cannot submit.*persistence backlog",
+        ):
             await app.ainvoke(workflow, session_id="stalled")
 
         release.set()
@@ -974,7 +1190,11 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_admission_timeout_is_nonzero(self) -> None:
         """The default timeout allows waiting, not immediate rejection."""
 
-        self.assertEqual(30_000, self.backend.queue_admission_timeout_ms)
+        assert self.store.persistence is not None
+        self.assertEqual(
+            5_000,
+            self.store.persistence.policy.admission_timeout_ms,
+        )
 
     async def test_waiting_session_rejects_new_invoke_with_database(self) -> None:
         """Persistent session with a waiting invocation rejects new invoke."""
@@ -1012,6 +1232,60 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("waiting", second.state)
         self.assertNotEqual(second.id, waiting.id)
+        await app.aclose()
+
+    async def test_session_busy_wins_before_persistence_backpressure(self) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(
+            backend=self.backend,
+            persistence_policy=PersistencePolicy(
+                queue_low_watermark_bytes=10 * 1024,
+                queue_high_watermark_bytes=20 * 1024,
+                queue_hard_watermark_bytes=100 * 1024,
+                admission_timeout_ms=5_000,
+            ),
+        )
+        workflow = Workflow(id="busy_before_backpressure")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        app = AutoAgentApp(runtime_store=self.store)
+        waiting = await app.ainvoke(
+            workflow,
+            input={"wait_key": "approval"},
+            session_id="shared",
+        )
+        assert self.store.persistence is not None
+        envelope = PersistenceEnvelope(
+            kind="event",
+            namespace="default",
+            session_id=self.store.invocation_sessions[waiting.id],
+            session_updated_at_ms=0,
+            invocation_id=waiting.id,
+            invocation_state="waiting",
+            execution_mode="normal",
+            invocation_updated_at_ms=0,
+            event=RuntimeEvent(
+                invocation_id=waiting.id,
+                sequence=waiting.event_sequence + 1,
+                type="test.pressure",
+                occurred_at_ms=0,
+                payload={"operations": []},
+            ),
+            estimated_bytes=30 * 1024,
+            force_recovery_checkpoint=False,
+        )
+        reservation = self.store.persistence.try_reserve(envelope)
+        assert reservation is not None
+        self.assertTrue(self.store.admission_paused)
+
+        try:
+            with self.assertRaises(SessionBusyError):
+                await asyncio.wait_for(
+                    app.ainvoke(workflow, session_id="shared"),
+                    timeout=0.1,
+                )
+        finally:
+            self.store.persistence.cancel(reservation)
         await app.aclose()
 
     async def test_boundary_events_are_coalesced_into_database_batches(self) -> None:

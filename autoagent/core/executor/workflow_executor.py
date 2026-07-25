@@ -70,7 +70,7 @@ class WorkflowExecutor:
         boundary: RuntimeBoundary,
         *,
         node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
+        force_recovery_checkpoint: bool = False,
         detail: dict[str, Any] | None = None,
     ) -> RuntimeEvent:
         """Generate a sequenced state event, then apply it to RuntimeStore."""
@@ -105,7 +105,7 @@ class WorkflowExecutor:
             invocation,
             event,
             node_execution_ids=node_execution_ids,
-            durability_barrier=durability_barrier,
+            force_recovery_checkpoint=force_recovery_checkpoint,
         )
         return applied
 
@@ -299,7 +299,7 @@ class WorkflowExecutor:
             invocation,
             "recovery.interrupted",
             node_execution_ids=changed_execution_ids,
-            durability_barrier=True,
+            force_recovery_checkpoint=True,
             detail={"code": code, "message": message},
         )
 
@@ -313,22 +313,6 @@ class WorkflowExecutor:
         """Advance one Invocation until it reaches a stable public state."""
 
         while True:
-            if self.runtime_store.persistence_corrupted:
-                invocation.mark_failed(
-                    RuntimeErrorInfo(
-                        code="PERSISTENCE_LOST",
-                        message="Durable persistence is permanently unavailable.",
-                    )
-                )
-                abandoned = await self._abandon_active_work(invocation)
-                await self._commit_boundary(
-                    session,
-                    invocation,
-                    "invocation.failed",
-                    node_execution_ids=abandoned,
-                )
-                return invocation
-
             transitions = invocation.scheduler.drain_transitions()
             if transitions:
                 await self.scheduler.next(
@@ -405,7 +389,7 @@ class WorkflowExecutor:
                     session,
                     invocation,
                     "wait.committed",
-                    durability_barrier=True,
+                    force_recovery_checkpoint=True,
                 )
                 return invocation
 
@@ -586,7 +570,7 @@ class WorkflowExecutor:
             invocation,
             "resume.committed",
             node_execution_ids=(node_execution.id,),
-            durability_barrier=True,
+            force_recovery_checkpoint=True,
             detail={"wait_key": wait_key, "node_id": node_execution.node_id},
         )
         return await self._drive(

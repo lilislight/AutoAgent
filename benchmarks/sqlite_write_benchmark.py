@@ -1,8 +1,8 @@
-"""Benchmark SQLite write throughput: DELETE journal vs WAL mode.
+"""Benchmark SQLite journal mode and durability settings independently.
 
 This benchmark directly measures raw SQLite insert throughput in batches
-comparable to RuntimeEvent persistence.  It tests both journal modes on
-identical workloads.
+comparable to RuntimeEvent persistence. It never presents WAL+NORMAL versus
+DELETE+FULL as a journal-mode comparison because that changes two variables.
 
 Usage::
 
@@ -14,7 +14,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import sqlite3
 import tempfile
@@ -45,6 +44,7 @@ def _create_table(db: sqlite3.Connection) -> None:
 def _run_mode(
     mode: str,
     *,
+    synchronous: str,
     event_count: int,
     batch_size: int,
     payload_bytes: int,
@@ -55,8 +55,7 @@ def _run_mode(
         db_path = Path(tmpdir) / "bench.db"
         with closing(sqlite3.connect(str(db_path))) as db:
             db.execute(f"PRAGMA journal_mode={mode}")
-            if mode.upper() == "WAL":
-                db.execute("PRAGMA synchronous=NORMAL")
+            db.execute(f"PRAGMA synchronous={synchronous}")
             _create_table(db)
             db.commit()
 
@@ -66,8 +65,7 @@ def _run_mode(
 
         with closing(sqlite3.connect(str(db_path))) as db:
             db.execute(f"PRAGMA journal_mode={mode}")
-            if mode.upper() == "WAL":
-                db.execute("PRAGMA synchronous=NORMAL")
+            db.execute(f"PRAGMA synchronous={synchronous}")
 
             for batch_start in range(0, event_count, batch_size):
                 batch_end = min(batch_start + batch_size, event_count)
@@ -97,27 +95,27 @@ def _run_mode(
                     (time.perf_counter() - t0) * 1000
                 )
 
-        total_ms = (time.perf_counter() - total_start) * 1000
-
-        db_bytes = db_path.stat().st_size
-        wal_path = Path(str(db_path) + "-wal")
-        shm_path = Path(str(db_path) + "-shm")
-        journal_path = Path(str(db_path) + "-journal")
-        wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
-        shm_bytes = shm_path.stat().st_size if shm_path.exists() else 0
-        journal_bytes = (
-            journal_path.stat().st_size
-            if journal_path.exists()
-            else 0
-        )
-
-        with closing(sqlite3.connect(str(db_path))) as db:
+            total_ms = (time.perf_counter() - total_start) * 1000
+            # WAL may be checkpointed and removed when the final connection
+            # closes, so measure sidecar files while this connection is open.
+            db_bytes = db_path.stat().st_size
+            wal_path = Path(str(db_path) + "-wal")
+            shm_path = Path(str(db_path) + "-shm")
+            journal_path = Path(str(db_path) + "-journal")
+            wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+            shm_bytes = shm_path.stat().st_size if shm_path.exists() else 0
+            journal_bytes = (
+                journal_path.stat().st_size
+                if journal_path.exists()
+                else 0
+            )
             row_count = db.execute(
                 "SELECT COUNT(*) FROM runtime_events"
             ).fetchone()[0]
 
     return {
         "journal_mode": mode,
+        "synchronous": synchronous,
         "event_count": event_count,
         "batch_size": batch_size,
         "payload_bytes": payload_bytes,
@@ -137,9 +135,9 @@ def _run_mode(
     }
 
 
-async def _main() -> None:
+def _main() -> None:
     parser = argparse.ArgumentParser(
-        description="Measure raw SQLite write throughput: DELETE vs WAL."
+        description="Measure SQLite journal mode and sync level separately."
     )
     parser.add_argument("--events", type=int, default=10000)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -147,19 +145,26 @@ async def _main() -> None:
     parser.add_argument("--runs", type=int, default=5)
     args = parser.parse_args()
 
-    all_results: dict[str, list[dict]] = {"wal": [], "delete": []}
+    profiles = (
+        ("wal_full", "wal", "FULL"),
+        ("delete_full", "delete", "FULL"),
+        ("wal_normal", "wal", "NORMAL"),
+        ("delete_normal", "delete", "NORMAL"),
+    )
+    all_results: dict[str, list[dict]] = {
+        name: [] for name, _, _ in profiles
+    }
     for run_i in range(args.runs):
-        # Alternate order each run to reduce bias
-        modes = ("wal", "delete") if run_i % 2 == 0 else ("delete", "wal")
-        for mode in modes:
-            result = await asyncio.to_thread(
-                _run_mode,
+        ordered = profiles if run_i % 2 == 0 else tuple(reversed(profiles))
+        for name, mode, synchronous in ordered:
+            result = _run_mode(
                 mode,
+                synchronous=synchronous,
                 event_count=args.events,
                 batch_size=args.batch_size,
                 payload_bytes=args.payload_bytes,
             )
-            all_results[mode].append(result)
+            all_results[name].append(result)
 
     def _summary(results: list[dict]) -> dict:
         eps = [r["events_per_second"] for r in results]
@@ -183,10 +188,24 @@ async def _main() -> None:
             ],
         }
 
-    wal = _summary(all_results["wal"])
-    dell = _summary(all_results["delete"])
-
-    speedup = wal["mean_events_per_second"] / dell["mean_events_per_second"]
+    summaries = {
+        name: _summary(results)
+        for name, results in all_results.items()
+    }
+    comparisons = {
+        "wal_vs_delete_full": (
+            summaries["wal_full"]["mean_events_per_second"]
+            / summaries["delete_full"]["mean_events_per_second"]
+        ),
+        "wal_vs_delete_normal": (
+            summaries["wal_normal"]["mean_events_per_second"]
+            / summaries["delete_normal"]["mean_events_per_second"]
+        ),
+        "wal_normal_vs_full": (
+            summaries["wal_normal"]["mean_events_per_second"]
+            / summaries["wal_full"]["mean_events_per_second"]
+        ),
+    }
 
     print(
         json.dumps(
@@ -197,18 +216,22 @@ async def _main() -> None:
                     "payload_bytes": args.payload_bytes,
                     "runs": args.runs,
                 },
-                "wal": wal,
-                "delete": dell,
-                "speedup": {
-                    "events_per_second": speedup,
-                    "total_ms": dell["mean_total_ms"]
-                    / wal["mean_total_ms"],
+                "profiles": summaries,
+                "comparisons": comparisons,
+                "interpretation": {
+                    "journal_mode_at_full": (
+                        "WAL/DELETE with synchronous=FULL: "
+                        f"{comparisons['wal_vs_delete_full']:.2f}x"
+                    ),
+                    "journal_mode_at_normal": (
+                        "WAL/DELETE with synchronous=NORMAL: "
+                        f"{comparisons['wal_vs_delete_normal']:.2f}x"
+                    ),
+                    "durability_cost_in_wal": (
+                        "NORMAL/FULL in WAL mode: "
+                        f"{comparisons['wal_normal_vs_full']:.2f}x"
+                    ),
                 },
-                "interpretation": (
-                    f"WAL is {speedup:.2f}x faster than DELETE journal "
-                    f"for {args.events} rows in batches of "
-                    f"{args.batch_size}."
-                ),
             },
             indent=2,
         )
@@ -216,4 +239,4 @@ async def _main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(_main())
+    _main()

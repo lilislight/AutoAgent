@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from copy import deepcopy
+import logging
 from threading import RLock
 from typing import Any, Protocol
 from uuid import UUID
@@ -10,6 +11,15 @@ from uuid import UUID
 from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.runtime.invocation import Invocation
+from autoagent.core.runtime.persistence import (
+    PersistenceCoordinator,
+    PersistenceEnvelope,
+    PersistenceHealth,
+    PersistencePolicy,
+    freeze_admission_envelope,
+    freeze_event_envelope,
+    freeze_workflow_envelope,
+)
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
 from autoagent.core.runtime.retention import RuntimeRetentionPolicy
 from autoagent.core.runtime.session import Session
@@ -22,6 +32,9 @@ from autoagent.core.runtime.snapshot import (
     restore_execution_state,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
+
+
+logger = logging.getLogger(__name__)
 
 
 class SessionBusyError(RuntimeError):
@@ -45,43 +58,11 @@ class DurableBackend(Protocol):
 
     def bind(self, store: RuntimeStore) -> None: ...
 
-    @property
-    def admission_paused(self) -> bool: ...
-
-    @property
-    def persistence_corrupted(self) -> bool: ...
-
-    @property
-    def pending_persistence_bytes(self) -> int: ...
-
-    @property
-    def pending_persistence_count(self) -> int: ...
-
     async def ainitialize(self) -> None: ...
 
     async def aclose(self) -> None: ...
 
     async def aflush(self) -> None: ...
-
-    async def await_capacity(self) -> None: ...
-
-    def dispatch_event_nowait(
-        self,
-        session_id: UUID,
-        namespace: str,
-        session_updated_at_ms: int,
-        invocation_id: UUID,
-        invocation_state: str,
-        execution_mode: str,
-        invocation_updated_at_ms: int,
-        event: RuntimeEvent,
-    ) -> None: ...
-
-    async def asave_workflow_snapshot(
-        self,
-        namespace: str,
-        snapshot: WorkflowVersionSnapshot,
-    ) -> None: ...
 
     async def afind_session(
         self,
@@ -90,22 +71,6 @@ class DurableBackend(Protocol):
         workflow_id: str,
         session_key: str,
     ) -> Session | None: ...
-
-    async def aadmit_invocation(
-        self,
-        session: Session,
-        invocation: Invocation,
-        snapshot: ExecutionSnapshot,
-    ) -> None: ...
-
-    async def aappend_event(
-        self,
-        session: Session,
-        invocation: Invocation,
-        event: RuntimeEvent,
-        *,
-        durability_barrier: bool,
-    ) -> None: ...
 
     async def aload_execution_snapshot(
         self,
@@ -123,11 +88,6 @@ class DurableBackend(Protocol):
         limit: int,
     ) -> tuple[RuntimeEvent, ...]: ...
 
-    def persistence_status(self, invocation_id: UUID) -> str: ...
-
-    def durable_sequence(self, invocation_id: UUID) -> int: ...
-
-
 class RuntimeStore:
     """Authoritative in-memory runtime center with optional durability.
 
@@ -142,10 +102,16 @@ class RuntimeStore:
         backend: DurableBackend | None = None,
         serializer: JsonRuntimeSerializer | None = None,
         retention_policy: RuntimeRetentionPolicy | None = None,
+        persistence_policy: PersistencePolicy | None = None,
     ) -> None:
         self.serializer = serializer or JsonRuntimeSerializer()
         self.backend = backend
         self.retention_policy = retention_policy or RuntimeRetentionPolicy()
+        self.persistence = (
+            PersistenceCoordinator(persistence_policy or PersistencePolicy())
+            if backend is not None
+            else None
+        )
         self._lock = RLock()
         self.workflow_versions: dict[
             tuple[str, str, str, str],
@@ -169,43 +135,33 @@ class RuntimeStore:
 
     @property
     def pending_persistence_bytes(self) -> int:
-        return (
-            self.backend.pending_persistence_bytes
-            if self.backend is not None
-            else 0
-        )
+        return self.persistence.pending_bytes if self.persistence is not None else 0
 
     @property
     def pending_persistence_count(self) -> int:
-        return (
-            self.backend.pending_persistence_count
-            if self.backend is not None
-            else 0
-        )
+        return self.persistence.pending_count if self.persistence is not None else 0
 
     @property
     def admission_paused(self) -> bool:
-        return self.backend.admission_paused if self.backend is not None else False
-
-    @property
-    def persistence_corrupted(self) -> bool:
-        """True when durable persistence is permanently unavailable.
-
-        A ``_drive()`` loop inspects this at the top of every iteration so
-        that an async serialization failure on the persistence thread stops
-        the invocation within one scheduler boundary instead of silently
-        advancing in-memory state past broken durable records.
-        """
-
         return (
-            self.backend.persistence_corrupted
-            if self.backend is not None
+            self.persistence.admission_paused
+            if self.persistence is not None
             else False
         )
 
     async def ainitialize(self) -> None:
         if self.backend is not None:
-            await self.backend.ainitialize()
+            try:
+                await self.backend.ainitialize()
+            except Exception as exc:
+                assert self.persistence is not None
+                self.persistence.mark_unavailable(exc)
+                logger.exception(
+                    "Runtime persistence could not be initialized; Workflow "
+                    "execution will continue in memory and new submission "
+                    "will be limited only when the persistence backlog reaches "
+                    "its admission watermark."
+                )
 
     async def aclose(self) -> None:
         if self.backend is not None:
@@ -214,6 +170,8 @@ class RuntimeStore:
     async def aflush(self) -> None:
         if self.backend is not None:
             await self.backend.aflush()
+        elif self.persistence is not None:
+            await self.persistence.flush()
 
     def save_workflow_snapshot(
         self,
@@ -237,8 +195,21 @@ class RuntimeStore:
         snapshot: WorkflowVersionSnapshot,
     ) -> None:
         created = self.save_workflow_snapshot(namespace, snapshot)
-        if created and self.backend is not None:
-            await self.backend.asave_workflow_snapshot(namespace, snapshot)
+        if created and self.persistence is not None:
+            try:
+                envelope = freeze_workflow_envelope(
+                    namespace=namespace,
+                    snapshot=snapshot,
+                )
+            except Exception as exc:
+                self.persistence.mark_unavailable(exc)
+                logger.exception(
+                    "Workflow metadata could not be copied for persistence; "
+                    "execution remains available: workflow_id=%s",
+                    snapshot.workflow_id,
+                )
+            else:
+                self._publish_persistence(envelope)
 
     def load_workflow_snapshot(
         self,
@@ -332,11 +303,23 @@ class RuntimeStore:
         )
         if value is not None or self.backend is None:
             return value
-        value = await self.backend.afind_session(
-            namespace=namespace,
-            workflow_id=workflow_id,
-            session_key=session_key,
-        )
+        try:
+            value = await self.backend.afind_session(
+                namespace=namespace,
+                workflow_id=workflow_id,
+                session_key=session_key,
+            )
+        except Exception as exc:
+            assert self.persistence is not None
+            self.persistence.mark_unavailable(exc)
+            logger.exception(
+                "Historical Session lookup is unavailable; a process-local "
+                "Session will be used so Workflow execution can continue: "
+                "workflow_id=%s session_key=%s",
+                workflow_id,
+                session_key,
+            )
+            value = None
         if value is not None:
             with self._lock:
                 self._cache_session(value)
@@ -347,46 +330,18 @@ class RuntimeStore:
         session_id: UUID,
         invocation: Invocation,
     ) -> Session:
-        if self.admission_paused:
-            timeout_ms = (
-                self.backend.queue_admission_timeout_ms
-                if self.backend is not None
-                else 0
-            )
-            if timeout_ms == 0:
-                raise RuntimeError(
-                    "Runtime persistence backlog is above the admission "
-                    "watermark."
-                )
-            # Poll until admission resumes or the timeout elapses.
-            # Multiple callers for the same session may wait concurrently.
-            # After the queue drains, the RLock and _pending_admissions dict
-            # (just below) serialize admission so only one succeeds and the
-            # rest receive SessionBusyError.
-            import time as _time
-            started = _time.monotonic()
-            deadline_s = timeout_ms / 1_000
-            while self.admission_paused:
-                if _time.monotonic() - started >= deadline_s:
-                    raise TimeoutError(
-                        "Runtime persistence backlog did not clear "
-                        f"within {timeout_ms:.0f} ms."
-                    )
-                await asyncio.sleep(0.05)
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(f"Unknown session: {session_id}")
-            pending = self._pending_admissions.get(session_id)
-            if pending is not None:
-                raise SessionBusyError(session, pending)
-            current = session.get_current_invocation()
-            if current is not None and current.state in {
-                "created",
-                "running",
-                "waiting",
-            }:
-                raise SessionBusyError(session, current)
+            self._ensure_session_can_admit(session)
+        if self.persistence is not None:
+            await self.persistence.await_admission()
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                raise KeyError(f"Unknown session: {session_id}")
+            self._ensure_session_can_admit(session)
             admitted_at_ms = utc_timestamp_ms()
             session_record = session.to_record()
             session_record["current_invocation_id"] = str(invocation.id)
@@ -404,26 +359,6 @@ class RuntimeStore:
                 state=state,
             )
             self._pending_admissions[session_id] = invocation
-        cancelled: asyncio.CancelledError | None = None
-        try:
-            if self.backend is not None:
-                admission = asyncio.create_task(
-                    self.backend.aadmit_invocation(
-                        session,
-                        invocation,
-                        snapshot,
-                    )
-                )
-                try:
-                    await asyncio.shield(admission)
-                except asyncio.CancelledError as exc:
-                    await admission
-                    cancelled = exc
-        except BaseException:
-            with self._lock:
-                if self._pending_admissions.get(session_id) is invocation:
-                    del self._pending_admissions[session_id]
-            raise
         with self._lock:
             pending = self._pending_admissions.get(session_id)
             if pending is not invocation:
@@ -438,9 +373,42 @@ class RuntimeStore:
             self.runtime_events[invocation.id] = []
             self._committed_states[invocation.id] = state
             self._replay_checkpoints[(invocation.id, 0)] = snapshot
-        if cancelled is not None:
-            raise cancelled
+        if self.persistence is not None:
+            try:
+                envelope = freeze_admission_envelope(
+                    namespace=session.namespace,
+                    session_id=session.id,
+                    invocation_id=invocation.id,
+                    workflow_key=(
+                        session.namespace,
+                        session.workflow_id,
+                        invocation.workflow_definition_hash or "",
+                        invocation.workflow_operator_manifest_hash or "",
+                    ),
+                    snapshot=snapshot,
+                )
+            except Exception as exc:
+                self.persistence.fail_invocation(invocation.id, 0, exc)
+                logger.exception(
+                    "Invocation genesis could not be copied for persistence; "
+                    "execution remains available: invocation_id=%s",
+                    invocation.id,
+                )
+            else:
+                self._publish_persistence(envelope)
         return session
+
+    def _ensure_session_can_admit(self, session: Session) -> None:
+        pending = self._pending_admissions.get(session.id)
+        if pending is not None:
+            raise SessionBusyError(session, pending)
+        current = session.get_current_invocation()
+        if current is not None and current.state in {
+            "created",
+            "running",
+            "waiting",
+        }:
+            raise SessionBusyError(session, current)
 
     async def aclaim_waiting_session(
         self,
@@ -488,7 +456,7 @@ class RuntimeStore:
         event: RuntimeEvent,
         *,
         node_execution_ids: tuple[UUID, ...] = (),
-        durability_barrier: bool = False,
+        force_recovery_checkpoint: bool = False,
     ) -> RuntimeEvent:
         del node_execution_ids
         if event.invocation_id != invocation.id:
@@ -510,43 +478,6 @@ class RuntimeStore:
                 for value in event.payload["operations"]
             )
             reduced = apply_state_operations(previous, operations)
-        cancelled: asyncio.CancelledError | None = None
-        try:
-            if self.backend is not None:
-                await self.backend.await_capacity()
-                if durability_barrier:
-                    acceptance = asyncio.create_task(
-                        self.backend.aappend_event(
-                            session,
-                            invocation,
-                            event,
-                            durability_barrier=True,
-                        )
-                    )
-                    try:
-                        await asyncio.shield(acceptance)
-                    except asyncio.CancelledError as exc:
-                        await acceptance
-                        cancelled = exc
-                else:
-                    self.backend.dispatch_event_nowait(
-                        session.id,
-                        session.namespace,
-                        session.updated_at_ms,
-                        invocation.id,
-                        invocation.state,
-                        invocation.execution_mode,
-                        invocation.updated_at_ms,
-                        event,
-                    )
-        except BaseException:
-            with self._lock:
-                self._restore_live_aggregate(
-                    session,
-                    invocation,
-                    previous,
-                )
-            raise
         with self._lock:
             events = self.runtime_events.setdefault(invocation.id, [])
             expected = events[-1].sequence + 1 if events else 1
@@ -559,11 +490,71 @@ class RuntimeStore:
             self._committed_states[invocation.id] = reduced
             self.sessions[session.id] = session
             self.invocations[invocation.id] = invocation
+        if self.persistence is not None:
+            try:
+                envelope = freeze_event_envelope(
+                    namespace=session.namespace,
+                    session_id=session.id,
+                    session_updated_at_ms=session.updated_at_ms,
+                    invocation_id=invocation.id,
+                    invocation_state=invocation.state,
+                    execution_mode=invocation.execution_mode,
+                    invocation_updated_at_ms=invocation.updated_at_ms,
+                    event=event,
+                    force_recovery_checkpoint=force_recovery_checkpoint,
+                )
+            except Exception as exc:
+                self.persistence.fail_invocation(
+                    invocation.id,
+                    event.sequence,
+                    exc,
+                )
+                logger.exception(
+                    "Invocation Event could not be copied for persistence; "
+                    "execution remains available: invocation_id=%s sequence=%s",
+                    invocation.id,
+                    event.sequence,
+                )
+            else:
+                self._publish_persistence(envelope)
         if self.backend is not None:
             self._persistence_advanced(invocation.id)
-        if cancelled is not None:
-            raise cancelled
         return event
+
+    def _publish_persistence(self, envelope: PersistenceEnvelope) -> bool:
+        persistence = self.persistence
+        if persistence is None:
+            return False
+        if (
+            envelope.invocation_id is not None
+            and (
+                persistence.invocation_error(envelope.invocation_id)
+                is not None
+                or persistence.invocation_gap(envelope.invocation_id)
+                is not None
+            )
+        ):
+            return False
+        reservation = persistence.try_reserve(envelope)
+        if reservation is None:
+            if envelope.invocation_id is not None:
+                sequence = envelope.event.sequence if envelope.event else 0
+                persistence.degrade_invocation(
+                    envelope.invocation_id,
+                    sequence,
+                    "persistence queue reached its hard memory limit",
+                )
+            logger.error(
+                "Persistence record was not queued because the queue reached "
+                "its hard memory limit; execution remains available: "
+                "kind=%s invocation_id=%s pending_bytes=%s",
+                envelope.kind,
+                envelope.invocation_id,
+                persistence.pending_bytes,
+            )
+            return False
+        persistence.publish(reservation, envelope)
+        return True
 
     def _restore_live_aggregate(
         self,
@@ -728,7 +719,8 @@ class RuntimeStore:
                 )
             ]
         if known_in_memory:
-            return tuple(values[-limit:] if before_sequence is not None else values[:limit])
+            selected = values[-limit:] if before_sequence is not None else values[:limit]
+            return tuple(event.model_copy(deep=True) for event in selected)
         if self.backend is None:
             return ()
         return await self.backend.alist_runtime_events(
@@ -748,19 +740,24 @@ class RuntimeStore:
             return "memory_only"
         expected = self._evicted_event_sequences.get(invocation_id)
         if expected is not None:
-            return (
-                "durable"
-                if self.backend.durable_sequence(invocation_id) >= expected
-                else "pending"
-            )
-        return self.backend.persistence_status(invocation_id)
+            assert self.persistence is not None
+            return self.persistence.status(invocation_id, expected)
+        invocation = self.invocations[invocation_id]
+        assert self.persistence is not None
+        return self.persistence.status(
+            invocation_id,
+            invocation.event_sequence,
+        )
 
     def durable_sequence(self, invocation_id: UUID) -> int:
         return (
-            self.backend.durable_sequence(invocation_id)
-            if self.backend is not None
+            self.persistence.durable_sequence(invocation_id)
+            if self.persistence is not None
             else 0
         )
+
+    def persistence_health(self) -> PersistenceHealth | None:
+        return self.persistence.health if self.persistence is not None else None
 
     async def _load_event_range(
         self,

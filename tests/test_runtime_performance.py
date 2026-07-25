@@ -11,7 +11,13 @@ import unittest
 
 from sqlalchemy import text
 
-from autoagent import AutoAgentApp, DatabaseBackend, RuntimeStore, Workflow
+from autoagent import (
+    AutoAgentApp,
+    DatabaseBackend,
+    PersistencePolicy,
+    RuntimeStore,
+    Workflow,
+)
 from autoagent.core.runtime.backends.database import _PersistenceItem
 
 
@@ -175,14 +181,19 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             backend = BlockedEventBackend.from_path(
                 Path(directory) / "runtime.db",
-                queue_low_watermark_bytes=8 * 1024,
-                queue_high_watermark_bytes=16 * 1024,
-                queue_hard_watermark_bytes=16 * 1024 * 1024,
                 batch_max_delay_ms=0,
                 recovery_event_interval=1_000,
-                queue_admission_timeout_ms=0,
             )
-            store = RuntimeStore(backend=backend)
+            persistence_policy = PersistencePolicy(
+                queue_low_watermark_bytes=32 * 1024,
+                queue_high_watermark_bytes=64 * 1024,
+                queue_hard_watermark_bytes=16 * 1024 * 1024,
+                admission_timeout_ms=0,
+            )
+            store = RuntimeStore(
+                backend=backend,
+                persistence_policy=persistence_policy,
+            )
             app = AutoAgentApp(runtime_store=store)
             workflow = _build_chain("concurrent_queue_backlog", node_count=5)
 
@@ -206,13 +217,19 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                     len(store.runtime_events[invocation.id])
                     for invocation in invocations
                 )
-                self.assertEqual(
-                    boundary_event_count,
+                self.assertGreaterEqual(
                     store.pending_persistence_count,
+                    boundary_event_count,
+                )
+                self.assertLessEqual(
+                    store.pending_persistence_count - boundary_event_count,
+                    len(admitted) + 1,
+                    "Only Workflow metadata and Invocation genesis records "
+                    "may add queue entries beyond boundary Events.",
                 )
                 self.assertGreaterEqual(
                     store.pending_persistence_bytes,
-                    backend.queue_high_watermark_bytes,
+                    persistence_policy.queue_high_watermark_bytes,
                 )
                 self.assertTrue(store.admission_paused)
 

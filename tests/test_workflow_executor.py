@@ -6,7 +6,7 @@ import time
 import unittest
 
 from autoagent import AutoAgentApp
-from autoagent.core.runtime import RuntimeStore, SessionBusyError
+from autoagent.core.runtime import Invocation, RuntimeStore, SessionBusyError
 from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
@@ -14,6 +14,7 @@ from autoagent.core.workflow import (
     EdgePolicy,
     MapPolicy,
     NodePolicy,
+    RecoveryPolicy,
     ReplicationPolicy,
     ResourcePolicy,
     RetryPolicy,
@@ -21,6 +22,7 @@ from autoagent.core.workflow import (
     TimeoutPolicy,
     Workflow,
 )
+from tests.helpers import started_app
 
 
 def start_message(message: str) -> dict[str, str]:
@@ -32,6 +34,65 @@ def finish_message(text: str) -> str:
 
 
 class WorkflowExecutorTests(unittest.TestCase):
+    def test_app_execution_requires_explicit_start(self) -> None:
+        workflow = Workflow(id="explicit_app_start")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp()
+
+        with self.assertRaisesRegex(RuntimeError, "not started"):
+            app.invoke(workflow)
+        with self.assertRaisesRegex(RuntimeError, "not started"):
+            asyncio.run(app.ainvoke(workflow))
+        self.assertEqual({}, app.runtime_store.invocations)
+
+        app.start()
+        invocation = app.invoke(workflow)
+        self.assertEqual("completed", invocation.state)
+        app.close()
+
+    def test_start_recovers_registered_created_invocation(self) -> None:
+        workflow = Workflow(id="startup_created_recovery")
+        workflow.add_node(
+            lambda: "recovered",
+            node_id="node",
+            policy=NodePolicy(
+                recovery=RecoveryPolicy(mode="replay_safe", max_attempts=1)
+            ),
+        )
+        store = RuntimeStore()
+        app = AutoAgentApp(runtime_store=store)
+        entry = app.register_workflow(workflow)
+        session = store.get_or_create_session(
+            namespace=app.namespace,
+            workflow_id=workflow.id,
+            session_key="recover-on-start",
+        )
+        invocation = Invocation(
+            workflow_id=workflow.id,
+            workflow_version=entry.workflow_ir.workflow_version,
+            workflow_definition_hash=entry.workflow_ir.definition_hash,
+            workflow_operator_manifest_hash=(
+                entry.workflow_snapshot.operator_manifest_hash
+            ),
+            entry_node_id="node",
+            event_mode="full",
+        )
+        asyncio.run(store.aadmit_invocation(session.id, invocation))
+
+        app.start()
+
+        recovered = store.invocations[invocation.id]
+        self.assertEqual("completed", recovered.state)
+        self.assertEqual("recovery", recovered.execution_mode)
+        self.assertEqual({"output": "recovered"}, recovered.result)
+        app.close()
+
+    def test_workflow_executor_is_async_only(self) -> None:
+        app = started_app()
+        self.assertFalse(hasattr(app.workflow_executor, "invoke"))
+        self.assertFalse(hasattr(app.workflow_executor, "resume"))
+        app.close()
+
     def test_expanded_child_workflow_executes_with_local_hook_ids(self) -> None:
         observed_condition: list[tuple[str, str, str, int]] = []
         observed_binding: list[tuple[str, int]] = []
@@ -92,7 +153,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         parent.add_edge("start", "child")
         parent.add_edge("child", "finish")
 
-        invocation = AutoAgentApp().invoke(parent, input={"value": 2})
+        invocation = started_app().invoke(parent, input={"value": 2})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": 9})
@@ -112,7 +173,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_node(finish_message, node_id="finish")
         workflow.add_edge("start", "finish")
 
-        invocation = AutoAgentApp().invoke(workflow, input={"message": "hello"})
+        invocation = started_app().invoke(workflow, input={"message": "hello"})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.outputs.latest("start"), {"text": "HELLO"})
@@ -134,7 +195,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_node(finish, node_id="finish")
         workflow.add_edge("approval", "finish")
-        app = AutoAgentApp()
+        app = started_app()
 
         waiting = app.invoke(
             workflow,
@@ -188,7 +249,7 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_system_wait_uses_node_execution_id_as_default_wait_key(self) -> None:
         workflow = Workflow(id="generated_wait_key")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
-        app = AutoAgentApp()
+        app = started_app()
 
         invocation = app.invoke(workflow, session_id="session")
 
@@ -241,7 +302,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             edge_id="exit",
             condition=lambda ctx: ctx.source_output >= 2,
         )
-        app = AutoAgentApp()
+        app = started_app()
 
         first_wait = app.invoke(workflow, session_id="loop-wait")
         first_state = first_wait.state
@@ -296,7 +357,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             )
             workflow.add_edge("start", "wait")
             workflow.add_edge("start", "slow")
-            app = AutoAgentApp()
+            app = started_app()
 
             task = asyncio.create_task(
                 app.ainvoke(workflow, session_id="parallel-session")
@@ -353,7 +414,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow = Workflow(id="invalid_wait_input")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
 
-        invocation = AutoAgentApp().invoke(
+        invocation = started_app().invoke(
             workflow,
             input={"wait_key": 1},
             session_id="session",
@@ -375,7 +436,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("start", "wait_a")
         workflow.add_edge("start", "wait_b")
 
-        invocation = AutoAgentApp().invoke(workflow, session_id="session")
+        invocation = started_app().invoke(workflow, session_id="session")
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "WAIT_KEY_CONFLICT")
@@ -391,7 +452,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_node(finish_message, node_id="finish")
         workflow.add_edge("start", "finish")
 
-        invocation = AutoAgentApp().invoke(workflow, input={"message": "async"})
+        invocation = started_app().invoke(workflow, input={"message": "async"})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.outputs.latest("finish"), "done:async")
@@ -410,7 +471,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             workflow = Workflow(id="native_async_invoke")
             workflow.add_node(operator, node_id="operator")
 
-            invocation = await AutoAgentApp().ainvoke(
+            invocation = await started_app().ainvoke(
                 workflow,
                 input={"value": "async"},
             )
@@ -442,7 +503,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             workflow.add_node(operator, node_id="operator")
 
             invocation, _ = await asyncio.gather(
-                AutoAgentApp().ainvoke(workflow),
+                started_app().ainvoke(workflow),
                 heartbeat(),
             )
 
@@ -456,7 +517,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         async def scenario() -> None:
             workflow = Workflow(id="sync_in_async")
             workflow.add_node(lambda: "done", node_id="node")
-            app = AutoAgentApp()
+            app = started_app()
 
             sync_result = app.invoke(workflow, session_id="sync")
             async_result = await app.ainvoke(workflow, session_id="async")
@@ -481,7 +542,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
             workflow = Workflow(id="async_cancellation")
             workflow.add_node(operator, node_id="operator")
-            app = AutoAgentApp()
+            app = started_app()
             task = asyncio.create_task(
                 app.ainvoke(workflow, session_id="session")
             )
@@ -530,7 +591,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_edge("start", "target", condition=condition)
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.result, {"output": 4})
         self.assertEqual(invocation.context.data, {"bound": 4})
@@ -569,7 +630,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_edge("start", "target", condition=condition)
 
-        app = AutoAgentApp()
+        app = started_app()
         invocation = app.invoke(
             workflow,
             input={"request": {"items": [1]}},
@@ -624,7 +685,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("start", "slow")
         workflow.add_edge("fast", "after_fast")
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "completed")
         self.assertLess(events.index("after_fast"), events.index("slow"))
@@ -669,7 +730,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("left", "join", edge_id="left_join")
         workflow.add_edge("right", "join", edge_id="right_join")
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(calls, ["left", "join"])
@@ -707,7 +768,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("left", "join")
         workflow.add_edge("right", "join")
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.outputs.latest("join"), "LR")
@@ -764,7 +825,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=lambda ctx: ctx.source_output >= 3,
         )
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": 3})
@@ -794,7 +855,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=lambda ctx: True,
         )
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "failed")
         assert invocation.error is not None
@@ -851,7 +912,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=lambda ctx: ctx.source_output >= 3,
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": 3})
@@ -927,7 +988,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=lambda ctx: ctx.source_output["outer"] >= 2,
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(
@@ -1011,7 +1072,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=lambda ctx: ctx.source_output >= 3,
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": 3})
@@ -1060,7 +1121,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_edge("side", "join", edge_id="side_join")
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": "2:side"})
@@ -1086,7 +1147,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=broken_condition,
         )
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "failed")
         assert invocation.error is not None
@@ -1119,7 +1180,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             )
         )
 
-        invocation = AutoAgentApp().invoke(workflow, input={})
+        invocation = started_app().invoke(workflow, input={})
 
         self.assertEqual(invocation.state, "failed")
         self.assertIsNotNone(invocation.error)
@@ -1139,7 +1200,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        compile_result = AutoAgentApp().compiler.compile(workflow)
+        compile_result = started_app().compiler.compile(workflow)
 
         self.assertFalse(compile_result.ok)
 
@@ -1155,7 +1216,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="same_session_running")
         workflow.add_node(slow, node_id="slow")
-        app = AutoAgentApp()
+        app = started_app()
         thread = threading.Thread(
             target=lambda: results.append(
                 app.invoke(workflow, session_id="shared-session")
@@ -1192,7 +1253,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="busy_while_waiting")
         workflow.add_node(SystemCommand(id="wait"), node_id="approval")
-        app = AutoAgentApp()
+        app = started_app()
 
         waiting = app.invoke(
             workflow,
@@ -1222,7 +1283,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="reuse_session")
         workflow.add_node(SystemCommand(id="wait"), node_id="approval")
-        app = AutoAgentApp()
+        app = started_app()
 
         waiting = app.invoke(
             workflow,
@@ -1259,7 +1320,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="isolated_mailboxes")
         workflow.add_node(concurrent, node_id="node")
-        app = AutoAgentApp()
+        app = started_app()
         app.invoke(workflow, input={"value": "warm"}, session_id="warm")
 
         threads = [
@@ -1304,7 +1365,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         second = Workflow(id="after_isolated_failure")
         second.add_node(lambda: "new", node_id="new")
-        app = AutoAgentApp()
+        app = started_app()
 
         failed = app.invoke(first)
         completed = app.invoke(second)
@@ -1336,7 +1397,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "completed")
         execution = invocation.node_executions[0]
@@ -1357,7 +1418,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             order.append("fallback")
             return "ok"
 
-        app = AutoAgentApp()
+        app = started_app()
         app.register_capability("retry_fallback")
         app.register_operator(
             primary,
@@ -1410,7 +1471,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             node_id="limited",
             policy=NodePolicy(max_concurrency=1),
         )
-        app = AutoAgentApp()
+        app = started_app()
         app.invoke(workflow, input={"value": "warm"}, session_id="warm")
 
         def invoke(key: str) -> None:
@@ -1438,7 +1499,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             policy=NodePolicy(timeout=TimeoutPolicy(timeout_ms=1)),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
@@ -1458,7 +1519,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.result, {"output": 6})
         calls = invocation.node_executions[0].operator_executions
@@ -1485,7 +1546,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.result, {"output": (1, 4, 9)})
         calls = invocation.latest_node_execution("square").operator_executions
@@ -1495,7 +1556,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(3, calls[0].summary.success_count)
 
     def test_input_mapping_failure_bypasses_retry_and_fallback(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         primary_calls = 0
         fallback_calls = 0
 
@@ -1535,7 +1596,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(execution.operator_executions, [])
 
     def test_invalid_mapping_output_bypasses_retry_and_fallback(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         primary_calls = 0
         fallback_calls = 0
 
@@ -1587,7 +1648,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_edge("start", "target")
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "INPUT_MAPPING_INVALID")
@@ -1614,7 +1675,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             policy=EdgePolicy(map=MapPolicy(item_selector=lambda _ctx: 1)),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "MAP_ITEM_SELECTION_FAILED")
@@ -1643,7 +1704,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "MAP_ITEM_INPUT_INVALID")
@@ -1676,7 +1737,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "MAP_ITEM_INPUT_INVALID")
@@ -1720,7 +1781,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(
+        invocation = started_app().invoke(
             workflow,
             input={"request": {"id": "shared"}},
         )
@@ -1766,7 +1827,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
 
         started = time.perf_counter()
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
         elapsed = time.perf_counter() - started
 
         self.assertEqual(invocation.state, "failed")
@@ -1795,12 +1856,12 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = AutoAgentApp().invoke(workflow, input={"value": 2})
+        invocation = started_app().invoke(workflow, input={"value": 2})
 
         self.assertEqual(invocation.result, {"output": 6})
 
     def test_output_binding_failure_bypasses_retry_and_fallback(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         primary_calls = 0
         fallback_calls = 0
 
@@ -1872,7 +1933,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             "target",
             condition=condition,
         )
-        app = AutoAgentApp()
+        app = started_app()
 
         invocation = app.invoke(
             workflow,
@@ -1913,7 +1974,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("start", "a")
         workflow.add_edge("start", "b")
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         failed = [
             execution
@@ -1950,7 +2011,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("start", "a")
         workflow.add_edge("start", "b")
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual("completed", invocation.state)
         self.assertEqual({"a": 1, "b": 2}, invocation.context.data)
@@ -1969,7 +2030,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_edge("first", "second")
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
 
         self.assertEqual("completed", invocation.state)
         self.assertEqual({"value": 2}, invocation.context.data)
@@ -1982,7 +2043,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("a", "join", edge_id="a_join")
         workflow.add_edge("b", "join", edge_id="b_join")
 
-        invocation = AutoAgentApp().invoke(workflow, entry_node_id="a")
+        invocation = started_app().invoke(workflow, entry_node_id="a")
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": "A"})

@@ -9,6 +9,7 @@ runtime facts asynchronously.
 Runtime detail is selected for each Invocation:
 
 ```python
+app.start()
 invocation = app.invoke(
     workflow,
     input={"message": "hello"},
@@ -23,6 +24,7 @@ environment-loading method:
 
 ```python
 app = AutoAgentApp()
+app.start()
 ```
 
 `AutoAgentApp()` automatically reads supported `AUTOAGENT_*` values from the
@@ -30,6 +32,12 @@ current `.env`, then lets process environment variables override the same
 keys. `AutoAgentSettings(...)` is only for explicit programmatic overrides and
 tests. The complete supported deployment configuration is documented in
 `.env.example`; unrelated Workflow/test variables do not belong there.
+
+Startup is explicit. Register Workflows and runtime codecs/models first, then
+call `app.start()` (or `await app.astart()`). Startup initializes the backend,
+rebuilds durable waits, and recovers unfinished `created`/`running`
+Invocations for registered Workflows. Invoke, submit, and resume never start or
+recover the App lazily.
 
 `event_mode` is deliberately an Invocation option rather than an App option.
 The same App and Session may choose different modes for different Invocations.

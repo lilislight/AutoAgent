@@ -18,6 +18,7 @@ from autoagent.core.workflow import (
     TimeoutPolicy,
     Workflow,
 )
+from tests.helpers import started_app
 
 
 class BackoffPolicyTests(unittest.TestCase):
@@ -111,7 +112,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
                 ),
             )
 
-            invocation = await AutoAgentApp().ainvoke(workflow)
+            invocation = await started_app().ainvoke(workflow)
             calls = invocation.latest_node_execution("slow").operator_executions
 
             self.assertEqual(invocation.state, "failed")
@@ -148,7 +149,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             node_id="slow",
             policy=NodePolicy(timeout=TimeoutPolicy(timeout_ms=5)),
         )
-        app = AutoAgentApp()
+        app = started_app()
 
         invocation = app.invoke(workflow, session_id="session")
         self.assertTrue(started.is_set())
@@ -187,7 +188,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
 
             workflow = Workflow(id="sync_cancel_late_result")
             workflow.add_node(slow, node_id="slow")
-            app = AutoAgentApp()
+            app = started_app()
             task = asyncio.create_task(
                 app.ainvoke(workflow, session_id="session")
             )
@@ -249,7 +250,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             condition=lambda ctx: ctx.source_output >= 3,
         )
 
-        invocation = AutoAgentApp().invoke(workflow)
+        invocation = started_app().invoke(workflow)
         executions = [
             execution
             for execution in invocation.node_executions
@@ -270,7 +271,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         primary_calls = 0
         fallback_calls = 0
 
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("sample", operator_id="primary")
         def primary() -> str:

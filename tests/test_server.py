@@ -24,6 +24,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.workflow = Workflow(id="server_wait")
         self.workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         self.app.register_workflow(self.workflow)
+        await self.app.astart()
         self.server = AutoAgentServer(self.app)
         self.submit = next(
             route.endpoint
@@ -480,6 +481,8 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             first = AutoAgentApp(runtime_store=first_store)
             workflow = Workflow(id="historical_trace")
             workflow.add_node(lambda: {"answer": 42}, node_id="answer")
+            first.register_workflow(workflow)
+            await first.astart()
             invocation = await first.ainvoke(
                 workflow,
                 session_id="history",

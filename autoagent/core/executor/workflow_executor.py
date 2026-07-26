@@ -32,7 +32,7 @@ from autoagent.core.runtime import (
 )
 from autoagent.core.runtime.context import capture_hook_context
 from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance_key
-from autoagent.core.runtime.hooks import invoke_hook_async, run_sync
+from autoagent.core.runtime.hooks import invoke_hook_async
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.scheduler import Scheduler
 
@@ -194,25 +194,6 @@ class WorkflowExecutor:
         )
         return applied
 
-    def invoke(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-    ) -> Invocation:
-        """Synchronous adapter over the async-first execution loop."""
-
-        return run_sync(
-            self.ainvoke(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-            ),
-            api_name="invoke",
-            async_api_name="ainvoke",
-        )
-
     async def ainvoke(
         self,
         *,
@@ -266,7 +247,6 @@ class WorkflowExecutor:
         gated immediately before execution; no speculative graph scan occurs.
         """
 
-        del workflow_snapshot
         if invocation.state not in {"created", "running"}:
             return invocation
         if invocation.workflow_definition_hash != workflow_ir.definition_hash:
@@ -275,6 +255,19 @@ class WorkflowExecutor:
                 invocation,
                 code="WORKFLOW_DEFINITION_CHANGED",
                 message="Current Workflow definition does not match interrupted work.",
+            )
+            return invocation
+        if (
+            invocation.workflow_operator_manifest_hash
+            != workflow_snapshot.operator_manifest_hash
+        ):
+            await self._interrupt_recovery(
+                session,
+                invocation,
+                code="OPERATOR_ENVIRONMENT_CHANGED",
+                message=(
+                    "Current Operator environment does not match interrupted work."
+                ),
             )
             return invocation
         invocation.execution_mode = "recovery"
@@ -654,29 +647,6 @@ class WorkflowExecutor:
             )
         await self._cancel_invocation(session=session, invocation=invocation)
         return invocation
-
-    def resume(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        wait_key: str,
-        output: Any = _MISSING,
-    ) -> Invocation:
-        """Synchronous adapter over aresume()."""
-
-        return run_sync(
-            self.aresume(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-                wait_key=wait_key,
-                output=output,
-            ),
-            api_name="resume",
-            async_api_name="aresume",
-        )
 
     async def aresume(
         self,

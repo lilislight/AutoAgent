@@ -20,6 +20,7 @@ from autoagent import (
     operator,
 )
 from autoagent.core.operators import OperatorContractWarning
+from tests.helpers import started_app
 
 
 class SearchRequest(BaseModel):
@@ -325,7 +326,7 @@ class OperatorExecutionTests(unittest.TestCase):
             nodes=[Node(id="uppercase", capability=direct)],
         )
 
-        invocation = AutoAgentApp().invoke(
+        invocation = started_app().invoke(
             workflow,
             input={"value": "hello"},
         )
@@ -337,7 +338,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertFalse(hasattr(call, "operator_manifest"))
 
     def test_pydantic_input_is_validated_and_passed_to_operator(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.operator("typed_request")
         def typed_request(request: SearchRequest) -> str:
@@ -356,7 +357,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(invocation.result, {"output": "schema:3"})
 
     def test_single_mapping_parameter_requires_its_parameter_name(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         calls = 0
 
         @app.operator("save_document")
@@ -398,7 +399,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(calls, 1)
 
     def test_capability_ref_default_mode_uses_default_operator(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("web_search", operator_id="default_search")
         def default_search(query: str) -> str:
@@ -422,7 +423,7 @@ class OperatorExecutionTests(unittest.TestCase):
         )
 
     def test_priority_policy_selects_highest_priority_operator(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("web_search", operator_id="default_search")
         def default_search(query: str) -> str:
@@ -454,7 +455,7 @@ class OperatorExecutionTests(unittest.TestCase):
         )
 
     def test_priority_policy_breaks_ties_by_operator_id(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         app.register_capability("stable_search")
 
         @app.operator("z_search", capability="stable_search", priority=10)
@@ -487,7 +488,7 @@ class OperatorExecutionTests(unittest.TestCase):
         )
 
     def test_first_available_policy_breaks_ties_by_operator_id(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         app.register_capability("stable_available")
 
         @app.operator("z_available", capability="stable_available")
@@ -520,7 +521,7 @@ class OperatorExecutionTests(unittest.TestCase):
         )
 
     def test_first_available_skips_disabled_operator(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("search", operator_id="disabled_default")
         def disabled_default(query: str) -> str:
@@ -550,7 +551,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(invocation.result, {"output": "available:docs"})
 
     def test_operator_ref_executes_exact_standalone_operator(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.operator("exact_operator")
         def exact(value: str) -> str:
@@ -570,7 +571,7 @@ class OperatorExecutionTests(unittest.TestCase):
         )
 
     def test_async_registered_operator_uses_native_async_path(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("async_capability", operator_id="async_operator")
         async def async_operator(value: str) -> str:
@@ -587,7 +588,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(invocation.result, {"output": "async:input"})
 
     def test_new_operator_is_selected_after_workflow_ir_was_cached(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("late_bound", operator_id="initial_operator")
         def initial(value: str) -> str:
@@ -618,7 +619,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(len(app.workflow_registry), 1)
 
     def test_failed_default_operator_falls_back_and_records_both_calls(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("resilient", operator_id="failing_operator")
         def failing(value: str) -> str:
@@ -645,7 +646,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual([call.state for call in calls], ["failed", "completed"])
 
     def test_invalid_operator_output_enters_fallback(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("validated_output", operator_id="invalid_output")
         def invalid_output(value: int) -> int:
@@ -673,7 +674,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(calls[0].error.code, "OPERATOR_OUTPUT_INVALID")
 
     def test_allow_fallback_false_stops_after_selected_operator_failure(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("no_fallback", operator_id="failing_operator")
         def failing(value: str) -> str:
@@ -704,7 +705,7 @@ class OperatorExecutionTests(unittest.TestCase):
         self.assertEqual(calls[0].operator_id, "failing_operator")
 
     def test_string_node_capability_is_capability_ref_shorthand(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("uppercase")
         def uppercase(value: str) -> str:
@@ -723,7 +724,7 @@ class OperatorExecutionTests(unittest.TestCase):
                 CapabilitySelectionPolicy(mode=mode)
 
     def test_selection_policy_rejects_unknown_operator_id(self) -> None:
-        app = AutoAgentApp()
+        app = started_app()
 
         @app.capability("known_capability")
         def known(value: str) -> str:

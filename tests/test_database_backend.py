@@ -39,6 +39,7 @@ from autoagent.core.runtime import (
     capture_execution_state,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
+from tests.helpers import started_app
 from autoagent.core.runtime.backends.database import (
     _PersistenceItem,
     _is_retryable_database_error,
@@ -174,6 +175,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="atomic_admission")
         workflow.add_node(lambda value: len(value), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         invocation = await app.ainvoke(
             workflow,
@@ -219,6 +221,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="atomic_event")
         workflow.add_node(lambda: "x" * 20_000, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         invocation = await app.ainvoke(
             workflow,
@@ -278,6 +281,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="one_way_event_submission")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
 
@@ -299,6 +303,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="unavailable_event_acceptance")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         entry = app.register_workflow(workflow)
         await self.store.asave_workflow_snapshot(
             app.namespace,
@@ -402,6 +407,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="session_timestamp")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(workflow, session_id="same")
         await self.store.aflush()
         session = self.store.sessions[
@@ -452,6 +458,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="database_round_trip")
         workflow.add_node(lambda value: value + 1, node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             input={"value": 1},
@@ -493,6 +500,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         workflow.add_edge("source", "target")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             session_id="artifact",
@@ -564,6 +572,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="terminal_recovery_state")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(workflow)
         await self.store.aflush()
 
@@ -599,6 +608,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="event_mode_storage")
         workflow.add_node(lambda value: value + 1, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         invocations = {
             mode: await app.ainvoke(
@@ -672,6 +682,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="minimal_wait")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         waiting = await app.ainvoke(
             workflow,
@@ -701,6 +712,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = DatabaseBackend.from_path(self.path)
         self.store = RuntimeStore(backend=self.backend)
         reopened = AutoAgentApp(runtime_store=self.store)
+        await reopened.astart()
         with self.assertRaisesRegex(ValueError, "current Invocation"):
             await reopened.aresume(
                 workflow,
@@ -720,6 +732,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="wait_recovery_state")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             input={"wait_key": "approval"},
@@ -755,6 +768,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="durable_retention")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             session_id="retention",
@@ -791,6 +805,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="minimal_retention")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             session_id="minimal",
@@ -818,6 +833,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="snapshot_event_cache")
         workflow.add_node(lambda value: value + 1, node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             input={"value": 1},
@@ -869,6 +885,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="per_invocation_sequence")
         workflow.add_node(lambda: "ok", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         first = await app.ainvoke(workflow, session_id="same")
         second = await app.ainvoke(workflow, session_id="same")
         first_events = await self.store.alist_runtime_events(
@@ -886,6 +903,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="database_mixed_api")
         workflow.add_node(lambda value: value, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         synchronous_future: Future = Future()
 
@@ -954,6 +972,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="persistence_thread_serialization")
         workflow.add_node(run, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         invocation = await app.ainvoke(workflow)
 
@@ -971,6 +990,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="database_wait_resume")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         waiting = await app.ainvoke(
             workflow,
             input={"wait_key": "approval"},
@@ -983,6 +1003,8 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         reopened = RuntimeStore(backend=self.backend)
         self.store = reopened
         restarted = AutoAgentApp(runtime_store=reopened)
+        restarted.register_workflow(workflow)
+        await restarted.astart()
         resumed = await restarted.aresume(
             workflow,
             session_id="session",
@@ -991,6 +1013,39 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("completed", resumed.state)
         self.assertEqual({"output": {"approved": True}}, resumed.result)
+
+    async def test_invoke_does_not_lazily_recover_unregistered_workflow(
+        self,
+    ) -> None:
+        workflow = Workflow(id="startup_only_recovery")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        first = AutoAgentApp(runtime_store=self.store)
+        first.register_workflow(workflow)
+        await first.astart()
+        waiting = await first.ainvoke(
+            workflow,
+            input={"wait_key": "approval"},
+            session_id="session",
+        )
+        self.assertEqual("waiting", waiting.state)
+        await first.aclose()
+
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened_store = RuntimeStore(backend=self.backend)
+        self.store = reopened_store
+        reopened = AutoAgentApp(runtime_store=reopened_store)
+        await reopened.astart()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Register the Workflow before starting",
+        ):
+            await reopened.ainvoke(
+                workflow,
+                session_id="session",
+            )
+        self.assertEqual({}, reopened_store.invocations)
+        await reopened.aclose()
 
     async def test_transient_database_failure_retries_without_losing_events(self) -> None:
         class FlakyBackend(DatabaseBackend):
@@ -1018,6 +1073,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="database_retry_queue")
         workflow.add_node(lambda: "ok", node_id="node")
         app = AutoAgentApp(runtime_store=flaky)
+        await app.astart()
         invocation = await app.ainvoke(workflow)
         await flaky.aflush()
         await app.aclose()
@@ -1053,6 +1109,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="nonblocking_terminal")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=slow)
+        await app.astart()
 
         invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
 
@@ -1081,6 +1138,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="nonblocking_wait_resume")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=blocked)
+        await app.astart()
 
         waiting = await asyncio.wait_for(
             app.ainvoke(
@@ -1114,6 +1172,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="full_wait_resume_operations")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         waiting = await app.ainvoke(
             workflow,
@@ -1196,6 +1255,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="hard_queue_execution_priority")
         workflow.add_node(lambda: "x" * (128 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=bounded)
+        await app.astart()
 
         invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
 
@@ -1238,8 +1298,8 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         ):
             await app.astart()
         with self.assertRaisesRegex(
-            OperationalError,
-            "database offline at startup",
+            RuntimeError,
+            "not started",
         ):
             await app.ainvoke(workflow)
 
@@ -1275,6 +1335,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="byte_backpressure")
         workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
+        await app.astart()
         first = await app.ainvoke(workflow, session_id="first")
 
         self.assertEqual("completed", first.state)
@@ -1316,6 +1377,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="timeout_zero")
         workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
+        await app.astart()
         first = await app.ainvoke(workflow, session_id="first")
 
         self.assertEqual("completed", first.state)
@@ -1359,6 +1421,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="timeout_drain")
         workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
+        await app.astart()
 
         first = await app.ainvoke(workflow, session_id="first")
         self.assertEqual("completed", first.state)
@@ -1401,6 +1464,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="admission_timeout")
         workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
+        await app.astart()
 
         first = await app.ainvoke(workflow, session_id="first")
         self.assertEqual("completed", first.state)
@@ -1431,6 +1495,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="persistent_waiting_guard")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
 
         waiting = await app.ainvoke(
             workflow,
@@ -1478,6 +1543,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="busy_before_backpressure")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
         waiting = await app.ainvoke(
             workflow,
             input={"wait_key": "approval"},
@@ -1544,6 +1610,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="batch_events")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=recording)
+        await app.astart()
 
         await app.ainvoke(workflow)
         await recording.aflush()
@@ -1556,7 +1623,7 @@ class RuntimeEventTests(unittest.TestCase):
     def test_invalid_event_mode_is_rejected_before_admission(self) -> None:
         workflow = Workflow(id="invalid_event_mode")
         workflow.add_node(lambda: "done", node_id="node")
-        app = AutoAgentApp()
+        app = started_app()
 
         with self.assertRaisesRegex(ValueError, "Invalid event_mode"):
             app.invoke(workflow, event_mode="verbose")  # type: ignore[arg-type]
@@ -1564,7 +1631,7 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_standard_records_graph_events_without_operations(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="standard_events")
         workflow.add_node(lambda value: value, node_id="node")
         invocation = app.invoke(
@@ -1590,7 +1657,7 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_standard_records_scheduler_skips_as_node_state_events(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="standard_skip_events")
         workflow.add_node(lambda: "source", node_id="source")
         workflow.add_node(
@@ -1617,7 +1684,7 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_full_records_internal_phases_and_rebuilds_each_event(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="full_events")
         workflow.add_node(lambda value: value.upper(), node_id="node")
         invocation = app.invoke(
@@ -1654,7 +1721,7 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_full_freezes_each_parallel_edge_decision_independently(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="atomic_edge_events")
         workflow.add_node(lambda: "source", node_id="source")
         workflow.add_node(
@@ -1707,7 +1774,7 @@ class RuntimeEventTests(unittest.TestCase):
         self,
     ) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="event_timing")
         workflow.add_node(lambda: "source", node_id="source")
         workflow.add_node(
@@ -1742,7 +1809,7 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_map_units_collapse_into_one_logical_operator_event(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="bounded_map_history")
         workflow.add_node(lambda: list(range(100)), node_id="source")
         workflow.add_node(lambda value: value * 2, node_id="target")
@@ -2002,6 +2069,7 @@ class PostgreSQLDatabaseBackendIntegrationTests(
         backend = DatabaseBackend(database_url)
         store = RuntimeStore(backend=backend)
         app = AutoAgentApp(runtime_store=store)
+        await app.astart()
         invocation = await app.ainvoke(
             workflow,
             input={"value": 1},

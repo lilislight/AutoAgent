@@ -91,6 +91,13 @@ class DurableBackend(Protocol):
         session_key: str,
     ) -> Session | None: ...
 
+    async def alist_recoverable_invocation_ids(
+        self,
+        *,
+        namespace: str,
+        workflow_ids: tuple[str, ...],
+    ) -> tuple[UUID, ...]: ...
+
     async def aload_execution_snapshot(
         self,
         invocation_id: UUID,
@@ -171,6 +178,36 @@ class RuntimeStore:
     async def ainitialize(self) -> None:
         if self.backend is not None:
             await self.backend.ainitialize()
+
+    async def alist_recoverable_invocation_ids(
+        self,
+        *,
+        namespace: str,
+        workflow_ids: tuple[str, ...],
+    ) -> tuple[UUID, ...]:
+        """List active durable Invocations eligible for startup recovery."""
+
+        if not workflow_ids:
+            return ()
+        workflow_id_set = set(workflow_ids)
+        with self._lock:
+            invocation_ids = [
+                invocation.id
+                for session in self.sessions.values()
+                if session.namespace == namespace
+                and session.workflow_id in workflow_id_set
+                for invocation in [session.get_current_invocation()]
+                if invocation is not None
+                and invocation.event_mode != "minimal"
+                and invocation.state in {"created", "running", "waiting"}
+            ]
+        if self.backend is not None:
+            persisted = await self.backend.alist_recoverable_invocation_ids(
+                namespace=namespace,
+                workflow_ids=workflow_ids,
+            )
+            invocation_ids.extend(persisted)
+        return tuple(dict.fromkeys(invocation_ids))
 
     async def aclose(self) -> None:
         if self.backend is not None:

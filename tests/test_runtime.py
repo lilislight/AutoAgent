@@ -22,6 +22,7 @@ from autoagent.core.runtime.snapshot import (
     capture_recovery_state,
     compact_recovery_state,
 )
+from tests.helpers import started_app
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -265,7 +266,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                 max_replay_checkpoints_per_invocation=2,
             )
         )
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="checkpoint_retention")
         workflow.add_node(lambda: "done", node_id="node")
         invocation = await app.ainvoke(workflow, event_mode="full")
@@ -291,7 +292,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_events_are_invocation_local_contiguous_and_rebuildable(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="reducer")
         workflow.add_node(lambda: {"value": 1}, node_id="entry")
 

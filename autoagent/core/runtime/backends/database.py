@@ -358,10 +358,13 @@ class DatabaseBackend:
                 and invocation_row.event_mode != "minimal"
                 and invocation_row.state in {"created", "running", "waiting"}
             ):
-                session, _ = await self.store.arebuild_execution(
-                    UUID(row.current_invocation_id)
+                raise RuntimeError(
+                    "Persisted active Invocation was not loaded during "
+                    "AutoAgentApp.start(). Register the Workflow before starting "
+                    "the App so startup recovery can claim it: "
+                    f"workflow_id={workflow_id}, "
+                    f"invocation_id={invocation_row.id}"
                 )
-                return session
         context = await self._hydrate_runtime_values(
             self.serializer.loads(row.context_json)
         )
@@ -375,6 +378,47 @@ class DatabaseBackend:
             updated_at_ms=row.updated_at_ms,
         )
         return session
+
+    async def alist_recoverable_invocation_ids(
+        self,
+        *,
+        namespace: str,
+        workflow_ids: tuple[str, ...],
+    ) -> tuple[UUID, ...]:
+        if not workflow_ids:
+            return ()
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.alist_recoverable_invocation_ids(
+                    namespace=namespace,
+                    workflow_ids=workflow_ids,
+                )
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            rows = (
+                await database.scalars(
+                    select(InvocationRow.id)
+                    .join(
+                        SessionRow,
+                        SessionRow.id == InvocationRow.session_id,
+                    )
+                    .where(
+                        SessionRow.namespace == namespace,
+                        SessionRow.workflow_id.in_(workflow_ids),
+                        SessionRow.current_invocation_id == InvocationRow.id,
+                        InvocationRow.event_mode != "minimal",
+                        InvocationRow.state.in_(
+                            ("created", "running", "waiting")
+                        ),
+                    )
+                    .order_by(
+                        InvocationRow.created_at_ms,
+                        InvocationRow.id,
+                    )
+                )
+            ).all()
+        return tuple(UUID(value) for value in rows)
 
     def _prepare_admission_item(
         self,

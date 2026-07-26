@@ -19,6 +19,7 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core.runtime.backends.database import _PersistenceItem
+from tests.helpers import started_app
 
 
 MEMORY_CHAIN_MAX_SECONDS = float(
@@ -68,7 +69,7 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
     def test_memory_runtime_completes_thirty_node_chain_within_smoke_budget(
         self,
     ) -> None:
-        app = AutoAgentApp()
+        app = started_app()
         workflow = _build_chain("memory_performance_chain", node_count=30)
 
         try:
@@ -91,7 +92,7 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
 
     def test_standard_events_do_not_copy_large_node_output(self) -> None:
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = started_app(runtime_store=store)
         workflow = Workflow(id="event_payload_performance")
         workflow.add_node(_large_output, node_id="large")
 
@@ -128,7 +129,7 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 batch_max_delay_ms=0,
             )
             store = RuntimeStore(backend=backend)
-            app = AutoAgentApp(runtime_store=store)
+            app = started_app(runtime_store=store)
             workflow = _build_chain("sqlite_performance_chain", node_count=30)
 
             try:
@@ -191,7 +192,7 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 backend=backend,
                 persistence_policy=persistence_policy,
             )
-            app = AutoAgentApp(runtime_store=store)
+            app = started_app(runtime_store=store)
             workflow = _build_chain("concurrent_queue_backlog", node_count=5)
 
             try:
@@ -255,7 +256,7 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 recovery_event_interval=10,
             )
             store = RuntimeStore(backend=backend)
-            app = AutoAgentApp(runtime_store=store)
+            app = started_app(runtime_store=store)
             workflow = _build_chain("persisted_payload_size", node_count=5)
 
             try:
@@ -321,7 +322,7 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 batch_max_delay_ms=0,
             )
             store = RuntimeStore(backend=backend)
-            app = AutoAgentApp(runtime_store=store)
+            app = started_app(runtime_store=store)
             workflow = _build_chain("event_mode_size", node_count=5)
             try:
                 invocations = {

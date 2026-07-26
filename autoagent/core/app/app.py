@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import RLock
@@ -57,16 +58,12 @@ class _PreparedInvocation:
         self,
         *,
         workflow_ir: WorkflowIR,
-        workflow_snapshot: WorkflowVersionSnapshot,
         session: Session,
         invocation: Invocation,
-        recover_existing: bool,
     ) -> None:
         self.workflow_ir = workflow_ir
-        self.workflow_snapshot = workflow_snapshot
         self.session = session
         self.invocation = invocation
-        self.recover_existing = recover_existing
 
 
 class AutoAgentApp:
@@ -136,6 +133,7 @@ class AutoAgentApp:
             name=f"autoagent-runtime-{self.namespace}"
         )
         self._started = False
+        self._start_lock: asyncio.Lock | None = None
         self._closed = False
 
     def register_runtime_codec(self, codec: RuntimeCodec) -> None:
@@ -144,14 +142,19 @@ class AutoAgentApp:
         self.runtime_serializer.register_codec(codec)
 
     def start(self) -> None:
-        """Initialize App runtime resources from synchronous code."""
+        """Initialize resources and recover registered Workflows."""
 
         if self._closed:
             raise RuntimeError("AutoAgentApp is closed.")
         self._runtime_loop.run(self.astart())
 
     async def astart(self) -> None:
-        """Initialize App runtime resources from asynchronous code."""
+        """Initialize resources and recover registered Workflows.
+
+        Every Workflow that may have unfinished durable work must be registered
+        before startup. Invocation and resume APIs never initialize or recover
+        the App implicitly.
+        """
 
         if not self._runtime_loop.is_current():
             await self._runtime_loop.arun(self.astart())
@@ -160,8 +163,57 @@ class AutoAgentApp:
             raise RuntimeError("AutoAgentApp is closed.")
         if self._started:
             return
-        await self.runtime_store.ainitialize()
-        self._started = True
+        if self._start_lock is None:
+            self._start_lock = asyncio.Lock()
+        async with self._start_lock:
+            if self._started:
+                return
+            await self.runtime_store.ainitialize()
+            await self._arecover_registered_workflows()
+            self._started = True
+
+    async def _arecover_registered_workflows(self) -> None:
+        with self._workflow_registry_lock:
+            entries = tuple(self.workflow_registry.values())
+        for entry in entries:
+            self._refresh_workflow_snapshot(entry.workflow_ir.workflow_id)
+            await self.runtime_store.asave_workflow_snapshot(
+                self.namespace,
+                entry.workflow_snapshot,
+            )
+        recoverable_ids = (
+            await self.runtime_store.alist_recoverable_invocation_ids(
+                namespace=self.namespace,
+                workflow_ids=tuple(
+                    entry.workflow_ir.workflow_id for entry in entries
+                ),
+            )
+        )
+        entries_by_id = {
+            entry.workflow_ir.workflow_id: entry for entry in entries
+        }
+        for invocation_id in recoverable_ids:
+            session, invocation = await self.runtime_store.arebuild_execution(
+                invocation_id
+            )
+            entry = entries_by_id.get(invocation.workflow_id)
+            if entry is None:
+                continue
+            if invocation.state == "waiting":
+                continue
+            if invocation.state not in {"created", "running"}:
+                continue
+            if not self._claim_invocation_live(invocation.id):
+                raise SessionBusyError(session, invocation)
+            try:
+                await self.workflow_executor.arecover(
+                    workflow_ir=entry.workflow_ir,
+                    workflow_snapshot=entry.workflow_snapshot,
+                    session=session,
+                    invocation=invocation,
+                )
+            finally:
+                self._set_invocation_live(invocation.id, False)
 
     def register_runtime_model(
         self,
@@ -389,6 +441,7 @@ class AutoAgentApp:
         """
 
         self._ensure_open()
+        self._ensure_started()
         return self._runtime_loop.run(
             self.ainvoke(
                 workflow,
@@ -408,22 +461,10 @@ class AutoAgentApp:
         entry_node_id: str | None = None,
         event_mode: RuntimeEventMode = "standard",
     ) -> Invocation:
-        """Invoke a Workflow through the native async execution pipeline.
+        """Invoke a Workflow through the native async execution pipeline."""
 
-        Durable crash recovery is lazy because a restarted process cannot
-        validate a historical invocation until this Workflow and its Operators
-        have been registered again. After loading the Session, this method:
-
-        1. rejects an invocation still owned by this App as concurrent work;
-        2. automatically replays compatible persisted ``created``/``running``
-           work and returns that historical invocation, without mixing new input;
-        3. marks incompatible work ``interrupted`` and admits this request as a
-           fresh invocation; and
-        4. leaves ``waiting`` work reserved for :meth:`aresume`.
-
-        There is intentionally no manual crash-recovery option in V1.
-        """
-
+        self._ensure_open()
+        self._ensure_started()
         if not self._runtime_loop.is_current():
             return await self._runtime_loop.arun(
                 self.ainvoke(
@@ -434,9 +475,6 @@ class AutoAgentApp:
                     event_mode=event_mode,
                 )
             )
-        self._ensure_open()
-        await self.astart()
-
         prepared = await self._prepare_invocation(
             workflow,
             input=input,
@@ -445,14 +483,6 @@ class AutoAgentApp:
             event_mode=event_mode,
         )
         try:
-            if prepared.recover_existing:
-                recovered = await self.workflow_executor.arecover(
-                    workflow_ir=prepared.workflow_ir,
-                    workflow_snapshot=prepared.workflow_snapshot,
-                    session=prepared.session,
-                    invocation=prepared.invocation,
-                )
-                return recovered
             return await self.workflow_executor.ainvoke(
                 workflow_ir=prepared.workflow_ir,
                 session=prepared.session,
@@ -483,7 +513,7 @@ class AutoAgentApp:
                 )
             )
         self._ensure_open()
-        await self.astart()
+        self._ensure_started()
         return await self._prepare_invocation(
             workflow,
             input=input,
@@ -505,14 +535,6 @@ class AutoAgentApp:
                 self._aexecute_admitted(prepared, input=input)
             )
         try:
-            if prepared.recover_existing:
-                recovered = await self.workflow_executor.arecover(
-                    workflow_ir=prepared.workflow_ir,
-                    workflow_snapshot=prepared.workflow_snapshot,
-                    session=prepared.session,
-                    invocation=prepared.invocation,
-                )
-                return recovered
             return await self.workflow_executor.ainvoke(
                 workflow_ir=prepared.workflow_ir,
                 session=prepared.session,
@@ -532,6 +554,7 @@ class AutoAgentApp:
         """Resume one wait from synchronous code."""
 
         self._ensure_open()
+        self._ensure_started()
         return self._runtime_loop.run(
             self.aresume(
                 workflow,
@@ -558,6 +581,8 @@ class AutoAgentApp:
         memory.
         """
 
+        self._ensure_open()
+        self._ensure_started()
         if not self._runtime_loop.is_current():
             return await self._runtime_loop.arun(
                 self.aresume(
@@ -567,9 +592,6 @@ class AutoAgentApp:
                     output=output,
                 )
             )
-        self._ensure_open()
-        await self.astart()
-
         workflow_ir = self._get_or_compile_workflow(workflow)
         workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
         await self.runtime_store.asave_workflow_snapshot(
@@ -679,27 +701,12 @@ class AutoAgentApp:
             session_id=session_id,
         )
         current = session.get_current_invocation()
-        if current is not None and current.state == "waiting":
+        if current is not None and current.state in {
+            "created",
+            "running",
+            "waiting",
+        }:
             raise SessionBusyError(session, current)
-        if current is not None and current.state in {"created", "running"}:
-            if not self._claim_invocation_live(current.id):
-                raise SessionBusyError(session, current)
-            # Recovery always starts from the durable Genesis/snapshot + event
-            # prefix, never from a mutable materialized database cache.
-            try:
-                session, current = await self.runtime_store.arebuild_execution(
-                    current.id
-                )
-            except BaseException:
-                self._set_invocation_live(current.id, False)
-                raise
-            return _PreparedInvocation(
-                workflow_ir=workflow_ir,
-                workflow_snapshot=workflow_snapshot,
-                session=session,
-                invocation=current,
-                recover_existing=True,
-            )
         return await self._prepare_fresh_invocation(
             workflow_ir=workflow_ir,
             workflow_snapshot=workflow_snapshot,
@@ -736,10 +743,8 @@ class AutoAgentApp:
             raise
         return _PreparedInvocation(
             workflow_ir=workflow_ir,
-            workflow_snapshot=workflow_snapshot,
             session=session,
             invocation=invocation,
-            recover_existing=False,
         )
 
     def _default_entry_node_id(self, workflow_ir: WorkflowIR) -> str:
@@ -796,3 +801,11 @@ class AutoAgentApp:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("AutoAgentApp is closed.")
+
+    def _ensure_started(self) -> None:
+        if not self._started:
+            raise RuntimeError(
+                "AutoAgentApp is not started. Call app.start() from synchronous "
+                "code or await app.astart() from asynchronous code before "
+                "invoking, submitting, or resuming Workflows."
+            )

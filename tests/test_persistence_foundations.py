@@ -213,6 +213,7 @@ class PersistenceIdentityTests(unittest.TestCase):
         workflow = Workflow(id="persisted_identity")
         workflow.add_node(echo, node_id="echo")
         app = AutoAgentApp()
+        app.start()
 
         invocation = app.invoke(workflow, input={"value": "hello"}, session_id="s1")
         session = app.runtime_store.find_session(
@@ -247,6 +248,7 @@ class PersistenceIdentityTests(unittest.TestCase):
             id="late_bound_manifest",
             nodes=[Node(id="search", capability=CapabilityRef(id="search"))],
         )
+        app.start()
         first = app.invoke(workflow, input={"query": "first"}, session_id="one")
 
         @app.operator("search_secondary", capability="search")
@@ -272,6 +274,7 @@ class PersistenceIdentityTests(unittest.TestCase):
         workflow = Workflow(id="mutable_workflow_source")
         workflow.add_node(echo, node_id="echo")
         app = AutoAgentApp()
+        app.start()
 
         first = app.invoke(workflow, input={"value": "one"}, session_id="first")
         first_hash = first.workflow_definition_hash

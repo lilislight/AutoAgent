@@ -8,6 +8,7 @@ Invocation 状态。配置数据库后端后，RuntimeStore 会异步持久化�
 每次 Invocation 可以独立选择记录级别：
 
 ```python
+app.start()
 invocation = app.invoke(
     workflow,
     input={"message": "hello"},
@@ -25,12 +26,18 @@ Invocation 可以动态选择不同模式。`memory` 和 `database` 是 RuntimeS
 
 ```python
 app = AutoAgentApp()
+app.start()
 ```
 
 `AutoAgentApp()` 会自动读取当前目录 `.env` 中框架支持的 `AUTOAGENT_*`
 配置，然后用同名进程环境变量覆盖。`AutoAgentSettings(...)` 只用于代码显式
 覆盖和测试。框架支持的完整部署配置统一记录在 `.env.example`；Workflow
 示例或测试自己的变量不放入其中。
+
+App 必须显式启动。先注册 Workflow 以及 Runtime codec/model，再调用
+`app.start()`（异步代码使用 `await app.astart()`）。启动阶段负责初始化后端、
+重建持久化 Wait，并恢复已注册 Workflow 中未完成的 `created`/`running`
+Invocation；invoke、submit 和 resume 不会再惰性启动或恢复 App。
 
 ## Runtime Event 模式
 

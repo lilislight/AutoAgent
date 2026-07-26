@@ -2,25 +2,24 @@
 
 ## Project Structure & Module Organization
 
-This repository currently contains design documentation for AutoAgent OS. Source code, tests, and build assets are not present.
+This repository contains the AutoAgent implementation, tests, UI, runnable
+examples, and an archived design snapshot.
 
-- `docs/README.md` contains initial notes for Workflow IR and runtime scheduling.
-- `docs/00-Foundation/` covers vision, core concepts, and architecture.
-- `docs/01-Workflow/` documents workflow, node, edge, and builder concepts.
-- `docs/02-Compiler/` describes compilation, validation, Workflow IR, and the compilation pipeline.
-- `docs/03-Runtime/` describes invocation, runtime, sessions, runs, context, lifecycle, and concurrency.
+- `autoagent/` contains the Python framework and embedded tracing server.
+- `tests/` contains the automated Python test suite.
+- `ui/` contains the tracing UI.
+- `examples/` contains runnable examples.
+- `docs-deprecated/` is an obsolete design snapshot and is not a source of
+  truth for the current implementation.
 
-Keep new documentation in the numbered area that best matches its subject. Use the existing filename pattern, for example `docs/02-Compiler/5 - New Topic.md`.
+Do not add current documentation to `docs-deprecated/`.
 
 ## Build, Test, and Development Commands
 
-There is no configured build system, package manager, or test runner yet. Useful local checks are documentation-oriented:
+Run Python commands through the repository-root uv environment:
 
-- `rg "WorkflowIR" docs` searches the documentation for a concept.
-- `git diff -- docs` reviews documentation changes before commit.
-- `find docs -name "*.md" -print` lists all Markdown documents.
-
-If executable code is added later, document setup, run, build, lint, and test commands here before relying on them in pull requests.
+- `UV_CACHE_DIR=/tmp/autoagent-uv-cache uv run python -m unittest discover -v`
+- `cd ui && npm run build`
 
 ## Coding Style & Naming Conventions
 
@@ -30,7 +29,8 @@ Use fenced code blocks with language tags, for example `mermaid` for diagrams an
 
 ## Testing Guidelines
 
-No automated tests or coverage requirements are defined. For documentation changes, verify links, diagrams, and terminology against `docs/00-Foundation/1 - Core Concepts.md`. When code is introduced, place tests in a clearly named test directory and add exact test commands to this guide.
+Keep Python tests in `tests/`. Treat current source and tests as authoritative;
+the archived documentation may be used only as historical context.
 
 ## Commit & Pull Request Guidelines
 

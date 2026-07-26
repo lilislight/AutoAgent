@@ -199,7 +199,7 @@ class WorkflowDiagramTests(unittest.TestCase):
         self.assertIn("Capability: uppercase", mermaid)
 
     def test_complex_example_marks_auto_id_and_schema_errors(self) -> None:
-        from main import (
+        from examples.workflow_validation_preview import (
             build_app,
             build_workflow,
             demonstrate_schema_registration_error,

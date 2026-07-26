@@ -43,7 +43,7 @@ RELIABILITY_REVIEW_CAPABILITY_ID = "reliability_review"
 DEFAULT_RUNTIME_DATABASE = (
     Path(__file__).resolve().parent
     / ".autoagent"
-    / "real-workflow-tracing-v1.sqlite3"
+    / "incident-response-tracing-v1.sqlite3"
 )
 
 
@@ -200,7 +200,7 @@ class EscalationPacket(BaseModel):
 
 
 # Runtime values can outlive the Python process. These stable ids avoid using
-# ``__main__`` when this example is started as ``python real_workflow.py``.
+# ``__main__`` when this example is started directly.
 _RUNTIME_MODELS: tuple[type[BaseModel], ...] = (
     ServiceContext,
     IncidentRequest,
@@ -903,8 +903,9 @@ def build_incident_response_app(
     The reliability review node intentionally uses a CapabilityRef so the UI can
     show a primary Operator execution timing out and a fallback execution finishing
     successfully inside the same NodeExecution. By default the example stores
-    durable runtime data in ``.autoagent/real-workflow.sqlite3`` so the tracing
-    server and UI can inspect historical invocations across restarts.
+    durable runtime data in ``.autoagent/incident-response-tracing-v1.sqlite3``
+    so the tracing server and UI can inspect historical invocations across
+    restarts.
     """
 
     if runtime_store is not None and database_path is not None:
@@ -923,16 +924,19 @@ def build_incident_response_app(
                 ),
             )
         app = AutoAgentApp(
-            namespace="real-workflow",
+            namespace="incident-response-example",
             settings=settings,
         )
     else:
         app = AutoAgentApp(
-            namespace="real-workflow",
+            namespace="incident-response-example",
             runtime_store=runtime_store,
         )
     for model_type in _RUNTIME_MODELS:
-        stable_type_id = f"real_workflow:{model_type.__qualname__}"
+        stable_type_id = (
+            "examples.incident_response_tracing_server:"
+            f"{model_type.__qualname__}"
+        )
         app.register_runtime_model(model_type, type_id=stable_type_id)
     app.register_capability(
         RELIABILITY_REVIEW_CAPABILITY_ID,

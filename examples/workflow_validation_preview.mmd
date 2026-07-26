@@ -1,0 +1,67 @@
+flowchart LR
+    n0["Collect incident signal<br/><small>collect_incident_signal</small>"]
+    n1["Classify incident<br/><small>classify_incident</small>"]
+    n2["Analyze logs<br/><small>Capability: incident_log_analysis</small>"]
+    n3["Assess blast radius<br/><small>assess_blast_radius</small>"]
+    n4["Security review<br/><small>review_security_risk</small>"]
+    n5["Plan remediation<br/><small>plan_remediation</small>"]
+    n6["Execute remediation actions<br/><small>execute_action</small>"]
+    n7["Review remediation<br/><small>review_remediation</small>"]
+    n8["Refine failed remediation<br/><small>refine_remediation</small>"]
+    n9["Close incident<br/><small>close_incident</small>"]
+    n10["Notify stakeholders<br/><small>notify_stakeholders</small>"]
+    n11["Create postmortem<br/><small>create_postmortem</small>"]
+    n12["Archive incident<br/><small>Operator: archive_incident_v1</small>"]
+    n13["[ERROR] Unregistered pager capability<br/><small>Capability: pager_delivery</small>"]
+    n14["[ERROR] Unregistered compliance capability<br/><small>Capability: compliance_ticket_writer</small>"]
+    missing0["Missing: missing_audit_sink<br/><small>Unknown node reference</small>"]
+    missing1["Missing: ghost_manual_trigger<br/><small>Unknown node reference</small>"]
+    n0 -->|edge_collect_signal_classify_incident| n1
+    n1 -->|edge_classify_incident_analyze_logs| n2
+    n1 -->|edge_classify_incident_assess_blast_radius| n3
+    n1 -->|edge_classify_incident_security_review &#124; condition| n4
+    n2 -->|edge_analyze_logs_plan_remediation| n5
+    n3 -->|edge_assess_blast_radius_plan_remediation| n5
+    n4 -->|edge_security_review_plan_remediation| n5
+    n5 -->|edge_plan_remediation_execute_action &#124; map| n6
+    n6 -->|edge_execute_action_review_remediation| n7
+    n7 -->|edge_review_remediation_close_incident &#124; condition| n9
+    n7 -->|edge_review_remediation_refine_remediation &#124; condition| n8
+    n8 -->|edge_refine_remediation_review_remediation| n7
+    n9 -->|edge_close_incident_notify_stakeholders| n10
+    n9 -->|edge_close_incident_create_postmortem| n11
+    n10 -->|edge_notify_stakeholders_archive_incident| n12
+    n11 -->|edge_create_postmortem_archive_incident| n12
+    n12 -->|edge_archive_incident_broken_pager_node| n13
+    n12 -->|edge_archive_incident_broken_ticket_node| n14
+    n12 -->|error_missing_target| missing0
+    missing1 -->|error_missing_source| n0
+    n1 -->|error_string_condition &#124; condition| n12
+    n1 -->|edge_classify_incident_refine_remediation| n8
+    n4 -->|edge_security_review_assess_blast_radius &#124; map| n3
+    classDef normal fill:#ffffff,stroke:#334155,color:#111827
+    classDef entry fill:#ecfdf5,stroke:#047857,color:#111827,stroke-width:2px
+    classDef exit fill:#eff6ff,stroke:#1d4ed8,color:#111827,stroke-width:2px
+    classDef missing fill:#fef2f2,stroke:#dc2626,color:#991b1b,stroke-dasharray:5 3
+    class n0 entry
+    class n1 normal
+    class n2 normal
+    class n3 normal
+    class n4 normal
+    class n5 normal
+    class n6 normal
+    class n7 normal
+    class n8 normal
+    class n9 normal
+    class n10 normal
+    class n11 normal
+    class n12 normal
+    class n13 exit
+    class n14 exit
+    class missing0 missing
+    class missing1 missing
+    linkStyle 18 stroke:#dc2626,stroke-width:3px,color:#991b1b
+    linkStyle 19 stroke:#dc2626,stroke-width:3px,color:#991b1b
+    linkStyle 20 stroke:#dc2626,stroke-width:3px,color:#991b1b
+    linkStyle 21 stroke:#dc2626,stroke-width:3px,color:#991b1b
+    linkStyle 22 stroke:#dc2626,stroke-width:3px,color:#991b1b

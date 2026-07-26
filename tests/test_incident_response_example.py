@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from autoagent.core.runtime import DatabaseBackend, RuntimeStore
 from autoagent.core.server import AutoAgentServer
-from real_workflow import (
+from examples.incident_response_tracing_server import (
     EscalationPacket,
     PublishedResolution,
     _new_incident_sample,
@@ -23,7 +23,7 @@ def build_test_app():
     return build_incident_response_app(runtime_store=RuntimeStore())
 
 
-class RealWorkflowTests(unittest.TestCase):
+class IncidentResponseExampleTests(unittest.TestCase):
     def test_demo_defaults_to_a_sqlite_runtime_store(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "demo.sqlite3"
@@ -61,12 +61,15 @@ class RealWorkflowTests(unittest.TestCase):
     ) -> None:
         app, workflow = build_test_app()
 
-        with patch("real_workflow.random.random", return_value=0.99):
+        with patch(
+            "examples.incident_response_tracing_server.random.random",
+            return_value=0.99,
+        ):
             invocation = app.invoke(
                 workflow,
                 input={"request": _new_incident_sample()},
                 entry_node_id="new_incident",
-                session_id="real-workflow-new-test",
+                session_id="incident-response-new-test",
                 event_mode="full",
             )
 
@@ -90,7 +93,7 @@ class RealWorkflowTests(unittest.TestCase):
         session = app.runtime_store.find_session(
             namespace=app.namespace,
             workflow_id=workflow.id,
-            session_key="real-workflow-new-test",
+            session_key="incident-response-new-test",
         )
         assert session is not None
         self.assertIn("latest_incident_decision", session.context.data)
@@ -165,12 +168,15 @@ class RealWorkflowTests(unittest.TestCase):
     def test_resume_entry_reaches_escalation_exit(self) -> None:
         app, workflow = build_test_app()
 
-        with patch("real_workflow.random.random", return_value=0.99):
+        with patch(
+            "examples.incident_response_tracing_server.random.random",
+            return_value=0.99,
+        ):
             invocation = app.invoke(
                 workflow,
                 input={"checkpoint": _resume_incident_sample()},
                 entry_node_id="resume_incident",
-                session_id="real-workflow-resume-test",
+                session_id="incident-response-resume-test",
                 event_mode="full",
             )
 
@@ -185,12 +191,15 @@ class RealWorkflowTests(unittest.TestCase):
     def test_random_security_failure_exhausts_retry_and_fails_invocation(self) -> None:
         app, workflow = build_test_app()
 
-        with patch("real_workflow.random.random", side_effect=[0.0, 0.0]):
+        with patch(
+            "examples.incident_response_tracing_server.random.random",
+            side_effect=[0.0, 0.0],
+        ):
             invocation = app.invoke(
                 workflow,
                 input={"request": _new_incident_sample()},
                 entry_node_id="new_incident",
-                session_id="real-workflow-random-failure-test",
+                session_id="incident-response-random-failure-test",
                 event_mode="full",
             )
 
@@ -213,12 +222,12 @@ class RealWorkflowTests(unittest.TestCase):
         waiting = app.invoke(
             workflow,
             input={
-                "wait_key": "approval:real-workflow-test",
+                "wait_key": "approval:incident-response-test",
                 "wait_type": "human",
                 "payload": {"ticket": "INC-9000"},
             },
             entry_node_id="manual_approval_wait",
-            session_id="real-workflow-approval-test",
+            session_id="incident-response-approval-test",
             event_mode="full",
         )
 
@@ -230,8 +239,8 @@ class RealWorkflowTests(unittest.TestCase):
 
         resumed = app.resume(
             workflow,
-            session_id="real-workflow-approval-test",
-            wait_key="approval:real-workflow-test",
+            session_id="incident-response-approval-test",
+            wait_key="approval:incident-response-test",
             output={
                 "approved": True,
                 "reviewer": "sre-lead",
@@ -266,7 +275,7 @@ class RealWorkflowTests(unittest.TestCase):
                 "payload": {"ticket": "INC-TRACE"},
             },
             entry_node_id="manual_approval_wait",
-            session_id="real-workflow-trace-bootstrap",
+            session_id="incident-response-trace-bootstrap",
             event_mode="full",
         )
         server = AutoAgentServer(app)
@@ -301,7 +310,7 @@ class RealWorkflowTests(unittest.TestCase):
             rebuilt["node_executions"][0]["node_id"],
         )
 
-    def test_durable_real_workflow_trace_survives_restart(self) -> None:
+    def test_durable_incident_response_trace_survives_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "real-trace.sqlite3"
             first, workflow = build_incident_response_app(
@@ -315,7 +324,7 @@ class RealWorkflowTests(unittest.TestCase):
                     "payload": {"ticket": "INC-DURABLE"},
                 },
                 entry_node_id="manual_approval_wait",
-                session_id="real-workflow-durable-trace",
+                session_id="incident-response-durable-trace",
                 event_mode="full",
             )
             invocation_id = waiting.id

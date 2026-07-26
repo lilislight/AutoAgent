@@ -550,7 +550,10 @@ def main() -> None:
     # The example contains intentional compiler errors, so preview it rather
     # than calling app.invoke(). Remove the marked block before execution.
     diagram = workflow.diagram(compiler=app.compiler)
-    mermaid_path = app.preview(workflow, Path("workflow_preview.mmd"))
+    mermaid_path = app.preview(
+        workflow,
+        Path(__file__).with_name("workflow_validation_preview.mmd"),
+    )
 
     print(f"Mermaid source: {mermaid_path}")
     print(

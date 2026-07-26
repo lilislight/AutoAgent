@@ -1,6 +1,11 @@
 # AutoAgent OS Documentation
 
-This directory contains the architecture design for AutoAgent OS.
+> [!WARNING]
+> This directory is an archived, obsolete design snapshot. It does not describe
+> the current implementation. Use the source code, tests, root README files,
+> and runnable examples as the current source of truth.
+
+This directory contains an early architecture design for AutoAgent OS.
 
 ## Structure
 

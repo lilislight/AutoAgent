@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 from autoagent import (
     AutoAgentApp,
     AutoAgentServer,
+    AutoAgentSettings,
     CapabilityRef,
     CapabilitySelectionPolicy,
-    DatabaseBackend,
     EdgePolicy,
     MapPolicy,
     NodePolicy,
@@ -38,7 +41,9 @@ RELIABILITY_REVIEW_TIMEOUT_MS = 120
 RELIABILITY_REVIEW_PRIMARY_SLEEP_SECONDS = 0.35
 RELIABILITY_REVIEW_CAPABILITY_ID = "reliability_review"
 DEFAULT_RUNTIME_DATABASE = (
-    Path(__file__).resolve().parent / ".autoagent" / "real-workflow.sqlite3"
+    Path(__file__).resolve().parent
+    / ".autoagent"
+    / "real-workflow-tracing-v1.sqlite3"
 )
 
 
@@ -905,23 +910,30 @@ def build_incident_response_app(
     if runtime_store is not None and database_path is not None:
         raise ValueError("Pass either runtime_store or database_path, not both.")
     if runtime_store is None:
-        resolved_database_path = Path(database_path or DEFAULT_RUNTIME_DATABASE)
-        resolved_database_path.parent.mkdir(parents=True, exist_ok=True)
-        runtime_store = RuntimeStore(
-            backend=DatabaseBackend.from_path(resolved_database_path)
+        settings = AutoAgentSettings.from_env()
+        if database_path is not None or settings.database_url is None:
+            resolved_database_path = Path(
+                database_path or DEFAULT_RUNTIME_DATABASE
+            ).resolve()
+            resolved_database_path.parent.mkdir(parents=True, exist_ok=True)
+            settings = replace(
+                settings,
+                database_url=(
+                    f"sqlite+aiosqlite:///{resolved_database_path.as_posix()}"
+                ),
+            )
+        app = AutoAgentApp(
+            namespace="real-workflow",
+            settings=settings,
         )
-
-    app = AutoAgentApp(namespace="real-workflow", runtime_store=runtime_store)
+    else:
+        app = AutoAgentApp(
+            namespace="real-workflow",
+            runtime_store=runtime_store,
+        )
     for model_type in _RUNTIME_MODELS:
         stable_type_id = f"real_workflow:{model_type.__qualname__}"
         app.register_runtime_model(model_type, type_id=stable_type_id)
-        # The first version of this example was executed as a script and wrote
-        # ``__main__`` ids. Keep this alias so its current local demo database
-        # can open once; all new writes use the stable id above.
-        app.register_runtime_model(
-            model_type,
-            type_id=f"__main__:{model_type.__qualname__}",
-        )
     app.register_capability(
         RELIABILITY_REVIEW_CAPABILITY_ID,
         description="Review incident mitigation from a reliability perspective.",
@@ -991,32 +1003,13 @@ def _resume_incident_sample() -> ResumeRequest:
     )
 
 
-def _print_result(label: str, invocation) -> None:
-    if invocation.state != "completed":
-        error = (
-            invocation.error.to_record()
-            if invocation.error is not None
-            else {"message": "Unknown invocation failure."}
-        )
-        print(f"\n{label} failed")
-        print(json.dumps(error, indent=2, sort_keys=True))
-        print("Executed nodes:")
-        print(" -> ".join(item.node_id for item in invocation.node_executions))
-        return
-    output = invocation.result["output"]
-    payload = (
-        output.model_dump(mode="json")
-        if isinstance(output, BaseModel)
-        else output
-    )
-    print(f"\n{label}")
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    print("Executed nodes:")
-    print(" -> ".join(item.node_id for item in invocation.node_executions))
-
-
 def main() -> None:
     app, workflow = build_incident_response_app()
+    env_file = dotenv_values(Path.cwd() / ".env")
+
+    def configured(name: str, default: str) -> str:
+        value = os.environ.get(name, env_file.get(name))
+        return default if value is None or not str(value).strip() else str(value)
 
     compile_result = app.compiler.compile(workflow)
     if not compile_result.ok:
@@ -1030,29 +1023,24 @@ def main() -> None:
     print("Compiled exits:", compile_result.workflow_ir.exit_node_ids)
     print("Expanded node count:", len(compile_result.workflow_ir.nodes))
 
-    new_invocation = app.invoke(
-        workflow,
-        input={"request": _new_incident_sample()},
-        entry_node_id="new_incident",
-        session_id="incident-new-example",
-    )
-    _print_result("New incident path", new_invocation)
+    host = configured("AUTOAGENT_SERVER_HOST", "0.0.0.0")
+    port = int(configured("AUTOAGENT_SERVER_PORT", "8765"))
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    server_url = f"http://{browser_host}:{port}"
 
-    resumed_invocation = app.invoke(
-        workflow,
-        input={"checkpoint": _resume_incident_sample()},
-        entry_node_id="resume_incident",
-        session_id="incident-resume-example",
-    )
-    _print_result("Resumed incident path", resumed_invocation)
-
-    print("\nAutoAgentServer is serving this workflow at http://0.0.0.0:8765")
-    print("Start the tracing UI with:")
-    print(
-        "cd /home/chengqian/projects/AutoAgent/ui && "
-        "AUTOAGENT_SERVER_URL=http://127.0.0.1:8765 npm run dev -- --host 0.0.0.0"
-    )
-    AutoAgentServer(app).run(host="0.0.0.0", port=8765)
+    print(f"\nAutoAgentServer: {server_url}")
+    print(f"Tracing API: {server_url}/api/v1")
+    ui_dist = Path(__file__).resolve().parent / "ui" / "dist"
+    if ui_dist.is_dir():
+        print(f"Tracing UI: {server_url}")
+    else:
+        print("Build the tracing UI once with: npm --prefix ui run build")
+        print(
+            "For UI development use: "
+            f"AUTOAGENT_SERVER_URL={server_url} "
+            "npm --prefix ui run dev"
+        )
+    AutoAgentServer(app).run(host=host, port=port)
 
 
 if __name__ == "__main__":

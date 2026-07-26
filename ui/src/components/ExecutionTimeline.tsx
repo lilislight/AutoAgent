@@ -2,13 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
-  ChevronDown,
-  ChevronRight,
   Clock3,
-  CornerDownRight,
+  CirclePause,
   History,
   LoaderCircle,
   Play,
+  Radio,
   Square,
 } from "lucide-react";
 
@@ -71,12 +70,14 @@ interface ExecutionTimelineProps {
   historyLoading: boolean;
   historyError: string | null;
   bufferedEventCount: number;
+  totalEventCount: number;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   height: number;
   onHeightChange: (height: number) => void;
   onLoadHistory: () => void;
   onFlushBufferedEvents: () => void;
+  onToggleFollow: () => void;
 }
 
 export function ExecutionTimeline({
@@ -90,12 +91,14 @@ export function ExecutionTimeline({
   historyLoading,
   historyError,
   bufferedEventCount,
+  totalEventCount,
   collapsed,
   onCollapsedChange,
   height,
   onHeightChange,
   onLoadHistory,
   onFlushBufferedEvents,
+  onToggleFollow,
 }: ExecutionTimelineProps) {
   const shellRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -103,7 +106,6 @@ export function ExecutionTimeline({
   const [trackViewportWidthPx, setTrackViewportWidthPx] = useState(900);
   const [draggingHeight, setDraggingHeight] = useState(false);
   const [draggingCursor, setDraggingCursor] = useState(false);
-  const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(() => new Set());
   const [zoomLevel, setZoomLevel] = useState(1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -280,9 +282,7 @@ export function ExecutionTimeline({
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell || !cursorRowId) return;
-    const target =
-      findTimelineRow(shell, cursorRowId) ??
-      findTimelineRow(shell, parentTimelineRowId(timeline.spans, cursorRowId));
+    const target = findTimelineRow(shell, cursorRowId);
     target?.scrollIntoView({
       block: "center",
       inline: "nearest",
@@ -347,32 +347,10 @@ export function ExecutionTimeline({
     if (options.requireNear && !position.near) return;
     onCursorChange(position.sequence);
   };
-  const childSpansByParent = useMemo(() => {
-    const values = new Map<string, TimelineSpan[]>();
-    for (const span of timeline.spans) {
-      if (span.kind !== "operator_call" || !span.parent_id) continue;
-      const children = values.get(span.parent_id) ?? [];
-      children.push(span);
-      values.set(span.parent_id, children);
-    }
-    for (const children of values.values()) {
-      children.sort(compareTimelineSpans);
-    }
-    return values;
-  }, [timeline.spans]);
-  const visibleSpans = useMemo(() => {
-    const rows: TimelineSpan[] = [];
-    const nodes = timeline.spans
-      .filter((span) => span.kind === "node_execution")
-      .sort(compareTimelineSpans);
-    for (const node of nodes) {
-      rows.push(node);
-      if (!collapsedNodes.has(node.id)) {
-        rows.push(...(childSpansByParent.get(node.id) ?? []));
-      }
-    }
-    return rows;
-  }, [childSpansByParent, collapsedNodes, timeline.spans]);
+  const visibleSpans = useMemo(
+    () => [...timeline.spans].sort(compareTimelineSpans),
+    [timeline.spans],
+  );
   const startHeightDrag = (clientY: number) => {
     const initialHeight = collapsed ? 42 : height;
     let moved = false;
@@ -392,15 +370,6 @@ export function ExecutionTimeline({
     document.body.classList.add("is-resizing-timeline");
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp, { once: true });
-  };
-
-  const toggleNode = (id: string) => {
-    setCollapsedNodes((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   };
 
   const startCursorDrag = (clientX: number) => {
@@ -443,6 +412,15 @@ export function ExecutionTimeline({
           {!collapsed && <span>{formatDuration(range.end - range.start)}</span>}
         </div>
         {!collapsed && <div className="timeline-actions">
+          <button
+            type="button"
+            className={followLive ? "is-active" : ""}
+            onClick={onToggleFollow}
+            title={followLive ? "Enter replay mode" : "Return to the latest event"}
+          >
+            {followLive ? <Radio size={13} /> : <CirclePause size={13} />}
+            {followLive ? "Following" : "Replay"}
+          </button>
           {!followLive && (
             <div className="timeline-replay-controls">
               <button
@@ -480,11 +458,12 @@ export function ExecutionTimeline({
           {historyAvailable && (
             <button type="button" onClick={onLoadHistory} disabled={historyLoading}>
               {historyLoading ? <LoaderCircle className="spin" size={13} /> : <History size={13} />}
-              {historyLoading ? "Loading history" : "Load full history"}
+              {historyLoading ? "Loading events" : "Load next events"}
             </button>
           )}
           <span className="timeline-cursor-label">
             {formatTimestamp(cursorTime)} · event {cursorEventIndex}/{events.length}
+            {totalEventCount > events.length ? ` loaded · ${totalEventCount} current` : ""}
           </span>
         </div>}
       </div>
@@ -535,6 +514,14 @@ export function ExecutionTimeline({
                   onClick={(event) => {
                     event.stopPropagation();
                     onCursorChange(marker.sequence);
+                    if (marker.events.length === 1) {
+                      const runtimeEvent = marker.events[0];
+                      onSelect({
+                        type: "event",
+                        id: runtimeEvent.id,
+                        sequence: runtimeEvent.sequence,
+                      });
+                    }
                   }}
                 >
                   {marker.events.length > 1 && <span>{marker.events.length}</span>}
@@ -567,9 +554,6 @@ export function ExecutionTimeline({
                 key={span.id}
                 span={span}
                 scale={scale}
-                collapsed={collapsedNodes.has(span.id)}
-                hasChildren={(childSpansByParent.get(span.id)?.length ?? 0) > 0}
-                onToggleNode={() => toggleNode(span.id)}
                 onCursorPreview={previewCursor}
                 onCursorCommit={commitCursor}
                 onCursorDragStart={startCursorDrag}
@@ -623,10 +607,22 @@ export function ExecutionTimeline({
                 title={`Event #${runtimeEvent.sequence}: ${runtimeEvent.type}`}
                 onClick={() => {
                   onCursorChange(runtimeEvent.sequence);
+                  onSelect({
+                    type: "event",
+                    id: runtimeEvent.id,
+                    sequence: runtimeEvent.sequence,
+                  });
                 }}
               >
                 <span>#{runtimeEvent.sequence}</span>
                 <small>{shortEventType(runtimeEvent.type)}</small>
+                <time>{formatTimestamp(runtimeEvent.occurred_at_ms)}</time>
+                <em>
+                  {runtimeEvent.status ?? "recorded"}
+                  {runtimeEvent.elapsed_ns == null
+                    ? ""
+                    : ` · ${formatDuration(runtimeEvent.elapsed_ns / 1_000_000)}`}
+                </em>
               </button>
             ))}
           </div>
@@ -645,6 +641,20 @@ export function ExecutionTimeline({
             {formatRuntimeState(durationTooltip.span.state)}
             <b>{durationTooltip.durationLabel}</b>
           </span>
+          <span>
+            <small>Started</small>
+            <b>{formatTimestamp(durationTooltip.span.started_at_ms)}</b>
+          </span>
+          {durationTooltip.span.ended_at_ms !== null && (
+            <span>
+              <small>Ended</small>
+              <b>{formatTimestamp(durationTooltip.span.ended_at_ms)}</b>
+            </span>
+          )}
+          <span>
+            <small>Event</small>
+            <b>#{durationTooltip.span.sequence}</b>
+          </span>
         </div>,
         document.body,
       )}
@@ -655,9 +665,6 @@ export function ExecutionTimeline({
 function TimelineRow({
   span,
   scale,
-  collapsed,
-  hasChildren,
-  onToggleNode,
   onCursorPreview,
   onCursorCommit,
   onCursorDragStart,
@@ -667,9 +674,6 @@ function TimelineRow({
 }: {
   span: TimelineSpan;
   scale: TimelineScale;
-  collapsed: boolean;
-  hasChildren: boolean;
-  onToggleNode: () => void;
   onCursorPreview: (clientX: number) => void;
   onCursorCommit: (clientX: number, options?: { requireNear?: boolean }) => void;
   onCursorDragStart: (clientX: number) => void;
@@ -693,20 +697,13 @@ function TimelineRow({
   return (
     <>
       <button
-        className={`timeline-label ${span.kind === "operator_call" ? "is-child" : ""} ${span.kind === "node_execution" ? "is-node" : ""}`}
+        className="timeline-label is-node"
         type="button"
         data-timeline-row-id={span.id}
-        onClick={() => {
-          if (span.kind === "node_execution" && hasChildren) onToggleNode();
-          else onSelect();
-        }}
+        onClick={onSelect}
         title={span.label}
       >
-        {span.kind === "node_execution" && hasChildren && (
-          collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />
-        )}
-        {span.kind === "node_execution" && !hasChildren && <span className="timeline-label-spacer" />}
-        {span.kind === "operator_call" && <CornerDownRight size={12} />}
+        <span className="timeline-label-spacer" />
         <span>{span.label}</span>
       </button>
       <button
@@ -927,8 +924,14 @@ function markerForSequence(
 
 function timelineRowIdForEvent(event: RuntimeEvent | undefined): string | null {
   if (!event) return null;
-  if (event.entity_type === "node_execution" || event.entity_type === "operator_call") {
+  if (event.entity_type === "node_execution") {
     return event.entity_id;
+  }
+  if (event.entity_type === "operator_call") {
+    const nodeExecutionId = event.payload.node_execution_id;
+    return nodeExecutionId === undefined || nodeExecutionId === null
+      ? null
+      : String(nodeExecutionId);
   }
   if (event.entity_type === "edge") {
     const sourceExecutionId = event.payload.node_execution_id;
@@ -937,11 +940,6 @@ function timelineRowIdForEvent(event: RuntimeEvent | undefined): string | null {
       : String(sourceExecutionId);
   }
   return null;
-}
-
-function parentTimelineRowId(spans: TimelineSpan[], rowId: string | null): string | null {
-  if (!rowId) return null;
-  return spans.find((span) => span.id === rowId)?.parent_id ?? null;
 }
 
 function findTimelineRow(scroller: HTMLElement, rowId: string | null): HTMLElement | null {

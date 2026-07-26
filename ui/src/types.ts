@@ -24,6 +24,36 @@ export interface ServerHealth {
   authenticated: boolean;
 }
 
+export interface RuntimeStatus {
+  service: {
+    status: string;
+    started_at_ms: number;
+  };
+  execution: {
+    enabled: boolean;
+    accepting_invocations: boolean;
+    refusal_reason: string | null;
+  };
+  store: {
+    kind: "memory" | "durable" | string;
+  };
+  persistence: {
+    enabled: boolean;
+    backend_kind: string | null;
+    worker_state: string;
+    health: "memory_only" | "healthy" | "retrying" | "unavailable" | string;
+    pending_count: number;
+    pending_bytes: number;
+    low_watermark_bytes: number;
+    high_watermark_bytes: number;
+    hard_watermark_bytes: number;
+    pressure: "normal" | "high" | "hard" | string;
+    last_error: string | null;
+    changed_at_ms: number | null;
+    last_success_at_ms: number | null;
+  };
+}
+
 export interface InvocationSubmitResponse {
   workflow_id: string;
   session_id: string;
@@ -38,9 +68,15 @@ export interface InvocationResumeResponse {
   state: RuntimeState;
 }
 
+export interface InvocationCancelResponse {
+  invocation_id: string;
+  state: RuntimeState;
+}
+
 export interface WorkflowSummary {
   workflow_id: string;
   workflow_version: string | number | null;
+  revision_id: string;
   definition_hash: string;
   operator_manifest_hash: string;
   name: string | null;
@@ -49,6 +85,9 @@ export interface WorkflowSummary {
   revision_count?: number;
   /** Whether this exact revision is registered by the current App process. */
   registered_in_current_app?: boolean;
+  registered?: boolean;
+  created_at_ms?: number;
+  updated_at_ms?: number;
 }
 
 export interface WorkflowNodeView {
@@ -106,6 +145,7 @@ export interface SessionSummary {
   workflow_id: string;
   session_key: string | null;
   current_invocation_id: string | null;
+  current_invocation_state?: RuntimeState | null;
   invocation_count: number;
   created_at_ms: number;
   updated_at_ms: number;
@@ -113,12 +153,19 @@ export interface SessionSummary {
 
 export interface InvocationSummary {
   id: string;
+  session_id?: string;
   workflow_id: string;
+  workflow_revision_id?: string;
   workflow_version: string | number | null;
   definition_hash: string | null;
   operator_manifest_hash: string | null;
   entry_node_id: string;
   state: RuntimeState;
+  execution_mode?: string;
+  event_mode?: "minimal" | "standard" | "full";
+  live_sequence?: number;
+  durable_sequence?: number;
+  persistence_status?: string;
   created_at_ms: number;
   updated_at_ms: number;
 }
@@ -128,6 +175,7 @@ export interface OperatorCallView {
   operator_id: string;
   call_no: number;
   kind: string;
+  reason?: string | null;
   item_index: number | null;
   replica_index: number | null;
   state: RuntimeState;
@@ -182,7 +230,7 @@ export interface InvocationDetail extends InvocationSummary {
 
 export interface TimelineSpan {
   id: string;
-  kind: "node_execution" | "operator_call";
+  kind: "node_execution";
   parent_id: string | null;
   node_id: string;
   label: string;
@@ -202,11 +250,23 @@ export interface TimelineView {
 
 export interface RuntimeEvent {
   id: string;
-  namespace: string;
-  workflow_id: string;
-  session_id: string;
   invocation_id: string;
   sequence: number;
+  schema_version: number;
+  event_type: string;
+  event_name: string;
+  subject_type: string;
+  subject_id: string;
+  elapsed_ns: number | null;
+  status: string | null;
+  timing: Record<string, number>;
+  has_input: boolean;
+  has_output: boolean;
+  has_operations?: boolean;
+  input?: unknown;
+  output?: unknown;
+  operations?: Array<Record<string, unknown>> | null;
+  /** Compatibility aliases used by visual components. */
   type: string;
   entity_type: string;
   entity_id: string | null;
@@ -222,17 +282,53 @@ export interface ProjectedNodeExecution {
   execution_id: string;
   node_id: string;
   sequence: number;
+  first_event_sequence?: number;
   state: RuntimeState;
   input: unknown;
   output: unknown;
   error: Record<string, unknown> | null;
+  started_at_ms?: number | null;
+  ended_at_ms?: number | null;
+  elapsed_ns?: number | null;
+  timing?: Record<string, number>;
+  operator_call_count?: number;
+  failed_operator_call_count?: number;
+  retry_count?: number;
+  fallback_count?: number;
+  timeout_count?: number;
+  operator_calls?: ProjectedOperatorCall[];
+}
+
+export interface ProjectedOperatorCall {
+  id: string;
+  event_sequence: number;
+  node_execution_id: string;
+  operator_id: string;
+  kind: string;
+  reason: string | null;
+  state: RuntimeState;
+  error: Record<string, unknown> | null;
+  summary: Record<string, unknown> | null;
+  occurred_at_ms: number;
+  elapsed_ns: number | null;
+  timing: Record<string, number>;
 }
 
 export interface ProjectedNode {
   node_id: string;
   state: RuntimeState;
-  latest_execution_id: string;
+  latest_execution_id: string | null;
   execution_count: number;
+  latest_error?: unknown;
+  latest_elapsed_ns?: number | null;
+  latest_timing?: Record<string, number>;
+  operator_call_count?: number;
+  failed_operator_call_count?: number;
+  retry_count?: number;
+  fallback_count?: number;
+  timeout_count?: number;
+  parallel_call_count?: number;
+  latest_operator_kind?: string | null;
 }
 
 export interface ProjectedEdge {
@@ -248,6 +344,7 @@ export interface ProjectedEdge {
 }
 
 export interface RuntimeProjection {
+  schema_version?: number;
   invocation_id: string;
   through_sequence: number;
   invocation_state: RuntimeState;
@@ -255,6 +352,15 @@ export interface RuntimeProjection {
   nodes: Record<string, ProjectedNode>;
   edges: Record<string, ProjectedEdge>;
   operator_states: Record<string, RuntimeState>;
+  active_waits?: Record<string, {
+    wait_key: string;
+    created_at_ms: number;
+    node_execution_id?: string;
+    node_id?: string;
+    wait_type?: string | null;
+    payload?: Record<string, unknown>;
+  }>;
+  latest_phase?: Record<string, unknown> | null;
 }
 
 export interface RuntimeEventPage {
@@ -262,6 +368,9 @@ export interface RuntimeEventPage {
   next_after_sequence: number;
   previous_before_sequence: number | null;
   has_more: boolean;
+  has_later?: boolean;
+  live_sequence: number;
+  invocation_state: RuntimeState;
 }
 
 export interface TraceBootstrap {
@@ -272,12 +381,23 @@ export interface TraceBootstrap {
   checkpoint: RuntimeProjection;
   events: RuntimeEvent[];
   projection: RuntimeProjection;
+  capabilities: {
+    has_events: boolean;
+    has_graph_trace: boolean;
+    has_internal_phases: boolean;
+    has_historical_runtime_state: boolean;
+    fork_available: boolean;
+    design_available: boolean;
+  };
+  has_more_events: boolean;
 }
 
 export type TraceSelection =
+  | { type: "invocation"; id: string }
   | { type: "node"; id: string }
   | { type: "edge"; id: string }
   | { type: "group"; id: string }
+  | { type: "event"; id: string; sequence: number }
   | { type: "node_execution"; id: string }
   | { type: "operator_call"; id: string }
   | null;

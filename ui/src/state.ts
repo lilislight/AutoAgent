@@ -2,9 +2,12 @@ import { create } from "zustand";
 
 import type { TraceSelection } from "./types";
 
-export type InspectorTab = "definition" | "runtime" | "contracts" | "policies" | "events";
-export type RuntimeTab = "input" | "output" | "execution" | "calls" | "evaluations";
-
+export type InspectorTab =
+  | "overview"
+  | "data"
+  | "trace"
+  | "context"
+  | "definition";
 interface TraceUiState {
   workflowId: string | null;
   sessionId: string | null;
@@ -12,10 +15,8 @@ interface TraceUiState {
   cursorSequence: number | null;
   replayCursorSequence: number | null;
   followLive: boolean;
-  connected: boolean;
   selection: TraceSelection;
   inspectorTab: InspectorTab;
-  runtimeTab: RuntimeTab;
   setWorkflow: (id: string | null) => void;
   setSession: (id: string | null) => void;
   setInvocation: (id: string | null) => void;
@@ -26,10 +27,8 @@ interface TraceUiState {
   ) => void;
   setCursor: (sequence: number, followLive?: boolean) => void;
   setFollowLive: (value: boolean) => void;
-  setConnected: (value: boolean) => void;
   setSelection: (selection: TraceSelection) => void;
   setInspectorTab: (tab: InspectorTab) => void;
-  setRuntimeTab: (tab: RuntimeTab) => void;
 }
 
 export const useTraceUi = create<TraceUiState>((set) => ({
@@ -39,10 +38,8 @@ export const useTraceUi = create<TraceUiState>((set) => ({
   cursorSequence: null,
   replayCursorSequence: null,
   followLive: true,
-  connected: false,
   selection: null,
-  inspectorTab: "runtime",
-  runtimeTab: "input",
+  inspectorTab: "overview",
   setWorkflow: (workflowId) =>
     set({
       workflowId,
@@ -90,8 +87,6 @@ export const useTraceUi = create<TraceUiState>((set) => ({
         : cursorSequence,
     })),
   setFollowLive: (followLive) => set({ followLive }),
-  setConnected: (connected) => set({ connected }),
   setSelection: (selection) => set({ selection }),
   setInspectorTab: (inspectorTab) => set({ inspectorTab }),
-  setRuntimeTab: (runtimeTab) => set({ runtimeTab }),
 }));

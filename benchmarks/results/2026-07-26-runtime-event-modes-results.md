@@ -1,7 +1,7 @@
 # Runtime Event modes benchmark
 
 Environment: 4 logical CPUs, 8 GiB memory, repository `uv` Python
-environment. Results describe the current uncommitted working tree.
+environment. The first measurements are the committed `b226516` baseline.
 
 ## Normal execution
 
@@ -55,6 +55,38 @@ the measured workload scales approximately linearly, 64 MiB corresponds to:
 These are workload-specific projections, not fixed framework limits. Workflow
 width, node count, Context changes, retries, and output shape change the bytes
 per Invocation.
+
+## Copy-on-write Runtime State optimization
+
+The optimized working tree replaces the Full-mode reducer's complete Runtime
+State deepcopy with path-based copy-on-write and compacts Standard
+RecoveryState records before one final defensive copy.
+
+The normal benchmark used exactly the same 30-node/30-Invocation command:
+
+| Backend | Mode | Baseline median | Optimized median | Change | Baseline throughput | Optimized throughput |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Memory | Minimal | 71.76 ms | 71.61 ms | -0.2% | 13.69 inv/s | 13.64 inv/s |
+| Memory | Standard | 75.48 ms | 75.36 ms | -0.2% | 12.98 inv/s | 13.00 inv/s |
+| Memory | Full | 182.18 ms | 96.99 ms | **-46.8%** | 5.36 inv/s | **9.77 inv/s** |
+| SQLite | Minimal | 84.96 ms | 84.78 ms | -0.2% | 11.52 inv/s | 11.68 inv/s |
+| SQLite | Standard | 212.71 ms | 188.34 ms | **-11.5%** | 4.65 inv/s | **5.19 inv/s** |
+| SQLite | Full | 606.85 ms | 211.05 ms | **-65.2%** | 1.64 inv/s | **4.61 inv/s** |
+
+The same blocked-database, 20-Invocation, 10-node, 10 KiB-output case was
+repeated sequentially:
+
+| Mode | Baseline execution | Optimized execution | Change | Baseline flush | Optimized flush | Queue bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Minimal | 0.335 s | 0.321 s | -4.1% | 0.948 s | 0.972 s | 303,736 |
+| Standard | 1.839 s | 1.637 s | **-11.0%** | 1.750 s | 1.754 s | 5,559,831 |
+| Full | 2.743 s | 2.113 s | **-23.0%** | 9.361 s | **4.749 s** | 18,594,362 |
+
+The optimization intentionally does not reduce persisted Event content, so
+queue and database sizes remain effectively unchanged. It removes executor and
+persistence-thread copying work. The Full flush improvement occurs because
+database recovery-state advancement also reduces operations through the same
+copy-on-write implementation.
 
 ## Commands
 

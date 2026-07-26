@@ -18,6 +18,10 @@ from autoagent.core.runtime import (
     StateOperation,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
+from autoagent.core.runtime.snapshot import (
+    capture_recovery_state,
+    compact_recovery_state,
+)
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -45,6 +49,99 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first, reduced["node_executions"][0])
         self.assertIsNot(second, reduced["node_executions"][1])
         self.assertEqual("completed", reduced["node_executions"][1]["state"])
+
+    def test_state_operations_copy_only_nested_changed_paths(self) -> None:
+        untouched_session = {"context": {"data": {"tenant": "one"}}}
+        previous_context = {
+            "data": {
+                "nested": {"old": 1},
+                "untouched": {"large": [1, 2, 3]},
+            }
+        }
+        state = {
+            "session": untouched_session,
+            "invocation": {"context": previous_context},
+            "node_executions": [],
+        }
+        operation_value = {"new": [4, 5, 6]}
+
+        reduced = apply_state_operations(
+            state,
+            (
+                StateOperation(
+                    op="replace",
+                    path=("invocation", "context", "data", "nested"),
+                    value=operation_value,
+                ),
+            ),
+        )
+
+        self.assertIs(untouched_session, reduced["session"])
+        self.assertIsNot(state["invocation"], reduced["invocation"])
+        self.assertIsNot(previous_context, reduced["invocation"]["context"])
+        self.assertIsNot(
+            previous_context["data"],
+            reduced["invocation"]["context"]["data"],
+        )
+        self.assertIs(
+            previous_context["data"]["untouched"],
+            reduced["invocation"]["context"]["data"]["untouched"],
+        )
+        self.assertEqual({"old": 1}, previous_context["data"]["nested"])
+        operation_value["new"].append(7)
+        self.assertEqual(
+            {"new": [4, 5, 6]},
+            reduced["invocation"]["context"]["data"]["nested"],
+        )
+
+    def test_recovery_capture_matches_compacted_full_state(self) -> None:
+        session = Session(workflow_id="flow", session_key="session")
+        session.context.data["session_payload"] = {"value": 1}
+        invocation = Invocation(
+            workflow_id="flow",
+            workflow_version=1,
+            entry_node_id="entry",
+            event_mode="standard",
+        )
+        invocation.context.data["invocation_payload"] = {"value": 2}
+        session.add_invocation(invocation)
+        execution = invocation.create_node_execution("entry")
+        execution.input = {"prompt": "input"}
+        execution.output = {"answer": "output"}
+        operator_call = DirectOperatorExecution(
+            operator_id="primary",
+            sequence=1,
+            input={"operator": "input"},
+        )
+        operator_call.mark_completed({"operator": "output"})
+        execution.operator_executions.append(operator_call)
+
+        expected = compact_recovery_state(
+            capture_execution_state(session, invocation)
+        )
+        captured = capture_recovery_state(session, invocation)
+
+        self.assertEqual(expected, captured)
+        self.assertIsNone(captured["node_executions"][0]["input"])
+        self.assertEqual(
+            {"answer": "output"},
+            captured["node_executions"][0]["output"],
+        )
+        operator_record = captured["node_executions"][0][
+            "operator_executions"
+        ][0]
+        self.assertNotIn("input", operator_record)
+        self.assertNotIn("output", operator_record)
+        execution.output["answer"] = "changed"
+        session.context.data["session_payload"]["value"] = 3
+        self.assertEqual(
+            {"answer": "output"},
+            captured["node_executions"][0]["output"],
+        )
+        self.assertEqual(
+            1,
+            captured["session"]["context"]["data"]["session_payload"]["value"],
+        )
 
     def test_reducer_rejects_non_contiguous_event_journal(self) -> None:
         session = Session(workflow_id="flow", session_key="session")

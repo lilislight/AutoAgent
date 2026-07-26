@@ -4,17 +4,22 @@ import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-quer
 import { AlertTriangle, GitBranch, LoaderCircle, Play, X } from "lucide-react";
 
 import {
+  buildTimelineView,
+  cancelInvocation,
   createAuthenticationSession,
-  getEarlierEvents,
   getLaterEvents,
+  getInvocation,
   getWorkflowGraph,
   getTraceView,
   getHealth,
+  getRuntimeStatus,
   listInvocations,
   listRegisteredWorkflows,
   listSessions,
   listWorkflows,
   resumeInvocation,
+  subscribeToInvocation,
+  subscribeToRuntimeStatus,
   submitInvocation,
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
@@ -28,23 +33,22 @@ import type {
   InvocationSummary,
   RuntimeEvent,
   RuntimeProjection,
+  RuntimeStatus,
   SessionSummary,
   TimelineView,
+  TraceBootstrap,
   WorkflowGraphView,
   WorkflowSummary,
 } from "./types";
 
-const LIVE_EVENT_POLL_MS = 500;
-const LIVE_EVENT_ERROR_POLL_MS = 1500;
-const LIVE_EVENT_FETCH_LIMIT = 500;
+const EVENT_PAGE_SIZE = 200;
+const EVENT_HISTORY_CACHE_SIZE = 8;
 
 export default function App() {
   const queryClient = useQueryClient();
   const ui = useTraceUi();
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [eventBuffer, setEventBuffer] = useState<RuntimeEvent[]>([]);
-  const [fetchAfterSequence, setFetchAfterSequence] = useState(0);
-  const eventFetchInFlight = useRef(false);
   const [pendingScope, setPendingScope] = useState<{
     workflowId: string;
     sessionId: string;
@@ -53,6 +57,7 @@ export default function App() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [refreshingLatest, setRefreshingLatest] = useState(false);
   const [authToken, setAuthToken] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState(false);
@@ -63,17 +68,39 @@ export default function App() {
   const [invokeInput, setInvokeInput] = useState("{}");
   const [invokeSessionKey, setInvokeSessionKey] = useState("");
   const [invokeEntryNodeId, setInvokeEntryNodeId] = useState("");
+  const [invokeEventMode, setInvokeEventMode] = useState<
+    "minimal" | "standard" | "full"
+  >("standard");
   const [invokeSubmitting, setInvokeSubmitting] = useState(false);
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [invokeMessage, setInvokeMessage] = useState<string | null>(null);
   const [resumeSubmitting, setResumeSubmitting] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [resumeWaitKey, setResumeWaitKey] = useState("");
+  const [resumeNodeId, setResumeNodeId] = useState("");
+  const [resumeOutput, setResumeOutput] = useState("{}");
   const [resumeError, setResumeError] = useState<string | null>(null);
+  const [pendingNodeAction, setPendingNodeAction] = useState<{
+    kind: "invoke" | "resume";
+    nodeId: string;
+  } | null>(null);
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  const [runtimeStreamConnected, setRuntimeStreamConnected] = useState<boolean | null>(null);
   const [liveDraftGraph, setLiveDraftGraph] = useState<WorkflowGraphView | null>(null);
   const [liveDraftInvocation, setLiveDraftInvocation] = useState<InvocationDetail | null>(null);
   const [liveDraftTimeline, setLiveDraftTimeline] = useState<TimelineView | null>(null);
   const [darkMode, setDarkMode] = useState(
     () => localStorage.getItem("autoagent:theme") === "dark",
   );
+  const projectionCacheRef = useRef<{
+    key: string;
+    values: Map<number, RuntimeProjection>;
+  }>({ key: "", values: new Map() });
+  const eventHistoryCacheRef = useRef(new Map<string, {
+    events: RuntimeEvent[];
+    historyLoaded: boolean;
+  }>());
+  const eventOwnerRef = useRef<string | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = darkMode ? "dark" : "light";
@@ -83,10 +110,33 @@ export default function App() {
   const healthQuery = useQuery({
     queryKey: ["trace-health"],
     queryFn: getHealth,
-    refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
+    staleTime: Number.POSITIVE_INFINITY,
   });
   const authenticated = healthQuery.data?.authenticated ?? false;
+  const runtimeStatusQuery = useQuery({
+    queryKey: ["runtime-status"],
+    queryFn: getRuntimeStatus,
+    enabled: authenticated,
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchInterval: runtimeStreamConnected === false ? 10_000 : false,
+    refetchIntervalInBackground: false,
+  });
+  useEffect(() => {
+    if (!authenticated) return;
+    return subscribeToRuntimeStatus(
+      (status) => queryClient.setQueryData<RuntimeStatus>(["runtime-status"], status),
+      setRuntimeStreamConnected,
+    );
+  }, [authenticated, queryClient]);
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible" && authenticated) {
+        void runtimeStatusQuery.refetch();
+      }
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => document.removeEventListener("visibilitychange", refreshWhenVisible);
+  }, [authenticated, runtimeStatusQuery.refetch]);
   const workflowQuery = useQuery({
     queryKey: ["workflows"],
     queryFn: listWorkflows,
@@ -116,6 +166,7 @@ export default function App() {
     ],
     queryFn: () => getWorkflowGraph(invokeWorkflow!),
     enabled: invokeOpen && Boolean(invokeWorkflow),
+    staleTime: Number.POSITIVE_INFINITY,
   });
   const invokeGraph = invokeGraphQuery.data;
   const invokeSessionQuery = useQuery({
@@ -196,6 +247,7 @@ export default function App() {
     queryKey: ["trace-view", ui.sessionId, ui.invocationId],
     queryFn: () => getTraceView(ui.sessionId!, ui.invocationId!),
     enabled: Boolean(ui.sessionId && ui.invocationId),
+    staleTime: Number.POSITIVE_INFINITY,
   });
   const queriedView = viewQuery.data;
   const view =
@@ -204,124 +256,192 @@ export default function App() {
     queriedView.invocation.id === ui.invocationId
       ? queriedView
       : undefined;
-  const activeInvocation = liveDraftInvocation ?? view?.invocation ?? null;
-  const pollingActive = activeInvocation ? shouldPollInvocation(activeInvocation.state) : false;
-  const backendLive = (
-    healthQuery.data?.status === "ok" &&
-    (!pollingActive || ui.connected)
+  const invocationStatusQuery = useQuery({
+    queryKey: ["invocation-status", ui.invocationId],
+    queryFn: () => getInvocation(ui.invocationId!),
+    enabled: Boolean(
+      view &&
+      !historyLoaded &&
+      shouldStreamInvocation(view.invocation),
+    ),
+    refetchInterval: (query) => {
+      const current = query.state.data;
+      return !current || shouldStreamInvocation(current) ? 1_000 : false;
+    },
+    refetchIntervalInBackground: false,
+  });
+  const polledInvocation = invocationStatusQuery.data;
+  const activeInvocation = liveDraftInvocation ?? (
+    view
+      ? { ...view.invocation, ...polledInvocation }
+      : null
   );
+  const streamEligible = activeInvocation
+    ? shouldStreamInvocation(activeInvocation)
+    : false;
   const activeSessionId = ui.sessionId;
   const activeInvocationId = activeInvocation?.id ?? null;
+  const activeEvents = (
+    activeInvocationId !== null &&
+    eventOwnerRef.current === activeInvocationId
+  ) ? events : [];
 
   useEffect(() => {
     if (!view) return;
     if (liveDraftInvocation?.id === view.invocation.id) return;
-    setEvents(view.events);
+    const previousOwner = eventOwnerRef.current;
+    if (previousOwner && previousOwner !== view.invocation.id) {
+      cacheEventHistory(eventHistoryCacheRef.current, previousOwner, {
+        events,
+        historyLoaded,
+      });
+    }
+    const cached = eventHistoryCacheRef.current.get(view.invocation.id);
+    if (cached) {
+      cacheEventHistory(
+        eventHistoryCacheRef.current,
+        view.invocation.id,
+        cached,
+      );
+    }
+    eventOwnerRef.current = view.invocation.id;
+    setEvents(cached?.events ?? view.events);
     setEventBuffer([]);
-    setFetchAfterSequence(view.projection.through_sequence);
-    setHistoryLoaded(view.checkpoint.through_sequence === 0);
+    setHistoryLoaded(cached?.historyLoaded ?? !view.has_more_events);
     setHistoryError(null);
     const latest = view.projection.through_sequence;
     ui.setCursor(latest, true);
   }, [liveDraftInvocation?.id, view?.invocation.id]);
 
-  const fetchLatestEvents = useCallback(async (): Promise<boolean> => {
+  useEffect(() => {
     if (
-      !activeInvocation ||
-      !shouldPollInvocation(activeInvocation.state) ||
-      !activeSessionId ||
       !activeInvocationId ||
-      eventFetchInFlight.current
-    ) {
-      return false;
-    }
-    eventFetchInFlight.current = true;
-    try {
-      const sessionId = activeSessionId;
-      const invocationId = activeInvocationId;
-      const page = await getLaterEvents(
-        sessionId,
-        invocationId,
-        fetchAfterSequence,
-        LIVE_EVENT_FETCH_LIMIT,
-      );
-      const state = useTraceUi.getState();
-      if (state.sessionId !== sessionId || state.invocationId !== invocationId) return false;
-      if (page.events.length > 0) {
+      !activeInvocation ||
+      !activeSessionId ||
+      !streamEligible ||
+      !historyLoaded
+    ) return;
+    const cachedEvents =
+      eventHistoryCacheRef.current.get(activeInvocationId)?.events ?? [];
+    const startSequence = (
+      eventOwnerRef.current === activeInvocationId
+        ? events
+        : cachedEvents
+    ).at(-1)?.sequence ?? 0;
+    return subscribeToInvocation(
+      activeInvocationId,
+      startSequence,
+      (event) => {
+        const state = useTraceUi.getState();
+        if (state.invocationId !== activeInvocationId) return;
         if (state.followLive) {
-          setEvents((current) => mergeEvents(current, page.events));
-          state.setCursor(page.events.at(-1)!.sequence, true);
+          setEvents((current) => {
+            const merged = mergeEvents(current, [event]);
+            cacheEventHistory(eventHistoryCacheRef.current, activeInvocationId, {
+              events: merged,
+              historyLoaded: true,
+            });
+            return merged;
+          });
+          state.setCursor(event.sequence, true);
         } else {
-          setEventBuffer((current) => mergeEvents(current, page.events));
+          setEventBuffer((current) => mergeEvents(current, [event]));
         }
-        applyInvocationStateEvents(queryClient, page.events);
+      },
+      (status) => {
         setLiveDraftInvocation((current) =>
-          current && current.id === invocationId
-            ? applyInvocationStateToDetail(current, page.events)
+          current?.id === status.id ? { ...current, ...status } : current,
+        );
+        queryClient.setQueryData<TraceBootstrap>(
+          ["trace-view", activeSessionId, activeInvocationId],
+          (current) => current
+            ? {
+                ...current,
+                invocation: { ...current.invocation, ...status },
+              }
             : current,
         );
-        void queryClient.invalidateQueries({
-          queryKey: ["trace-view", sessionId, invocationId],
-        });
-      }
-      setFetchAfterSequence(page.next_after_sequence);
-      ui.setConnected(true);
-      return true;
-    } catch {
-      ui.setConnected(false);
-      return false;
-    } finally {
-      eventFetchInFlight.current = false;
-    }
-  }, [activeInvocation, activeInvocationId, activeSessionId, fetchAfterSequence, queryClient, ui]);
-
-  useEffect(() => {
-    if (!activeInvocation || !pollingActive) return;
-    let cancelled = false;
-    let timeout: number | null = null;
-    const poll = async () => {
-      const ok = await fetchLatestEvents();
-      if (cancelled) return;
-      timeout = window.setTimeout(
-        poll,
-        ok ? LIVE_EVENT_POLL_MS : LIVE_EVENT_ERROR_POLL_MS,
-      );
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timeout !== null) window.clearTimeout(timeout);
-    };
-  }, [activeInvocation, fetchLatestEvents, pollingActive]);
+        queryClient.setQueryData<InvocationSummary[]>(
+          ["invocations", activeSessionId],
+          (current) => current?.map((item) =>
+            item.id === status.id ? { ...item, ...status } : item,
+          ),
+        );
+        if (!shouldStreamInvocation(status)) {
+          setLiveDraftGraph(null);
+          setLiveDraftInvocation(null);
+          setLiveDraftTimeline(null);
+          void queryClient.invalidateQueries({
+            queryKey: ["trace-view", activeSessionId, activeInvocationId],
+          });
+        }
+      },
+      () => undefined,
+    );
+  }, [
+    activeInvocationId,
+    activeSessionId,
+    historyLoaded,
+    queryClient,
+    streamEligible,
+  ]);
 
   const cursorSequence =
     ui.cursorSequence ?? view?.projection.through_sequence ?? 0;
   const projection = useMemo(
     () => {
       if (liveDraftInvocation) {
-        return projectEvents(
+        return cachedProjection(
+          projectionCacheRef.current,
+          `${liveDraftInvocation.id}:live`,
           liveDraftInvocation.id,
-          events,
+          activeEvents,
           cursorSequence,
         );
       }
       if (!view) return null;
+      // Bootstrap already carries the authoritative state at the live cursor.
+      // Using it also avoids a first paint from an empty local Event array.
+      if (cursorSequence === view.projection.through_sequence) {
+        return view.projection;
+      }
       const checkpoint =
         !historyLoaded && cursorSequence >= view.checkpoint.through_sequence
           ? view.checkpoint
           : undefined;
-      return projectEvents(
+      return cachedProjection(
+        projectionCacheRef.current,
+        `${view.invocation.id}:${historyLoaded}:${checkpoint?.through_sequence ?? 0}`,
         view.invocation.id,
-        events,
+        activeEvents,
         cursorSequence,
         checkpoint,
       );
     },
-    [cursorSequence, events, historyLoaded, liveDraftInvocation, view],
+    [activeEvents, cursorSequence, historyLoaded, liveDraftInvocation, view],
   );
   const activeGraph = liveDraftGraph ?? view?.graph ?? null;
-  const activeInvocationDetail = liveDraftInvocation ?? view?.invocation ?? null;
-  const activeTimeline = view?.timeline ?? liveDraftTimeline ?? null;
+  const activeInvocationDetail = activeInvocation;
+  const latestTimelineProjection = useMemo(() => {
+    if (liveDraftInvocation) {
+      return projectEvents(liveDraftInvocation.id, activeEvents);
+    }
+    if (!view) return null;
+    return projectEvents(
+      view.invocation.id,
+      activeEvents,
+      undefined,
+      view.projection,
+    );
+  }, [activeEvents, liveDraftInvocation, view]);
+  const activeTimeline = useMemo(
+    () => (
+      activeInvocationDetail && latestTimelineProjection
+        ? buildTimelineView(activeInvocationDetail, latestTimelineProjection)
+        : liveDraftTimeline
+    ),
+    [activeInvocationDetail, latestTimelineProjection, liveDraftTimeline],
+  );
   const viewedWorkflow = activeGraph ?? workflows.find(
     (workflow) => workflow.workflow_id === ui.workflowId,
   ) ?? null;
@@ -333,15 +453,28 @@ export default function App() {
         workflow.operator_manifest_hash === viewedWorkflow.operator_manifest_hash,
     ),
   );
-  const draftProjection = useMemo(
-    () => (invokeGraph ? createDraftProjection(invokeGraph) : null),
-    [invokeGraph],
+  const selectedDirectoryWorkflow =
+    workflows.find((workflow) => workflow.workflow_id === ui.workflowId) ?? null;
+  const selectedGraphQuery = useQuery({
+    queryKey: [
+      "workflow-graph",
+      selectedDirectoryWorkflow?.workflow_id,
+      selectedDirectoryWorkflow?.definition_hash,
+      selectedDirectoryWorkflow?.operator_manifest_hash,
+    ],
+    queryFn: () => getWorkflowGraph(selectedDirectoryWorkflow!),
+    enabled: Boolean(selectedDirectoryWorkflow && !activeGraph && !invokeOpen),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const selectedGraph = selectedGraphQuery.data ?? null;
+  const selectedGraphProjection = useMemo(
+    () => selectedGraph ? createDraftProjection(selectedGraph) : null,
+    [selectedGraph],
   );
-  const draftInvocation = useMemo(
-    () => (invokeGraph ? createDraftInvocation(invokeGraph) : null),
-    [invokeGraph],
+  const selectedGraphInvocation = useMemo(
+    () => selectedGraph ? createDraftInvocation(selectedGraph) : null,
+    [selectedGraph],
   );
-
   useEffect(() => {
     if (!invokeOpen || !invokeGraph) return;
     if (
@@ -353,38 +486,113 @@ export default function App() {
     setInvokeEntryNodeId("");
   }, [invokeEntryNodeId, invokeGraph, invokeOpen]);
 
-  const loadFullHistory = useCallback(async () => {
+  const loadNextEventPage = useCallback(async () => {
     if (!view || !ui.sessionId || !ui.invocationId || historyLoading) return;
+    const requestedInvocationId = ui.invocationId;
+    const cached = eventHistoryCacheRef.current.get(requestedInvocationId);
+    const currentEvents = cached?.events ?? (
+      eventOwnerRef.current === requestedInvocationId ? events : []
+    );
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      let collected = [...events];
-      let beforeSequence =
-        collected[0]?.sequence ?? view.checkpoint.through_sequence + 1;
-      while (beforeSequence > 1) {
-        const page = await getEarlierEvents(
-          ui.sessionId,
-          ui.invocationId,
-          beforeSequence,
-        );
-        collected = mergeEvents(page.events, collected);
-        if (!page.has_more || page.previous_before_sequence === null) break;
-        beforeSequence = page.previous_before_sequence;
+      const afterSequence = currentEvents.at(-1)?.sequence ?? 0;
+      const page = await getLaterEvents(
+        ui.sessionId,
+        requestedInvocationId,
+        afterSequence,
+        EVENT_PAGE_SIZE,
+      );
+      const merged = mergeEvents(currentEvents, page.events);
+      const loadedThrough = merged.at(-1)?.sequence ?? 0;
+      const caughtUp = loadedThrough >= page.live_sequence;
+      cacheEventHistory(eventHistoryCacheRef.current, requestedInvocationId, {
+        events: merged,
+        historyLoaded: caughtUp,
+      });
+      if (useTraceUi.getState().invocationId === requestedInvocationId) {
+        eventOwnerRef.current = requestedInvocationId;
+        setEvents(merged);
+        setHistoryLoaded(caughtUp);
+        if (caughtUp && useTraceUi.getState().followLive) {
+          useTraceUi.getState().setCursor(loadedThrough, true);
+        }
       }
-      setEvents(collected);
-      setHistoryLoaded(true);
+      queryClient.setQueryData<TraceBootstrap>(
+        ["trace-view", ui.sessionId, requestedInvocationId],
+        (current) => current
+          ? {
+              ...current,
+              invocation: {
+                ...current.invocation,
+                state: page.invocation_state,
+                live_sequence: page.live_sequence,
+              },
+              has_more_events: loadedThrough < page.live_sequence,
+            }
+          : current,
+      );
+      queryClient.setQueryData<InvocationSummary[]>(
+        ["invocations", ui.sessionId],
+        (current) => current?.map((item) =>
+          item.id === requestedInvocationId
+            ? {
+                ...item,
+                state: page.invocation_state,
+                live_sequence: page.live_sequence,
+              }
+            : item,
+        ),
+      );
     } catch (loadError) {
       setHistoryError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       setHistoryLoading(false);
     }
-  }, [events, historyLoading, ui.invocationId, ui.sessionId, view]);
+  }, [
+    events,
+    historyLoading,
+    queryClient,
+    ui.invocationId,
+    ui.sessionId,
+    view,
+  ]);
 
   useEffect(() => {
-    if (!view || shouldPollInvocation(view.invocation.state) || historyLoaded || historyLoading) return;
-    if (view.checkpoint.through_sequence <= 0) return;
-    void loadFullHistory();
-  }, [historyLoaded, historyLoading, loadFullHistory, view]);
+    if (
+      !view ||
+      view.invocation.event_mode === "minimal" ||
+      historyLoaded ||
+      historyLoading ||
+      activeEvents.length > 0
+    ) return;
+    void loadNextEventPage();
+  }, [
+    activeEvents.length,
+    historyLoaded,
+    historyLoading,
+    loadNextEventPage,
+    view?.invocation.id,
+  ]);
+
+  const refreshLatestInvocation = useCallback(async () => {
+    if (!ui.sessionId || !ui.invocationId || refreshingLatest) return;
+    setRefreshingLatest(true);
+    try {
+      const result = await viewQuery.refetch();
+      if (result.data && ui.followLive) {
+        ui.setCursor(result.data.projection.through_sequence, true);
+      }
+    } finally {
+      setRefreshingLatest(false);
+    }
+  }, [
+    refreshingLatest,
+    ui,
+    viewQuery,
+    ui.invocationId,
+    ui.sessionId,
+  ]);
 
   const flushBufferedEvents = useCallback(() => {
     const flushed = mergeEvents(events, eventBuffer);
@@ -399,7 +607,6 @@ export default function App() {
     const flushed = flushBufferedEvents();
     const latest = flushed.at(-1)?.sequence ?? view?.projection.through_sequence ?? 0;
     ui.setCursor(latest, true);
-    if (view && shouldPollInvocation(view.invocation.state)) void fetchLatestEvents();
     if (ui.sessionId && ui.invocationId) {
       void queryClient.invalidateQueries({
         queryKey: ["trace-view", ui.sessionId, ui.invocationId],
@@ -429,11 +636,17 @@ export default function App() {
         input: parsedInput,
         session_id: invokeSessionKey.trim() || null,
         entry_node_id: invokeEntryNodeId.trim() || null,
+        event_mode: invokeEventMode,
       });
       setInvokeMessage(`Created invocation ${response.invocation_id.slice(0, 8)}.`);
+      eventOwnerRef.current = response.invocation_id;
       setEvents([]);
       setEventBuffer([]);
-      setFetchAfterSequence(0);
+      setHistoryLoaded(true);
+      cacheEventHistory(eventHistoryCacheRef.current, response.invocation_id, {
+        events: [],
+        historyLoaded: true,
+      });
       setLiveDraftGraph(invokeGraph);
       setLiveDraftInvocation(createLiveDraftInvocation(
         invokeGraph,
@@ -455,10 +668,12 @@ export default function App() {
         sessionKey: invokeSessionKey.trim() || null,
         entryNodeId: invokeEntryNodeId,
         state: response.state,
+        eventMode: invokeEventMode,
       });
       ui.setInvocationScope(response.workflow_id, response.session_id, response.invocation_id);
       ui.setCursor(0, true);
       setInvokeOpen(false);
+      setPendingNodeAction(null);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["workflows"] }),
         queryClient.invalidateQueries({ queryKey: ["registered-workflows"] }),
@@ -470,6 +685,47 @@ export default function App() {
     } finally {
       setInvokeSubmitting(false);
     }
+  };
+
+  const stageInvoke = (entryNodeId: string) => {
+    const workflowId =
+      registeredWorkflows.find((workflow) => workflow.workflow_id === ui.workflowId)
+        ?.workflow_id ??
+      registeredWorkflows[0]?.workflow_id ??
+      null;
+    setInvokeWorkflowId(workflowId);
+    const currentSession = sessions.find((value) => value.id === ui.sessionId);
+    setInvokeSessionKey(
+      activeInvocationDetail &&
+      !isTerminalInvocation(activeInvocationDetail.state)
+        ? ""
+        : currentSession?.session_key ?? "",
+    );
+    setInvokeEntryNodeId(entryNodeId);
+    setInvokeInput("{}");
+    setInvokeOpen(false);
+    setInvokeError(null);
+    setInvokeMessage(null);
+    setResumeOpen(false);
+    setPendingNodeAction({ kind: "invoke", nodeId: entryNodeId });
+  };
+
+  const stageResume = (nodeId: string) => {
+    const waits = Object.values(projection?.active_waits ?? {});
+    const matching = waits.filter((wait) => wait.node_id === nodeId);
+    const selected = matching[0] ?? (waits.length === 1 ? waits[0] : null);
+    if (!selected) {
+      setPendingNodeAction(null);
+      ui.setSelection({ type: "node", id: nodeId });
+      return;
+    }
+    setResumeNodeId(nodeId);
+    setResumeWaitKey(selected.wait_key);
+    setResumeOutput("{}");
+    setResumeError(null);
+    setResumeOpen(false);
+    setInvokeOpen(false);
+    setPendingNodeAction({ kind: "resume", nodeId });
   };
 
   const resumeSelectedWait = async (waitKey: string, output: unknown) => {
@@ -489,6 +745,7 @@ export default function App() {
         sessionKey: view.session.session_key,
         entryNodeId: activeInvocationDetail?.entry_node_id ?? "",
         state: response.state,
+        eventMode: activeInvocationDetail?.event_mode,
       });
       await Promise.all([
         queryClient.invalidateQueries({
@@ -497,11 +754,32 @@ export default function App() {
         queryClient.invalidateQueries({ queryKey: ["sessions", response.workflow_id] }),
         queryClient.invalidateQueries({ queryKey: ["invocations", response.session_id] }),
       ]);
-      void fetchLatestEvents();
+      setResumeOpen(false);
+      setPendingNodeAction(null);
+      await refreshLatestInvocation();
     } catch (resumeError) {
       setResumeError(resumeError instanceof Error ? resumeError.message : String(resumeError));
+      throw resumeError;
     } finally {
       setResumeSubmitting(false);
+    }
+  };
+
+  const cancelActiveInvocation = async () => {
+    if (!activeInvocationDetail || cancelSubmitting) return;
+    setCancelSubmitting(true);
+    try {
+      await cancelInvocation(activeInvocationDetail.id);
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["trace-view", activeSessionId, activeInvocationDetail.id],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["invocations", activeSessionId],
+        }),
+      ]);
+    } finally {
+      setCancelSubmitting(false);
     }
   };
 
@@ -512,13 +790,38 @@ export default function App() {
     setEventBuffer([]);
   };
 
+  useEffect(() => {
+    if (
+      activeInvocationDetail &&
+      pendingNodeAction &&
+      (
+        ui.selection?.type !== "node" ||
+        ui.selection.id !== pendingNodeAction.nodeId
+      )
+    ) {
+      setPendingNodeAction(null);
+      setInvokeOpen(false);
+      setResumeOpen(false);
+    }
+  }, [activeInvocationDetail, pendingNodeAction, ui.selection]);
+
   const loading =
+    runtimeStatusQuery.isLoading ||
     workflowQuery.isLoading ||
+    registeredWorkflowQuery.isLoading ||
     sessionQuery.isLoading ||
     invocationQuery.isLoading ||
     (viewQuery.isLoading && !liveDraftGraph) ||
     (Boolean(ui.sessionId && ui.invocationId) && !view && !liveDraftGraph);
-  const error = healthQuery.error || workflowQuery.error || sessionQuery.error || invocationQuery.error || viewQuery.error;
+  const error =
+    healthQuery.error ||
+    runtimeStatusQuery.error ||
+    workflowQuery.error ||
+    registeredWorkflowQuery.error ||
+    sessionQuery.error ||
+    invocationQuery.error ||
+    viewQuery.error ||
+    selectedGraphQuery.error;
 
   if (healthQuery.isLoading) {
     return (
@@ -564,42 +867,48 @@ export default function App() {
     <div className="app-shell">
       <ScopeBar
         workflows={workflows}
-        sessions={sessions}
         invocations={invocations}
         workflowId={ui.workflowId}
         sessionId={ui.sessionId}
         invocationId={ui.invocationId}
-        invocationState={projection?.invocation_state ?? view?.invocation.state ?? null}
-        viewedWorkflow={viewedWorkflow}
-        viewedWorkflowIsRegistered={viewedWorkflowIsRegistered}
-        followLive={ui.followLive}
-        backendLive={backendLive}
+        invocationState={activeInvocationDetail?.state ?? null}
+        runtimeStatus={runtimeStatusQuery.data ?? null}
         darkMode={darkMode}
-        executionEnabled={healthQuery.data?.execution_enabled ?? false}
-        canInvoke={registeredWorkflows.length > 0}
-        invoking={invokeSubmitting}
+        refreshingInvocation={refreshingLatest}
+        canCancelInvocation={Boolean(
+          activeInvocationDetail &&
+          !isTerminalInvocation(activeInvocationDetail.state)
+        )}
+        cancellingInvocation={cancelSubmitting}
+        onRefreshInvocation={() => void refreshLatestInvocation()}
+        onCancelInvocation={() => void cancelActiveInvocation()}
+        onInspectInvocation={() => {
+          if (!activeInvocationDetail) return;
+          ui.setSelection({
+            type: "invocation",
+            id: activeInvocationDetail.id,
+          });
+        }}
         onScopeChange={(workflowId, sessionId, invocationId) => {
           clearLiveDraft();
+          setPendingNodeAction(null);
+          setInvokeOpen(false);
+          setResumeOpen(false);
           ui.setInvocationScope(workflowId, sessionId, invocationId);
-        }}
-        onFollowLive={toggleTimelineMode}
-        onOpenInvoke={() => {
-          const workflowId =
-            registeredWorkflows.find((workflow) => workflow.workflow_id === ui.workflowId)
-              ?.workflow_id ??
-            registeredWorkflows[0]?.workflow_id ??
-            null;
-          setInvokeWorkflowId(workflowId);
-          const currentSession = sessions.find((value) => value.id === ui.sessionId);
-          setInvokeSessionKey(currentSession?.session_key ?? "");
-          setInvokeEntryNodeId("");
-          setInvokeInput("{}");
-          setInvokeOpen(true);
-          setInvokeError(null);
-          setInvokeMessage(null);
         }}
         onToggleTheme={() => setDarkMode((value) => !value)}
       />
+      {pendingNodeAction && !invokeOpen && !resumeOpen && (
+        <NodeActionPrompt
+          action={pendingNodeAction.kind}
+          nodeId={pendingNodeAction.nodeId}
+          onOpen={() => {
+            if (pendingNodeAction.kind === "invoke") setInvokeOpen(true);
+            else setResumeOpen(true);
+          }}
+          onClose={() => setPendingNodeAction(null)}
+        />
+      )}
       {invokeOpen && (
         <InvocationLauncher
           workflows={registeredWorkflows}
@@ -608,11 +917,15 @@ export default function App() {
           input={invokeInput}
           sessionKey={invokeSessionKey}
           entryNodeId={invokeEntryNodeId}
+          eventMode={invokeEventMode}
           entryNodeIds={invokeGraph?.entry_node_ids ?? []}
           error={invokeError}
           message={invokeMessage}
           submitting={invokeSubmitting}
           graphLoading={invokeGraphQuery.isLoading}
+          graphError={invokeGraphQuery.error}
+          sessionsLoading={invokeSessionQuery.isLoading}
+          sessionsError={invokeSessionQuery.error}
           onWorkflowChange={(workflowId) => {
             setInvokeWorkflowId(workflowId);
             setInvokeEntryNodeId("");
@@ -622,51 +935,53 @@ export default function App() {
           onSessionKeyChange={setInvokeSessionKey}
           onSessionSelect={(sessionKey) => setInvokeSessionKey(sessionKey)}
           onEntryNodeIdChange={setInvokeEntryNodeId}
+          onEventModeChange={setInvokeEventMode}
           onClose={() => {
             if (!invokeSubmitting) setInvokeOpen(false);
           }}
           onSubmit={submitFromUi}
         />
       )}
-      {invokeOpen ? (
-        invokeGraph && draftProjection && draftInvocation ? (
-          <main
-            className={`trace-workspace invoke-draft-workspace ${timelineCollapsed ? "timeline-collapsed" : ""}`}
-            style={{ "--timeline-height": "42px" } as CSSProperties}
-          >
-            <WorkflowCanvas
-              graph={invokeGraph}
-              invocation={draftInvocation}
-              projection={draftProjection}
-              followLive={false}
-              selection={
-                invokeEntryNodeId
-                  ? { type: "node", id: invokeEntryNodeId }
-                  : null
-              }
-              onSelect={(selection) => {
-                if (!selection || selection.type !== "node") return;
-                if (!invokeGraph.entry_node_ids.includes(selection.id)) {
-                  setInvokeError("Select an entry node to start this workflow.");
-                  return;
-                }
-                setInvokeEntryNodeId(selection.id);
-                setInvokeError(null);
-              }}
-            />
-          </main>
-        ) : (
-          <StatusScreen
-            icon={<LoaderCircle className="spin" size={28} />}
-            title="Loading workflow graph"
-            detail="Select a workflow, then click an entry node to invoke it."
-          />
-        )
-      ) : error ? (
+      {resumeOpen && (
+        <ResumePanel
+          nodeId={resumeNodeId}
+          waitKey={resumeWaitKey}
+          output={resumeOutput}
+          error={resumeError}
+          submitting={resumeSubmitting}
+          onOutputChange={setResumeOutput}
+          onClose={() => {
+            if (!resumeSubmitting) setResumeOpen(false);
+          }}
+          onSubmit={async () => {
+            try {
+              await resumeSelectedWait(
+                resumeWaitKey,
+                parseJsonValue(resumeOutput),
+              );
+            } catch (resumeFailure) {
+              setResumeError(
+                resumeFailure instanceof Error
+                  ? resumeFailure.message
+                  : String(resumeFailure),
+              );
+            }
+          }}
+        />
+      )}
+      {error ? (
         <StatusScreen
           icon={<AlertTriangle size={28} />}
           title="Trace data could not be loaded"
           detail={error instanceof Error ? error.message : String(error)}
+          action={{
+            label: "Retry connection",
+            onClick: () => {
+              void healthQuery.refetch();
+              void runtimeStatusQuery.refetch();
+              void workflowQuery.refetch();
+            },
+          }}
         />
       ) : loading ? (
         <StatusScreen
@@ -689,56 +1004,120 @@ export default function App() {
             projection={projection}
             followLive={ui.followLive}
             selection={ui.selection}
-            onSelect={(selection) => {
-              ui.setSelection(selection);
-            }}
+            canInvoke={Boolean(
+              viewedWorkflowIsRegistered &&
+              runtimeStatusQuery.data?.execution.accepting_invocations
+            )}
+            canResume={Boolean(
+              viewedWorkflowIsRegistered &&
+              projection.invocation_state === "waiting"
+            )}
+            onInspect={ui.setSelection}
+            onInvoke={stageInvoke}
+            onResume={stageResume}
           />
           {ui.selection && (
             <InspectorPanel
               graph={activeGraph}
               invocation={activeInvocationDetail}
-              events={events}
+              events={activeEvents}
               projection={projection}
               selection={ui.selection}
               cursorSequence={cursorSequence}
-              onResumeWait={resumeSelectedWait}
-              resumePending={resumeSubmitting}
-              resumeError={resumeError}
-              resumeDisabledReason={
-                view?.session.session_key
-                  ? null
-                  : "This invocation has no external session key, so it cannot be resumed from the UI."
-              }
+              capabilities={view?.capabilities}
               onClose={() => ui.setSelection(null)}
             />
           )}
           <ExecutionTimeline
             timeline={activeTimeline}
-            events={events}
+            events={activeEvents}
             cursorSequence={cursorSequence}
             followLive={ui.followLive}
             onCursorChange={(sequence) => ui.setCursor(sequence, false)}
             onSelect={ui.setSelection}
-            historyAvailable={!liveDraftGraph && !historyLoaded && (view?.checkpoint.through_sequence ?? 0) > 0}
+            historyAvailable={!liveDraftGraph && !historyLoaded && Boolean(view?.has_more_events)}
             historyLoading={historyLoading}
             historyError={historyError}
             bufferedEventCount={eventBuffer.length}
+            totalEventCount={activeInvocationDetail.live_sequence ?? activeEvents.length}
             collapsed={timelineCollapsed}
             onCollapsedChange={setTimelineCollapsed}
             height={timelineHeight}
             onHeightChange={setTimelineHeight}
-            onLoadHistory={() => void loadFullHistory()}
+            onLoadHistory={() => void loadNextEventPage()}
             onFlushBufferedEvents={flushBufferedEvents}
+            onToggleFollow={toggleTimelineMode}
+          />
+        </main>
+      ) : selectedGraphQuery.isLoading ? (
+        <StatusScreen
+          icon={<LoaderCircle className="spin" size={28} />}
+          title="Loading workflow graph"
+          detail="Reading the selected registered or historical Workflow definition."
+        />
+      ) : selectedGraph && selectedGraphInvocation && selectedGraphProjection ? (
+        <main
+          className="trace-workspace timeline-collapsed"
+          style={{ "--timeline-height": "42px" } as CSSProperties}
+        >
+          <WorkflowCanvas
+            graph={selectedGraph}
+            invocation={selectedGraphInvocation}
+            projection={selectedGraphProjection}
+            followLive={false}
+            selection={null}
+            canInvoke={Boolean(
+              selectedDirectoryWorkflow?.registered_in_current_app &&
+              runtimeStatusQuery.data?.execution.accepting_invocations
+            )}
+            onInspect={() => undefined}
+            onInvoke={stageInvoke}
           />
         </main>
       ) : (
         <StatusScreen
           icon={<GitBranch size={28} />}
           title="No invocation selected"
-          detail="Run a workflow or select an existing session and invocation."
+          detail={
+            ui.workflowId
+              ? "Loading the selected Workflow graph."
+              : "Select a Workflow to inspect or invoke it."
+          }
         />
       )}
     </div>
+  );
+}
+
+function NodeActionPrompt({
+  action,
+  nodeId,
+  onOpen,
+  onClose,
+}: {
+  action: "invoke" | "resume";
+  nodeId: string;
+  onOpen: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="node-action-prompt" aria-label={`${action} node action`}>
+      <button className="node-action-primary" type="button" onClick={onOpen}>
+        <Play size={14} />
+        <span>
+          <small>{action === "invoke" ? "Entry node" : "Waiting node"}</small>
+          <strong>{action === "invoke" ? "Invoke" : "Resume"} {nodeId}</strong>
+        </span>
+      </button>
+      <button
+        className="node-action-close"
+        type="button"
+        onClick={onClose}
+        aria-label="Dismiss node action"
+      >
+        <X size={14} />
+      </button>
+    </aside>
   );
 }
 
@@ -749,16 +1128,21 @@ function InvocationLauncher({
   input,
   sessionKey,
   entryNodeId,
+  eventMode,
   entryNodeIds,
   error,
   message,
   submitting,
   graphLoading,
+  graphError,
+  sessionsLoading,
+  sessionsError,
   onWorkflowChange,
   onInputChange,
   onSessionKeyChange,
   onSessionSelect,
   onEntryNodeIdChange,
+  onEventModeChange,
   onClose,
   onSubmit,
 }: {
@@ -768,16 +1152,21 @@ function InvocationLauncher({
   input: string;
   sessionKey: string;
   entryNodeId: string;
+  eventMode: "minimal" | "standard" | "full";
   entryNodeIds: string[];
   error: string | null;
   message: string | null;
   submitting: boolean;
   graphLoading: boolean;
+  graphError: Error | null;
+  sessionsLoading: boolean;
+  sessionsError: Error | null;
   onWorkflowChange: (value: string | null) => void;
   onInputChange: (value: string) => void;
   onSessionKeyChange: (value: string) => void;
   onSessionSelect: (value: string) => void;
   onEntryNodeIdChange: (value: string) => void;
+  onEventModeChange: (value: "minimal" | "standard" | "full") => void;
   onClose: () => void;
   onSubmit: () => Promise<void>;
 }) {
@@ -821,12 +1210,18 @@ function InvocationLauncher({
           Existing session
           <select
             value=""
-            disabled={submitting || knownSessions.length === 0}
+            disabled={submitting || sessionsLoading || knownSessions.length === 0}
             onChange={(event) => {
               if (event.target.value) onSessionSelect(event.target.value);
             }}
           >
-            <option value="">Choose to reuse, or type below</option>
+            <option value="">
+              {sessionsLoading
+                ? "Loading sessions…"
+                : sessionsError
+                  ? "Sessions could not be loaded"
+                  : "Choose to reuse, or type below"}
+            </option>
             {knownSessions.map((session) => (
               <option key={session.id} value={session.session_key ?? ""}>
                 {session.session_key}
@@ -851,13 +1246,33 @@ function InvocationLauncher({
             disabled={submitting || graphLoading || entryNodeIds.length === 0}
           >
             <option value="">
-              {graphLoading ? "Loading graph" : "Click an entry node on the graph"}
+              {graphLoading
+                ? "Loading graph…"
+                : graphError
+                  ? "Workflow graph could not be loaded"
+                  : "Click an entry node on the graph"}
             </option>
             {entryNodeIds.map((nodeId) => (
               <option key={nodeId} value={nodeId}>
                 {nodeId}
               </option>
             ))}
+          </select>
+        </label>
+        <label>
+          Trace mode
+          <select
+            value={eventMode}
+            onChange={(event) =>
+              onEventModeChange(
+                event.target.value as "minimal" | "standard" | "full",
+              )
+            }
+            disabled={submitting}
+          >
+            <option value="minimal">Minimal · final state only</option>
+            <option value="standard">Standard · graph trace</option>
+            <option value="full">Full · inputs, outputs and replay state</option>
           </select>
         </label>
         <label>
@@ -873,6 +1288,68 @@ function InvocationLauncher({
         {error && <p className="invoke-error">{error}</p>}
         <button type="submit" disabled={!workflowId || !entryNodeId || submitting}>
           {submitting ? "Submitting..." : "Invoke"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function ResumePanel({
+  nodeId,
+  waitKey,
+  output,
+  error,
+  submitting,
+  onOutputChange,
+  onClose,
+  onSubmit,
+}: {
+  nodeId: string;
+  waitKey: string;
+  output: string;
+  error: string | null;
+  submitting: boolean;
+  onOutputChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <section className="invoke-panel resume-panel" aria-label="Resume waiting node">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSubmit();
+        }}
+      >
+        <div className="invoke-heading">
+          <div>
+            <Play size={16} />
+            <strong>Resume wait</strong>
+          </div>
+          <button type="button" onClick={onClose} disabled={submitting} aria-label="Close">
+            <X size={15} />
+          </button>
+        </div>
+        <label>
+          Node
+          <input value={nodeId} disabled />
+        </label>
+        <label>
+          Wait key
+          <input value={waitKey} disabled />
+        </label>
+        <label>
+          Resume output JSON
+          <textarea
+            value={output}
+            onChange={(event) => onOutputChange(event.target.value)}
+            disabled={submitting}
+            spellCheck={false}
+          />
+        </label>
+        {error && <p className="invoke-error">{error}</p>}
+        <button type="submit" disabled={!waitKey || submitting}>
+          {submitting ? "Resuming..." : "Resume"}
         </button>
       </form>
     </section>
@@ -928,16 +1405,23 @@ function StatusScreen({
   icon,
   title,
   detail,
+  action,
 }: {
   icon: React.ReactNode;
   title: string;
   detail: string;
+  action?: { label: string; onClick: () => void };
 }) {
   return (
     <main className="status-screen">
       {icon}
       <strong>{title}</strong>
       <span>{detail}</span>
+      {action && (
+        <button type="button" onClick={action.onClick}>
+          {action.label}
+        </button>
+      )}
     </main>
   );
 }
@@ -948,6 +1432,60 @@ function mergeEvents(...groups: RuntimeEvent[][]): RuntimeEvent[] {
     for (const event of group) values.set(event.id, event);
   }
   return [...values.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function cacheEventHistory(
+  cache: Map<string, { events: RuntimeEvent[]; historyLoaded: boolean }>,
+  invocationId: string,
+  value: { events: RuntimeEvent[]; historyLoaded: boolean },
+) {
+  cache.delete(invocationId);
+  cache.set(invocationId, value);
+  while (cache.size > EVENT_HISTORY_CACHE_SIZE) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function cachedProjection(
+  cache: { key: string; values: Map<number, RuntimeProjection> },
+  key: string,
+  invocationId: string,
+  events: RuntimeEvent[],
+  throughSequence: number,
+  checkpoint?: RuntimeProjection,
+): RuntimeProjection {
+  if (cache.key !== key) {
+    cache.key = key;
+    cache.values.clear();
+  }
+  let base =
+    checkpoint && checkpoint.through_sequence <= throughSequence
+      ? checkpoint
+      : undefined;
+  for (const [sequence, projection] of cache.values) {
+    if (
+      sequence <= throughSequence &&
+      sequence > (base?.through_sequence ?? 0)
+    ) {
+      base = projection;
+    }
+  }
+  const projected = projectEvents(
+    invocationId,
+    events,
+    throughSequence,
+    base,
+  );
+  cache.values.delete(projected.through_sequence);
+  cache.values.set(projected.through_sequence, projected);
+  while (cache.values.size > 256) {
+    const oldest = cache.values.keys().next().value;
+    if (oldest === undefined) break;
+    cache.values.delete(oldest);
+  }
+  return projected;
 }
 
 /**
@@ -984,7 +1522,12 @@ function buildWorkflowDirectory(
         registered_in_current_app: current !== undefined,
       };
     })
-    .sort((left, right) => left.workflow_id.localeCompare(right.workflow_id));
+    .sort((left, right) => {
+      const sourceOrder =
+        Number(Boolean(right.registered_in_current_app)) -
+        Number(Boolean(left.registered_in_current_app));
+      return sourceOrder || left.workflow_id.localeCompare(right.workflow_id);
+    });
 }
 
 function workflowRevisionKey(workflow: Pick<
@@ -1008,30 +1551,6 @@ function formatWorkflowRevision(
     : resolvedVersion;
 }
 
-function applyInvocationStateEvents(
-  queryClient: QueryClient,
-  events: RuntimeEvent[],
-): void {
-  for (const event of events) {
-    if (event.type !== "invocation.state_changed") continue;
-    const state = String(event.payload.to ?? "");
-    if (!state) continue;
-    queryClient.setQueryData<InvocationSummary[]>(
-      ["invocations", event.session_id],
-      (current) =>
-        current?.map((invocation) =>
-          invocation.id === event.invocation_id
-            ? {
-                ...invocation,
-                state,
-                updated_at_ms: event.occurred_at_ms,
-              }
-            : invocation,
-        ) ?? current,
-    );
-  }
-}
-
 function upsertSubmittedScope(
   queryClient: QueryClient,
   value: {
@@ -1041,6 +1560,7 @@ function upsertSubmittedScope(
     sessionKey: string | null;
     entryNodeId: string;
     state: string;
+    eventMode?: "minimal" | "standard" | "full";
   },
 ): void {
   const now = Date.now();
@@ -1085,6 +1605,10 @@ function upsertSubmittedScope(
         operator_manifest_hash: null,
         entry_node_id: value.entryNodeId,
         state: value.state,
+        event_mode: value.eventMode,
+        live_sequence: 0,
+        durable_sequence: 0,
+        persistence_status: "pending",
         created_at_ms: now,
         updated_at_ms: now,
       };
@@ -1112,7 +1636,7 @@ function createDraftProjection(graph: WorkflowGraphView): RuntimeProjection {
         {
           node_id: node.id,
           state: "created",
-          latest_execution_id: "",
+          latest_execution_id: null,
           execution_count: 0,
         },
       ]),
@@ -1176,23 +1700,16 @@ function createLiveDraftTimeline(invocationId: string): TimelineView {
   };
 }
 
-function applyInvocationStateToDetail(
-  invocation: InvocationDetail,
-  events: RuntimeEvent[],
-): InvocationDetail {
-  const stateEvent = [...events]
-    .filter((event) => event.type === "invocation.state_changed")
-    .at(-1);
-  if (!stateEvent) return invocation;
-  return {
-    ...invocation,
-    state: String(stateEvent.payload.to ?? invocation.state),
-    updated_at_ms: stateEvent.occurred_at_ms,
-  };
+function shouldStreamInvocation(invocation: Pick<
+  InvocationSummary,
+  "state" | "persistence_status"
+>): boolean {
+  if (["created", "running", "waiting"].includes(invocation.state)) return true;
+  return invocation.persistence_status === "pending";
 }
 
-function shouldPollInvocation(state: string): boolean {
-  return ["created", "running", "waiting", "interrupted"].includes(state);
+function isTerminalInvocation(state: string): boolean {
+  return ["completed", "failed", "cancelled", "interrupted"].includes(state);
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {
@@ -1203,4 +1720,9 @@ function parseJsonObject(value: string): Record<string, unknown> {
     throw new Error("Input JSON must be an object.");
   }
   return parsed as Record<string, unknown>;
+}
+
+function parseJsonValue(value: string): unknown {
+  const trimmed = value.trim();
+  return trimmed ? JSON.parse(trimmed) : null;
 }

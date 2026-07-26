@@ -1,0 +1,1132 @@
+from __future__ import annotations
+
+import base64
+from collections import OrderedDict
+from copy import deepcopy
+from dataclasses import dataclass
+import json
+from typing import Any
+from uuid import UUID
+
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowVersionSnapshot
+from autoagent.core.runtime import Invocation, RuntimeEvent, Session
+
+
+@dataclass(frozen=True)
+class TracePage:
+    items: list[dict[str, Any]]
+    next_cursor: str | None
+    has_more: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "items": self.items,
+            "next_cursor": self.next_cursor,
+            "has_more": self.has_more,
+        }
+
+
+def _node_operator_summary(
+    execution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if execution is None:
+        return {
+            "operator_call_count": 0,
+            "failed_operator_call_count": 0,
+            "retry_count": 0,
+            "fallback_count": 0,
+            "timeout_count": 0,
+            "parallel_call_count": 0,
+            "latest_operator_kind": None,
+        }
+    calls = execution.get("operator_calls", ())
+    latest = calls[-1] if calls else None
+    parallel_call_count = sum(
+        int((call.get("summary") or {}).get("call_count", 0))
+        for call in calls
+        if call.get("kind") in {"map", "replication"}
+    )
+    return {
+        "operator_call_count": int(
+            execution.get("operator_call_count", 0)
+        ),
+        "failed_operator_call_count": int(
+            execution.get("failed_operator_call_count", 0)
+        ),
+        "retry_count": int(execution.get("retry_count", 0)),
+        "fallback_count": int(execution.get("fallback_count", 0)),
+        "timeout_count": int(execution.get("timeout_count", 0)),
+        "parallel_call_count": parallel_call_count,
+        "latest_operator_kind": (
+            latest.get("kind") if latest is not None else None
+        ),
+    }
+
+
+class TraceProjectionReducer:
+    """Pure graph/read-model reducer shared semantically with the UI."""
+
+    schema_version = 2
+
+    @classmethod
+    def initial(cls, invocation_id: UUID | str) -> dict[str, Any]:
+        return {
+            "schema_version": cls.schema_version,
+            "invocation_id": str(invocation_id),
+            "through_sequence": 0,
+            "invocation_state": "created",
+            "nodes": {},
+            "node_executions": {},
+            "edges": {},
+            "operator_states": {},
+            "active_waits": {},
+            "latest_phase": None,
+        }
+
+    @classmethod
+    def apply(
+        cls,
+        projection: dict[str, Any],
+        event: RuntimeEvent,
+    ) -> dict[str, Any]:
+        if event.sequence <= int(projection["through_sequence"]):
+            return projection
+        result = deepcopy(projection)
+        result["through_sequence"] = event.sequence
+        name = event.event_name
+        payload = event.payload
+
+        if name.startswith("invocation."):
+            result["invocation_state"] = event.status or name.rsplit(".", 1)[-1]
+            return result
+
+        if name.startswith("node."):
+            node_id = str(payload.get("node_id") or event.subject_id)
+            execution_id = payload.get("node_execution_id")
+            state = event.status or name.rsplit(".", 1)[-1]
+            executions = result["node_executions"]
+            if execution_id is not None:
+                execution_id = str(execution_id)
+                previous = executions.get(execution_id, {})
+                executions[execution_id] = {
+                    "execution_id": execution_id,
+                    "node_id": node_id,
+                    "sequence": int(
+                        previous.get(
+                            "sequence",
+                            sum(
+                                1
+                                for value in executions.values()
+                                if value.get("node_id") == node_id
+                            )
+                            + 1,
+                        )
+                    ),
+                    "first_event_sequence": int(
+                        previous.get("first_event_sequence", event.sequence)
+                    ),
+                    "state": state,
+                    "error": payload.get("error"),
+                    "started_at_ms": (
+                        event.occurred_at_ms
+                        if state == "running"
+                        else previous.get("started_at_ms")
+                    ),
+                    "ended_at_ms": (
+                        event.occurred_at_ms
+                        if state
+                        in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "interrupted",
+                            "skipped",
+                        }
+                        else None
+                    ),
+                    "elapsed_ns": event.elapsed_ns,
+                    "timing": dict(event.timing),
+                    "operator_call_count": int(
+                        previous.get("operator_call_count", 0)
+                    ),
+                    "failed_operator_call_count": int(
+                        previous.get("failed_operator_call_count", 0)
+                    ),
+                    "retry_count": int(previous.get("retry_count", 0)),
+                    "fallback_count": int(previous.get("fallback_count", 0)),
+                    "timeout_count": int(previous.get("timeout_count", 0)),
+                    "operator_calls": list(previous.get("operator_calls", ())),
+                }
+            node_executions = [
+                value
+                for value in executions.values()
+                if value["node_id"] == node_id
+            ]
+            latest = max(
+                node_executions,
+                key=lambda value: (
+                    int(value["sequence"]),
+                    str(value["execution_id"]),
+                ),
+                default=None,
+            )
+            previous_node = result["nodes"].get(node_id, {})
+            result["nodes"][node_id] = {
+                "node_id": node_id,
+                "state": state,
+                "latest_execution_id": (
+                    latest["execution_id"] if latest is not None else None
+                ),
+                "execution_count": max(
+                    len(node_executions),
+                    int(previous_node.get("execution_count", 0)),
+                    1 if name == "node.skipped" else 0,
+                ),
+                "latest_error": payload.get("error"),
+                "latest_elapsed_ns": event.elapsed_ns,
+                "latest_timing": dict(event.timing),
+                **_node_operator_summary(latest),
+            }
+            return result
+
+        if name == "edge.evaluated":
+            edge_id = str(payload.get("edge_id") or event.subject_id)
+            previous = result["edges"].get(edge_id, {})
+            selected = bool(payload.get("selected"))
+            state = str(payload.get("state") or event.status or "evaluated")
+            result["edges"][edge_id] = {
+                "edge_id": edge_id,
+                "state": state,
+                "selected": selected,
+                "evaluation_count": int(previous.get("evaluation_count", 0)) + 1,
+                "selected_count": int(previous.get("selected_count", 0))
+                + int(selected),
+                "skipped_count": int(previous.get("skipped_count", 0))
+                + int(state == "skipped"),
+                "failed_count": int(previous.get("failed_count", 0))
+                + int(state == "failed"),
+                "source_execution_id": payload.get("source_execution_id"),
+                "target_node_id": payload.get("target_node_id"),
+                "reason": payload.get("reason"),
+                "elapsed_ns": event.elapsed_ns,
+            }
+            return result
+
+        if name == "operator_call.completed":
+            call_id = str(payload.get("operator_call_id") or event.subject_id)
+            state = str(payload.get("state") or event.status or "completed")
+            result["operator_states"][call_id] = state
+            execution_id = payload.get("node_execution_id")
+            if execution_id is not None:
+                execution = result["node_executions"].get(str(execution_id))
+                if execution is not None:
+                    error = payload.get("error")
+                    reason = payload.get("reason")
+                    summary = payload.get("summary")
+                    call = {
+                        "id": call_id,
+                        "event_sequence": event.sequence,
+                        "node_execution_id": str(execution_id),
+                        "operator_id": str(
+                            payload.get("operator_id")
+                            or ", ".join(payload.get("operator_ids", ()))
+                            or payload.get("kind")
+                            or "operator"
+                        ),
+                        "kind": str(payload.get("kind") or "direct"),
+                        "reason": (
+                            str(reason) if reason is not None else None
+                        ),
+                        "state": state,
+                        "error": error,
+                        "summary": summary,
+                        "occurred_at_ms": event.occurred_at_ms,
+                        "elapsed_ns": event.elapsed_ns,
+                        "timing": dict(event.timing),
+                    }
+                    calls = [
+                        value
+                        for value in execution.get("operator_calls", ())
+                        if value.get("id") != call_id
+                    ]
+                    calls.append(call)
+                    execution["operator_calls"] = calls
+                    execution["operator_call_count"] += 1
+                    execution["failed_operator_call_count"] += int(
+                        state != "completed"
+                    )
+                    execution["retry_count"] += int(reason == "retry")
+                    execution["fallback_count"] += int(reason == "fallback")
+                    execution["timeout_count"] += int(
+                        isinstance(error, dict)
+                        and error.get("code") == "OPERATOR_TIMEOUT"
+                    )
+                    node = result["nodes"].get(execution["node_id"])
+                    if node is not None:
+                        node.update(_node_operator_summary(execution))
+            return result
+
+        if name == "wait.created":
+            waits = payload.get("waits", ())
+            if waits:
+                for wait in waits:
+                    wait_key = str(wait["wait_key"])
+                    result["active_waits"][wait_key] = {
+                        **dict(wait),
+                        "wait_key": wait_key,
+                        "created_at_ms": event.occurred_at_ms,
+                    }
+            else:
+                for wait_key in payload.get("wait_keys", ()):
+                    result["active_waits"][str(wait_key)] = {
+                        "wait_key": str(wait_key),
+                        "created_at_ms": event.occurred_at_ms,
+                    }
+            result["invocation_state"] = "waiting"
+            return result
+
+        if name == "wait.resumed":
+            wait_key = payload.get("wait_key")
+            if wait_key is not None:
+                result["active_waits"].pop(str(wait_key), None)
+            return result
+
+        if event.event_type == "phase":
+            result["latest_phase"] = {
+                "event_name": name,
+                "subject_id": event.subject_id,
+                "status": event.status,
+                "occurred_at_ms": event.occurred_at_ms,
+                "elapsed_ns": event.elapsed_ns,
+            }
+        if event.event_type == "recovery" and name.endswith("interrupted"):
+            result["invocation_state"] = "interrupted"
+        return result
+
+
+class TraceService:
+    """Read-only RuntimeStore projection/query surface for AutoAgentServer."""
+
+    def __init__(self, agent: AutoAgentApp, *, cache_size: int = 128) -> None:
+        self.agent = agent
+        self.store = agent.runtime_store
+        self._projection_cache: OrderedDict[
+            tuple[UUID, int], dict[str, Any]
+        ] = OrderedDict()
+        self._cache_size = cache_size
+        self._database_workflow_versions: list[
+            tuple[str, WorkflowVersionSnapshot, int]
+        ] | None = None
+
+    async def list_workflows(
+        self,
+        *,
+        cursor: str | None,
+        limit: int,
+        registered_only: bool = False,
+    ) -> dict[str, Any]:
+        versions = await self._workflow_versions()
+        grouped: dict[str, dict[str, Any]] = {}
+        registered = self._registered_workflow_identities()
+        for revision_id, snapshot, created_at_ms in versions:
+            identity = (
+                snapshot.workflow_id,
+                snapshot.definition_hash,
+                snapshot.operator_manifest_hash,
+            )
+            if registered_only and identity not in registered:
+                continue
+            current = grouped.get(snapshot.workflow_id)
+            value = {
+                "workflow_id": snapshot.workflow_id,
+                "workflow_version": snapshot.workflow_version,
+                "revision_id": revision_id,
+                "definition_hash": snapshot.definition_hash,
+                "operator_manifest_hash": snapshot.operator_manifest_hash,
+                "name": snapshot.definition.get("name"),
+                "description": snapshot.definition.get("description"),
+                "registered": identity in registered,
+                "created_at_ms": created_at_ms,
+                "updated_at_ms": created_at_ms,
+            }
+            if current is None or created_at_ms >= current["updated_at_ms"]:
+                grouped[snapshot.workflow_id] = value
+        values = sorted(
+            grouped.values(),
+            key=lambda item: (item["updated_at_ms"], item["workflow_id"]),
+            reverse=True,
+        )
+        return _paginate(
+            values,
+            cursor=cursor,
+            limit=limit,
+            key_fields=("updated_at_ms", "workflow_id"),
+        ).to_dict()
+
+    async def list_workflow_versions(
+        self,
+        workflow_id: str,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        registered = self._registered_workflow_identities()
+        values = [
+            {
+                "workflow_id": snapshot.workflow_id,
+                "workflow_version": snapshot.workflow_version,
+                "revision_id": revision_id,
+                "definition_hash": snapshot.definition_hash,
+                "operator_manifest_hash": snapshot.operator_manifest_hash,
+                "name": snapshot.definition.get("name"),
+                "description": snapshot.definition.get("description"),
+                "registered": (
+                    snapshot.workflow_id,
+                    snapshot.definition_hash,
+                    snapshot.operator_manifest_hash,
+                ) in registered,
+                "created_at_ms": created_at_ms,
+                "updated_at_ms": created_at_ms,
+            }
+            for revision_id, snapshot, created_at_ms
+            in await self._workflow_versions()
+            if snapshot.workflow_id == workflow_id
+        ]
+        values.sort(
+            key=lambda item: (item["created_at_ms"], item["revision_id"]),
+            reverse=True,
+        )
+        return _paginate(
+            values,
+            cursor=cursor,
+            limit=limit,
+            key_fields=("created_at_ms", "revision_id"),
+        ).to_dict()
+
+    async def workflow_graph(self, revision_id: str) -> dict[str, Any]:
+        for candidate, snapshot, _ in await self._workflow_versions():
+            if candidate == revision_id:
+                return _graph_view(revision_id, snapshot)
+        for candidate, snapshot, _ in await self._workflow_versions(
+            refresh_database=True,
+        ):
+            if candidate == revision_id:
+                return _graph_view(revision_id, snapshot)
+        raise KeyError(f"Unknown Workflow revision: {revision_id}")
+
+    async def list_sessions(
+        self,
+        workflow_id: str,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        values: dict[str, dict[str, Any]] = {}
+        memory_sessions = [
+            session
+            for session in self.store.sessions.values()
+            if session.namespace == self.agent.namespace
+            and session.workflow_id == workflow_id
+        ]
+        backend_loader = getattr(self.store.backend, "alist_trace_sessions", None)
+        if backend_loader is not None:
+            for record in await backend_loader(
+                namespace=self.agent.namespace,
+                workflow_id=workflow_id,
+                limit=limit + len(memory_sessions) + 1,
+                before=_decode_cursor(cursor),
+            ):
+                values[str(record["id"])] = dict(record)
+        for session in memory_sessions:
+            values[str(session.id)] = self._session_summary(session)
+        ordered = sorted(
+            values.values(),
+            key=lambda item: (item["updated_at_ms"], item["id"]),
+            reverse=True,
+        )
+        return _paginate(
+            ordered,
+            cursor=cursor,
+            limit=limit,
+            key_fields=("updated_at_ms", "id"),
+        ).to_dict()
+
+    async def list_invocations(
+        self,
+        session_id: UUID,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        values: dict[str, dict[str, Any]] = {}
+        session = self.store.sessions.get(session_id)
+        memory_invocations = (
+            list(session.invocations)
+            if session is not None
+            else []
+        )
+        backend_loader = getattr(
+            self.store.backend,
+            "alist_trace_invocations",
+            None,
+        )
+        if backend_loader is not None:
+            for record in await backend_loader(
+                session_id=session_id,
+                limit=limit + len(memory_invocations) + 1,
+                before=_decode_cursor(cursor),
+            ):
+                values[str(record["id"])] = dict(record)
+        if session is not None:
+            revisions = await self._workflow_versions()
+            for invocation in memory_invocations:
+                values[str(invocation.id)] = self._invocation_summary(
+                    session,
+                    invocation,
+                    revisions,
+                )
+        ordered = sorted(
+            values.values(),
+            key=lambda item: (item["created_at_ms"], item["id"]),
+            reverse=True,
+        )
+        return _paginate(
+            ordered,
+            cursor=cursor,
+            limit=limit,
+            key_fields=("created_at_ms", "id"),
+        ).to_dict()
+
+    async def trace_bootstrap(
+        self,
+        invocation_id: UUID,
+        *,
+        tail_limit: int,
+    ) -> dict[str, Any]:
+        record = await self._invocation_detail(invocation_id)
+        live_sequence = int(record["live_sequence"])
+        latest_projection = await self.projection(
+            invocation_id,
+            through_sequence=live_sequence,
+        )
+        self._enrich_latest_projection_from_memory(
+            latest_projection,
+            invocation_id,
+        )
+        if record["event_mode"] == "minimal":
+            latest_projection["invocation_state"] = record["state"]
+        revision = await self.workflow_graph(record["workflow_revision_id"])
+        return {
+            "workflow": revision,
+            "session": record.pop("session"),
+            "invocation": record,
+            "capabilities": {
+                "has_events": record["event_mode"] != "minimal",
+                "has_graph_trace": record["event_mode"] != "minimal",
+                "has_internal_phases": record["event_mode"] == "full",
+                "has_historical_runtime_state": record["event_mode"] == "full",
+                "fork_available": False,
+                "design_available": False,
+            },
+            "checkpoint": {
+                "schema_version": TraceProjectionReducer.schema_version,
+                "through_sequence": live_sequence,
+                "projection": latest_projection,
+            },
+            "event_page": {
+                "items": [],
+                "first_sequence": None,
+                "last_sequence": None,
+                "has_earlier": False,
+                "has_later": live_sequence > 0,
+                "live_sequence": live_sequence,
+                "invocation_state": record["state"],
+            },
+        }
+
+    async def event_page(
+        self,
+        invocation_id: UUID,
+        *,
+        after_sequence: int,
+        before_sequence: int | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        events = await self.store.alist_runtime_events(
+            invocation_id=invocation_id,
+            after_sequence=after_sequence,
+            before_sequence=before_sequence,
+            limit=limit,
+        )
+        detail = await self._invocation_detail(invocation_id)
+        live_sequence = int(detail["live_sequence"])
+        first_sequence = events[0].sequence if events else None
+        last_sequence = events[-1].sequence if events else after_sequence
+        return {
+            "items": [
+                self.event_view(event, include_values=False)
+                for event in events
+            ],
+            "first_sequence": first_sequence,
+            "last_sequence": events[-1].sequence if events else None,
+            "has_earlier": bool(
+                (first_sequence is not None and first_sequence > 1)
+                or (first_sequence is None and after_sequence > 0)
+            ),
+            "has_later": last_sequence < live_sequence,
+            "live_sequence": live_sequence,
+            "invocation_state": detail["state"],
+        }
+
+    async def event_detail(
+        self,
+        invocation_id: UUID,
+        sequence: int,
+    ) -> dict[str, Any]:
+        events = await self.store.alist_runtime_events(
+            invocation_id=invocation_id,
+            after_sequence=sequence - 1,
+            limit=1,
+        )
+        if not events or events[0].sequence != sequence:
+            raise KeyError(
+                f"Unknown RuntimeEvent sequence: {invocation_id}/{sequence}"
+            )
+        return self.event_view(events[0], include_values=True)
+
+    async def invocation_detail(self, invocation_id: UUID) -> dict[str, Any]:
+        record = await self._invocation_detail(invocation_id)
+        record.pop("session", None)
+        return record
+
+    async def runtime_state(
+        self,
+        invocation_id: UUID,
+        *,
+        through_sequence: int | None,
+    ) -> dict[str, Any]:
+        detail = await self._invocation_detail(invocation_id)
+        if detail["event_mode"] != "full":
+            raise ValueError(
+                "Historical Runtime state is available only for full tracing."
+            )
+        session, invocation = await self.store.arebuild_execution(
+            invocation_id,
+            through_sequence=through_sequence,
+        )
+        return {
+            "invocation_id": str(invocation_id),
+            "through_sequence": invocation.event_sequence,
+            "session_context": _json_value(
+                self.store,
+                session.context.to_record(),
+            ),
+            "invocation": _json_value(
+                self.store,
+                invocation.to_record(session.id),
+            ),
+            "node_executions": _json_value(
+                self.store,
+                [
+                    execution.to_record(invocation.id)
+                    for execution in invocation.node_executions
+                ],
+            ),
+        }
+
+    async def projection(
+        self,
+        invocation_id: UUID,
+        *,
+        through_sequence: int,
+    ) -> dict[str, Any]:
+        key = (invocation_id, through_sequence)
+        cached = self._projection_cache.get(key)
+        if cached is not None:
+            self._projection_cache.move_to_end(key)
+            return deepcopy(cached)
+        nearest_sequence = 0
+        projection = TraceProjectionReducer.initial(invocation_id)
+        for (candidate_id, sequence), value in reversed(
+            self._projection_cache.items()
+        ):
+            if candidate_id == invocation_id and sequence <= through_sequence:
+                nearest_sequence = sequence
+                projection = deepcopy(value)
+                break
+        cursor = nearest_sequence
+        while cursor < through_sequence:
+            page = await self.store.alist_runtime_events(
+                invocation_id=invocation_id,
+                after_sequence=cursor,
+                limit=min(1_000, through_sequence - cursor),
+            )
+            if not page:
+                break
+            for event in page:
+                if event.sequence > through_sequence:
+                    break
+                projection = TraceProjectionReducer.apply(projection, event)
+                cursor = event.sequence
+            if page[-1].sequence <= cursor and cursor >= through_sequence:
+                break
+            if cursor == nearest_sequence:
+                break
+            nearest_sequence = cursor
+        self._projection_cache[key] = deepcopy(projection)
+        self._projection_cache.move_to_end(key)
+        while len(self._projection_cache) > self._cache_size:
+            self._projection_cache.popitem(last=False)
+        return projection
+
+    def event_view(
+        self,
+        event: RuntimeEvent,
+        *,
+        include_values: bool,
+    ) -> dict[str, Any]:
+        return {
+            "id": str(event.id),
+            "invocation_id": str(event.invocation_id),
+            "sequence": event.sequence,
+            "schema_version": event.schema_version,
+            "event_type": event.event_type,
+            "event_name": event.event_name,
+            "subject_type": event.subject_type,
+            "subject_id": event.subject_id,
+            "occurred_at_ms": event.occurred_at_ms,
+            "elapsed_ns": event.elapsed_ns,
+            "status": event.status,
+            "timing": dict(event.timing),
+            "payload": _json_value(self.store, event.payload),
+            "has_input": event.input is not None,
+            "has_output": event.output is not None,
+            "has_operations": event.operations is not None,
+            "input": (
+                _json_value(self.store, event.input)
+                if include_values and event.input is not None
+                else None
+            ),
+            "output": (
+                _json_value(self.store, event.output)
+                if include_values and event.output is not None
+                else None
+            ),
+            **(
+                {
+                    "operations": (
+                        _json_value(
+                            self.store,
+                            [
+                                operation.model_dump(mode="python")
+                                for operation in event.operations
+                            ],
+                        )
+                        if event.operations is not None
+                        else None
+                    )
+                }
+                if include_values
+                else {}
+            ),
+        }
+
+    def _enrich_latest_projection_from_memory(
+        self,
+        projection: dict[str, Any],
+        invocation_id: UUID,
+    ) -> None:
+        """Fill fields omitted by Events created before Projection schema v2.
+
+        This is intentionally limited to the latest in-memory view. Historical
+        replay remains Event-derived and never leaks a later Runtime value into
+        an earlier cursor.
+        """
+
+        invocation = self.store.invocations.get(invocation_id)
+        if invocation is None:
+            return
+        for node_execution in invocation.node_executions:
+            projected = projection["node_executions"].get(
+                str(node_execution.id)
+            )
+            if projected is None:
+                continue
+            if node_execution.error is not None:
+                projected["error"] = node_execution.error.to_record()
+            runtime_calls = {
+                str(call.id): call.to_record()
+                for call in node_execution.operator_executions
+            }
+            for call in projected.get("operator_calls", ()):
+                runtime_call = runtime_calls.get(str(call.get("id")))
+                if runtime_call is None:
+                    continue
+                call["reason"] = runtime_call.get("reason")
+                call["error"] = runtime_call.get("error")
+                call["summary"] = runtime_call.get("summary")
+            calls = projected.get("operator_calls", ())
+            projected["retry_count"] = sum(
+                1 for call in calls if call.get("reason") == "retry"
+            )
+            projected["fallback_count"] = sum(
+                1 for call in calls if call.get("reason") == "fallback"
+            )
+            projected["timeout_count"] = sum(
+                1
+                for call in calls
+                if (call.get("error") or {}).get("code")
+                == "OPERATOR_TIMEOUT"
+            )
+            node = projection["nodes"].get(node_execution.node_id)
+            if node is not None:
+                if node_execution.error is not None:
+                    node["latest_error"] = node_execution.error.to_record()
+                node.update(_node_operator_summary(projected))
+
+    async def _invocation_detail(
+        self,
+        invocation_id: UUID,
+    ) -> dict[str, Any]:
+        invocation = self.store.invocations.get(invocation_id)
+        if invocation is not None:
+            session_id = self.store.invocation_sessions[invocation_id]
+            session = self.store.sessions[session_id]
+            revisions = await self._workflow_versions()
+            return {
+                **self._invocation_summary(session, invocation, revisions),
+                "input": _json_value(self.store, invocation.input),
+                "result": _json_value(self.store, invocation.result),
+                "error": (
+                    invocation.error.to_record()
+                    if invocation.error is not None
+                    else None
+                ),
+                "session": self._session_summary(session),
+            }
+        backend_loader = getattr(
+            self.store.backend,
+            "aload_trace_invocation",
+            None,
+        )
+        if backend_loader is None:
+            raise KeyError(f"Unknown Invocation: {invocation_id}")
+        record = await backend_loader(invocation_id)
+        if record is None:
+            raise KeyError(f"Unknown Invocation: {invocation_id}")
+        return dict(record)
+
+    def _session_summary(self, session: Session) -> dict[str, Any]:
+        current = session.get_current_invocation()
+        return {
+            "id": str(session.id),
+            "namespace": session.namespace,
+            "workflow_id": session.workflow_id,
+            "session_key": session.session_key,
+            "current_invocation_id": (
+                str(session.current_invocation_id)
+                if session.current_invocation_id is not None
+                else None
+            ),
+            "current_invocation_state": (
+                current.state if current is not None else None
+            ),
+            "invocation_count": len(session.invocations),
+            "created_at_ms": session.created_at_ms,
+            "updated_at_ms": session.updated_at_ms,
+        }
+
+    def _invocation_summary(
+        self,
+        session: Session,
+        invocation: Invocation,
+        revisions: list[tuple[str, WorkflowVersionSnapshot, int]],
+    ) -> dict[str, Any]:
+        revision_id = next(
+            (
+                candidate
+                for candidate, snapshot, _ in revisions
+                if snapshot.workflow_id == invocation.workflow_id
+                and snapshot.definition_hash
+                == invocation.workflow_definition_hash
+                and snapshot.operator_manifest_hash
+                == invocation.workflow_operator_manifest_hash
+            ),
+            _revision_id(
+                self.agent.namespace,
+                invocation.workflow_id,
+                invocation.workflow_definition_hash or "",
+                invocation.workflow_operator_manifest_hash or "",
+            ),
+        )
+        return {
+            "id": str(invocation.id),
+            "session_id": str(session.id),
+            "workflow_id": invocation.workflow_id,
+            "workflow_revision_id": revision_id,
+            "workflow_version": invocation.workflow_version,
+            "definition_hash": invocation.workflow_definition_hash,
+            "operator_manifest_hash": (
+                invocation.workflow_operator_manifest_hash
+            ),
+            "entry_node_id": invocation.entry_node_id,
+            "state": invocation.state,
+            "execution_mode": invocation.execution_mode,
+            "event_mode": invocation.event_mode,
+            "live_sequence": invocation.event_sequence,
+            "durable_sequence": self.store.durable_sequence(invocation.id),
+            "persistence_status": self.store.persistence_status(invocation.id),
+            "created_at_ms": invocation.created_at_ms,
+            "updated_at_ms": invocation.updated_at_ms,
+        }
+
+    async def _workflow_versions(
+        self,
+        *,
+        refresh_database: bool = False,
+    ) -> list[tuple[str, WorkflowVersionSnapshot, int]]:
+        values: dict[
+            tuple[str, str, str],
+            tuple[str, WorkflowVersionSnapshot, int],
+        ] = {}
+        backend_loader = getattr(
+            self.store.backend,
+            "alist_trace_workflow_versions",
+            None,
+        )
+        if (
+            backend_loader is not None
+            and (
+                self._database_workflow_versions is None
+                or refresh_database
+            )
+        ):
+            self._database_workflow_versions = list(
+                await backend_loader(
+                    namespace=self.agent.namespace,
+                    limit=500,
+                )
+            )
+        for revision_id, snapshot, created_at_ms in (
+            self._database_workflow_versions or ()
+        ):
+            values[
+                (
+                    snapshot.workflow_id,
+                    snapshot.definition_hash,
+                    snapshot.operator_manifest_hash,
+                )
+            ] = (revision_id, snapshot, created_at_ms)
+        for key, snapshot in self.store.workflow_versions.items():
+            if key[0] != self.agent.namespace:
+                continue
+            identity = (
+                snapshot.workflow_id,
+                snapshot.definition_hash,
+                snapshot.operator_manifest_hash,
+            )
+            if identity in values:
+                continue
+            values[identity] = (
+                _revision_id(
+                    self.agent.namespace,
+                    snapshot.workflow_id,
+                    snapshot.definition_hash,
+                    snapshot.operator_manifest_hash,
+                ),
+                snapshot,
+                0,
+            )
+        for entry in self.agent.workflow_registry.values():
+            snapshot = entry.workflow_snapshot
+            identity = (
+                snapshot.workflow_id,
+                snapshot.definition_hash,
+                snapshot.operator_manifest_hash,
+            )
+            values.setdefault(
+                identity,
+                (
+                    _revision_id(
+                        self.agent.namespace,
+                        snapshot.workflow_id,
+                        snapshot.definition_hash,
+                        snapshot.operator_manifest_hash,
+                    ),
+                    snapshot,
+                    0,
+                ),
+            )
+        return list(values.values())
+
+    def _registered_workflow_identities(
+        self,
+    ) -> set[tuple[str, str, str]]:
+        return {
+            (
+                entry.workflow_snapshot.workflow_id,
+                entry.workflow_snapshot.definition_hash,
+                entry.workflow_snapshot.operator_manifest_hash,
+            )
+            for entry in self.agent.workflow_registry.values()
+        }
+
+
+def _graph_view(
+    revision_id: str,
+    snapshot: WorkflowVersionSnapshot,
+) -> dict[str, Any]:
+    definition = snapshot.definition
+    nodes = [dict(value) for value in definition.get("nodes", ())]
+    edges = [dict(value) for value in definition.get("edges", ())]
+    return {
+        "workflow_id": snapshot.workflow_id,
+        "workflow_version": snapshot.workflow_version,
+        "revision_id": revision_id,
+        "definition_hash": snapshot.definition_hash,
+        "operator_manifest_hash": snapshot.operator_manifest_hash,
+        "name": definition.get("name"),
+        "description": definition.get("description"),
+        "nodes": nodes,
+        "edges": edges,
+        "groups": _workflow_groups(nodes),
+        "operator_manifests": [
+            value.model_dump(mode="python")
+            for value in snapshot.operator_manifests
+        ],
+        "entry_node_ids": list(definition.get("entry_node_ids", ())),
+        "exit_node_ids": list(definition.get("exit_node_ids", ())),
+        "loop_regions": list(definition.get("loop_regions", ())),
+        "policy": definition.get("policy"),
+    }
+
+
+def _workflow_groups(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    paths = {
+        tuple(str(value) for value in node.get("workflow_path", ()))
+        for node in nodes
+        if node.get("workflow_path")
+    }
+    groups: list[dict[str, Any]] = []
+    for path in sorted(paths, key=lambda value: (len(value), value)):
+        group_id = "/".join(path)
+        direct = [
+            str(node["id"])
+            for node in nodes
+            if tuple(node.get("workflow_path", ())) == path
+        ]
+        descendants = [
+            str(node["id"])
+            for node in nodes
+            if tuple(node.get("workflow_path", ()))[: len(path)] == path
+        ]
+        groups.append(
+            {
+                "id": group_id,
+                "parent_group_id": (
+                    "/".join(path[:-1]) if len(path) > 1 else None
+                ),
+                "label": path[-1],
+                "workflow_path": list(path),
+                "node_ids": descendants,
+                "direct_node_ids": direct,
+                "entry_node_ids": [
+                    str(node["id"])
+                    for node in nodes
+                    if str(node["id"]) in descendants and node.get("entry")
+                ],
+                "exit_node_ids": [
+                    str(node["id"])
+                    for node in nodes
+                    if str(node["id"]) in descendants and node.get("exit")
+                ],
+            }
+        )
+    return groups
+
+
+def _revision_id(
+    namespace: str,
+    workflow_id: str,
+    definition_hash: str,
+    operator_manifest_hash: str,
+) -> str:
+    import hashlib
+
+    value = "\0".join(
+        (
+            namespace,
+            workflow_id,
+            definition_hash,
+            operator_manifest_hash,
+        )
+    )
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _json_value(store, value: Any) -> Any:
+    if value is None:
+        return None
+    payload = store.serializer.dumps_unchecked(value)
+    return store.serializer.json_view(payload)
+
+
+def _paginate(
+    values: list[dict[str, Any]],
+    *,
+    cursor: str | None,
+    limit: int,
+    key_fields: tuple[str, str],
+) -> TracePage:
+    anchor = _decode_cursor(cursor)
+    candidates = (
+        values
+        if anchor is None
+        else [
+            value
+            for value in values
+            if _page_key(value, key_fields) < anchor
+        ]
+    )
+    selected = candidates[:limit]
+    has_more = len(candidates) > len(selected)
+    return TracePage(
+        items=selected,
+        next_cursor=(
+            _encode_cursor(_page_key(selected[-1], key_fields))
+            if has_more and selected
+            else None
+        ),
+        has_more=has_more,
+    )
+
+
+def _page_key(
+    value: dict[str, Any],
+    fields: tuple[str, str],
+) -> tuple[int, str]:
+    return int(value[fields[0]]), str(value[fields[1]])
+
+
+def _encode_cursor(anchor: tuple[int, str]) -> str:
+    raw = json.dumps(
+        {"timestamp": anchor[0], "id": anchor[1]},
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str | None) -> tuple[int, str] | None:
+    if cursor is None:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded))
+        timestamp = int(value["timestamp"])
+        identity = str(value["id"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid pagination cursor.") from exc
+    if timestamp < 0 or not identity:
+        raise ValueError("Invalid pagination cursor.")
+    return timestamp, identity

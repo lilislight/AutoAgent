@@ -48,6 +48,8 @@ class WorkflowVersionRow(RuntimeDatabaseBase):
     compiler_version: Mapped[str] = mapped_column(String(64), nullable=False)
     definition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     operator_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    definition_json: Mapped[str] = mapped_column(Text, nullable=False)
+    operator_manifests_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 

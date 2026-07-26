@@ -503,6 +503,17 @@ class WorkflowExecutor:
                         "wait_keys": sorted(
                             invocation.scheduler.waiting_executions
                         ),
+                        "waits": [
+                            waiting.to_record()
+                            for waiting in (
+                                invocation.scheduler.waiting_executions[
+                                    wait_key
+                                ]
+                                for wait_key in sorted(
+                                    invocation.scheduler.waiting_executions
+                                )
+                            )
+                        ],
                     },
                 )
                 return invocation
@@ -617,7 +628,7 @@ class WorkflowExecutor:
         changed_execution_ids = tuple(
             execution.id
             for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running"}
+            if execution.state in {"created", "ready", "running", "waiting"}
         )
         invocation.cancel_active_node_executions(error)
         invocation.mark_cancelled()
@@ -628,6 +639,21 @@ class WorkflowExecutor:
             "invocation.cancelled",
             node_execution_ids=changed_execution_ids,
         )
+
+    async def acancel(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+    ) -> Invocation:
+        """Cancel an Invocation that is not currently owned by a caller task."""
+
+        if invocation.state not in {"created", "running", "waiting"}:
+            raise ValueError(
+                f"Invocation cannot be cancelled from state {invocation.state}."
+            )
+        await self._cancel_invocation(session=session, invocation=invocation)
+        return invocation
 
     def resume(
         self,
@@ -1073,7 +1099,9 @@ class WorkflowExecutor:
                 node_execution_ids=(node_execution.id,),
                 detail={
                     "node_id": node_execution.node_id,
+                    "node_execution_id": str(node_execution.id),
                     "state": "failed",
+                    "error": runtime_error.to_record(),
                 },
             )
             return node_execution.id
@@ -1181,6 +1209,11 @@ class WorkflowExecutor:
                 "node_id": node_execution.node_id,
                 "node_execution_id": str(node_execution.id),
                 "state": node_execution.state,
+                "error": (
+                    node_execution.error.to_record()
+                    if node_execution.error is not None
+                    else None
+                ),
             },
             elapsed_ns=(
                 max(
@@ -1221,10 +1254,16 @@ class WorkflowExecutor:
             usage = operator_execution.resource_usage
             detail = {
                 "node_id": node_execution.node_id,
+                "node_execution_id": str(node_execution.id),
                 "operator_call_id": str(operator_execution.id),
                 "operator_id": operator_execution.operator_id,
                 "reason": operator_execution.reason,
                 "state": operator_execution.state,
+                "error": (
+                    operator_execution.error.to_record()
+                    if operator_execution.error is not None
+                    else None
+                ),
             }
             await self._record_event(
                 session,
@@ -1255,11 +1294,17 @@ class WorkflowExecutor:
             node_execution_ids=(node_execution.id,),
             detail={
                 "node_id": node_execution.node_id,
+                "node_execution_id": str(node_execution.id),
                 "operator_call_id": str(operator_execution.id),
                 "kind": operator_execution.kind,
                 "operator_ids": list(operator_execution.operator_ids),
                 "state": operator_execution.state,
                 "summary": summary.to_record(),
+                "error": (
+                    operator_execution.error.to_record()
+                    if operator_execution.error is not None
+                    else None
+                ),
             },
             elapsed_ns=logical_elapsed_ns,
             timing={

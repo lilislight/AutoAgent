@@ -156,4 +156,11 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             if key.startswith("AUTOAGENT_")
         }
 
-        self.assertEqual(AUTOAGENT_ENV_KEYS, documented)
+        entrypoint_keys = {
+            "AUTOAGENT_SERVER_HOST",
+            "AUTOAGENT_SERVER_PORT",
+        }
+        self.assertEqual(
+            AUTOAGENT_ENV_KEYS | entrypoint_keys,
+            documented,
+        )

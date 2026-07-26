@@ -5,10 +5,10 @@ import {
   Activity,
   ChevronDown,
   ChevronRight,
-  CirclePause,
+  Database,
+  LoaderCircle,
   Moon,
-  Play,
-  Radio,
+  RefreshCw,
   Search,
   Sun,
   Workflow,
@@ -16,6 +16,7 @@ import {
 
 import type {
   InvocationSummary,
+  RuntimeStatus,
   RuntimeState,
   SessionSummary,
   WorkflowSummary,
@@ -26,51 +27,43 @@ type ScopeColumn = "workflow" | "session" | "invocation";
 
 interface ScopeBarProps {
   workflows: WorkflowSummary[];
-  sessions: SessionSummary[];
   invocations: InvocationSummary[];
   workflowId: string | null;
   sessionId: string | null;
   invocationId: string | null;
   invocationState: RuntimeState | null;
-  viewedWorkflow: Pick<
-    WorkflowSummary,
-    "workflow_id" | "workflow_version" | "definition_hash" | "operator_manifest_hash"
-  > | null;
-  viewedWorkflowIsRegistered: boolean;
-  followLive: boolean;
-  backendLive: boolean;
+  runtimeStatus: RuntimeStatus | null;
   darkMode: boolean;
-  executionEnabled: boolean;
-  canInvoke: boolean;
-  invoking: boolean;
+  refreshingInvocation: boolean;
+  canCancelInvocation: boolean;
+  cancellingInvocation: boolean;
+  onRefreshInvocation: () => void;
+  onCancelInvocation: () => void;
+  onInspectInvocation: () => void;
   onScopeChange: (workflowId: string, sessionId: string, invocationId: string) => void;
-  onFollowLive: () => void;
-  onOpenInvoke: () => void;
   onToggleTheme: () => void;
 }
 
 export function ScopeBar({
   workflows,
-  sessions,
   invocations,
   workflowId,
   sessionId,
   invocationId,
   invocationState,
-  viewedWorkflow,
-  viewedWorkflowIsRegistered,
-  followLive,
-  backendLive,
+  runtimeStatus,
   darkMode,
-  executionEnabled,
-  canInvoke,
-  invoking,
+  refreshingInvocation,
+  canCancelInvocation,
+  cancellingInvocation,
+  onRefreshInvocation,
+  onCancelInvocation,
+  onInspectInvocation,
   onScopeChange,
-  onFollowLive,
-  onOpenInvoke,
   onToggleTheme,
 }: ScopeBarProps) {
   const selectedInvocation = invocations.find((value) => value.id === invocationId);
+  const [persistenceOpen, setPersistenceOpen] = useState(false);
   return (
     <header className="scope-bar">
       <div className="brand-mark" aria-label="AutoAgent Trace">
@@ -86,60 +79,64 @@ export function ScopeBar({
         onScopeChange={onScopeChange}
       />
       <div className="scope-actions">
-        {viewedWorkflow && (
-          <span
-            className={`workflow-revision-pill ${viewedWorkflowIsRegistered ? "is-current" : "is-historical"}`}
-            title={`Workflow ${viewedWorkflow.workflow_id}\nDefinition hash: ${viewedWorkflow.definition_hash}\nOperator manifest: ${viewedWorkflow.operator_manifest_hash}`}
+        {selectedInvocation && (
+          <button
+            className="icon-button"
+            type="button"
+            onClick={onRefreshInvocation}
+            disabled={refreshingInvocation}
+            title="Refresh latest invocation state and graph projection"
+            aria-label="Refresh latest invocation"
           >
-            {workflowRevisionLabel(
-              viewedWorkflow.workflow_version,
-              viewedWorkflow.definition_hash,
-            )}
-            <strong>{viewedWorkflowIsRegistered ? "Current app" : "History"}</strong>
-          </span>
+            <RefreshCw
+              className={refreshingInvocation ? "spin" : undefined}
+              size={16}
+            />
+          </button>
         )}
         {selectedInvocation && (
-          <span className={`invocation-status-pill state-${stateClass(invocationState ?? selectedInvocation.state)}`}>
-            {shortId(selectedInvocation.id)} · {invocationState ?? selectedInvocation.state}
-          </span>
+          <div className={`invocation-status-control state-${stateClass(invocationState ?? selectedInvocation.state)}`}>
+            <button
+              className="invocation-status-inspect"
+              type="button"
+              onClick={onInspectInvocation}
+              title="Inspect this invocation"
+            >
+              {invocationState ?? selectedInvocation.state}
+            </button>
+            {canCancelInvocation && (
+              <button
+                className="invocation-status-cancel"
+                type="button"
+                onClick={onCancelInvocation}
+                disabled={cancellingInvocation}
+              >
+                {cancellingInvocation ? "Cancelling" : "Cancel"}
+              </button>
+            )}
+          </div>
         )}
-        <button
-          className="toolbar-button"
-          type="button"
-          onClick={onOpenInvoke}
-          disabled={!canInvoke || !executionEnabled || invoking}
-          title={
-            !executionEnabled
-              ? "Execution API is disabled"
-              : canInvoke
-                ? "Invoke a workflow registered by the current App"
-                : "The current App has no registered workflows"
-          }
-        >
-          <Play size={15} />
-          {invoking ? "Invoking" : "Invoke"}
-        </button>
-        <button
-          className={`toolbar-button ${followLive ? "is-active" : ""}`}
-          type="button"
-          onClick={onFollowLive}
-          disabled={!selectedInvocation}
-          title={
-            followLive
-              ? "Enter replay at the previous cursor, or the pre-event graph"
-              : "Return to the latest runtime event"
-          }
-        >
-          {followLive ? <Radio size={15} /> : <CirclePause size={15} />}
-          {followLive ? "Following" : "Replay"}
-        </button>
-        <span
-          className={`connection-state ${backendLive ? "is-connected" : ""}`}
-          title={backendLive ? "Backend service is reachable" : "Backend service or live polling is unavailable"}
-        >
-          <Radio size={13} />
-          {backendLive ? "Live" : "Offline"}
-        </span>
+        {selectedInvocation?.event_mode && (
+          <span className="event-mode-pill">{selectedInvocation.event_mode}</span>
+        )}
+        <div className="persistence-control">
+          <button
+            className={`persistence-pill tone-${persistenceTone(runtimeStatus, selectedInvocation)}`}
+            type="button"
+            onClick={() => setPersistenceOpen((value) => !value)}
+            aria-expanded={persistenceOpen}
+          >
+            <Database size={14} />
+            {persistenceLabel(runtimeStatus, selectedInvocation)}
+          </button>
+          {persistenceOpen && (
+            <PersistencePopover
+              status={runtimeStatus}
+              invocation={selectedInvocation ?? null}
+              onClose={() => setPersistenceOpen(false)}
+            />
+          )}
+        </div>
         <button
           className="icon-button"
           type="button"
@@ -151,6 +148,117 @@ export function ScopeBar({
       </div>
     </header>
   );
+}
+
+function PersistencePopover({
+  status,
+  invocation,
+  onClose,
+}: {
+  status: RuntimeStatus | null;
+  invocation: InvocationSummary | null;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (!panelRef.current?.parentElement?.contains(event.target as Node)) onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+  const persistence = status?.persistence;
+  const lag = Math.max(
+    0,
+    (invocation?.live_sequence ?? 0) - (invocation?.durable_sequence ?? 0),
+  );
+  return (
+    <section className="persistence-popover" ref={panelRef}>
+      <header>
+        <div>
+          <span>Runtime durability</span>
+          <strong>{persistence?.backend_kind ?? "In-memory store"}</strong>
+        </div>
+        <span className={`persistence-health tone-${persistenceTone(status, invocation)}`}>
+          {persistence?.health ?? "memory only"}
+        </span>
+      </header>
+      <dl>
+        <dt>Queue</dt>
+        <dd>{persistence?.pending_count ?? 0} records · {formatBytes(persistence?.pending_bytes ?? 0)}</dd>
+        <dt>Worker</dt>
+        <dd>{persistence?.worker_state ?? "not configured"}</dd>
+        <dt>Pressure</dt>
+        <dd>{persistence?.pressure ?? "normal"}</dd>
+        <dt>Admission</dt>
+        <dd>{status?.execution.accepting_invocations === false ? "Paused" : "Accepting"}</dd>
+        {invocation && (
+          <>
+            <dt>Invocation</dt>
+            <dd>{invocation.persistence_status ?? "unknown"}</dd>
+            <dt>Sequence</dt>
+            <dd>{invocation.durable_sequence ?? 0} / {invocation.live_sequence ?? 0} · lag {lag}</dd>
+          </>
+        )}
+      </dl>
+      {persistence?.last_error && <p>{persistence.last_error}</p>}
+      {persistence?.enabled && (
+        <div className="persistence-meter">
+          <i style={{
+            width: `${Math.min(100, ((persistence.pending_bytes || 0) / Math.max(1, persistence.hard_watermark_bytes)) * 100)}%`,
+          }} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function persistenceLabel(
+  status: RuntimeStatus | null,
+  invocation: InvocationSummary | undefined,
+): string {
+  if (!status || !status.persistence.enabled) return "Memory only";
+  if (status.persistence.health === "unavailable") return "Persistence unavailable";
+  if (status.persistence.pressure === "hard") return "Persistence full";
+  const lag = Math.max(
+    0,
+    (invocation?.live_sequence ?? 0) - (invocation?.durable_sequence ?? 0),
+  );
+  if (lag > 0 || status.persistence.pending_count > 0) {
+    return `Persisting · ${status.persistence.pending_count} queued`;
+  }
+  return "Durable";
+}
+
+function persistenceTone(
+  status: RuntimeStatus | null,
+  invocation: InvocationSummary | undefined | null,
+): string {
+  if (!status || !status.persistence.enabled) return "neutral";
+  if (status.persistence.health === "unavailable" || invocation?.persistence_status === "degraded") {
+    return "danger";
+  }
+  if (
+    status.persistence.health === "retrying" ||
+    status.persistence.pressure !== "normal" ||
+    invocation?.persistence_status === "pending"
+  ) {
+    return "warning";
+  }
+  return "success";
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function ScopeNavigator({
@@ -192,7 +300,12 @@ function ScopeNavigator({
   const stagedInvocations = invocationQuery.data ?? [];
   const selectedInvocation = stagedInvocations.find((value) => value.id === draftScope.invocationId);
   const sortedWorkflows = useMemo(
-    () => [...workflows].sort((left, right) => left.workflow_id.localeCompare(right.workflow_id)),
+    () => [...workflows].sort((left, right) => {
+      const sourceOrder =
+        Number(Boolean(right.registered_in_current_app)) -
+        Number(Boolean(left.registered_in_current_app));
+      return sourceOrder || left.workflow_id.localeCompare(right.workflow_id);
+    }),
     [workflows],
   );
   const sortedSessions = useMemo(
@@ -309,6 +422,8 @@ function ScopeNavigator({
             column="session"
             count={sortedSessions.length}
             disabled={!draftScope.workflowId}
+            loading={sessionQuery.isLoading || sessionQuery.isFetching}
+            error={sessionQuery.error}
             emptyLabel={draftScope.workflowId ? "No sessions for this workflow." : "Select a workflow first."}
             query={queries.session}
             onQueryChange={(value) => setQuery("session", value)}
@@ -334,6 +449,8 @@ function ScopeNavigator({
             column="invocation"
             count={sortedInvocations.length}
             disabled={!draftScope.sessionId}
+            loading={invocationQuery.isLoading || invocationQuery.isFetching}
+            error={invocationQuery.error}
             emptyLabel={draftScope.sessionId ? "No invocations in this session." : "Select a session first."}
             query={queries.invocation}
             onQueryChange={(value) => setQuery("invocation", value)}
@@ -349,6 +466,9 @@ function ScopeNavigator({
                 <span className="scope-navigator-item-title">
                   {formatTime(invocation.created_at_ms)}
                   <em className={`scope-navigator-state state-${stateClass(invocation.state)}`}>{invocation.state}</em>
+                  {invocation.event_mode && (
+                    <em className="scope-navigator-mode">{invocation.event_mode}</em>
+                  )}
                 </span>
                 <span className="scope-navigator-item-detail">{shortId(invocation.id)} · {invocation.entry_node_id}</span>
                 <span className="scope-navigator-item-meta">
@@ -385,6 +505,8 @@ function ScopeColumnList({
   column,
   count,
   disabled = false,
+  loading = false,
+  error = null,
   emptyLabel,
   query,
   onQueryChange,
@@ -395,6 +517,8 @@ function ScopeColumnList({
   column: ScopeColumn;
   count: number;
   disabled?: boolean;
+  loading?: boolean;
+  error?: Error | null;
   emptyLabel: string;
   query: string;
   onQueryChange: (value: string) => void;
@@ -423,7 +547,16 @@ function ScopeColumnList({
         />
       </label>
       <div className="scope-navigator-list">
-        {visible > 0 ? children : <p>{emptyLabel}</p>}
+        {loading ? (
+          <p className="scope-column-status">
+            <LoaderCircle className="spin" size={14} />
+            Loading {label.toLowerCase()}s…
+          </p>
+        ) : error ? (
+          <p className="scope-column-status is-error">
+            {error.message}
+          </p>
+        ) : visible > 0 ? children : <p>{emptyLabel}</p>}
       </div>
     </section>
   );
@@ -460,6 +593,7 @@ function invocationSearchText(invocation: InvocationSummary): string {
     invocation.state,
     invocation.workflow_version,
     invocation.definition_hash,
+    invocation.event_mode,
   ].filter(Boolean).join(" ");
 }
 
@@ -472,7 +606,11 @@ function sessionLabel(session: SessionSummary): string {
 }
 
 function invocationLabel(invocation: InvocationSummary): string {
-  return `${formatTime(invocation.created_at_ms)} · ${invocation.state}`;
+  return [
+    formatTime(invocation.created_at_ms),
+    invocation.state,
+    invocation.event_mode,
+  ].filter(Boolean).join(" · ");
 }
 
 function shortId(value: string): string {
@@ -501,8 +639,10 @@ function formatRelativeTime(value: number): string {
 
 function workflowDirectoryLabel(workflow: WorkflowSummary): string {
   const revisions = workflow.revision_count ?? 1;
-  const source = workflow.registered_in_current_app ? "current" : "history";
-  return `${revisions} revision${revisions === 1 ? "" : "s"} · ${source}`;
+  const source = workflow.registered_in_current_app
+    ? "Registered"
+    : "Historical only";
+  return `${source} · ${revisions} revision${revisions === 1 ? "" : "s"}`;
 }
 
 function workflowRevisionLabel(

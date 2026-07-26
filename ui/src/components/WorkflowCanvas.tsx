@@ -16,7 +16,12 @@ import {
   type ReactFlowInstance,
   useNodesState,
 } from "@xyflow/react";
-import { Boxes, Flag, Play, RotateCcw } from "lucide-react";
+import {
+  Boxes,
+  Flag,
+  Play,
+  RotateCcw,
+} from "lucide-react";
 
 import { layoutWorkflow, loadSavedLayout, saveLayout } from "../layout";
 import type {
@@ -38,6 +43,7 @@ type TraceNodeData = {
   entry: boolean;
   exit: boolean;
   executionCount: number;
+  operatorSummary: string | null;
   issue: NodeIssue | null;
 };
 
@@ -67,7 +73,11 @@ interface WorkflowCanvasProps {
   projection: RuntimeProjection;
   followLive: boolean;
   selection: TraceSelection;
-  onSelect: (selection: TraceSelection) => void;
+  canInvoke: boolean;
+  canResume?: boolean;
+  onInspect: (selection: TraceSelection) => void;
+  onInvoke?: (entryNodeId: string) => void;
+  onResume?: (nodeId: string) => void;
 }
 
 export function WorkflowCanvas({
@@ -76,7 +86,11 @@ export function WorkflowCanvas({
   projection,
   followLive,
   selection,
-  onSelect,
+  canInvoke,
+  canResume = false,
+  onInspect,
+  onInvoke,
+  onResume,
 }: WorkflowCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<TraceFlowNode>([]);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
@@ -116,6 +130,7 @@ export function WorkflowCanvas({
               entry: node.entry,
               exit: node.exit,
               executionCount: projected?.execution_count ?? 0,
+              operatorSummary: nodeOperatorSummary(projected),
               issue: nodeIssue(latestExecution),
             },
             selected: selection?.type === "node" && selection.id === node.id,
@@ -162,6 +177,7 @@ export function WorkflowCanvas({
             ...node.data,
             state: projected?.state ?? "created",
             executionCount: projected?.execution_count ?? 0,
+            operatorSummary: nodeOperatorSummary(projected),
             issue: nodeIssue(latestExecution),
           },
         };
@@ -259,13 +275,31 @@ export function WorkflowCanvas({
         }}
         onNodeClick={(event, node) => {
           event.stopPropagation();
-          onSelect(
-            { type: node.type === "workflowGroup" ? "group" : "node", id: node.id },
-          );
+          const target: Exclude<TraceSelection, null> = {
+            type: node.type === "workflowGroup" ? "group" : "node",
+            id: node.id,
+          };
+          onInspect(target);
+          if (
+            target.type === "node" &&
+            projection.nodes[node.id]?.state === "waiting" &&
+            canResume
+          ) {
+            onResume?.(node.id);
+            return;
+          }
+          if (
+            target.type === "node" &&
+            graph.entry_node_ids.includes(node.id) &&
+            canInvoke
+          ) {
+            onInvoke?.(node.id);
+            return;
+          }
         }}
         onEdgeClick={(event, edge) => {
           event.stopPropagation();
-          onSelect({ type: "edge", id: edge.id });
+          onInspect({ type: "edge", id: edge.id });
         }}
         onEdgeMouseEnter={(_event, edge) => {
           setHoveredEdgeId(edge.id);
@@ -273,11 +307,7 @@ export function WorkflowCanvas({
         onEdgeMouseLeave={() => {
           setHoveredEdgeId(null);
         }}
-        onPaneClick={() => {
-          // Keep the active detail panel open while users pan or inspect the
-          // canvas. It should close only via its close button or by selecting
-          // another graph element.
-        }}
+        onPaneClick={() => onInspect(null)}
         onInit={(instance) => {
           flow.current = instance;
         }}
@@ -346,6 +376,11 @@ function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
         )}
       </div>
       <div className="trace-node-capability">{traceData.capability}</div>
+      {traceData.operatorSummary && (
+        <div className="trace-node-operator-summary">
+          {traceData.operatorSummary}
+        </div>
+      )}
       <div className="trace-node-footer">
         <span>{traceData.state}</span>
         <span className="node-flags">
@@ -364,6 +399,23 @@ function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
       <Handle type="source" position={Position.Right} />
     </div>
   );
+}
+
+function nodeOperatorSummary(
+  node: RuntimeProjection["nodes"][string] | undefined,
+): string | null {
+  if (!node || !node.operator_call_count) return null;
+  const values = [`calls ${node.operator_call_count}`];
+  if (node.parallel_call_count) {
+    values.push(`${node.latest_operator_kind ?? "parallel"} ×${node.parallel_call_count}`);
+  }
+  if (node.retry_count) values.push(`retry ${node.retry_count}`);
+  if (node.fallback_count) values.push(`fallback ${node.fallback_count}`);
+  if (node.timeout_count) values.push(`timeout ${node.timeout_count}`);
+  if (node.failed_operator_call_count) {
+    values.push(`failed ${node.failed_operator_call_count}`);
+  }
+  return values.join(" · ");
 }
 
 function stateClass(state: RuntimeState): string {
@@ -421,11 +473,18 @@ function nodeIssue(execution: NodeExecutionView | undefined): NodeIssue | null {
     ["failed", "interrupted"].includes(call.state),
   );
   if (failedCalls.length > 0 && execution.state === "completed") {
-    const latest = failedCalls.at(-1)!;
+    const failed = failedCalls.at(-1)!;
+    const recovery = execution.operator_calls.find(
+      (call) =>
+        call.call_no > failed.call_no &&
+        call.state === "completed" &&
+        ["retry", "fallback", "recovery"].includes(call.reason ?? ""),
+    );
+    const recoveryLabel = recovery?.reason ?? "recovered";
     return {
       tone: "warning",
-      label: "fallback",
-      title: `${latest.operator_id} ${latest.kind} ${latest.state}: ${errorMessage(latest.error)}`,
+      label: recoveryLabel,
+      title: `${failed.operator_id} ${failed.kind} ${failed.state}: ${errorMessage(failed.error)}. Recovered by ${recoveryLabel}.`,
     };
   }
   if (failedCalls.length > 0) {

@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator
 from uuid import UUID
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response
+from fastapi import (
+    APIRouter,
+    Cookie,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+)
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from autoagent.core.app import AutoAgentApp
@@ -15,6 +29,7 @@ from autoagent.core.runtime import (
     RuntimeSerializationError,
     SessionBusyError,
 )
+from autoagent.core.server.trace import TraceService
 
 
 _AUTH_COOKIE = "autoagent_session"
@@ -57,13 +72,13 @@ class InvocationResumeResponse(_ApiModel):
     state: str
 
 
-class AutoAgentServer:
-    """Thin execution adapter.
+class InvocationCancelResponse(_ApiModel):
+    invocation_id: UUID
+    state: str
 
-    Runtime inspection, graph preview, Trace projections, event paging, and SSE
-    are intentionally absent. The next Server/UI design can consume the new
-    RuntimeStore contract without keeping the deleted projection APIs alive.
-    """
+
+class AutoAgentServer:
+    """Standalone FastAPI application and embeddable tracing/execution router."""
 
     def __init__(
         self,
@@ -72,6 +87,7 @@ class AutoAgentServer:
         execution_enabled: bool = True,
         access_token: str | None = None,
         secure_cookies: bool = False,
+        ui_directory: str | Path | None = None,
     ) -> None:
         if access_token is not None and not access_token:
             raise ValueError("access_token cannot be empty.")
@@ -79,9 +95,18 @@ class AutoAgentServer:
         self.execution_enabled = execution_enabled
         self.access_token = access_token
         self.secure_cookies = secure_cookies
+        default_ui = Path(__file__).resolve().parents[3] / "ui" / "dist"
+        self.ui_directory = (
+            Path(ui_directory)
+            if ui_directory is not None
+            else default_ui
+        )
         self._invocation_tasks: dict[UUID, asyncio.Task[Any]] = {}
         self._invocation_failures: dict[UUID, BaseException] = {}
-        self.api = self._build_api()
+        self._started_at_ms = time.time_ns() // 1_000_000
+        self.trace = TraceService(app)
+        self.router = self._build_router()
+        self.api = self.create_app()
 
     def run(
         self,
@@ -94,7 +119,18 @@ class AutoAgentServer:
 
         uvicorn.run(self.api, host=host, port=port, reload=reload)
 
-    def _build_api(self) -> FastAPI:
+    def create_app(self) -> FastAPI:
+        api = FastAPI(title="AutoAgent Server API", version="1")
+        api.include_router(self.router)
+        if self.ui_directory.is_dir():
+            api.mount(
+                "/",
+                StaticFiles(directory=self.ui_directory, html=True),
+                name="tracing_ui",
+            )
+        return api
+
+    def _build_router(self) -> APIRouter:
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             await self.agent.astart()
@@ -108,7 +144,7 @@ class AutoAgentServer:
                     )
                 await self.agent.aclose()
 
-        api = FastAPI(title="AutoAgent Server API", version="1", lifespan=lifespan)
+        router = APIRouter(prefix="/api/v1", lifespan=lifespan)
 
         def authenticated(
             authorization: str | None,
@@ -133,14 +169,70 @@ class AutoAgentServer:
 
         auth = [Depends(require_authentication)]
 
-        @api.get("/api/health")
-        async def health() -> dict[str, str | bool]:
+        @router.get("/health")
+        async def health(
+            authorization: str | None = Header(default=None),
+            session_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE),
+        ) -> dict[str, str | bool]:
             return {
                 "status": "ok",
                 "execution_enabled": self.execution_enabled,
+                "authentication_required": self.access_token is not None,
+                "authenticated": authenticated(authorization, session_cookie),
             }
 
-        @api.post("/api/auth/session")
+        @router.get("/health/live")
+        async def liveness() -> dict[str, str]:
+            """Cheap process liveness probe; it deliberately does not touch storage."""
+
+            return {"status": "alive"}
+
+        @router.get("/health/ready")
+        async def readiness() -> dict[str, str | bool]:
+            """Report whether this process may accept execution requests."""
+
+            return {
+                "status": "ready",
+                "execution_enabled": self.execution_enabled,
+                "accepting_invocations": (
+                    self.execution_enabled
+                    and not self.agent.runtime_store.admission_paused
+                ),
+            }
+
+        @router.get("/runtime/status", dependencies=auth)
+        async def runtime_status() -> dict[str, Any]:
+            return self._runtime_status()
+
+        @router.get("/runtime/stream", dependencies=auth)
+        async def stream_runtime_status() -> StreamingResponse:
+            async def generate() -> AsyncIterator[str]:
+                previous: str | None = None
+                heartbeat_at = asyncio.get_running_loop().time()
+                while True:
+                    payload = json.dumps(
+                        self._runtime_status(),
+                        separators=(",", ":"),
+                    )
+                    if payload != previous:
+                        previous = payload
+                        yield f"event: runtime_status\ndata: {payload}\n\n"
+                    now = asyncio.get_running_loop().time()
+                    if now - heartbeat_at >= 15:
+                        yield ": heartbeat\n\n"
+                        heartbeat_at = now
+                    await asyncio.sleep(0.5)
+
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        @router.post("/auth/session")
         async def create_authentication_session(
             body: _AuthenticationRequest,
             response: Response,
@@ -160,12 +252,237 @@ class AutoAgentServer:
             )
             return {"authenticated": True}
 
-        @api.delete("/api/auth/session")
+        @router.delete("/auth/session")
         async def delete_authentication_session(response: Response) -> None:
             response.delete_cookie(_AUTH_COOKIE)
 
-        @api.post(
-            "/api/workflows/{workflow_id}/invocations",
+        @router.get("/workflows", dependencies=auth)
+        async def list_workflows(
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=200),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.list_workflows(
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/registered-workflows", dependencies=auth)
+        async def list_registered_workflows(
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=200),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.list_workflows(
+                    cursor=cursor,
+                    limit=limit,
+                    registered_only=True,
+                )
+            )
+
+        @router.get("/workflows/{workflow_id}/revisions", dependencies=auth)
+        async def list_workflow_revisions(
+            workflow_id: str,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=200),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.list_workflow_versions(
+                    workflow_id,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/workflow-revisions/{revision_id}", dependencies=auth)
+        async def get_workflow_revision(revision_id: str) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.workflow_graph(revision_id)
+            )
+
+        @router.get("/workflows/{workflow_id}/sessions", dependencies=auth)
+        async def list_sessions(
+            workflow_id: str,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=200),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.list_sessions(
+                    workflow_id,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/sessions/{session_id}/invocations", dependencies=auth)
+        async def list_invocations(
+            session_id: UUID,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=200),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.list_invocations(
+                    session_id,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/invocations/{invocation_id}/trace", dependencies=auth)
+        async def get_invocation_trace(
+            invocation_id: UUID,
+            tail_limit: int = Query(default=200, ge=1, le=1_000),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.trace_bootstrap(
+                    invocation_id,
+                    tail_limit=tail_limit,
+                )
+            )
+
+        @router.get("/invocations/{invocation_id}", dependencies=auth)
+        async def get_invocation(invocation_id: UUID) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.invocation_detail(invocation_id)
+            )
+
+        @router.get("/invocations/{invocation_id}/events", dependencies=auth)
+        async def list_invocation_events(
+            invocation_id: UUID,
+            after_sequence: int = Query(default=0, ge=0),
+            before_sequence: int | None = Query(default=None, ge=1),
+            limit: int = Query(default=200, ge=1, le=1_000),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.event_page(
+                    invocation_id,
+                    after_sequence=after_sequence,
+                    before_sequence=before_sequence,
+                    limit=limit,
+                )
+            )
+
+        @router.get(
+            "/invocations/{invocation_id}/events/{sequence}",
+            dependencies=auth,
+        )
+        async def get_invocation_event(
+            invocation_id: UUID,
+            sequence: int,
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.event_detail(invocation_id, sequence)
+            )
+
+        @router.get(
+            "/invocations/{invocation_id}/projection",
+            dependencies=auth,
+        )
+        async def get_invocation_projection(
+            invocation_id: UUID,
+            through_sequence: int = Query(ge=0),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.projection(
+                    invocation_id,
+                    through_sequence=through_sequence,
+                )
+            )
+
+        @router.get("/invocations/{invocation_id}/state", dependencies=auth)
+        async def get_invocation_state(
+            invocation_id: UUID,
+            through_sequence: int | None = Query(default=None, ge=0),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.runtime_state(
+                    invocation_id,
+                    through_sequence=through_sequence,
+                )
+            )
+
+        @router.get("/invocations/{invocation_id}/stream", dependencies=auth)
+        async def stream_invocation(
+            invocation_id: UUID,
+            after_sequence: int = Query(default=0, ge=0),
+            last_event_id: str | None = Header(
+                default=None,
+                alias="Last-Event-ID",
+            ),
+        ) -> StreamingResponse:
+            if last_event_id is not None:
+                try:
+                    after_sequence = max(after_sequence, int(last_event_id))
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid Last-Event-ID.",
+                    ) from exc
+
+            async def generate() -> AsyncIterator[str]:
+                cursor = after_sequence
+                heartbeat_at = asyncio.get_running_loop().time()
+                previous_detail: str | None = None
+                while True:
+                    page = await self.trace.event_page(
+                        invocation_id,
+                        after_sequence=cursor,
+                        before_sequence=None,
+                        limit=200,
+                    )
+                    for event in page["items"]:
+                        cursor = int(event["sequence"])
+                        yield (
+                            f"id: {cursor}\n"
+                            "event: runtime_event\n"
+                            f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                        )
+                    detail = await self.trace.invocation_detail(invocation_id)
+                    encoded_detail = json.dumps(detail, separators=(",", ":"))
+                    if encoded_detail != previous_detail:
+                        previous_detail = encoded_detail
+                        yield (
+                            "event: invocation_status\n"
+                            f"data: {encoded_detail}\n\n"
+                        )
+                    terminal = detail["state"] in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "interrupted",
+                    }
+                    persistence_settled = detail["persistence_status"] in {
+                        "memory_only",
+                        "durable",
+                        "degraded",
+                        "unserializable",
+                    }
+                    if (
+                        terminal
+                        and cursor >= int(detail["live_sequence"])
+                        and persistence_settled
+                    ):
+                        yield "event: stream_end\ndata: {}\n\n"
+                        break
+                    now = asyncio.get_running_loop().time()
+                    if now - heartbeat_at >= 15:
+                        yield ": heartbeat\n\n"
+                        heartbeat_at = now
+                    await asyncio.sleep(0.25)
+
+            await self._trace_call(self.trace.invocation_detail(invocation_id))
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        @router.post(
+            "/workflows/{workflow_id}/invocations",
             response_model=InvocationSubmitResponse,
             dependencies=auth,
         )
@@ -218,8 +535,8 @@ class AutoAgentServer:
                 state=admitted.invocation.state,
             )
 
-        @api.post(
-            "/api/workflows/{workflow_id}/resume",
+        @router.post(
+            "/workflows/{workflow_id}/resume",
             response_model=InvocationResumeResponse,
             dependencies=auth,
         )
@@ -263,7 +580,133 @@ class AutoAgentServer:
                 state=invocation.state,
             )
 
-        return api
+        @router.post(
+            "/invocations/{invocation_id}/cancel",
+            response_model=InvocationCancelResponse,
+            dependencies=auth,
+        )
+        async def cancel_invocation(
+            invocation_id: UUID,
+        ) -> InvocationCancelResponse:
+            if not self.execution_enabled:
+                raise HTTPException(status_code=403, detail="Execution API is disabled.")
+            invocation = self.agent.runtime_store.invocations.get(invocation_id)
+            if invocation is None:
+                raise HTTPException(status_code=404, detail="Unknown Invocation.")
+            if invocation.state not in {"created", "running", "waiting"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Invocation cannot be cancelled from state {invocation.state}.",
+                )
+            task = self._invocation_tasks.get(invocation_id)
+            if task is None or task.done():
+                if invocation.state != "waiting":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Invocation is no longer executing in this Server process.",
+                    )
+                session_id = self.agent.runtime_store.invocation_sessions[
+                    invocation_id
+                ]
+                session = self.agent.runtime_store.sessions[session_id]
+                await self.agent._runtime_loop.arun(
+                    self.agent.workflow_executor.acancel(
+                        session=session,
+                        invocation=invocation,
+                    )
+                )
+            else:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            return InvocationCancelResponse(
+                invocation_id=invocation_id,
+                state=invocation.state,
+            )
+
+        return router
+
+    def _runtime_status(self) -> dict[str, Any]:
+        store = self.agent.runtime_store
+        persistence = store.persistence
+        if persistence is None:
+            persistence_status: dict[str, Any] = {
+                "enabled": False,
+                "backend_kind": None,
+                "worker_state": "not_configured",
+                "health": "memory_only",
+                "pending_count": 0,
+                "pending_bytes": 0,
+                "low_watermark_bytes": 0,
+                "high_watermark_bytes": 0,
+                "hard_watermark_bytes": 0,
+                "pressure": "normal",
+                "last_error": None,
+                "changed_at_ms": None,
+                "last_success_at_ms": None,
+            }
+        else:
+            policy = persistence.policy
+            health = persistence.health
+            pending = persistence.pending_bytes
+            high = policy.queue_high_watermark_bytes
+            hard = policy.queue_hard_watermark_bytes
+            assert policy.queue_low_watermark_bytes is not None
+            assert hard is not None
+            pressure = (
+                "hard"
+                if pending >= hard
+                else "high"
+                if pending >= high
+                else "normal"
+            )
+            persistence_status = {
+                "enabled": True,
+                "backend_kind": type(store.backend).__name__,
+                "worker_state": getattr(
+                    store.backend,
+                    "persistence_worker_state",
+                    "unknown",
+                ),
+                "health": health.state,
+                "pending_count": persistence.pending_count,
+                "pending_bytes": pending,
+                "low_watermark_bytes": policy.queue_low_watermark_bytes,
+                "high_watermark_bytes": high,
+                "hard_watermark_bytes": hard,
+                "pressure": pressure,
+                "last_error": health.last_error,
+                "changed_at_ms": health.changed_at_ms,
+                "last_success_at_ms": health.last_success_at_ms,
+            }
+        return {
+            "service": {
+                "status": "ok",
+                "started_at_ms": self._started_at_ms,
+            },
+            "execution": {
+                "enabled": self.execution_enabled,
+                "accepting_invocations": (
+                    self.execution_enabled and not store.admission_paused
+                ),
+                "refusal_reason": (
+                    "Persistence queue pressure is above the admission watermark."
+                    if store.admission_paused
+                    else None
+                ),
+            },
+            "store": {
+                "kind": "durable" if store.backend is not None else "memory",
+            },
+            "persistence": persistence_status,
+        }
+
+    async def _trace_call(self, awaitable):
+        try:
+            return await awaitable
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _finish_invocation_task(
         self,

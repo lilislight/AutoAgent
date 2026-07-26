@@ -74,19 +74,38 @@ def capture_recovery_state(
 ) -> dict[str, Any]:
     """Capture restartable Standard state without trace-only intermediate I/O."""
 
-    return compact_recovery_state(capture_execution_state(session, invocation))
+    # Compact the locally owned records before freezing them. Calling
+    # capture_execution_state() first would deepcopy the complete trace and
+    # compact_recovery_state() would immediately deepcopy it a second time,
+    # including operator inputs/outputs that Standard never persists.
+    state = {
+        "session": session.to_record(),
+        "invocation": invocation.to_record(session.id),
+        "node_executions": [
+            execution.to_record(invocation.id)
+            for execution in invocation.node_executions
+        ],
+    }
+    _compact_recovery_state_in_place(state)
+    return deepcopy(state)
 
 
 def compact_recovery_state(state: dict[str, Any]) -> dict[str, Any]:
     """Remove trace-only values from an already captured Runtime State."""
 
     state = deepcopy(state)
+    _compact_recovery_state_in_place(state)
+    return state
+
+
+def _compact_recovery_state_in_place(state: dict[str, Any]) -> None:
+    """Compact a private state tree without making another defensive copy."""
+
     for execution in state["node_executions"]:
         execution["input"] = None
         for operator_call in execution.get("operator_executions", ()):
             operator_call.pop("input", None)
             operator_call.pop("output", None)
-    return state
 
 
 def restore_execution_state(state: dict[str, Any]) -> tuple[Session, Invocation]:
@@ -220,40 +239,23 @@ def apply_state_operations(
 ) -> dict[str, Any]:
     if not operations:
         return state
-    if not all(_is_state_operation(operation) for operation in operations):
-        result = deepcopy(state)
-        for operation in operations:
-            _apply_operation(result, operation)
-        return result
 
-    # State operations only replace top-level aggregate fields or fields on
-    # one NodeExecution record. Clone those containers once instead of copying
-    # the complete Invocation history for every Event.
+    # Runtime State is immutable from the journal/reducer's perspective. Clone
+    # only containers on paths changed by this Event, at most once per path.
+    # Unchanged branches are structurally shared with the previous state.
     result = dict(state)
-    if any(operation.path[0] == "session" for operation in operations):
-        result["session"] = dict(state["session"])
-    if any(operation.path[0] == "invocation" for operation in operations):
-        result["invocation"] = dict(state["invocation"])
-    node_operations = [
-        operation
-        for operation in operations
-        if operation.path[0] == "node_executions"
-    ]
-    if node_operations:
-        result["node_executions"] = list(state.get("node_executions", []))
-        cloned_indexes: set[int] = set()
-        for operation in node_operations:
-            if len(operation.path) != 3:
-                continue
-            index = int(operation.path[1])
-            if index in cloned_indexes:
-                continue
-            result["node_executions"][index] = dict(
-                result["node_executions"][index]
-            )
-            cloned_indexes.add(index)
+    owned_paths: set[tuple[str | int, ...]] = {()}
     for operation in operations:
-        _apply_operation(result, operation)
+        if not operation.path:
+            _apply_operation(result, operation)
+            owned_paths = {()}
+            continue
+        parent = _copy_on_write_parent(
+            result,
+            operation.path,
+            owned_paths=owned_paths,
+        )
+        _apply_operation_to_parent(parent, operation)
     return result
 
 
@@ -363,25 +365,6 @@ def _diff_state_value(
     )
 
 
-def _is_state_operation(operation: StateOperation) -> bool:
-    path = operation.path
-    if operation.op == "replace":
-        return (
-            len(path) == 2
-            and path[0] in {"session", "invocation"}
-        ) or (
-            len(path) == 3
-            and path[0] == "node_executions"
-            and isinstance(path[1], int)
-        )
-    return (
-        operation.op == "add"
-        and len(path) == 2
-        and path[0] == "node_executions"
-        and isinstance(path[1], int)
-    )
-
-
 def _apply_operation(root: dict[str, Any], operation: StateOperation) -> None:
     if not operation.path:
         if operation.op == "remove":
@@ -396,6 +379,41 @@ def _apply_operation(root: dict[str, Any], operation: StateOperation) -> None:
     parent: Any = root
     for segment in operation.path[:-1]:
         parent = parent[segment]
+    _apply_operation_to_parent(parent, operation)
+
+
+def _copy_on_write_parent(
+    root: dict[str, Any],
+    path: tuple[str | int, ...],
+    *,
+    owned_paths: set[tuple[str | int, ...]],
+) -> Any:
+    parent: Any = root
+    prefix: tuple[str | int, ...] = ()
+    for segment in path[:-1]:
+        child = parent[segment]
+        child_path = (*prefix, segment)
+        if child_path not in owned_paths:
+            if isinstance(child, dict):
+                child = dict(child)
+            elif isinstance(child, list):
+                child = list(child)
+            else:
+                raise ValueError(
+                    "State operation traverses a non-container value at "
+                    f"path {child_path!r}."
+                )
+            parent[segment] = child
+            owned_paths.add(child_path)
+        parent = child
+        prefix = child_path
+    return parent
+
+
+def _apply_operation_to_parent(
+    parent: Any,
+    operation: StateOperation,
+) -> None:
     leaf = operation.path[-1]
     if operation.op == "remove":
         if isinstance(parent, list):

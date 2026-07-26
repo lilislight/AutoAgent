@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
-from uuid import uuid4
+from pathlib import Path
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
-from autoagent import AutoAgentApp, SystemCommand, Workflow
+from autoagent import AutoAgentApp, DatabaseBackend, SystemCommand, Workflow
+from autoagent.core.runtime import RuntimeEvent, RuntimeStore
 from autoagent.core.server import AutoAgentServer
+from autoagent.core.server.trace import TraceProjectionReducer
 from autoagent.core.server.app import (
     InvocationResumeRequest,
     InvocationSubmitRequest,
@@ -23,13 +27,18 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.server = AutoAgentServer(self.app)
         self.submit = next(
             route.endpoint
-            for route in self.server.api.routes
+            for route in self.server.router.routes
             if getattr(route, "name", "") == "submit_invocation"
         )
         self.resume = next(
             route.endpoint
-            for route in self.server.api.routes
+            for route in self.server.router.routes
             if getattr(route, "name", "") == "resume_invocation"
+        )
+        self.cancel = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "cancel_invocation"
         )
 
     async def asyncTearDown(self) -> None:
@@ -131,6 +140,323 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError,
         )
 
+    async def test_server_exposes_embeddable_v1_router(self) -> None:
+        paths = {route.path for route in self.server.router.routes}
+        self.assertIn("/api/v1/workflows", paths)
+        self.assertIn("/api/v1/invocations/{invocation_id}/trace", paths)
+        self.assertIn("/api/v1/invocations/{invocation_id}", paths)
+        self.assertIn("/api/v1/invocations/{invocation_id}/stream", paths)
+        self.assertIn("/api/v1/runtime/status", paths)
+        self.assertIn("/api/v1/runtime/stream", paths)
+        self.assertIn("/api/v1/health/live", paths)
+        self.assertIn("/api/v1/health/ready", paths)
+
+    async def test_runtime_status_separates_execution_and_persistence(self) -> None:
+        status = self.server._runtime_status()
+
+        self.assertEqual("ok", status["service"]["status"])
+        self.assertTrue(status["execution"]["accepting_invocations"])
+        self.assertEqual("memory", status["store"]["kind"])
+        self.assertFalse(status["persistence"]["enabled"])
+        self.assertEqual("memory_only", status["persistence"]["health"])
+
+    async def test_running_invocation_can_be_cancelled_by_server_action(self) -> None:
+        async def slow() -> str:
+            await asyncio.sleep(3_600)
+            return "unreachable"
+
+        workflow = Workflow(id="server_cancel")
+        workflow.add_node(slow, node_id="slow")
+        self.app.register_workflow(workflow)
+        submitted = await self.submit(
+            workflow.id,
+            InvocationSubmitRequest(entry_node_id="slow"),
+        )
+        await self._wait_for_state(submitted.invocation_id, "running")
+
+        response = await self.cancel(submitted.invocation_id)
+
+        self.assertEqual(submitted.invocation_id, response.invocation_id)
+        self.assertEqual("cancelled", response.state)
+
+    async def test_waiting_invocation_can_be_cancelled_without_active_task(self) -> None:
+        submitted = await self.submit(
+            self.workflow.id,
+            InvocationSubmitRequest(
+                session_key="cancel-wait",
+                input={"wait_key": "approval"},
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+        for _ in range(1_000):
+            if submitted.invocation_id not in self.server._invocation_tasks:
+                break
+            await asyncio.sleep(0.001)
+
+        response = await self.cancel(submitted.invocation_id)
+
+        self.assertEqual("cancelled", response.state)
+        invocation = self.app.runtime_store.invocations[submitted.invocation_id]
+        self.assertEqual("cancelled", invocation.state)
+        self.assertEqual("cancelled", invocation.node_executions[-1].state)
+
+    async def test_workflow_directory_uses_stable_cursor_pages(self) -> None:
+        other = Workflow(id="second_workflow")
+        other.add_node(lambda: "done", node_id="done")
+        self.app.register_workflow(other)
+
+        first = await self.server.trace.list_workflows(
+            cursor=None,
+            limit=1,
+            registered_only=True,
+        )
+        second = await self.server.trace.list_workflows(
+            cursor=first["next_cursor"],
+            limit=1,
+            registered_only=True,
+        )
+
+        self.assertTrue(first["has_more"])
+        self.assertNotEqual(
+            first["items"][0]["workflow_id"],
+            second["items"][0]["workflow_id"],
+        )
+        self.assertFalse(second["has_more"])
+
+    async def test_trace_bootstrap_separates_latest_projection_from_events(
+        self,
+    ) -> None:
+        submitted = await self.submit(
+            self.workflow.id,
+            InvocationSubmitRequest(
+                input={"wait_key": "trace"},
+                session_key="trace",
+                event_mode="full",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+
+        bootstrap = await self.server.trace.trace_bootstrap(
+            submitted.invocation_id,
+            tail_limit=2,
+        )
+
+        self.assertEqual(self.workflow.id, bootstrap["workflow"]["workflow_id"])
+        self.assertEqual("full", bootstrap["invocation"]["event_mode"])
+        self.assertEqual([], bootstrap["event_page"]["items"])
+        self.assertTrue(bootstrap["event_page"]["has_later"])
+        self.assertEqual(
+            bootstrap["invocation"]["live_sequence"],
+            bootstrap["checkpoint"]["through_sequence"],
+        )
+        active_wait = bootstrap["checkpoint"]["projection"]["active_waits"][
+            "trace"
+        ]
+        self.assertEqual("wait", active_wait["node_id"])
+        self.assertIn("node_execution_id", active_wait)
+        page = await self.server.trace.event_page(
+            submitted.invocation_id,
+            after_sequence=0,
+            before_sequence=None,
+            limit=2,
+        )
+        self.assertEqual(2, len(page["items"]))
+        self.assertEqual(
+            bootstrap["invocation"]["live_sequence"],
+            page["live_sequence"],
+        )
+        self.assertEqual("waiting", page["invocation_state"])
+        for event in page["items"]:
+            self.assertNotIn("operations", event)
+            self.assertIn("has_operations", event)
+        detail = await self.server.trace.event_detail(
+            submitted.invocation_id,
+            page["items"][-1]["sequence"],
+        )
+        self.assertIn("operations", detail)
+        state = await self.server.trace.runtime_state(
+            submitted.invocation_id,
+            through_sequence=bootstrap["invocation"]["live_sequence"],
+        )
+        self.assertEqual(
+            bootstrap["invocation"]["live_sequence"],
+            state["through_sequence"],
+        )
+        self.assertIn("node_executions", state)
+
+    async def test_event_detail_exposes_recorded_operator_input_and_output(self) -> None:
+        workflow = Workflow(id="server_event_values")
+        workflow.add_node(
+            lambda value: {"answer": value + 1},
+            node_id="answer",
+            input_mapping=lambda context: {
+                "value": context.invocation_input["value"],
+            },
+        )
+        self.app.register_workflow(workflow)
+        submitted = await self.submit(
+            workflow.id,
+            InvocationSubmitRequest(
+                input={"value": 41},
+                session_key="event-values",
+                event_mode="full",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "completed")
+
+        events = await self.app.runtime_store.alist_runtime_events(
+            invocation_id=submitted.invocation_id,
+            limit=100,
+        )
+        operator_event = next(
+            event
+            for event in events
+            if event.event_name == "operator_call.completed"
+        )
+        summary = self.server.trace.event_view(
+            operator_event,
+            include_values=False,
+        )
+        detail = await self.server.trace.event_detail(
+            submitted.invocation_id,
+            operator_event.sequence,
+        )
+
+        self.assertTrue(summary["has_input"])
+        self.assertTrue(summary["has_output"])
+        self.assertIsNone(summary["input"])
+        self.assertIsNone(summary["output"])
+        self.assertEqual({"value": 41}, detail["input"])
+        self.assertEqual({"answer": 42}, detail["output"])
+
+    async def test_projection_reducer_tracks_graph_state(self) -> None:
+        invocation_id = uuid4()
+        execution_id = uuid4()
+        projection = TraceProjectionReducer.initial(invocation_id)
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=1,
+                event_type="state_change",
+                event_name="node.running",
+                subject_type="node",
+                subject_id="worker",
+                occurred_at_ms=1,
+                status="running",
+                payload={
+                    "node_id": "worker",
+                    "node_execution_id": str(execution_id),
+                },
+            ),
+        )
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=3,
+                event_type="operator_call",
+                event_name="operator_call.completed",
+                subject_type="operator_call",
+                subject_id="primary",
+                occurred_at_ms=3,
+                elapsed_ns=2_000_000,
+                status="failed",
+                payload={
+                    "node_id": "worker",
+                    "node_execution_id": str(execution_id),
+                    "operator_call_id": "primary",
+                    "operator_id": "primary",
+                    "reason": "normal",
+                    "state": "failed",
+                    "error": {
+                        "code": "OPERATOR_TIMEOUT",
+                        "message": "timed out",
+                    },
+                },
+            ),
+        )
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=4,
+                event_type="operator_call",
+                event_name="operator_call.completed",
+                subject_type="operator_call",
+                subject_id="fallback",
+                occurred_at_ms=4,
+                elapsed_ns=1_000_000,
+                status="completed",
+                payload={
+                    "node_id": "worker",
+                    "node_execution_id": str(execution_id),
+                    "operator_call_id": "fallback",
+                    "operator_id": "fallback",
+                    "reason": "fallback",
+                    "state": "completed",
+                },
+            ),
+        )
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=5,
+                event_type="operator_call",
+                event_name="operator_call.completed",
+                subject_type="operator_call",
+                subject_id="mapped",
+                occurred_at_ms=5,
+                elapsed_ns=5_000_000,
+                status="completed",
+                payload={
+                    "node_id": "worker",
+                    "node_execution_id": str(execution_id),
+                    "operator_call_id": "mapped",
+                    "kind": "map",
+                    "operator_ids": ["mapped"],
+                    "state": "completed",
+                    "summary": {"call_count": 8},
+                },
+            ),
+        )
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=6,
+                event_type="routing",
+                event_name="edge.evaluated",
+                subject_type="edge",
+                subject_id="worker->done",
+                occurred_at_ms=2,
+                status="selected",
+                payload={
+                    "edge_id": "worker->done",
+                    "selected": True,
+                    "state": "selected",
+                    "source_execution_id": str(execution_id),
+                    "target_node_id": "done",
+                },
+            ),
+        )
+
+        self.assertEqual("running", projection["nodes"]["worker"]["state"])
+        self.assertEqual(
+            1,
+            projection["node_executions"][str(execution_id)][
+                "first_event_sequence"
+            ],
+        )
+        self.assertTrue(projection["edges"]["worker->done"]["selected"])
+        execution = projection["node_executions"][str(execution_id)]
+        self.assertEqual(3, execution["operator_call_count"])
+        self.assertEqual(1, execution["fallback_count"])
+        self.assertEqual(1, execution["timeout_count"])
+        self.assertEqual(8, projection["nodes"]["worker"]["parallel_call_count"])
+        self.assertEqual(6, projection["through_sequence"])
+
     async def _wait_for_state(
         self,
         invocation_id,
@@ -142,3 +468,105 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0.001)
         self.fail(f"Invocation did not reach state {state}.")
+
+
+class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_trace_keeps_exact_graph_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.db"
+            first_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            first = AutoAgentApp(runtime_store=first_store)
+            workflow = Workflow(id="historical_trace")
+            workflow.add_node(lambda: {"answer": 42}, node_id="answer")
+            invocation = await first.ainvoke(
+                workflow,
+                session_id="history",
+                event_mode="standard",
+            )
+            await first_store.aflush()
+            invocation_id = invocation.id
+            await first.aclose()
+
+            second_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            second = AutoAgentApp(runtime_store=second_store)
+            await second.astart()
+            server = AutoAgentServer(second)
+            try:
+                runtime_status = server._runtime_status()
+                workflows = await server.trace.list_workflows(
+                    cursor=None,
+                    limit=10,
+                )
+                sessions = await server.trace.list_sessions(
+                    "historical_trace",
+                    cursor=None,
+                    limit=10,
+                )
+                invocations = await server.trace.list_invocations(
+                    UUID(sessions["items"][0]["id"]),
+                    cursor=None,
+                    limit=10,
+                )
+                bootstrap = await server.trace.trace_bootstrap(
+                    invocation_id,
+                    tail_limit=20,
+                )
+                self.assertEqual(
+                    ["historical_trace"],
+                    [
+                        item["workflow_id"]
+                        for item in workflows["items"]
+                    ],
+                )
+                self.assertEqual(1, sessions["items"][0]["invocation_count"])
+                self.assertEqual(
+                    str(invocation_id),
+                    invocations["items"][0]["id"],
+                )
+                self.assertEqual(
+                    "historical_trace",
+                    bootstrap["workflow"]["workflow_id"],
+                )
+                self.assertEqual("durable", runtime_status["store"]["kind"])
+                self.assertTrue(runtime_status["persistence"]["enabled"])
+                self.assertEqual(
+                    "DatabaseBackend",
+                    runtime_status["persistence"]["backend_kind"],
+                )
+                self.assertEqual(
+                    "running",
+                    runtime_status["persistence"]["worker_state"],
+                )
+                self.assertLess(
+                    runtime_status["persistence"]["low_watermark_bytes"],
+                    runtime_status["persistence"]["high_watermark_bytes"],
+                )
+                self.assertLess(
+                    runtime_status["persistence"]["high_watermark_bytes"],
+                    runtime_status["persistence"]["hard_watermark_bytes"],
+                )
+                self.assertEqual(
+                    ["answer"],
+                    [
+                        node["id"]
+                        for node in bootstrap["workflow"]["nodes"]
+                    ],
+                )
+                self.assertEqual(
+                    "completed",
+                    bootstrap["invocation"]["state"],
+                )
+                self.assertEqual([], bootstrap["event_page"]["items"])
+                page = await server.trace.event_page(
+                    invocation_id,
+                    after_sequence=0,
+                    before_sequence=None,
+                    limit=200,
+                )
+                self.assertGreater(len(page["items"]), 0)
+            finally:
+                await second.aclose()

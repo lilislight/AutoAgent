@@ -115,7 +115,8 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("recovery_sequence", invocation_columns)
         self.assertNotIn("state_json", invocation_columns)
         self.assertNotIn("snapshot_json", workflow_columns)
-        self.assertNotIn("operator_manifests_json", workflow_columns)
+        self.assertIn("definition_json", workflow_columns)
+        self.assertIn("operator_manifests_json", workflow_columns)
 
     async def test_sqlite_uses_wal_with_full_durability_by_default(
         self,
@@ -551,7 +552,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("x" * 100_000, output_event.output)
 
-    async def test_terminal_event_does_not_force_recovery_state_write(self) -> None:
+    async def test_terminal_standard_invocation_keeps_compact_recovery_state(
+        self,
+    ) -> None:
         await self.store.aclose()
         self.backend = DatabaseBackend.from_path(
             self.path,
@@ -576,7 +579,20 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
         row, recovery = await self.backend._database_loop.arun(load_row())
         self.assertEqual(invocation.event_sequence, row.durable_sequence)
-        self.assertIsNone(recovery)
+        assert recovery is not None
+        state = self.store.serializer.loads(recovery.state_json)
+        self.assertLessEqual(recovery.event_sequence, invocation.event_sequence)
+        self.assertEqual("standard", state["invocation"]["event_mode"])
+        self.assertTrue(state["node_executions"])
+        self.assertIsNone(state["node_executions"][0]["input"])
+        self.assertTrue(
+            all(
+                "input" not in operator_call and "output" not in operator_call
+                for operator_call in state["node_executions"][0][
+                    "operator_executions"
+                ]
+            )
+        )
         await app.aclose()
 
     async def test_event_modes_share_schema_but_persist_distinct_detail(self) -> None:
@@ -642,7 +658,10 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(full.genesis_state_json)
         self.assertEqual(
-            {str(invocations["full"].id)},
+            {
+                str(invocations["standard"].id),
+                str(invocations["full"].id),
+            },
             {row.invocation_id for row in recovery},
         )
         await app.aclose()
@@ -1089,6 +1108,34 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await blocked.aflush()
         self.assertEqual("durable", blocked.persistence_status(resumed.id))
+        await app.aclose()
+
+    async def test_full_wait_resume_applies_persisted_operations_once(self) -> None:
+        workflow = Workflow(id="full_wait_resume_operations")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        waiting = await app.ainvoke(
+            workflow,
+            input={"wait_key": "approval"},
+            session_id="full-resume",
+            event_mode="full",
+        )
+        self.assertEqual("waiting", waiting.state)
+        await self.store.aflush()
+
+        resumed = await app.aresume(
+            workflow,
+            session_id="full-resume",
+            wait_key="approval",
+            output={"approved": True},
+        )
+        self.assertEqual("completed", resumed.state)
+        await self.store.aflush()
+
+        assert self.store.persistence is not None
+        self.assertEqual("healthy", self.store.persistence.health.state)
+        self.assertEqual("durable", self.store.persistence_status(resumed.id))
         await app.aclose()
 
     async def test_unavailable_database_rejects_only_after_backlog_limit(

@@ -10,6 +10,18 @@ from autoagent.core.runtime.execution import (
     RuntimeErrorInfo,
 )
 from autoagent.core.runtime.status import NodeExecutionStateValue
+from autoagent.core.runtime.time import utc_timestamp_ms
+
+
+@dataclass(frozen=True)
+class NodePhaseResult:
+    name: str
+    status: str
+    elapsed_ns: int
+    occurred_at_ms: int = field(default_factory=utc_timestamp_ms)
+    input: Any | None = None
+    output: Any | None = None
+    timing: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -25,3 +37,5 @@ class NodeExecutionResult:
     wait_type: str | None = None
     wait_payload: dict[str, Any] | None = None
     operator_executions: tuple[OperatorExecution, ...] = ()
+    operator_elapsed_ns: int = 0
+    phases: tuple[NodePhaseResult, ...] = ()

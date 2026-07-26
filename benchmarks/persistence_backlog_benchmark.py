@@ -51,7 +51,7 @@ def _build_payload_chain(
     return workflow
 
 
-class _BlockedEventBackend(DatabaseBackend):
+class _BlockedRuntimeBackend(DatabaseBackend):
     def __init__(self, *args: Any, release_events: threading.Event, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.release_events = release_events
@@ -60,7 +60,7 @@ class _BlockedEventBackend(DatabaseBackend):
         self,
         batch: Sequence[_PersistenceItem],
     ) -> None:
-        if any(item.kind == "event" for item in batch):
+        if any(item.kind in {"event", "invocation_state"} for item in batch):
             while not self.release_events.is_set():
                 await asyncio.sleep(0.001)
         await super()._persist_batch(list(batch))
@@ -69,18 +69,34 @@ class _BlockedEventBackend(DatabaseBackend):
 def _database_sizes(path: Path) -> dict[str, Any]:
     with sqlite3.connect(path) as database:
         event_count, event_bytes = database.execute(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload_json)), 0) "
+            "SELECT COUNT(*), COALESCE(SUM("
+            "LENGTH(payload_json) + LENGTH(timing_json) + "
+            "LENGTH(COALESCE(input_json, '')) + "
+            "LENGTH(COALESCE(output_json, '')) + "
+            "LENGTH(COALESCE(operations_json, ''))"
+            "), 0) "
             "FROM runtime_events"
         ).fetchone()
-        invocation_count, genesis_bytes, recovery_count, recovery_bytes = (
+        invocation_count, invocation_bytes, genesis_bytes = (
             database.execute(
                 "SELECT COUNT(*), "
-                "COALESCE(SUM(LENGTH(genesis_state_json)), 0), "
-                "COUNT(recovery_state_json), "
-                "COALESCE(SUM(LENGTH(recovery_state_json)), 0) "
+                "COALESCE(SUM("
+                "LENGTH(input_json) + "
+                "LENGTH(COALESCE(result_json, '')) + "
+                "LENGTH(COALESCE(error_json, '')) + "
+                "LENGTH(COALESCE(genesis_state_json, ''))"
+                "), 0), "
+                "COALESCE(SUM(LENGTH(genesis_state_json)), 0) "
                 "FROM invocations"
             ).fetchone()
         )
+        session_bytes = database.execute(
+            "SELECT COALESCE(SUM(LENGTH(context_json)), 0) FROM sessions"
+        ).fetchone()[0]
+        recovery_count, recovery_bytes = database.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(state_json)), 0) "
+            "FROM runtime_recovery_states"
+        ).fetchone()
         artifact_count, artifact_bytes = database.execute(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload_blob)), 0) "
             "FROM artifacts"
@@ -93,9 +109,13 @@ def _database_sizes(path: Path) -> dict[str, Any]:
                 "json_bytes": int(json_bytes),
             }
             for event_type, count, json_bytes in database.execute(
-                "SELECT type, COUNT(*), "
-                "COALESCE(SUM(LENGTH(payload_json)), 0) "
-                "FROM runtime_events GROUP BY type ORDER BY type"
+                "SELECT event_type, COUNT(*), COALESCE(SUM("
+                "LENGTH(payload_json) + LENGTH(timing_json) + "
+                "LENGTH(COALESCE(input_json, '')) + "
+                "LENGTH(COALESCE(output_json, '')) + "
+                "LENGTH(COALESCE(operations_json, ''))"
+                "), 0) FROM runtime_events "
+                "GROUP BY event_type ORDER BY event_type"
             ).fetchall()
         }
     wal_path = path.with_suffix(".db-wal")
@@ -106,6 +126,8 @@ def _database_sizes(path: Path) -> dict[str, Any]:
         "database_event_count": int(event_count),
         "database_event_json_bytes": int(event_bytes),
         "database_invocation_count": int(invocation_count),
+        "database_invocation_json_bytes": int(invocation_bytes),
+        "database_session_context_json_bytes": int(session_bytes),
         "database_genesis_json_bytes": int(genesis_bytes),
         "database_recovery_state_count": int(recovery_count),
         "database_recovery_state_json_bytes": int(recovery_bytes),
@@ -125,7 +147,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         release_events.set()
     with tempfile.TemporaryDirectory() as directory:
         database_path = Path(directory) / "runtime.db"
-        backend = _BlockedEventBackend.from_path(
+        backend = _BlockedRuntimeBackend.from_path(
             database_path,
             release_events=release_events,
             batch_max_delay_ms=0,
@@ -154,6 +176,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 await app._aadmit_invocation(
                     workflow,
                     session_id=f"session-{index}",
+                    event_mode=args.event_mode,
                 )
                 for index in range(args.invocations)
             ]
@@ -232,6 +255,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     await app.ainvoke(
                         workflow,
                         session_id="backpressure-probe",
+                        event_mode=args.event_mode,
                     )
                 except (RuntimeError, TimeoutError) as exc:
                     rejection = str(exc)
@@ -256,12 +280,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "nodes_per_invocation": args.nodes,
             "payload_bytes_per_node_output": args.payload_bytes,
             "recovery_event_interval": args.recovery_event_interval,
+            "event_mode": args.event_mode,
             "queue_low_watermark_bytes": args.queue_high_bytes // 2,
             "queue_high_watermark_bytes": args.queue_high_bytes,
             "queue_hard_watermark_bytes": args.queue_hard_bytes,
         },
         "execution_backlog": {
-            "boundary_event_count": event_count,
+            "runtime_event_count": event_count,
             "peak_persistence_item_count": peak_queue_count,
             "peak_accounted_queue_bytes": peak_queue_bytes,
             "persistence_item_count_after_execution": queue_count,
@@ -303,6 +328,11 @@ async def _main() -> None:
     parser.add_argument("--invocations", type=int, default=20)
     parser.add_argument("--nodes", type=int, default=10)
     parser.add_argument("--payload-bytes", type=int, default=0)
+    parser.add_argument(
+        "--event-mode",
+        choices=("minimal", "standard", "full"),
+        default="standard",
+    )
     parser.add_argument(
         "--recovery-event-interval",
         type=int,

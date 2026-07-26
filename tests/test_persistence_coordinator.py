@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import unittest
 from uuid import UUID, uuid4
 
-from autoagent.core.runtime import RuntimeEvent
+from autoagent.core.runtime import ExecutionSnapshot, RuntimeEvent
 from autoagent.core.runtime.persistence import (
     BackendPersistenceError,
     PersistenceCoordinator,
@@ -34,9 +35,11 @@ def _envelope(
         event=RuntimeEvent(
             invocation_id=invocation_id,
             sequence=sequence,
-            type="test.boundary",
+            event_type="state_change",
+            event_name="invocation.running",
+            subject_type="invocation",
+            subject_id=str(invocation_id),
             occurred_at_ms=10,
-            payload={"operations": []},
         ),
         estimated_bytes=estimated_bytes,
         force_recovery_checkpoint=False,
@@ -66,9 +69,12 @@ class PersistenceEnvelopeTests(unittest.TestCase):
         event = RuntimeEvent(
             invocation_id=invocation_id,
             sequence=1,
-            type="test.boundary",
+            event_type="state_change",
+            event_name="invocation.running",
+            subject_type="invocation",
+            subject_id=str(invocation_id),
             occurred_at_ms=10,
-            payload={"operations": [], "mutable": mutable},
+            payload={"mutable": mutable},
         )
 
         envelope = freeze_event_envelope(
@@ -79,7 +85,10 @@ class PersistenceEnvelopeTests(unittest.TestCase):
             invocation_state="running",
             execution_mode="normal",
             invocation_updated_at_ms=10,
+            invocation_result=None,
+            invocation_error=None,
             event=event,
+            recovery_snapshot=None,
             force_recovery_checkpoint=False,
         )
         mutable["items"][0]["value"] = "after"
@@ -155,6 +164,52 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             (first, other, second),
             self.coordinator.take(3),
         )
+
+    async def test_newer_recovery_state_replaces_older_queued_copy(self) -> None:
+        coordinator = PersistenceCoordinator(
+            PersistencePolicy(
+                queue_low_watermark_bytes=10_000,
+                queue_high_watermark_bytes=20_000,
+                queue_hard_watermark_bytes=40_000,
+            )
+        )
+        coordinator.bind_consumer(self._wake)
+        invocation_id = uuid4()
+        session_id = uuid4()
+        snapshot = ExecutionSnapshot(
+            invocation_id=invocation_id,
+            through_sequence=1,
+            state={"payload": "x" * 2_000},
+        )
+        first = replace(
+            _envelope(
+                invocation_id=invocation_id,
+                session_id=session_id,
+                sequence=1,
+                estimated_bytes=3_000,
+            ),
+            recovery_snapshot=snapshot,
+        )
+        second = replace(
+            _envelope(
+                invocation_id=invocation_id,
+                session_id=session_id,
+                sequence=2,
+                estimated_bytes=3_000,
+            ),
+            recovery_snapshot=snapshot.model_copy(
+                update={"through_sequence": 2}
+            ),
+        )
+        for envelope in (first, second):
+            reservation = coordinator.try_reserve(envelope)
+            assert reservation is not None
+            coordinator.publish(reservation, envelope)
+
+        queued = coordinator.take(2)
+        self.assertIsNone(queued[0].recovery_snapshot)
+        self.assertEqual(2, queued[1].recovery_snapshot.through_sequence)
+        self.assertLess(coordinator.pending_bytes, 6_000)
 
     async def test_exact_serialized_size_replaces_estimate(self) -> None:
         envelope = _envelope(estimated_bytes=400)

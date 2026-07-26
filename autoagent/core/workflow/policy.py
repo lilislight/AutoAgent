@@ -122,7 +122,7 @@ class RecoveryPolicy(BaseModel):
     """Crash-recovery rule for one logical Node execution.
 
     Recovery is deliberately a Node concern: the whole Node phase may be
-    replayed after the last durable boundary, including mapping, all Operator
+    replayed after the latest Recovery State, including mapping, all Operator
     calls, aggregation, and binding.  It is independent from ``RetryPolicy``,
     which only handles failures observed by a live NodeExecutor.
     """
@@ -203,10 +203,11 @@ class ReplicationPolicy(BaseModel):
     ] | None = Field(
         default=None,
         description=(
-            "Required aggregation function for replication. It receives one "
+            "Optional aggregation function for replication. It receives one "
             "ReplicationAggregationContext whose replica_outputs contains all "
             "successful unit outputs, and returns the final "
-            "NodeExecution.output consumed by downstream nodes. If any replica "
+            "NodeExecution.output consumed by downstream nodes. Without it, "
+            "outputs remain an ordered list by replica index. If any replica "
             "fails, remaining calls are cancelled when possible and this hook is "
             "not called."
         ),

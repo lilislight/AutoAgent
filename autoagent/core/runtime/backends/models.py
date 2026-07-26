@@ -68,6 +68,7 @@ class SessionRow(RuntimeDatabaseBase):
     workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
     session_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     current_invocation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    context_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -91,14 +92,12 @@ class InvocationRow(RuntimeDatabaseBase):
     entry_node_id: Mapped[str] = mapped_column(String(255), nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_mode: Mapped[str] = mapped_column(String(16), nullable=False)
     durable_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    genesis_state_json: Mapped[str] = mapped_column(Text, nullable=False)
-    recovery_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    recovery_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    recovery_updated_at_ms: Mapped[int | None] = mapped_column(
-        BigInteger,
-        nullable=True,
-    )
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    genesis_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
@@ -112,6 +111,18 @@ class RuntimeEventRow(RuntimeDatabaseBase):
             name="uq_runtime_event_sequence",
         ),
         Index("ix_runtime_events_invocation", "invocation_id", "sequence"),
+        Index(
+            "ix_runtime_events_type",
+            "invocation_id",
+            "event_type",
+            "event_name",
+        ),
+        Index(
+            "ix_runtime_events_subject",
+            "invocation_id",
+            "subject_type",
+            "subject_id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -121,9 +132,30 @@ class RuntimeEventRow(RuntimeDatabaseBase):
     )
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    type: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    elapsed_ns: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    timing_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RecoveryStateRow(RuntimeDatabaseBase):
+    __tablename__ = "runtime_recovery_states"
+
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("invocations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class ArtifactRow(RuntimeDatabaseBase):

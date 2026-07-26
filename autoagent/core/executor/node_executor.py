@@ -14,7 +14,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from autoagent.core.compiler import NodeIR
-from autoagent.core.executor.result import NodeExecutionResult
+from autoagent.core.executor.result import NodeExecutionResult, NodePhaseResult
 from autoagent.core.operators import (
     CapabilityRegistry,
     Operator,
@@ -33,6 +33,7 @@ from autoagent.core.runtime import (
     ResourceUsage,
     ReplicationAggregationContext,
     RuntimeErrorInfo,
+    RuntimeEventMode,
     RuntimeConcurrencyController,
 )
 from autoagent.core.runtime.context import HookContextSnapshot
@@ -60,6 +61,7 @@ class NodeExecutionJob:
     concurrency_key: str | None = None
     recovery: bool = False
     hook_context: HookContextSnapshot | None = None
+    event_mode: RuntimeEventMode = "standard"
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class ResolvedNodeExecutionJob:
     concurrency_key: str | None = None
     recovery: bool = False
     hook_context: HookContextSnapshot | None = None
+    event_mode: RuntimeEventMode = "standard"
     concurrency_controller: RuntimeConcurrencyController | None = None
     thread_pool: ThreadPoolExecutor | None = None
 
@@ -180,6 +183,7 @@ class NodeExecutor:
                 concurrency_key=job.concurrency_key,
                 recovery=job.recovery,
                 hook_context=job.hook_context,
+                event_mode=job.event_mode,
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
             )
@@ -301,18 +305,27 @@ async def _execute_job(job: ResolvedNodeExecutionJob) -> NodeExecutionResult:
     limit = job.node_ir.policy.max_concurrency if job.node_ir.policy is not None else None
     key = job.concurrency_key or job.node_ir.id
     controller = job.concurrency_controller or RuntimeConcurrencyController()
+    waiting_started_ns = perf_counter_ns()
     async with controller.async_slot(key, limit):
-        return await _execute_job_with_slot(job)
+        concurrency_wait_ns = max(0, perf_counter_ns() - waiting_started_ns)
+        result = await _execute_job_with_slot(job)
+        result.resource_usage.concurrency_wait_ns += concurrency_wait_ns
+        result.resource_usage.duration_ns += concurrency_wait_ns
+        return result
 
 
 async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecutionResult:
     prepared = await _prepare_units(job)
-    if isinstance(prepared, RuntimeErrorInfo):
-        return _failed_result(job, prepared)
-    units, unit_kind = prepared
+    if prepared.error is not None:
+        result = _failed_result(job, prepared.error)
+        result.phases = prepared.phases
+        return result
+    units, unit_kind = prepared.units, prepared.unit_kind
     input_error = _validate_unit_inputs(job, units)
     if input_error is not None:
-        return _failed_result(job, input_error)
+        result = _failed_result(job, input_error)
+        result.phases = prepared.phases
+        return result
     budget = _CallBudget(job.max_operator_attempts)
     call_sequence = _CallSequence(
         sum(
@@ -320,6 +333,7 @@ async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecution
             for execution in job.node_execution.operator_executions
         )
     )
+    operator_started_ns = perf_counter_ns()
     unit_results, peak_parallelism = await _execute_units(
         job,
         units,
@@ -328,12 +342,15 @@ async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecution
         unit_kind=unit_kind,
         max_parallelism=_max_parallelism(job, len(units)),
     )
+    operator_elapsed_ns = max(0, perf_counter_ns() - operator_started_ns)
     return await _aggregate_unit_results(
         job,
         unit_results,
         unit_kind=unit_kind,
         unit_count=len(units),
         peak_parallelism=peak_parallelism,
+        operator_elapsed_ns=operator_elapsed_ns,
+        phases=prepared.phases,
     )
 
 
@@ -343,6 +360,15 @@ class _UnitResult:
     output: Any | None
     error: RuntimeErrorInfo | None
     attempts: list[DirectOperatorExecution]
+    retry_backoff_ns: int = 0
+
+
+@dataclass(frozen=True)
+class _PreparedUnits:
+    units: list[tuple[int, Any]]
+    unit_kind: str
+    phases: tuple[NodePhaseResult, ...] = ()
+    error: RuntimeErrorInfo | None = None
 
 
 class _CallBudget:
@@ -391,17 +417,22 @@ class _NodeOutputInvalid(TypeError):
 
 async def _prepare_units(
     job: ResolvedNodeExecutionJob,
-) -> tuple[list[tuple[int, Any]], str] | RuntimeErrorInfo:
+) -> _PreparedUnits:
     policy = job.node_ir.policy
     replication = policy.replication if policy is not None else None
     if job.map_policy is not None and replication is not None:
-        return RuntimeErrorInfo(
-            code="POLICY_COMBINATION_UNSUPPORTED",
-            message="MapPolicy and ReplicationPolicy cannot apply to the same node execution.",
-            detail={"node_id": job.node_ir.id},
+        return _PreparedUnits(
+            units=[],
+            unit_kind="normal",
+            error=RuntimeErrorInfo(
+                code="POLICY_COMBINATION_UNSUPPORTED",
+                message="MapPolicy and ReplicationPolicy cannot apply to the same node execution.",
+                detail={"node_id": job.node_ir.id},
+            ),
         )
 
     if job.map_policy is not None:
+        selection_started_ns = perf_counter_ns()
         try:
             selected = (
                 await invoke_hook_async(
@@ -413,13 +444,49 @@ async def _prepare_units(
             )
             units = _map_units(job, selected)
         except Exception as exc:
-            return RuntimeErrorInfo(
-                code="MAP_ITEM_SELECTION_FAILED",
-                message=str(exc),
-                detail={"node_id": job.node_ir.id, "error_type": type(exc).__name__},
+            elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
+            return _PreparedUnits(
+                units=[],
+                unit_kind="map_item",
+                phases=(
+                    NodePhaseResult(
+                        name="item_selection.completed",
+                        status="failed",
+                        elapsed_ns=elapsed_ns,
+                        timing={"execution_ns": elapsed_ns},
+                    ),
+                )
+                if (
+                    job.event_mode == "full"
+                    and job.map_policy.item_selector is not None
+                )
+                else (),
+                error=RuntimeErrorInfo(
+                    code="MAP_ITEM_SELECTION_FAILED",
+                    message=str(exc),
+                    detail={"node_id": job.node_ir.id, "error_type": type(exc).__name__},
+                ),
             )
         if isinstance(units, RuntimeErrorInfo):
-            return units
+            elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
+            return _PreparedUnits(
+                units=[],
+                unit_kind="map_item",
+                phases=(
+                    NodePhaseResult(
+                        name="item_selection.completed",
+                        status="failed",
+                        elapsed_ns=elapsed_ns,
+                        timing={"execution_ns": elapsed_ns},
+                    ),
+                )
+                if (
+                    job.event_mode == "full"
+                    and job.map_policy.item_selector is not None
+                )
+                else (),
+                error=units,
+            )
         if (
             policy is not None
             and policy.recovery is not None
@@ -437,7 +504,22 @@ async def _prepare_units(
                 )
                 for index, value in units
             ]
-        return units, "map_item"
+        phases = ()
+        if (
+            job.event_mode == "full"
+            and job.map_policy.item_selector is not None
+        ):
+            elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
+            phases = (
+                NodePhaseResult(
+                    name="item_selection.completed",
+                    status="completed",
+                    elapsed_ns=elapsed_ns,
+                    output=deepcopy(selected),
+                    timing={"execution_ns": elapsed_ns},
+                ),
+            )
+        return _PreparedUnits(units=units, unit_kind="map_item", phases=phases)
 
     if replication is not None:
         units = [
@@ -460,9 +542,12 @@ async def _prepare_units(
                 )
                 for index, value in units
             ]
-        return units, "replica"
+        return _PreparedUnits(units=units, unit_kind="replica")
 
-    return [(0, deepcopy(job.input))], "normal"
+    return _PreparedUnits(
+        units=[(0, deepcopy(job.input))],
+        unit_kind="normal",
+    )
 
 
 def _map_units(
@@ -551,8 +636,8 @@ def _validate_unit_inputs(
                 )
             arguments = dict(unit_input)
             arguments = job.node_ir.input_contract.validate(arguments)
-            # Detach hook-owned/custom Mapping objects before they cross the
-            # Operator boundary or are retained in runtime execution records.
+            # Detach hook-owned/custom Mapping objects before they cross into
+            # an Operator or are retained in runtime execution records.
             units[unit_position] = (unit_index, arguments)
         except (TypeError, ValidationError) as exc:
             is_map_item = job.map_policy is not None
@@ -675,6 +760,7 @@ async def _execute_unit(
     unit_index: int,
 ) -> _UnitResult:
     attempts: list[DirectOperatorExecution] = []
+    retry_backoff_ns = 0
     retry = job.node_ir.policy.retry if job.node_ir.policy is not None else None
     max_attempts = retry.max_attempts if retry is not None else 1
     for operator_index, operator in enumerate(job.operators):
@@ -685,6 +771,7 @@ async def _execute_unit(
                     None,
                     _operator_budget_error(job),
                     attempts,
+                    retry_backoff_ns,
                 )
             reason = _attempt_reason(
                 operator_index,
@@ -700,30 +787,60 @@ async def _execute_unit(
 
             started_ns = perf_counter_ns()
             try:
-                output = await _invoke_operator(job, operator, unit_input)
+                (
+                    output,
+                    execution_ns,
+                    thread_pool_queue_ns,
+                ) = await _invoke_operator(job, operator, unit_input)
                 _validate_operator_output(job, operator, output)
-                duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
-                attempt.resource_usage = ResourceUsage(duration_ms=duration_ms)
+                duration_ns = max(0, perf_counter_ns() - started_ns)
+                attempt.resource_usage = ResourceUsage(
+                    duration_ns=duration_ns,
+                    execution_ns=execution_ns,
+                    thread_pool_queue_ns=thread_pool_queue_ns,
+                )
                 attempt.mark_completed(output)
                 attempts.append(attempt)
-                return _UnitResult(unit_index, output, None, attempts)
+                return _UnitResult(
+                    unit_index,
+                    output,
+                    None,
+                    attempts,
+                    retry_backoff_ns,
+                )
             except Exception as exc:
-                duration_ms = max(0, (perf_counter_ns() - started_ns) // 1_000_000)
+                duration_ns = max(0, perf_counter_ns() - started_ns)
                 error = _operator_error(job, operator, exc)
-                attempt.resource_usage = ResourceUsage(duration_ms=duration_ms)
+                attempt.resource_usage = ResourceUsage(
+                    duration_ns=duration_ns,
+                    execution_ns=duration_ns,
+                )
                 attempt.mark_failed(error)
                 attempts.append(attempt)
                 if attempt_index + 1 < max_attempts:
-                    await asyncio.sleep(_retry_delay_seconds(retry.backoff, attempt_index))
+                    backoff_started_ns = perf_counter_ns()
+                    await asyncio.sleep(
+                        _retry_delay_seconds(retry.backoff, attempt_index)
+                    )
+                    retry_backoff_ns += max(
+                        0,
+                        perf_counter_ns() - backoff_started_ns,
+                    )
 
-    return _UnitResult(unit_index, None, attempts[-1].error, attempts)
+    return _UnitResult(
+        unit_index,
+        None,
+        attempts[-1].error,
+        attempts,
+        retry_backoff_ns,
+    )
 
 
 async def _invoke_operator(
     job: ResolvedNodeExecutionJob,
     operator: Operator,
     input: Any,
-) -> Any:
+) -> tuple[Any, int, int]:
     """Invoke one Operator without blocking the event loop.
 
     Native coroutine handlers stay on the current loop. Synchronous handlers
@@ -734,23 +851,39 @@ async def _invoke_operator(
 
     timeout = job.node_ir.policy.timeout if job.node_ir.policy is not None else None
 
-    async def invoke() -> Any:
+    async def invoke() -> tuple[Any, int, int]:
         if operator.is_async:
-            return await operator.ainvoke(input)
+            started_ns = perf_counter_ns()
+            output = await operator.ainvoke(input)
+            return output, max(0, perf_counter_ns() - started_ns), 0
 
         if job.thread_pool is None:  # pragma: no cover - defensive construction guard.
             raise RuntimeError("NodeExecutor thread pool is unavailable.")
-        future = job.thread_pool.submit(operator.invoke, input)
+        submitted_ns = perf_counter_ns()
+
+        def invoke_sync() -> tuple[Any, int, int]:
+            started_ns = perf_counter_ns()
+            output = operator.invoke(input)
+            ended_ns = perf_counter_ns()
+            return output, started_ns, ended_ns
+
+        future = job.thread_pool.submit(invoke_sync)
         try:
             # Polling keeps the event loop responsive and works across restricted
             # runtimes where asyncio's cross-thread self-pipe wakeup is blocked.
             while not future.done():
                 await asyncio.sleep(0.001)
-            output = future.result()
+            output, worker_started_ns, worker_ended_ns = future.result()
         except asyncio.CancelledError:
             future.cancel()
             raise
-        return await output if inspect.isawaitable(output) else output
+        if inspect.isawaitable(output):
+            output = await output
+        return (
+            output,
+            max(0, worker_ended_ns - worker_started_ns),
+            max(0, worker_started_ns - submitted_ns),
+        )
 
     try:
         invocation = invoke()
@@ -773,6 +906,8 @@ async def _aggregate_unit_results(
     unit_kind: str,
     unit_count: int,
     peak_parallelism: int,
+    operator_elapsed_ns: int,
+    phases: tuple[NodePhaseResult, ...],
 ) -> NodeExecutionResult:
     unit_results.sort(key=lambda item: item.index)
     attempts = tuple(
@@ -781,8 +916,26 @@ async def _aggregate_unit_results(
             key=lambda attempt: attempt.sequence,
         )
     )
-    duration_ms = sum(
-        attempt.resource_usage.duration_ms
+    execution_ns = sum(
+        attempt.resource_usage.execution_ns
+        for attempt in attempts
+    )
+    thread_pool_queue_ns = sum(
+        attempt.resource_usage.thread_pool_queue_ns
+        for attempt in attempts
+    )
+    retry_backoff_ns = sum(
+        item.retry_backoff_ns
+        for item in unit_results
+    )
+    resource_usage = ResourceUsage(
+        duration_ns=operator_elapsed_ns,
+        execution_ns=execution_ns,
+        thread_pool_queue_ns=thread_pool_queue_ns,
+        retry_backoff_ns=retry_backoff_ns,
+    )
+    duration_ns = sum(
+        attempt.resource_usage.duration_ns
         for attempt in attempts
     )
     is_parallel = unit_kind in {"map_item", "replica"}
@@ -819,10 +972,28 @@ async def _aggregate_unit_results(
             state="failed",
             error=failed.error,
             operator_executions=retained_executions,
-            resource_usage=ResourceUsage(duration_ms=duration_ms),
+            operator_elapsed_ns=operator_elapsed_ns,
+            phases=phases,
+            resource_usage=resource_usage,
         )
 
     outputs = [deepcopy(item.output) for item in unit_results]
+    aggregation_phase: NodePhaseResult | None = None
+    aggregation_started_ns = perf_counter_ns()
+    has_custom_aggregator = (
+        (
+            unit_kind == "map_item"
+            and job.map_policy is not None
+            and job.map_policy.output_aggregator is not None
+        )
+        or (
+            unit_kind == "replica"
+            and job.node_ir.policy is not None
+            and job.node_ir.policy.replication is not None
+            and job.node_ir.policy.replication.output_aggregator is not None
+        )
+    )
+    record_aggregator = has_custom_aggregator and job.event_mode == "full"
     try:
         if unit_kind == "map_item":
             output = (
@@ -836,14 +1007,30 @@ async def _aggregate_unit_results(
             )
         elif unit_kind == "replica":
             replication = job.node_ir.policy.replication
-            output = await invoke_hook_async(
-                replication.output_aggregator,
-                _replication_aggregation_context(job, outputs),
+            output = (
+                await invoke_hook_async(
+                    replication.output_aggregator,
+                    _replication_aggregation_context(job, outputs),
+                )
+                if replication.output_aggregator is not None
+                else outputs
             )
         else:
             output = outputs[0]
         _validate_final_output(job, output)
     except Exception as exc:
+        aggregation_elapsed_ns = max(
+            0,
+            perf_counter_ns() - aggregation_started_ns,
+        )
+        if record_aggregator:
+            aggregation_phase = NodePhaseResult(
+                name="aggregation.completed",
+                status="failed",
+                elapsed_ns=aggregation_elapsed_ns,
+                input=deepcopy(outputs),
+                timing={"execution_ns": aggregation_elapsed_ns},
+            )
         error = RuntimeErrorInfo(
             code=(
                 "NODE_OUTPUT_INVALID"
@@ -861,17 +1048,42 @@ async def _aggregate_unit_results(
             state="failed",
             error=error,
             operator_executions=retained_executions,
-            resource_usage=ResourceUsage(duration_ms=duration_ms),
+            operator_elapsed_ns=operator_elapsed_ns,
+            phases=(
+                (*phases, aggregation_phase)
+                if aggregation_phase is not None
+                else phases
+            ),
+            resource_usage=resource_usage,
         )
 
     if parallel_execution is not None:
         parallel_execution.state = "completed"
+    if record_aggregator:
+        aggregation_elapsed_ns = max(
+            0,
+            perf_counter_ns() - aggregation_started_ns,
+        )
+        aggregation_phase = NodePhaseResult(
+            name="aggregation.completed",
+            status="completed",
+            elapsed_ns=aggregation_elapsed_ns,
+            input=deepcopy(outputs),
+            output=deepcopy(output),
+            timing={"execution_ns": aggregation_elapsed_ns},
+        )
     return NodeExecutionResult(
         node_execution_id=job.node_execution.id,
         state="completed",
         output=output,
         operator_executions=retained_executions,
-        resource_usage=ResourceUsage(duration_ms=duration_ms),
+        operator_elapsed_ns=operator_elapsed_ns,
+        phases=(
+            (*phases, aggregation_phase)
+            if aggregation_phase is not None
+            else phases
+        ),
+        resource_usage=resource_usage,
     )
 
 
@@ -951,7 +1163,7 @@ def _parallel_execution(
     peak_parallelism: int,
 ) -> ParallelOperatorExecution:
     durations = [
-        attempt.resource_usage.duration_ms
+        attempt.resource_usage.duration_ns
         for attempt in attempts
     ]
     failures = [
@@ -985,9 +1197,9 @@ def _parallel_execution(
         fallback_count=sum(
             1 for attempt in attempts if attempt.reason == "fallback"
         ),
-        total_duration_ms=sum(durations),
-        min_duration_ms=min(durations) if durations else None,
-        max_duration_ms=max(durations) if durations else None,
+        total_duration_ns=sum(durations),
+        min_duration_ns=min(durations) if durations else None,
+        max_duration_ns=max(durations) if durations else None,
         peak_parallelism=peak_parallelism,
         failure_samples=tuple(failures),
     )

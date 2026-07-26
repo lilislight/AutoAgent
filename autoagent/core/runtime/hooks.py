@@ -79,7 +79,7 @@ class RuntimeEventLoop:
             # Cancellation belongs to the invocation, not merely to this
             # caller-side proxy. Forward it to the App runtime loop and wait
             # until WorkflowExecutor has cancelled its workers and committed
-            # the terminal boundary.
+            # the terminal Event.
             future.cancel()
             completed = getattr(future, "_autoagent_completed")
             while not completed.is_set():

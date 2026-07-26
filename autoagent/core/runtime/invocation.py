@@ -9,6 +9,7 @@ from autoagent.core.runtime.execution import (
     NodeExecution,
     RuntimeErrorInfo,
 )
+from autoagent.core.runtime.event import RuntimeEventMode
 from autoagent.core.runtime.output import OutputIndex, OutputView
 from autoagent.core.runtime.mailbox import InvocationExecutionMailbox
 from autoagent.core.runtime.scheduler import SchedulerContext
@@ -79,10 +80,13 @@ class Invocation:
         initialize_entry: bool = True,
         execution_mailbox: InvocationExecutionMailbox | None = None,
         execution_mode: ExecutionMode = "normal",
+        event_mode: RuntimeEventMode = "standard",
         event_sequence: int = 0,
         deferred_error: RuntimeErrorInfo | None = None,
         deferred_terminal_state: str | None = None,
     ) -> None:
+        if event_mode not in {"minimal", "standard", "full"}:
+            raise ValueError(f"Invalid event_mode: {event_mode}")
         self.id = id or uuid4()
         self.workflow_id = workflow_id
         self.workflow_version = workflow_version
@@ -101,6 +105,7 @@ class Invocation:
         # invocation's results when an App executes sessions concurrently.
         self.execution_mailbox = execution_mailbox or InvocationExecutionMailbox()
         self.execution_mode: ExecutionMode = execution_mode
+        self.event_mode: RuntimeEventMode = event_mode
         # Runtime events are ordered per Invocation. Sequence zero belongs to
         # the Genesis snapshot; the first event is therefore sequence one.
         self.event_sequence = event_sequence
@@ -422,6 +427,7 @@ class Invocation:
             "entry_node_id": self.entry_node_id,
             "state": self.state,
             "execution_mode": self.execution_mode,
+            "event_mode": self.event_mode,
             "event_sequence": self.event_sequence,
             "input": dict(self.input),
             "context": self.context.to_record(),
@@ -456,6 +462,7 @@ class Invocation:
             entry_node_id=str(record["entry_node_id"]),
             state=record["state"],
             execution_mode=record.get("execution_mode", "normal"),
+            event_mode=record["event_mode"],
             event_sequence=int(record.get("event_sequence", 0)),
             input=dict(record.get("input", {})),
             context=InvocationContext.from_record(

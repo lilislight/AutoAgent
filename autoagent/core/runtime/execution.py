@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from time import perf_counter_ns
 from typing import Any, TypeAlias
 from uuid import UUID, uuid4
 
@@ -44,19 +45,52 @@ class RuntimeErrorInfo:
 
 @dataclass
 class ResourceUsage:
-    """Framework-observed operator duration."""
+    """Framework-observed monotonic execution duration."""
 
-    duration_ms: int = 0
+    duration_ns: int = 0
+    execution_ns: int = 0
+    concurrency_wait_ns: int = 0
+    thread_pool_queue_ns: int = 0
+    retry_backoff_ns: int = 0
 
-    def add(self, *, duration_ms: int = 0) -> None:
-        self.duration_ms += duration_ms
+    @property
+    def duration_ms(self) -> int:
+        return self.duration_ns // 1_000_000
+
+    def add(
+        self,
+        *,
+        duration_ns: int = 0,
+        execution_ns: int = 0,
+        concurrency_wait_ns: int = 0,
+        thread_pool_queue_ns: int = 0,
+        retry_backoff_ns: int = 0,
+    ) -> None:
+        self.duration_ns += duration_ns
+        self.execution_ns += execution_ns
+        self.concurrency_wait_ns += concurrency_wait_ns
+        self.thread_pool_queue_ns += thread_pool_queue_ns
+        self.retry_backoff_ns += retry_backoff_ns
 
     def to_record(self) -> dict[str, Any]:
-        return {"duration_ms": self.duration_ms}
+        return {
+            "duration_ns": self.duration_ns,
+            "execution_ns": self.execution_ns,
+            "concurrency_wait_ns": self.concurrency_wait_ns,
+            "thread_pool_queue_ns": self.thread_pool_queue_ns,
+            "retry_backoff_ns": self.retry_backoff_ns,
+        }
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any] | None) -> ResourceUsage:
-        return cls(duration_ms=int((record or {}).get("duration_ms", 0)))
+        value = record or {}
+        return cls(
+            duration_ns=int(value.get("duration_ns", 0)),
+            execution_ns=int(value.get("execution_ns", 0)),
+            concurrency_wait_ns=int(value.get("concurrency_wait_ns", 0)),
+            thread_pool_queue_ns=int(value.get("thread_pool_queue_ns", 0)),
+            retry_backoff_ns=int(value.get("retry_backoff_ns", 0)),
+        )
 
 
 @dataclass
@@ -142,9 +176,9 @@ class ParallelExecutionSummary:
     cancelled_count: int = 0
     retry_count: int = 0
     fallback_count: int = 0
-    total_duration_ms: int = 0
-    min_duration_ms: int | None = None
-    max_duration_ms: int | None = None
+    total_duration_ns: int = 0
+    min_duration_ns: int | None = None
+    max_duration_ns: int | None = None
     peak_parallelism: int = 0
     failure_samples: tuple[dict[str, Any], ...] = ()
 
@@ -157,9 +191,9 @@ class ParallelExecutionSummary:
             "cancelled_count": self.cancelled_count,
             "retry_count": self.retry_count,
             "fallback_count": self.fallback_count,
-            "total_duration_ms": self.total_duration_ms,
-            "min_duration_ms": self.min_duration_ms,
-            "max_duration_ms": self.max_duration_ms,
+            "total_duration_ns": self.total_duration_ns,
+            "min_duration_ns": self.min_duration_ns,
+            "max_duration_ns": self.max_duration_ns,
             "peak_parallelism": self.peak_parallelism,
             "failure_samples": [dict(value) for value in self.failure_samples],
         }
@@ -177,9 +211,9 @@ class ParallelExecutionSummary:
             cancelled_count=int(value.get("cancelled_count", 0)),
             retry_count=int(value.get("retry_count", 0)),
             fallback_count=int(value.get("fallback_count", 0)),
-            total_duration_ms=int(value.get("total_duration_ms", 0)),
-            min_duration_ms=value.get("min_duration_ms"),
-            max_duration_ms=value.get("max_duration_ms"),
+            total_duration_ns=int(value.get("total_duration_ns", 0)),
+            min_duration_ns=value.get("min_duration_ns"),
+            max_duration_ns=value.get("max_duration_ns"),
             peak_parallelism=int(value.get("peak_parallelism", 0)),
             failure_samples=tuple(
                 dict(item) for item in value.get("failure_samples", [])
@@ -251,8 +285,10 @@ class EdgeEvaluation:
     selected: bool
     id: UUID = field(default_factory=uuid4)
     reason: str | None = None
+    elapsed_ns: int | None = None
     created_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
     updated_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
+    started_at_monotonic_ns: int = field(default=0, repr=False)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -262,6 +298,7 @@ class EdgeEvaluation:
             "state": self.state,
             "selected": self.selected,
             "reason": self.reason,
+            "elapsed_ns": self.elapsed_ns,
             "created_at_ms": self.created_at_ms,
             "updated_at_ms": self.updated_at_ms,
         }
@@ -275,6 +312,7 @@ class EdgeEvaluation:
             state=record["state"],
             selected=bool(record["selected"]),
             reason=record.get("reason"),
+            elapsed_ns=record.get("elapsed_ns"),
             created_at_ms=coerce_timestamp_ms(record.get("created_at_ms"))
             or utc_timestamp_ms(),
             updated_at_ms=coerce_timestamp_ms(record.get("updated_at_ms"))
@@ -296,6 +334,8 @@ class NodeExecution:
     idempotency_key: str | None = None
     recovery_of_execution_id: UUID | None = None
     recovery_attempt: int = 0
+    base_invocation_context_revision: int = 0
+    base_session_context_revision: int = 0
     incoming_activations: tuple[EdgeActivation, ...] = ()
     execution_scope: ExecutionScope = ()
     operator_executions: list[OperatorExecution] = field(default_factory=list)
@@ -314,6 +354,7 @@ class NodeExecution:
         self.state = "running"
         self.input = input
         self.started_at_ms = utc_timestamp_ms()
+        self.started_at_monotonic_ns = perf_counter_ns()
         self.updated_at_ms = self.started_at_ms
 
     def mark_waiting(self, reason: str | None = None) -> None:
@@ -363,6 +404,7 @@ class NodeExecution:
         state: EdgeEvaluationStateValue,
         selected: bool,
         reason: str | None = None,
+        elapsed_ns: int | None = None,
     ) -> EdgeEvaluation:
         evaluation = EdgeEvaluation(
             edge_id=edge_id,
@@ -370,6 +412,7 @@ class NodeExecution:
             state=state,
             selected=selected,
             reason=reason,
+            elapsed_ns=elapsed_ns,
         )
         self.edge_evaluations.append(evaluation)
         self.updated_at_ms = utc_timestamp_ms()
@@ -392,6 +435,10 @@ class NodeExecution:
                 else None
             ),
             "recovery_attempt": self.recovery_attempt,
+            "base_invocation_context_revision": (
+                self.base_invocation_context_revision
+            ),
+            "base_session_context_revision": self.base_session_context_revision,
             "incoming_activations": [
                 activation.to_record() for activation in self.incoming_activations
             ],
@@ -426,6 +473,12 @@ class NodeExecution:
                 else None
             ),
             recovery_attempt=int(record.get("recovery_attempt", 0)),
+            base_invocation_context_revision=int(
+                record.get("base_invocation_context_revision", 0)
+            ),
+            base_session_context_revision=int(
+                record.get("base_session_context_revision", 0)
+            ),
             incoming_activations=tuple(
                 EdgeActivation.from_record(item)
                 for item in record.get("incoming_activations", [])

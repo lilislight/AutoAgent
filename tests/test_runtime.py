@@ -52,6 +52,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             workflow_id="flow",
             workflow_version=1,
             entry_node_id="entry",
+            event_mode="full",
         )
         session.add_invocation(invocation)
         snapshot = ExecutionSnapshot.capture(
@@ -62,9 +63,12 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         event = RuntimeEvent(
             invocation_id=invocation.id,
             sequence=2,
-            type="routing.committed",
+            event_type="routing",
+            event_name="edge.evaluated",
+            subject_type="invocation",
+            subject_id=str(invocation.id),
             occurred_at_ms=utc_timestamp_ms(),
-            payload={"operations": []},
+            operations=(),
         )
 
         with self.assertRaisesRegex(ValueError, "not contiguous"):
@@ -83,6 +87,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             workflow_id="flow",
             workflow_version=1,
             entry_node_id="entry",
+            event_mode="full",
         )
         first = invocation.create_node_execution("first")
         second = invocation.create_node_execution("second")
@@ -144,6 +149,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             workflow_id="flow",
             workflow_version=1,
             entry_node_id="entry",
+            event_mode="full",
         )
 
         await store.aadmit_invocation(session.id, invocation)
@@ -165,7 +171,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="checkpoint_retention")
         workflow.add_node(lambda: "done", node_id="node")
-        invocation = await app.ainvoke(workflow)
+        invocation = await app.ainvoke(workflow, event_mode="full")
 
         for sequence in (1, 2, 3):
             await store.arebuild_execution(
@@ -192,7 +198,11 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="reducer")
         workflow.add_node(lambda: {"value": 1}, node_id="entry")
 
-        invocation = await app.ainvoke(workflow, session_id="session")
+        invocation = await app.ainvoke(
+            workflow,
+            session_id="session",
+            event_mode="full",
+        )
         events = await store.alist_runtime_events(invocation_id=invocation.id)
         rebuilt_session, rebuilt = await store.arebuild_execution(invocation.id)
 
@@ -218,7 +228,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         assert session is not None
         self.assertEqual(
             capture_execution_state(session, invocation),
-            store.committed_state(invocation.id),
+            store.reduced_state(invocation.id),
         )
         paged = await store._load_event_range(
             invocation_id=invocation.id,

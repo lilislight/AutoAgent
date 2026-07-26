@@ -1,41 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from autoagent.core.runtime.event import RuntimeEvent
+from autoagent.core.runtime.event import RuntimeEvent, StateOperation
 from autoagent.core.runtime.execution import NodeExecution
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
-
-
-RuntimeBoundary = Literal[
-    "node.activation_ready",
-    "node.input_ready",
-    "node.output_ready",
-    "node.committed",
-    "routing.committed",
-    "wait.committed",
-    "resume.committed",
-    "recovery.interrupted",
-    "invocation.completed",
-    "invocation.failed",
-    "invocation.cancelled",
-]
-
-
-class StateOperation(BaseModel):
-    """One deterministic JSON-tree mutation carried by a boundary event."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    op: Literal["add", "replace", "remove"]
-    path: tuple[str | int, ...]
-    value: Any | None = None
 
 
 class ExecutionSnapshot(BaseModel):
@@ -64,7 +39,11 @@ class ExecutionSnapshot(BaseModel):
                 if through_sequence is None
                 else through_sequence
             ),
-            state=capture_execution_state(session, invocation),
+            state=(
+                capture_recovery_state(session, invocation)
+                if invocation.event_mode == "standard"
+                else capture_execution_state(session, invocation)
+            ),
         )
 
     def restore(self) -> tuple[Session, Invocation]:
@@ -87,6 +66,27 @@ def capture_execution_state(
             ],
         }
     )
+
+
+def capture_recovery_state(
+    session: Session,
+    invocation: Invocation,
+) -> dict[str, Any]:
+    """Capture restartable Standard state without trace-only intermediate I/O."""
+
+    return compact_recovery_state(capture_execution_state(session, invocation))
+
+
+def compact_recovery_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Remove trace-only values from an already captured Runtime State."""
+
+    state = deepcopy(state)
+    for execution in state["node_executions"]:
+        execution["input"] = None
+        for operator_call in execution.get("operator_executions", ()):
+            operator_call.pop("input", None)
+            operator_call.pop("output", None)
+    return state
 
 
 def restore_execution_state(state: dict[str, Any]) -> tuple[Session, Invocation]:
@@ -140,14 +140,14 @@ _MUTABLE_NODE_EXECUTION_FIELDS = (
 )
 
 
-def build_boundary_state_operations(
+def build_state_operations(
     previous: dict[str, Any],
     session: Session,
     invocation: Invocation,
     *,
     node_execution_ids: tuple[UUID, ...] = (),
 ) -> tuple[StateOperation, ...]:
-    """Build one boundary delta from explicit mutable runtime sections.
+    """Build one state delta from explicit mutable runtime sections.
 
     Invocation identity, input, Workflow identity, and creation timestamps are
     immutable after admission and therefore never scanned. NodeExecution
@@ -189,7 +189,7 @@ def build_boundary_state_operations(
         execution = invocation.get_node_execution(execution_id)
         if execution is None:
             raise KeyError(
-                f"Boundary references unknown NodeExecution: {execution_id}"
+                f"Event references unknown NodeExecution: {execution_id}"
             )
         record = execution.to_record(invocation.id)
         previous_index = previous_indexes.get(str(execution_id))
@@ -220,13 +220,13 @@ def apply_state_operations(
 ) -> dict[str, Any]:
     if not operations:
         return state
-    if not all(_is_boundary_operation(operation) for operation in operations):
+    if not all(_is_state_operation(operation) for operation in operations):
         result = deepcopy(state)
         for operation in operations:
             _apply_operation(result, operation)
         return result
 
-    # Boundary operations only replace top-level aggregate fields or fields on
+    # State operations only replace top-level aggregate fields or fields on
     # one NodeExecution record. Clone those containers once instead of copying
     # the complete Invocation history for every Event.
     result = dict(state)
@@ -263,7 +263,7 @@ def reduce_execution_state(
     *,
     through_sequence: int | None = None,
 ) -> tuple[Session, Invocation]:
-    """Rebuild runtime state by reducing immutable boundary deltas."""
+    """Rebuild runtime state by reducing immutable state deltas."""
 
     state = deepcopy(snapshot.state)
     cursor = snapshot.through_sequence
@@ -282,18 +282,11 @@ def reduce_execution_state(
             raise ValueError(
                 "RuntimeEvent invocation does not match ExecutionSnapshot."
             )
-        if event.role != "boundary":
-            continue
-        raw_operations = event.payload.get("operations")
-        if raw_operations is None:
+        if event.operations is None:
             raise ValueError(
-                f"Boundary event {event.sequence} has no state operations."
+                f"Full RuntimeEvent {event.sequence} has no state operations."
             )
-        operations = tuple(
-            StateOperation.model_validate(value)
-            for value in raw_operations
-        )
-        state = apply_state_operations(state, operations)
+        state = apply_state_operations(state, event.operations)
         cursor = event.sequence
     return restore_execution_state(state)
 
@@ -308,18 +301,69 @@ def _replace_changed_fields(
 ) -> None:
     prefix = (section,) if isinstance(section, str) else section
     for field in fields:
-        if previous.get(field) == current.get(field):
-            continue
-        operations.append(
-            StateOperation(
-                op="replace",
-                path=(*prefix, field),
-                value=deepcopy(current.get(field)),
-            )
+        _diff_state_value(
+            operations,
+            path=(*prefix, field),
+            previous=previous.get(field),
+            current=current.get(field),
         )
 
 
-def _is_boundary_operation(operation: StateOperation) -> bool:
+def _diff_state_value(
+    operations: list[StateOperation],
+    *,
+    path: tuple[str | int, ...],
+    previous: Any,
+    current: Any,
+) -> None:
+    """Emit leaf-level tree edits while preserving append-only histories."""
+
+    if previous == current:
+        return
+    if isinstance(previous, dict) and isinstance(current, dict):
+        for key in sorted(set(previous) - set(current)):
+            operations.append(StateOperation(op="remove", path=(*path, key)))
+        for key in sorted(set(current) - set(previous)):
+            operations.append(
+                StateOperation(
+                    op="add",
+                    path=(*path, key),
+                    value=deepcopy(current[key]),
+                )
+            )
+        for key in sorted(set(previous) & set(current)):
+            _diff_state_value(
+                operations,
+                path=(*path, key),
+                previous=previous[key],
+                current=current[key],
+            )
+        return
+    if (
+        isinstance(previous, list)
+        and isinstance(current, list)
+        and len(current) >= len(previous)
+        and current[: len(previous)] == previous
+    ):
+        for index in range(len(previous), len(current)):
+            operations.append(
+                StateOperation(
+                    op="add",
+                    path=(*path, index),
+                    value=deepcopy(current[index]),
+                )
+            )
+        return
+    operations.append(
+        StateOperation(
+            op="replace",
+            path=path,
+            value=deepcopy(current),
+        )
+    )
+
+
+def _is_state_operation(operation: StateOperation) -> bool:
     path = operation.path
     if operation.op == "replace":
         return (

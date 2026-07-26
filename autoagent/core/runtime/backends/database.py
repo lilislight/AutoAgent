@@ -21,12 +21,14 @@ from autoagent.core.runtime.artifact import (
 from autoagent.core.runtime.backends.models import (
     ArtifactRow,
     InvocationRow,
+    RecoveryStateRow,
     RuntimeDatabaseBase,
     RuntimeEventRow,
     SessionRow,
     WorkflowVersionRow,
 )
 from autoagent.core.runtime.event import RuntimeEvent
+from autoagent.core.runtime.context import SessionContext
 from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.runtime.persistence import PersistenceEnvelope
 from autoagent.core.runtime.serialization import ArtifactRef
@@ -323,15 +325,29 @@ class DatabaseBackend:
         if row is None:
             return None
         if row.current_invocation_id is not None:
-            session, _ = await self.store.arebuild_execution(
-                UUID(row.current_invocation_id)
-            )
-            return session
+            async with self._database_sessions() as database:
+                invocation_row = await database.get(
+                    InvocationRow,
+                    row.current_invocation_id,
+                )
+            if (
+                invocation_row is not None
+                and invocation_row.event_mode != "minimal"
+                and invocation_row.state in {"created", "running", "waiting"}
+            ):
+                session, _ = await self.store.arebuild_execution(
+                    UUID(row.current_invocation_id)
+                )
+                return session
+        context = await self._hydrate_runtime_values(
+            self.serializer.loads(row.context_json)
+        )
         session = Session(
             id=UUID(row.id),
             namespace=row.namespace,
             workflow_id=row.workflow_id,
             session_key=row.session_key,
+            context=SessionContext.from_record(context),
             created_at_ms=row.created_at_ms,
             updated_at_ms=row.updated_at_ms,
         )
@@ -349,14 +365,34 @@ class DatabaseBackend:
             or envelope.workflow_key is None
         ):
             raise ValueError("Admission persistence envelope is incomplete.")
-        persisted_state, artifacts = self._externalize_admission_state(
-            snapshot.state,
+        session_record = snapshot.state["session"]
+        invocation_record = snapshot.state["invocation"]
+        event_mode = invocation_record["event_mode"]
+        persisted_input, input_artifacts = self.artifact_encoder.externalize(
+            invocation_record.get("input"),
             namespace=envelope.namespace,
             invocation_id=envelope.invocation_id,
         )
-        encoded_genesis = self.serializer.dumps(persisted_state)
-        session_record = snapshot.state["session"]
-        invocation_record = snapshot.state["invocation"]
+        artifacts: tuple[EncodedArtifact, ...] = input_artifacts
+        persisted_state: dict[str, Any] | None = None
+        if event_mode != "minimal":
+            persisted_state, state_artifacts = self._externalize_admission_state(
+                snapshot.state,
+                namespace=envelope.namespace,
+                invocation_id=envelope.invocation_id,
+            )
+            artifacts = (*artifacts, *state_artifacts)
+        encoded_bundle = self.serializer.dumps_unchecked(
+            {
+                "input": persisted_input,
+                "session_context": (
+                    persisted_state["session"].get("context", {})
+                    if persisted_state is not None
+                    else {"data": {}}
+                ),
+                "state": persisted_state,
+            }
+        )
         admission = {
             "session": {
                 key: session_record[key]
@@ -377,6 +413,7 @@ class DatabaseBackend:
                     "entry_node_id",
                     "state",
                     "execution_mode",
+                    "event_mode",
                     "created_at_ms",
                     "updated_at_ms",
                 )
@@ -389,10 +426,10 @@ class DatabaseBackend:
             session_id=envelope.session_id,
             invocation_id=envelope.invocation_id,
             record=admission,
-            encoded=encoded_genesis,
+            encoded=encoded_bundle,
             artifacts=artifacts,
             size_bytes=(
-                len(encoded_genesis)
+                len(encoded_bundle)
                 + sum(artifact.size_bytes for artifact in artifacts)
                 + 1024
             ),
@@ -414,21 +451,48 @@ class DatabaseBackend:
             or envelope.invocation_updated_at_ms is None
         ):
             raise ValueError("Event persistence envelope is incomplete.")
-        encoded_payload = self.serializer.dumps_unchecked(event.payload)
-        if (
-            self.artifact_policy.enabled
-            and len(encoded_payload) > self.artifact_policy.inline_max_bytes
-        ):
-            persisted_payload, artifacts = self._externalize_event_payload(
-                event.payload,
-                namespace=envelope.namespace,
-                invocation_id=envelope.invocation_id,
+        persisted_event, artifacts = self._externalize_event_values(
+            event,
+            namespace=envelope.namespace,
+            invocation_id=envelope.invocation_id,
+        )
+        encoded_payload = self.serializer.dumps(persisted_event["payload"])
+        input_json = (
+            None
+            if persisted_event["input"] is None
+            else _text(self.serializer.dumps(persisted_event["input"]))
+        )
+        output_json = (
+            None
+            if persisted_event["output"] is None
+            else _text(self.serializer.dumps(persisted_event["output"]))
+        )
+        operations_json = (
+            None
+            if persisted_event["operations"] is None
+            else _text(self.serializer.dumps(persisted_event["operations"]))
+        )
+        persisted_result, result_artifacts = self.artifact_encoder.externalize(
+            envelope.invocation_result,
+            namespace=envelope.namespace,
+            invocation_id=envelope.invocation_id,
+        )
+        artifacts = (*artifacts, *result_artifacts)
+        recovery_state_json = None
+        recovery_sequence = None
+        if envelope.recovery_snapshot is not None:
+            persisted_recovery, recovery_artifacts = (
+                self._externalize_admission_state(
+                    envelope.recovery_snapshot.state,
+                    namespace=envelope.namespace,
+                    invocation_id=envelope.invocation_id,
+                )
             )
-            encoded_payload = self.serializer.dumps(persisted_payload)
-        else:
-            artifacts = ()
-            if self.serializer.max_inline_bytes is not None:
-                encoded_payload = self.serializer.dumps(event.payload)
+            artifacts = (*artifacts, *recovery_artifacts)
+            recovery_state_json = _text(
+                self.serializer.dumps_unchecked(persisted_recovery)
+            )
+            recovery_sequence = envelope.recovery_snapshot.through_sequence
         return _PersistenceItem(
             kind="event",
             session_id=envelope.session_id,
@@ -437,11 +501,34 @@ class DatabaseBackend:
                 "event_id": event.id,
                 "sequence": event.sequence,
                 "schema_version": event.schema_version,
-                "event_type": event.type,
+                "event_type": event.event_type,
+                "event_name": event.event_name,
+                "subject_type": event.subject_type,
+                "subject_id": event.subject_id,
                 "occurred_at_ms": event.occurred_at_ms,
+                "elapsed_ns": event.elapsed_ns,
+                "status": event.status,
+                "timing_json": _text(
+                    self.serializer.dumps_unchecked(event.timing)
+                ),
+                "input_json": input_json,
+                "output_json": output_json,
+                "operations_json": operations_json,
+                "recovery_state_json": recovery_state_json,
+                "recovery_sequence": recovery_sequence,
                 "invocation_state": envelope.invocation_state,
                 "execution_mode": envelope.execution_mode,
                 "updated_at_ms": envelope.invocation_updated_at_ms,
+                "invocation_result_json": (
+                    None
+                    if persisted_result is None
+                    else _text(self.serializer.dumps(persisted_result))
+                ),
+                "invocation_error_json": (
+                    None
+                    if envelope.invocation_error is None
+                    else _text(self.serializer.dumps(envelope.invocation_error))
+                ),
                 "session_updated_at_ms": envelope.session_updated_at_ms,
                 "force_recovery_state": envelope.force_recovery_checkpoint,
             },
@@ -449,8 +536,77 @@ class DatabaseBackend:
             artifacts=artifacts,
             size_bytes=(
                 len(encoded_payload)
+                + sum(
+                    len(value.encode("utf-8"))
+                    for value in (input_json, output_json, operations_json)
+                    if value is not None
+                )
+                + (
+                    len(recovery_state_json.encode("utf-8"))
+                    if recovery_state_json is not None
+                    else 0
+                )
                 + sum(artifact.size_bytes for artifact in artifacts)
                 + 256
+            ),
+            coordinator_id=envelope.id,
+        )
+
+    def _prepare_invocation_state_item(
+        self,
+        envelope: PersistenceEnvelope,
+    ) -> _PersistenceItem:
+        if (
+            envelope.session_id is None
+            or envelope.invocation_id is None
+            or envelope.session_record is None
+            or envelope.invocation_record is None
+        ):
+            raise ValueError("Invocation state persistence envelope is incomplete.")
+        persisted_input, input_artifacts = self.artifact_encoder.externalize(
+            envelope.invocation_record.get("input"),
+            namespace=envelope.namespace,
+            invocation_id=envelope.invocation_id,
+        )
+        persisted_result, result_artifacts = self.artifact_encoder.externalize(
+            envelope.invocation_record.get("result"),
+            namespace=envelope.namespace,
+            invocation_id=envelope.invocation_id,
+        )
+        record = {
+            "session": envelope.session_record,
+            "invocation": {
+                **envelope.invocation_record,
+                "input_json": _text(self.serializer.dumps(persisted_input)),
+                "result_json": (
+                    None
+                    if persisted_result is None
+                    else _text(self.serializer.dumps(persisted_result))
+                ),
+                "error_json": (
+                    None
+                    if envelope.invocation_record.get("error") is None
+                    else _text(
+                        self.serializer.dumps(
+                            envelope.invocation_record["error"]
+                        )
+                    )
+                ),
+            },
+        }
+        return _PersistenceItem(
+            kind="invocation_state",
+            session_id=envelope.session_id,
+            invocation_id=envelope.invocation_id,
+            record=record,
+            encoded=None,
+            artifacts=(*input_artifacts, *result_artifacts),
+            size_bytes=(
+                envelope.estimated_bytes
+                + sum(
+                    value.size_bytes
+                    for value in (*input_artifacts, *result_artifacts)
+                )
             ),
             coordinator_id=envelope.id,
         )
@@ -491,31 +647,54 @@ class DatabaseBackend:
                 artifacts.extend(encoded)
         return result, tuple(artifacts)
 
-    def _externalize_event_payload(
+    def _externalize_event_values(
         self,
-        payload: dict[str, Any],
+        event: RuntimeEvent,
         *,
         namespace: str,
         invocation_id: UUID,
     ) -> tuple[dict[str, Any], tuple[EncodedArtifact, ...]]:
-        """Keep the reducer envelope inline and externalize operation values."""
+        """Externalize large Event values while preserving its typed envelope."""
 
-        result = dict(payload)
         artifacts: list[EncodedArtifact] = []
-        operations: list[dict[str, Any]] = []
-        for raw_operation in payload.get("operations", ()):
-            operation = dict(raw_operation)
-            if "value" in operation:
-                persisted, encoded = self.artifact_encoder.externalize(
-                    operation["value"],
-                    namespace=namespace,
-                    invocation_id=invocation_id,
-                )
-                operation["value"] = persisted
-                artifacts.extend(encoded)
-            operations.append(operation)
-        result["operations"] = operations
-        return result, tuple(artifacts)
+        persisted_payload, encoded = self.artifact_encoder.externalize(
+            event.payload,
+            namespace=namespace,
+            invocation_id=invocation_id,
+        )
+        artifacts.extend(encoded)
+        persisted_input, encoded = self.artifact_encoder.externalize(
+            event.input,
+            namespace=namespace,
+            invocation_id=invocation_id,
+        )
+        artifacts.extend(encoded)
+        persisted_output, encoded = self.artifact_encoder.externalize(
+            event.output,
+            namespace=namespace,
+            invocation_id=invocation_id,
+        )
+        artifacts.extend(encoded)
+        operations: list[dict[str, Any]] | None = None
+        if event.operations is not None:
+            operations = []
+            for raw_operation in event.operations:
+                operation = raw_operation.model_dump(mode="python")
+                if "value" in operation:
+                    persisted, encoded = self.artifact_encoder.externalize(
+                        operation["value"],
+                        namespace=namespace,
+                        invocation_id=invocation_id,
+                    )
+                    operation["value"] = persisted
+                    artifacts.extend(encoded)
+                operations.append(operation)
+        return {
+            "payload": persisted_payload,
+            "input": persisted_input,
+            "output": persisted_output,
+            "operations": operations,
+        }, tuple(artifacts)
 
     async def aload_execution_snapshot(
         self,
@@ -533,19 +712,21 @@ class DatabaseBackend:
         await self.ainitialize()
         async with self._database_sessions() as database:
             row = await database.get(InvocationRow, str(invocation_id))
+            recovery_row = await database.get(
+                RecoveryStateRow,
+                str(invocation_id),
+            )
         if row is None:
             return None
-        use_recovery = (
-            at_or_before_sequence is None
-            and row.recovery_state_json is not None
-            and row.recovery_sequence is not None
-        )
+        use_recovery = at_or_before_sequence is None and recovery_row is not None
         encoded_state = (
-            row.recovery_state_json
+            recovery_row.state_json
             if use_recovery
             else row.genesis_state_json
         )
-        sequence = int(row.recovery_sequence or 0) if use_recovery else 0
+        if encoded_state is None:
+            return None
+        sequence = recovery_row.event_sequence if use_recovery else 0
         state = await self._hydrate_runtime_values(
             self.serializer.loads(encoded_state)
         )
@@ -560,7 +741,11 @@ class DatabaseBackend:
             invocation_id=invocation_id,
             through_sequence=sequence,
             state=state,
-            created_at_ms=row.recovery_updated_at_ms or row.created_at_ms,
+            created_at_ms=(
+                recovery_row.updated_at_ms
+                if use_recovery and recovery_row is not None
+                else row.created_at_ms
+            ),
         )
 
     async def alist_runtime_events(
@@ -597,20 +782,48 @@ class DatabaseBackend:
             ).all()
         if before_sequence is not None:
             rows.reverse()
-        payloads = await self._hydrate_runtime_values(
-            [self.serializer.loads(row.payload_json) for row in rows]
-        )
+        encoded_values = [
+            {
+                "payload": self.serializer.loads(row.payload_json),
+                "input": (
+                    None
+                    if row.input_json is None
+                    else self.serializer.loads(row.input_json)
+                ),
+                "output": (
+                    None
+                    if row.output_json is None
+                    else self.serializer.loads(row.output_json)
+                ),
+                "operations": (
+                    None
+                    if row.operations_json is None
+                    else self.serializer.loads(row.operations_json)
+                ),
+            }
+            for row in rows
+        ]
+        values = await self._hydrate_runtime_values(encoded_values)
         events = tuple(
             RuntimeEvent(
                 id=UUID(row.id),
                 invocation_id=invocation_id,
                 sequence=row.sequence,
                 schema_version=row.schema_version,
-                type=row.type,
+                event_type=row.event_type,
+                event_name=row.event_name,
+                subject_type=row.subject_type,
+                subject_id=row.subject_id,
                 occurred_at_ms=row.occurred_at_ms,
-                payload=payload,
+                elapsed_ns=row.elapsed_ns,
+                status=row.status,
+                timing=self.serializer.loads(row.timing_json),
+                payload=value["payload"],
+                input=value["input"],
+                output=value["output"],
+                operations=value["operations"],
             )
-            for row, payload in zip(rows, payloads, strict=True)
+            for row, value in zip(rows, values, strict=True)
         )
         if events:
             self.coordinator.remember_durable(
@@ -712,6 +925,11 @@ class DatabaseBackend:
                                 item.coordinator_id,
                                 item.invocation_id,
                             )
+                        elif item.kind == "invocation_state":
+                            assert item.invocation_id is not None
+                            advanced.add(item.invocation_id)
+                            assert item.coordinator_id is not None
+                            self.coordinator.discard(item.coordinator_id)
                         else:
                             assert item.coordinator_id is not None
                             self.coordinator.discard(item.coordinator_id)
@@ -738,6 +956,8 @@ class DatabaseBackend:
                     item = self._prepare_workflow_item(envelope)
                 elif envelope.kind == "admission":
                     item = self._prepare_admission_item(envelope)
+                elif envelope.kind == "invocation_state":
+                    item = self._prepare_invocation_state_item(envelope)
                 else:
                     item = self._prepare_event_item(envelope)
             except Exception as exc:
@@ -810,6 +1030,9 @@ class DatabaseBackend:
             admission_items = [
                 item for item in batch if item.kind == "admission"
             ]
+            invocation_state_items = [
+                item for item in batch if item.kind == "invocation_state"
+            ]
             event_items = [item for item in batch if item.kind == "event"]
             for item in workflow_items:
                 await self._persist_workflow_version(database, item.record)
@@ -817,6 +1040,8 @@ class DatabaseBackend:
                 await database.flush()
             for item in admission_items:
                 await self._persist_admission(database, item)
+            for item in invocation_state_items:
+                await self._persist_invocation_state(database, item)
             artifacts = tuple(
                 artifact
                 for item in batch
@@ -878,13 +1103,18 @@ class DatabaseBackend:
                 "durable yet."
             )
         version_id = UUID(version_row.id)
-        genesis_state = self.serializer.loads(_text(item.encoded))
+        bundle = self.serializer.loads(_text(item.encoded))
+        state = bundle["state"]
+        event_mode = invocation["event_mode"]
         session_row = await database.get(SessionRow, session["id"])
         session_values = {
             "namespace": session["namespace"],
             "workflow_id": session["workflow_id"],
             "session_key": session["session_key"],
             "current_invocation_id": invocation["id"],
+            "context_json": _text(
+                self.serializer.dumps_unchecked(bundle["session_context"])
+            ),
             "created_at_ms": session["created_at_ms"],
             "updated_at_ms": session["updated_at_ms"],
         }
@@ -900,20 +1130,65 @@ class DatabaseBackend:
             "entry_node_id": invocation["entry_node_id"],
             "state": invocation["state"],
             "execution_mode": invocation["execution_mode"],
+            "event_mode": event_mode,
             "durable_sequence": 0,
-            "genesis_state_json": _text(item.encoded),
-            "recovery_state_json": None,
-            "recovery_sequence": None,
-            "recovery_updated_at_ms": None,
+            "input_json": _text(
+                self.serializer.dumps_unchecked(bundle["input"])
+            ),
+            "result_json": None,
+            "error_json": None,
+            "genesis_state_json": (
+                _text(self.serializer.dumps_unchecked(state))
+                if event_mode == "full"
+                else None
+            ),
             "created_at_ms": invocation["created_at_ms"],
             "updated_at_ms": invocation["updated_at_ms"],
         }
         if invocation_row is None:
             database.add(InvocationRow(id=invocation["id"], **invocation_values))
         invocation_id = UUID(str(invocation["id"]))
-        self._durable_states[invocation_id] = genesis_state
-        self._projection_sequences[invocation_id] = 0
-        self._recovery_sequences[invocation_id] = 0
+        if event_mode != "minimal":
+            if state is None:
+                raise RuntimeError("Recoverable Invocation admission has no state.")
+            recovery_row = await database.get(
+                RecoveryStateRow,
+                invocation["id"],
+            )
+            if recovery_row is None:
+                database.add(RecoveryStateRow(
+                    invocation_id=invocation["id"],
+                    event_sequence=0,
+                    state_json=_text(
+                        self.serializer.dumps_unchecked(state)
+                    ),
+                    updated_at_ms=invocation["updated_at_ms"],
+                ))
+            self._durable_states[invocation_id] = state
+            self._projection_sequences[invocation_id] = 0
+            self._recovery_sequences[invocation_id] = 0
+
+    async def _persist_invocation_state(
+        self,
+        database,
+        item: _PersistenceItem,
+    ) -> None:
+        session = item.record["session"]
+        invocation = item.record["invocation"]
+        session_row = await database.get(SessionRow, str(item.session_id))
+        invocation_row = await database.get(
+            InvocationRow,
+            str(item.invocation_id),
+        )
+        if session_row is None or invocation_row is None:
+            raise RuntimeError("Invocation state references a missing admission.")
+        session_row.current_invocation_id = session.get("current_invocation_id")
+        session_row.updated_at_ms = int(session["updated_at_ms"])
+        invocation_row.state = str(invocation["state"])
+        invocation_row.input_json = str(invocation["input_json"])
+        invocation_row.result_json = invocation["result_json"]
+        invocation_row.error_json = invocation["error_json"]
+        invocation_row.updated_at_ms = int(invocation["updated_at_ms"])
 
     async def _persist_events(
         self,
@@ -947,9 +1222,18 @@ class DatabaseBackend:
             if (
                 row.id != str(item.record["event_id"])
                 or row.schema_version != item.record["schema_version"]
-                or row.type != item.record["event_type"]
+                or row.event_type != item.record["event_type"]
+                or row.event_name != item.record["event_name"]
+                or row.subject_type != item.record["subject_type"]
+                or row.subject_id != item.record["subject_id"]
                 or row.occurred_at_ms != item.record["occurred_at_ms"]
+                or row.elapsed_ns != item.record["elapsed_ns"]
+                or row.status != item.record["status"]
+                or row.timing_json != item.record["timing_json"]
                 or row.payload_json != _text(item.encoded)
+                or row.input_json != item.record["input_json"]
+                or row.output_json != item.record["output_json"]
+                or row.operations_json != item.record["operations_json"]
             ):
                 raise RuntimeError(
                     "RuntimeEvent sequence already contains different data: "
@@ -963,9 +1247,18 @@ class DatabaseBackend:
                     invocation_id=str(item.invocation_id),
                     sequence=int(item.record["sequence"]),
                     schema_version=int(item.record["schema_version"]),
-                    type=str(item.record["event_type"]),
+                    event_type=str(item.record["event_type"]),
+                    event_name=str(item.record["event_name"]),
+                    subject_type=str(item.record["subject_type"]),
+                    subject_id=str(item.record["subject_id"]),
                     occurred_at_ms=int(item.record["occurred_at_ms"]),
+                    elapsed_ns=item.record["elapsed_ns"],
+                    status=item.record["status"],
+                    timing_json=str(item.record["timing_json"]),
                     payload_json=_text(item.encoded),
+                    input_json=item.record["input_json"],
+                    output_json=item.record["output_json"],
+                    operations_json=item.record["operations_json"],
                 )
                 for item in items
                 if (
@@ -1008,50 +1301,120 @@ class DatabaseBackend:
                 grouped[invocation_id],
                 key=lambda value: int(value.record["sequence"]),
             )
-            state = await self._load_projection_state(database, row)
-            projection_sequence = self._projection_sequences.get(
-                UUID(invocation_id),
-                row.recovery_sequence or 0,
-            )
-            for event_item in ordered:
-                sequence = int(event_item.record["sequence"])
-                if sequence <= projection_sequence:
-                    continue
-                payload = self.serializer.loads(_text(event_item.encoded))
-                operations = tuple(
-                    StateOperation.model_validate(operation)
-                    for operation in payload["operations"]
-                )
-                state = apply_state_operations(state, operations)
-                projection_sequence = sequence
-
             final_sequence = int(item.record["sequence"])
             row.state = str(item.record["invocation_state"])
             row.execution_mode = str(item.record["execution_mode"])
             row.durable_sequence = max(row.durable_sequence, final_sequence)
+            row.result_json = item.record["invocation_result_json"]
+            row.error_json = item.record["invocation_error_json"]
             row.updated_at_ms = int(item.record["updated_at_ms"])
 
-            recovery_sequence = int(row.recovery_sequence or 0)
-            force_recovery = any(
-                bool(value.record["force_recovery_state"])
-                for value in ordered
+            recovery_row = await database.get(
+                RecoveryStateRow,
+                invocation_id,
             )
-            if (
-                force_recovery
-                or final_sequence - recovery_sequence
+            state: dict[str, Any] | None = None
+            projection_sequence = (
+                self._projection_sequences.get(UUID(invocation_id), 0)
+            )
+            if row.event_mode == "full":
+                state = await self._load_projection_state(
+                    database,
+                    row,
+                    recovery_row,
+                )
+                for event_item in ordered:
+                    sequence = int(event_item.record["sequence"])
+                    if sequence <= projection_sequence:
+                        continue
+                    raw_operations = event_item.record["operations_json"]
+                    if raw_operations is None:
+                        raise RuntimeError(
+                            "Full RuntimeEvent has no persisted StateOperations."
+                        )
+                    operations = tuple(
+                        StateOperation.model_validate(operation)
+                        for operation in self.serializer.loads(raw_operations)
+                    )
+                    state = apply_state_operations(state, operations)
+                    projection_sequence = sequence
+
+            checkpoint_item = max(
+                (
+                    value
+                    for value in ordered
+                    if value.record["recovery_state_json"] is not None
+                ),
+                key=lambda value: int(value.record["recovery_sequence"]),
+                default=None,
+            )
+            recovery_sequence = (
+                recovery_row.event_sequence
+                if recovery_row is not None
+                else 0
+            )
+            should_checkpoint_full = (
+                row.event_mode == "full"
+                and state is not None
+                and final_sequence - recovery_sequence
                 >= self.recovery_event_interval
-            ):
-                row.recovery_state_json = _text(
+            )
+            if checkpoint_item is not None:
+                checkpoint_sequence = int(
+                    checkpoint_item.record["recovery_sequence"]
+                )
+                checkpoint_state_json = str(
+                    checkpoint_item.record["recovery_state_json"]
+                )
+            elif should_checkpoint_full:
+                checkpoint_sequence = final_sequence
+                checkpoint_state_json = _text(
                     self.serializer.dumps_unchecked(state)
                 )
-                row.recovery_sequence = final_sequence
-                row.recovery_updated_at_ms = int(
-                    item.record["updated_at_ms"]
-                )
-                self._recovery_sequences[UUID(invocation_id)] = final_sequence
+            else:
+                checkpoint_sequence = None
+                checkpoint_state_json = None
 
-            self._durable_states[UUID(invocation_id)] = state
-            self._projection_sequences[UUID(invocation_id)] = final_sequence
+            context_state = (
+                self.serializer.loads(checkpoint_state_json)
+                if checkpoint_state_json is not None
+                else state
+            )
+            if context_state is not None:
+                item.record["session_context_json"] = _text(
+                    self.serializer.dumps_unchecked(
+                        context_state["session"]["context"]
+                    )
+                )
+
+            terminal = row.state in {
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted",
+            }
+            if terminal and row.event_mode == "standard":
+                if recovery_row is not None:
+                    await database.delete(recovery_row)
+                self._recovery_sequences.pop(UUID(invocation_id), None)
+            elif checkpoint_sequence is not None and checkpoint_state_json is not None:
+                if recovery_row is None:
+                    recovery_row = RecoveryStateRow(
+                        invocation_id=invocation_id,
+                        event_sequence=checkpoint_sequence,
+                        state_json=checkpoint_state_json,
+                        updated_at_ms=int(item.record["updated_at_ms"]),
+                    )
+                    database.add(recovery_row)
+                else:
+                    recovery_row.event_sequence = checkpoint_sequence
+                    recovery_row.state_json = checkpoint_state_json
+                    recovery_row.updated_at_ms = int(item.record["updated_at_ms"])
+                self._recovery_sequences[UUID(invocation_id)] = checkpoint_sequence
+
+            if state is not None:
+                self._durable_states[UUID(invocation_id)] = state
+                self._projection_sequences[UUID(invocation_id)] = final_sequence
 
         final_by_session: dict[str, _PersistenceItem] = {}
         for item in items:
@@ -1080,6 +1443,11 @@ class DatabaseBackend:
                         "session_updated_at_ms"
                     ],
                 )
+                context_json = final_by_session[row.id].record.get(
+                    "session_context_json"
+                )
+                if context_json is not None:
+                    row.context_json = str(context_json)
 
     async def _persist_artifacts(
         self,
@@ -1124,6 +1492,7 @@ class DatabaseBackend:
         self,
         database,
         row: InvocationRow,
+        recovery_row: RecoveryStateRow | None = None,
     ) -> dict[str, Any]:
         invocation_id = UUID(row.id)
         cached = self._durable_states.get(invocation_id)
@@ -1134,13 +1503,16 @@ class DatabaseBackend:
         ):
             return cached
 
-        if (
-            row.recovery_state_json is not None
-            and row.recovery_sequence is not None
-        ):
-            state = self.serializer.loads(row.recovery_state_json)
-            cursor = row.recovery_sequence
+        if recovery_row is None:
+            recovery_row = await database.get(RecoveryStateRow, row.id)
+        if recovery_row is not None:
+            state = self.serializer.loads(recovery_row.state_json)
+            cursor = recovery_row.event_sequence
         else:
+            if row.genesis_state_json is None:
+                raise RuntimeError(
+                    "Invocation cannot rebuild Runtime State in this Event mode."
+                )
             state = self.serializer.loads(row.genesis_state_json)
             cursor = 0
         if cursor < row.durable_sequence:
@@ -1156,17 +1528,22 @@ class DatabaseBackend:
                 )
             ).all()
             for event_row in rows:
-                payload = self.serializer.loads(event_row.payload_json)
+                if event_row.operations_json is None:
+                    raise RuntimeError(
+                        "RuntimeEvent tail cannot rebuild Runtime State."
+                    )
                 operations = tuple(
                     StateOperation.model_validate(operation)
-                    for operation in payload["operations"]
+                    for operation in self.serializer.loads(
+                        event_row.operations_json
+                    )
                 )
                 state = apply_state_operations(state, operations)
                 cursor = event_row.sequence
         self._durable_states[invocation_id] = state
         self._projection_sequences[invocation_id] = cursor
         self._recovery_sequences[invocation_id] = int(
-            row.recovery_sequence or 0
+            recovery_row.event_sequence if recovery_row is not None else 0
         )
         return state
 

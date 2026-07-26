@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from threading import RLock
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -24,7 +25,12 @@ PersistenceStatus = Literal[
     "unserializable",
 ]
 PersistenceBackendState = Literal["healthy", "retrying", "unavailable"]
-PersistenceKind = Literal["workflow_version", "admission", "event"]
+PersistenceKind = Literal[
+    "workflow_version",
+    "admission",
+    "invocation_state",
+    "event",
+]
 
 
 class PersistenceError(RuntimeError):
@@ -106,7 +112,12 @@ class PersistenceEnvelope:
     invocation_state: str | None = None
     execution_mode: str | None = None
     invocation_updated_at_ms: int | None = None
+    invocation_result: Any | None = None
+    invocation_error: dict[str, Any] | None = None
     event: RuntimeEvent | None = None
+    session_record: dict[str, Any] | None = None
+    invocation_record: dict[str, Any] | None = None
+    recovery_snapshot: ExecutionSnapshot | None = None
     force_recovery_checkpoint: bool = False
     id: UUID = field(default_factory=uuid4)
 
@@ -165,13 +176,42 @@ def freeze_event_envelope(
     invocation_state: str,
     execution_mode: str,
     invocation_updated_at_ms: int,
+    invocation_result: Any | None,
+    invocation_error: dict[str, Any] | None,
     event: RuntimeEvent,
+    recovery_snapshot: ExecutionSnapshot | None,
     force_recovery_checkpoint: bool,
 ) -> PersistenceEnvelope:
     """Copy mutable payload ownership once before crossing a thread boundary."""
 
     frozen_event = event.model_copy(deep=True)
-    estimated_bytes = 256 + _estimate_runtime_bytes(frozen_event.payload)
+    # ExecutionSnapshot.capture already detached this state from the live
+    # aggregate. It is private to this envelope, so copying it a second time
+    # would double the hottest Standard-mode checkpoint cost.
+    frozen_recovery = recovery_snapshot
+    estimated_bytes = 256 + _estimate_runtime_bytes(
+        {
+            "payload": frozen_event.payload,
+            "timing": frozen_event.timing,
+            "input": frozen_event.input,
+            "output": frozen_event.output,
+            "operations": (
+                None
+                if frozen_event.operations is None
+                else [
+                    operation.model_dump(mode="python")
+                    for operation in frozen_event.operations
+                ]
+            ),
+            "recovery_state": (
+                frozen_recovery.state
+                if frozen_recovery is not None
+                else None
+            ),
+            "invocation_result": invocation_result,
+            "invocation_error": invocation_error,
+        }
+    )
     return PersistenceEnvelope(
         kind="event",
         namespace=namespace,
@@ -182,8 +222,62 @@ def freeze_event_envelope(
         invocation_state=invocation_state,
         execution_mode=execution_mode,
         invocation_updated_at_ms=invocation_updated_at_ms,
+        invocation_result=deepcopy(invocation_result),
+        invocation_error=deepcopy(invocation_error),
         event=frozen_event,
+        recovery_snapshot=frozen_recovery,
         force_recovery_checkpoint=force_recovery_checkpoint,
+    )
+
+
+def freeze_invocation_state_envelope(
+    *,
+    namespace: str,
+    session_id: UUID,
+    invocation_id: UUID,
+    session_record: dict[str, Any],
+    invocation_record: dict[str, Any],
+) -> PersistenceEnvelope:
+    """Freeze the small Invocation projection used by minimal mode."""
+
+    frozen_session = {
+        key: deepcopy(value)
+        for key, value in session_record.items()
+        if key
+        in {
+            "id",
+            "namespace",
+            "workflow_id",
+            "session_key",
+            "current_invocation_id",
+            "created_at_ms",
+            "updated_at_ms",
+        }
+    }
+    frozen_invocation = {
+        key: deepcopy(value)
+        for key, value in invocation_record.items()
+        if key
+        in {
+            "id",
+            "session_id",
+            "state",
+            "event_mode",
+            "input",
+            "result",
+            "error",
+            "created_at_ms",
+            "updated_at_ms",
+        }
+    }
+    return PersistenceEnvelope(
+        kind="invocation_state",
+        namespace=namespace,
+        session_id=session_id,
+        invocation_id=invocation_id,
+        estimated_bytes=512 + _estimate_runtime_bytes(frozen_invocation),
+        session_record=frozen_session,
+        invocation_record=frozen_invocation,
     )
 
 
@@ -198,6 +292,7 @@ class PersistenceCoordinator:
         self._ready_set: set[str] = set()
         self._reservations: dict[UUID, PersistenceReservation] = {}
         self._outstanding_bytes: dict[UUID, int] = {}
+        self._outstanding_invocations: dict[UUID, UUID | None] = {}
         self._pending_bytes = 0
         self._durable_sequences: dict[UUID, int] = {}
         self._durable_admissions: set[UUID] = set()
@@ -299,6 +394,9 @@ class PersistenceCoordinator:
             self._outstanding_bytes[reservation.id] = (
                 reservation.estimated_bytes
             )
+            self._outstanding_invocations[reservation.id] = (
+                reservation.invocation_id
+            )
             self._pending_bytes += reservation.estimated_bytes
             return reservation
 
@@ -317,6 +415,15 @@ class PersistenceCoordinator:
                 else "__control__"
             )
             queue = self._incoming.setdefault(key, deque())
+            if (
+                envelope.kind == "event"
+                and envelope.recovery_snapshot is not None
+                and envelope.invocation_id is not None
+            ):
+                self._coalesce_queued_recovery_state(
+                    queue,
+                    invocation_id=envelope.invocation_id,
+                )
             queue.append(envelope)
             should_wake = not self._ready_sessions
             if key not in self._ready_set:
@@ -335,6 +442,35 @@ class PersistenceCoordinator:
                 # A stopped sink is a durability failure, not an
                 # execution-state rollback.
                 self.mark_unavailable(exc)
+
+    def _coalesce_queued_recovery_state(
+        self,
+        queue: deque[PersistenceEnvelope],
+        *,
+        invocation_id: UUID,
+    ) -> None:
+        """Keep only the newest queued RecoveryState for one Invocation."""
+
+        for index in range(len(queue) - 1, -1, -1):
+            previous = queue[index]
+            snapshot = previous.recovery_snapshot
+            if (
+                previous.invocation_id != invocation_id
+                or snapshot is None
+            ):
+                continue
+            removed_bytes = _estimate_runtime_bytes(snapshot.state)
+            reduced_bytes = max(256, previous.estimated_bytes - removed_bytes)
+            queue[index] = replace(
+                previous,
+                estimated_bytes=reduced_bytes,
+                recovery_snapshot=None,
+            )
+            tracked = self._outstanding_bytes.get(previous.id)
+            if tracked is not None:
+                self._outstanding_bytes[previous.id] = reduced_bytes
+                self._pending_bytes += reduced_bytes - tracked
+            return
 
     def cancel(self, reservation: PersistenceReservation) -> None:
         with self._lock:
@@ -512,6 +648,7 @@ class PersistenceCoordinator:
 
     def _remove_outstanding(self, envelope_id: UUID) -> None:
         size = self._outstanding_bytes.pop(envelope_id, None)
+        self._outstanding_invocations.pop(envelope_id, None)
         if size is not None:
             self._pending_bytes -= size
 
@@ -554,8 +691,9 @@ class PersistenceCoordinator:
                 return "degraded"
             durable = self._durable_sequences.get(invocation_id, 0)
             admission_durable = invocation_id in self._durable_admissions
+            pending = invocation_id in self._outstanding_invocations.values()
             health = self._health
-        if admission_durable and durable >= expected_sequence:
+        if admission_durable and durable >= expected_sequence and not pending:
             return "durable"
         return "degraded" if health.state == "unavailable" else "pending"
 

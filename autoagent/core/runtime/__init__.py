@@ -22,7 +22,13 @@ from autoagent.core.runtime.execution import (
     ResourceUsage,
     RuntimeErrorInfo,
 )
-from autoagent.core.runtime.event import RuntimeEvent, RuntimeEventRole
+from autoagent.core.runtime.event import (
+    RuntimeEvent,
+    RuntimeEventMode,
+    RuntimeEventSubjectType,
+    RuntimeEventType,
+    StateOperation,
+)
 from autoagent.core.runtime.artifact import ArtifactPolicy
 from autoagent.core.runtime.retention import RuntimeRetentionPolicy
 from autoagent.core.runtime.persistence import (
@@ -53,10 +59,8 @@ from autoagent.core.runtime.scheduler import (
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
-    RuntimeBoundary,
-    StateOperation,
     apply_state_operations,
-    build_boundary_state_operations,
+    build_state_operations,
     capture_execution_state,
     reduce_execution_state,
 )
@@ -135,8 +139,9 @@ __all__ = [
     "ResourceUsage",
     "RuntimeErrorInfo",
     "RuntimeEvent",
-    "RuntimeEventRole",
-    "RuntimeBoundary",
+    "RuntimeEventMode",
+    "RuntimeEventSubjectType",
+    "RuntimeEventType",
     "StateOperation",
     "RuntimeContext",
     "RuntimeConcurrencyController",
@@ -156,7 +161,7 @@ __all__ = [
     "WaitingExecution",
     "utc_timestamp_ms",
     "capture_execution_state",
-    "build_boundary_state_operations",
+    "build_state_operations",
     "apply_state_operations",
     "reduce_execution_state",
 ]

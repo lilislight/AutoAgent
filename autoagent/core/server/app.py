@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import (
+    RuntimeEventMode,
     RuntimeSerializationError,
     SessionBusyError,
 )
@@ -31,6 +32,7 @@ class InvocationSubmitRequest(_ApiModel):
     input: dict[str, Any] | None = None
     session_key: str | None = None
     entry_node_id: str | None = None
+    event_mode: RuntimeEventMode = "standard"
 
 
 class InvocationSubmitResponse(_ApiModel):
@@ -182,6 +184,7 @@ class AutoAgentServer:
                     input=body.input,
                     session_id=body.session_key,
                     entry_node_id=body.entry_node_id,
+                    event_mode=body.event_mode,
                 )
             except SessionBusyError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
+from time import perf_counter_ns
 from typing import Any
 from uuid import UUID
 
@@ -16,14 +17,18 @@ from autoagent.core.runtime import (
     InputMappingContext,
     IncomingOutput,
     Invocation,
+    DirectOperatorExecution,
+    EdgeEvaluation,
     NodeExecution,
     OutputBindingContext,
+    ParallelOperatorExecution,
     RuntimeErrorInfo,
     RuntimeEvent,
+    RuntimeEventSubjectType,
+    RuntimeEventType,
     RuntimeStore,
-    RuntimeBoundary,
     Session,
-    build_boundary_state_operations,
+    build_state_operations,
 )
 from autoagent.core.runtime.context import capture_hook_context
 from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance_key
@@ -33,6 +38,58 @@ from autoagent.core.scheduler import Scheduler
 
 
 _MISSING = object()
+
+
+def _event_identity(event_name: str) -> tuple[RuntimeEventType, str]:
+    if event_name.startswith("invocation."):
+        return "state_change", event_name
+    if event_name.startswith("recovery."):
+        return "recovery", event_name
+    if event_name.startswith("wait."):
+        return "wait", event_name
+    if event_name.startswith("edge.") or event_name.startswith("routing."):
+        return "routing", event_name
+    if event_name.startswith("operator_call."):
+        return "operator_call", event_name
+    if event_name.startswith("node."):
+        return "state_change", event_name
+    return "phase", event_name
+
+
+def _event_subject(
+    invocation: Invocation,
+    *,
+    event_type: RuntimeEventType,
+    event_name: str,
+    node_execution_ids: tuple[UUID, ...],
+    detail: dict[str, Any] | None,
+) -> tuple[RuntimeEventSubjectType, str]:
+    data = detail or {}
+    if event_type == "routing" and data.get("edge_id") is not None:
+        return "edge", str(data["edge_id"])
+    if event_type == "operator_call" and data.get("operator_call_id") is not None:
+        return "operator_call", str(data["operator_call_id"])
+    if event_type == "wait" and data.get("wait_key") is not None:
+        return "wait", str(data["wait_key"])
+    if event_type == "recovery":
+        return "recovery", str(invocation.id)
+    if node_execution_ids:
+        return "node", str(node_execution_ids[0])
+    if data.get("node_execution_id") is not None:
+        return "node", str(data["node_execution_id"])
+    if data.get("node_id") is not None:
+        return "node", str(data["node_id"])
+    return "invocation", str(invocation.id)
+
+
+def _event_status(
+    event_name: str,
+    detail: dict[str, Any] | None,
+) -> str | None:
+    data = detail or {}
+    if data.get("state") is not None:
+        return str(data["state"])
+    return event_name.rsplit(".", 1)[-1] if "." in event_name else None
 
 
 class WorkflowExecutor:
@@ -63,44 +120,72 @@ class WorkflowExecutor:
         self.node_executor = node_executor or NodeExecutor()
         self.runtime_store = runtime_store
 
-    async def _commit_boundary(
+    async def _record_event(
         self,
         session: Session,
         invocation: Invocation,
-        boundary: RuntimeBoundary,
+        event_name: str,
         *,
         node_execution_ids: tuple[UUID, ...] = (),
         force_recovery_checkpoint: bool = False,
         detail: dict[str, Any] | None = None,
-    ) -> RuntimeEvent:
-        """Generate a sequenced state event, then apply it to RuntimeStore."""
+        elapsed_ns: int | None = None,
+        timing: dict[str, int] | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        occurred_at_ms: int | None = None,
+    ) -> RuntimeEvent | None:
+        """Record one mode-dependent Runtime fact after its change is applied."""
 
+        event_type, normalized_name = _event_identity(event_name)
+        if invocation.event_mode == "minimal":
+            if (
+                normalized_name.startswith("invocation.")
+                or normalized_name in {"wait.created", "wait.resumed"}
+            ):
+                await self.runtime_store.apersist_invocation_state(
+                    session,
+                    invocation,
+                )
+            return None
+
+        if invocation.event_mode == "standard" and event_type == "phase":
+            return None
         sequence = invocation.next_event_sequence()
-        previous_state = self.runtime_store.committed_state(invocation.id)
-        operations = build_boundary_state_operations(
-            previous_state,
-            session,
+        operations = (
+            build_state_operations(
+                self.runtime_store.reduced_state(invocation.id),
+                session,
+                invocation,
+                node_execution_ids=node_execution_ids,
+            )
+            if invocation.event_mode == "full"
+            else None
+        )
+        subject_type, subject_id = _event_subject(
             invocation,
+            event_type=event_type,
+            event_name=normalized_name,
             node_execution_ids=node_execution_ids,
+            detail=detail,
         )
         event = RuntimeEvent(
             invocation_id=invocation.id,
             sequence=sequence,
-            type=boundary,
-            occurred_at_ms=utc_timestamp_ms(),
-            payload={
-                "detail": deepcopy(detail or {}),
-                "operations": [
-                    {
-                        "op": operation.op,
-                        "path": list(operation.path),
-                        "value": operation.value,
-                    }
-                    for operation in operations
-                ],
-            },
+            event_type=event_type,
+            event_name=normalized_name,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            occurred_at_ms=occurred_at_ms or utc_timestamp_ms(),
+            elapsed_ns=elapsed_ns,
+            status=_event_status(normalized_name, detail),
+            timing=dict(timing or {}),
+            payload=deepcopy(detail or {}),
+            input=deepcopy(input) if invocation.event_mode == "full" else None,
+            output=deepcopy(output) if invocation.event_mode == "full" else None,
+            operations=operations,
         )
-        applied = await self.runtime_store.aapply_event(
+        applied = await self.runtime_store.arecord_event(
             session,
             invocation,
             event,
@@ -135,7 +220,23 @@ class WorkflowExecutor:
         session: Session,
         invocation: Invocation,
     ) -> Invocation:
+        if invocation.state == "created":
+            invocation.mark_running()
+            await self._record_event(
+                session,
+                invocation,
+                "invocation.running",
+                detail={"state": "running"},
+            )
+        skipped_before_initialization = set(
+            invocation.scheduler.skipped_node_instances
+        )
         self.scheduler.initialize(workflow_ir=workflow_ir, invocation=invocation)
+        await self._record_new_skipped_nodes(
+            session,
+            invocation,
+            skipped_before_initialization,
+        )
         try:
             return await self._drive(
                 workflow_ir=workflow_ir,
@@ -249,10 +350,10 @@ class WorkflowExecutor:
             )
 
         invocation.mark_running()
-        await self._commit_boundary(
+        await self._record_event(
             session,
             invocation,
-            "routing.committed",
+            "recovery.requeued",
             node_execution_ids=tuple(changed_execution_ids),
             detail={"recovery_requeued": [str(value) for value in changed_execution_ids]},
         )
@@ -294,7 +395,7 @@ class WorkflowExecutor:
             if execution.state in {"created", "ready", "running"}
         )
         invocation.interrupt_active_node_executions(error)
-        await self._commit_boundary(
+        await self._record_event(
             session,
             invocation,
             "recovery.interrupted",
@@ -315,24 +416,31 @@ class WorkflowExecutor:
         while True:
             transitions = invocation.scheduler.drain_transitions()
             if transitions:
+                skipped_before_routing = set(
+                    invocation.scheduler.skipped_node_instances
+                )
                 await self.scheduler.next(
                     workflow_ir=workflow_ir,
                     session=session,
                     invocation=invocation,
                     transitions=transitions,
+                    on_edge_evaluated=lambda execution, evaluation: (
+                        self._record_edge_event(
+                            session,
+                            invocation,
+                            execution,
+                            evaluation,
+                        )
+                    ),
                 )
-                await self._commit_boundary(
+                await self._record_new_skipped_nodes(
                     session,
                     invocation,
-                    "routing.committed",
-                    node_execution_ids=tuple(
-                        transition.node_execution_id for transition in transitions
-                    ),
-                    detail=self._routing_boundary_detail(invocation, transitions),
+                    skipped_before_routing,
                 )
                 if invocation.state == "failed":
                     abandoned = await self._abandon_active_work(invocation)
-                    await self._commit_boundary(
+                    await self._record_event(
                         session,
                         invocation,
                         "invocation.failed",
@@ -358,7 +466,7 @@ class WorkflowExecutor:
                     if invocation.state == "interrupted":
                         return invocation
                     abandoned = await self._abandon_active_work(invocation)
-                    await self._commit_boundary(
+                    await self._record_event(
                         session,
                         invocation,
                         "invocation.failed",
@@ -385,11 +493,17 @@ class WorkflowExecutor:
 
             if invocation.scheduler.waiting_executions:
                 invocation.mark_waiting()
-                await self._commit_boundary(
+                await self._record_event(
                     session,
                     invocation,
-                    "wait.committed",
+                    "wait.created",
                     force_recovery_checkpoint=True,
+                    detail={
+                        "state": "waiting",
+                        "wait_keys": sorted(
+                            invocation.scheduler.waiting_executions
+                        ),
+                    },
                 )
                 return invocation
 
@@ -400,14 +514,14 @@ class WorkflowExecutor:
                 )
                 if invocation.deferred_terminal_state == "interrupted":
                     invocation.mark_interrupted(error)
-                    boundary: RuntimeBoundary = "recovery.interrupted"
+                    terminal_event_name = "recovery.interrupted"
                 else:
                     invocation.mark_failed(error)
-                    boundary = "invocation.failed"
-                await self._commit_boundary(
+                    terminal_event_name = "invocation.failed"
+                await self._record_event(
                     session,
                     invocation,
-                    boundary,
+                    terminal_event_name,
                 )
                 return invocation
 
@@ -418,7 +532,7 @@ class WorkflowExecutor:
                         invocation=invocation,
                     )
                 )
-                await self._commit_boundary(
+                await self._record_event(
                     session,
                     invocation,
                     "invocation.completed",
@@ -431,12 +545,64 @@ class WorkflowExecutor:
                     message="Workflow has no ready, running, waiting, or completed exit node.",
                 )
             )
-            await self._commit_boundary(
+            await self._record_event(
                 session,
                 invocation,
                 "invocation.failed",
             )
             return invocation
+
+    async def _record_edge_event(
+        self,
+        session: Session,
+        invocation: Invocation,
+        execution: NodeExecution,
+        evaluation: EdgeEvaluation,
+    ) -> None:
+        """Freeze one edge decision before Scheduler evaluates another edge."""
+
+        await self._record_event(
+            session,
+            invocation,
+            "edge.evaluated",
+            node_execution_ids=(execution.id,),
+            detail={
+                "edge_id": evaluation.edge_id,
+                "node_id": execution.node_id,
+                "source_execution_id": str(execution.id),
+                "target_node_id": evaluation.target_node_id,
+                "state": evaluation.state,
+                "selected": evaluation.selected,
+                "reason": evaluation.reason,
+            },
+            elapsed_ns=evaluation.elapsed_ns,
+            timing=(
+                {"execution_ns": evaluation.elapsed_ns}
+                if evaluation.elapsed_ns is not None
+                else None
+            ),
+            occurred_at_ms=evaluation.updated_at_ms,
+        )
+
+    async def _record_new_skipped_nodes(
+        self,
+        session: Session,
+        invocation: Invocation,
+        previous: set[str],
+    ) -> None:
+        for instance_key in sorted(
+            invocation.scheduler.skipped_node_instances - previous
+        ):
+            await self._record_event(
+                session,
+                invocation,
+                "node.skipped",
+                detail={
+                    "node_id": instance_key.split("@", 1)[0],
+                    "node_instance_key": instance_key,
+                    "state": "skipped",
+                },
+            )
 
     async def _cancel_invocation(
         self,
@@ -456,7 +622,7 @@ class WorkflowExecutor:
         invocation.cancel_active_node_executions(error)
         invocation.mark_cancelled()
         await self.node_executor.abandon(invocation.execution_mailbox)
-        await self._commit_boundary(
+        await self._record_event(
             session,
             invocation,
             "invocation.cancelled",
@@ -533,14 +699,15 @@ class WorkflowExecutor:
         invocation.scheduler.remove_waiting_execution(wait_key)
         final_output = node_execution.output if output is _MISSING else output
         node_execution.output = final_output
-        await self._commit_boundary(
+        await self._record_event(
             session,
             invocation,
-            "node.output_ready",
+            "wait.resumed",
             node_execution_ids=(node_execution.id,),
             detail={
                 "node_id": node_execution.node_id,
                 "node_execution_id": str(node_execution.id),
+                "wait_key": wait_key,
                 "resumed": True,
             },
         )
@@ -551,10 +718,10 @@ class WorkflowExecutor:
             node_execution=node_execution,
             output=final_output,
         )
-        await self._commit_boundary(
+        await self._record_event(
             session,
             invocation,
-            "node.committed",
+            f"node.{node_execution.state}",
             node_execution_ids=(node_execution.id,),
             detail={
                 "node_id": node_execution.node_id,
@@ -565,14 +732,15 @@ class WorkflowExecutor:
 
         if not invocation.scheduler.waiting_executions:
             invocation.mark_running()
-        await self._commit_boundary(
-            session,
-            invocation,
-            "resume.committed",
-            node_execution_ids=(node_execution.id,),
-            force_recovery_checkpoint=True,
-            detail={"wait_key": wait_key, "node_id": node_execution.node_id},
-        )
+            await self._record_event(
+                session,
+                invocation,
+                "invocation.running",
+                detail={
+                    "state": "running",
+                    "resumed_wait_key": wait_key,
+                },
+            )
         return await self._drive(
             workflow_ir=workflow_ir,
             session=session,
@@ -635,10 +803,10 @@ class WorkflowExecutor:
                         invocation=invocation,
                         request=request,
                     )
-                    await self._commit_boundary(
+                    await self._record_event(
                         session,
                         invocation,
-                        "routing.committed",
+                        "recovery.node_skipped",
                         detail={
                             "recovery_blocked_node_id": request.node_id,
                         },
@@ -667,19 +835,28 @@ class WorkflowExecutor:
             invocation.scheduler.scheduled_node_instances.add(
                 node_instance_key(node_ir.id, request.execution_scope)
             )
-            await self._commit_boundary(
+            node_execution.base_invocation_context_revision = (
+                invocation.context.revision
+            )
+            node_execution.base_session_context_revision = (
+                session.context.revision
+            )
+            invocation.mark_node_running(node_execution.id)
+            await self._record_event(
                 session,
                 invocation,
-                "node.activation_ready",
+                "node.running",
                 node_execution_ids=(node_execution.id,),
                 detail={
                     "node_id": node_ir.id,
                     "node_execution_id": str(node_execution.id),
+                    "state": "running",
                 },
             )
 
             mapping_phase = "input_mapping"
             mapping_failure_code = "INPUT_MAPPING_FAILED"
+            mapping_started_ns = perf_counter_ns()
             try:
                 map_policy = self._map_policy_for_request(workflow_ir, request)
                 node_input = await self._build_node_input(
@@ -715,6 +892,20 @@ class WorkflowExecutor:
                             node_execution.idempotency_key
                         )
             except Exception as exc:
+                mapping_elapsed_ns = max(0, perf_counter_ns() - mapping_started_ns)
+                await self._record_event(
+                    session,
+                    invocation,
+                    "input_mapping.completed",
+                    node_execution_ids=(node_execution.id,),
+                    detail={
+                        "node_id": node_ir.id,
+                        "state": "failed",
+                        "error_type": type(exc).__name__,
+                    },
+                    elapsed_ns=mapping_elapsed_ns,
+                    timing={"execution_ns": mapping_elapsed_ns},
+                )
                 # Mapping is a workflow data-shaping phase, not an OperatorExecution.
                 # Finalize the node here so retry and operator fallback cannot run.
                 invocation.mark_node_failed(
@@ -728,24 +919,34 @@ class WorkflowExecutor:
                         },
                     ),
                 )
-                await self._commit_boundary(
+                await self._record_event(
                     session,
                     invocation,
-                    "node.committed",
+                    "node.failed",
                     node_execution_ids=(node_execution.id,),
-                    detail={"node_id": node_ir.id, "phase": mapping_phase},
+                    detail={
+                        "node_id": node_ir.id,
+                        "phase": mapping_phase,
+                        "state": "failed",
+                    },
                 )
                 continue
-            invocation.mark_node_running(node_execution.id, input=node_input)
-            await self._commit_boundary(
+            mapping_elapsed_ns = max(0, perf_counter_ns() - mapping_started_ns)
+            node_execution.input = node_input
+            invocation.updated_at_ms = utc_timestamp_ms()
+            await self._record_event(
                 session,
                 invocation,
-                "node.input_ready",
+                "input_mapping.completed",
                 node_execution_ids=(node_execution.id,),
                 detail={
                     "node_id": node_ir.id,
                     "node_execution_id": str(node_execution.id),
+                    "state": "completed",
                 },
+                elapsed_ns=mapping_elapsed_ns,
+                timing={"execution_ns": mapping_elapsed_ns},
+                output=node_input,
             )
 
             resource_error = self._check_operator_attempt_resource(
@@ -768,6 +969,7 @@ class WorkflowExecutor:
                     map_policy=map_policy,
                     concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
                     recovery=invocation.execution_mode == "recovery",
+                    event_mode=invocation.event_mode,
                     hook_context=capture_hook_context(
                         invocation_input=invocation.input,
                         invocation_context=invocation.context,
@@ -798,15 +1000,62 @@ class WorkflowExecutor:
             )
             return None
 
-        existing_execution_ids = {
-            execution.id
-            for execution in node_execution.operator_executions
-        }
+        before_operator = tuple(
+            phase for phase in result.phases
+            if phase.name == "item_selection.completed"
+        )
+        after_operator = tuple(
+            phase for phase in result.phases
+            if phase.name != "item_selection.completed"
+        )
+        for phase in before_operator:
+            await self._record_event(
+                session,
+                invocation,
+                phase.name,
+                node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_execution.node_id,
+                    "state": phase.status,
+                },
+                elapsed_ns=phase.elapsed_ns,
+                timing=phase.timing,
+                input=phase.input,
+                output=phase.output,
+                occurred_at_ms=phase.occurred_at_ms,
+            )
         for operator_execution in result.operator_executions:
-            if operator_execution.id not in existing_execution_ids:
+            if not any(
+                existing.id == operator_execution.id
+                for existing in node_execution.operator_executions
+            ):
                 node_execution.operator_executions.append(operator_execution)
-                existing_execution_ids.add(operator_execution.id)
+            await self._record_operator_call(
+                session,
+                invocation,
+                node_execution,
+                operator_execution,
+                logical_elapsed_ns=result.operator_elapsed_ns,
+            )
         node_execution.resource_usage = result.resource_usage
+        if after_operator and result.state == "completed":
+            node_execution.output = result.output
+        for phase in after_operator:
+            await self._record_event(
+                session,
+                invocation,
+                phase.name,
+                node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_execution.node_id,
+                    "state": phase.status,
+                },
+                elapsed_ns=phase.elapsed_ns,
+                timing=phase.timing,
+                input=phase.input,
+                output=phase.output,
+                occurred_at_ms=phase.occurred_at_ms,
+            )
 
         node_ir = workflow_ir.nodes[node_execution.node_id]
 
@@ -817,28 +1066,22 @@ class WorkflowExecutor:
         )
         if runtime_error is not None:
             invocation.mark_node_failed(node_execution.id, runtime_error)
-            await self._commit_boundary(
+            await self._record_event(
                 session,
                 invocation,
-                "node.committed",
+                "node.failed",
                 node_execution_ids=(node_execution.id,),
+                detail={
+                    "node_id": node_execution.node_id,
+                    "state": "failed",
+                },
             )
             return node_execution.id
 
         if result.state == "completed":
-            # output_ready is the restart/debug point after Operator aggregation
-            # and before output_binding is allowed to mutate either Context.
             node_execution.output = result.output
-            await self._commit_boundary(
-                session,
-                invocation,
-                "node.output_ready",
-                node_execution_ids=(node_execution.id,),
-                detail={
-                    "node_id": node_execution.node_id,
-                    "node_execution_id": str(node_execution.id),
-                },
-            )
+            has_output_binding = callable(node_ir.output_binding)
+            binding_started_ns = perf_counter_ns()
             try:
                 await self._run_output_binding(
                     workflow_ir=workflow_ir,
@@ -848,6 +1091,25 @@ class WorkflowExecutor:
                     output=result.output,
                 )
             except Exception as exc:
+                binding_elapsed_ns = max(
+                    0,
+                    perf_counter_ns() - binding_started_ns,
+                )
+                if has_output_binding:
+                    await self._record_event(
+                        session,
+                        invocation,
+                        "output_binding.completed",
+                        node_execution_ids=(node_execution.id,),
+                        detail={
+                            "node_id": node_execution.node_id,
+                            "state": "failed",
+                            "error_type": type(exc).__name__,
+                        },
+                        elapsed_ns=binding_elapsed_ns,
+                        timing={"execution_ns": binding_elapsed_ns},
+                        input=result.output,
+                    )
                 # Binding runs after successful operator execution. Its failure
                 # rolls back its isolated Context copies and finalizes the node
                 # without retrying or selecting another operator.
@@ -864,6 +1126,24 @@ class WorkflowExecutor:
                 )
                 session.mark_context_updated()
             else:
+                binding_elapsed_ns = max(
+                    0,
+                    perf_counter_ns() - binding_started_ns,
+                )
+                if has_output_binding:
+                    await self._record_event(
+                        session,
+                        invocation,
+                        "output_binding.completed",
+                        node_execution_ids=(node_execution.id,),
+                        detail={
+                            "node_id": node_execution.node_id,
+                            "state": "completed",
+                        },
+                        elapsed_ns=binding_elapsed_ns,
+                        timing={"execution_ns": binding_elapsed_ns},
+                        input=result.output,
+                    )
                 invocation.mark_node_completed(node_execution.id, result.output)
                 session.mark_context_updated()
         elif result.state == "waiting":
@@ -892,18 +1172,101 @@ class WorkflowExecutor:
                     message="Node execution failed.",
                 ),
             )
-        await self._commit_boundary(
+        await self._record_event(
             session,
             invocation,
-            "node.committed",
+            f"node.{node_execution.state}",
             node_execution_ids=(node_execution.id,),
             detail={
                 "node_id": node_execution.node_id,
                 "node_execution_id": str(node_execution.id),
                 "state": node_execution.state,
             },
+            elapsed_ns=(
+                max(
+                    0,
+                    perf_counter_ns() - node_execution.started_at_monotonic_ns,
+                )
+                if node_execution.started_at_monotonic_ns
+                else None
+            ),
+            timing={
+                key: value
+                for key, value in {
+                    "concurrency_slot_ns": (
+                        node_execution.resource_usage.concurrency_wait_ns
+                    ),
+                    "thread_pool_queue_ns": (
+                        node_execution.resource_usage.thread_pool_queue_ns
+                    ),
+                    "retry_backoff_ns": (
+                        node_execution.resource_usage.retry_backoff_ns
+                    ),
+                }.items()
+                if value
+            },
         )
         return node_execution.id
+
+    async def _record_operator_call(
+        self,
+        session: Session,
+        invocation: Invocation,
+        node_execution: NodeExecution,
+        operator_execution: DirectOperatorExecution | ParallelOperatorExecution,
+        *,
+        logical_elapsed_ns: int,
+    ) -> None:
+        if isinstance(operator_execution, DirectOperatorExecution):
+            usage = operator_execution.resource_usage
+            detail = {
+                "node_id": node_execution.node_id,
+                "operator_call_id": str(operator_execution.id),
+                "operator_id": operator_execution.operator_id,
+                "reason": operator_execution.reason,
+                "state": operator_execution.state,
+            }
+            await self._record_event(
+                session,
+                invocation,
+                "operator_call.completed",
+                node_execution_ids=(node_execution.id,),
+                detail=detail,
+                elapsed_ns=usage.duration_ns,
+                timing={
+                    key: value
+                    for key, value in {
+                        "execution_ns": usage.execution_ns,
+                        "thread_pool_queue_ns": usage.thread_pool_queue_ns,
+                    }.items()
+                    if value
+                },
+                input=operator_execution.input,
+                output=operator_execution.output,
+                occurred_at_ms=operator_execution.ended_at_ms,
+            )
+            return
+
+        summary = operator_execution.summary
+        await self._record_event(
+            session,
+            invocation,
+            "operator_call.completed",
+            node_execution_ids=(node_execution.id,),
+            detail={
+                "node_id": node_execution.node_id,
+                "operator_call_id": str(operator_execution.id),
+                "kind": operator_execution.kind,
+                "operator_ids": list(operator_execution.operator_ids),
+                "state": operator_execution.state,
+                "summary": summary.to_record(),
+            },
+            elapsed_ns=logical_elapsed_ns,
+            timing={
+                "execution_ns": summary.total_duration_ns,
+            },
+            occurred_at_ms=operator_execution.ended_at_ms,
+        )
 
     async def _build_node_input(
         self,
@@ -1017,29 +1380,36 @@ class WorkflowExecutor:
         node_ir = workflow_ir.nodes[node_execution.node_id]
         if not callable(node_ir.output_binding):
             return
-        # User hooks operate on isolated working Contexts. A successful
-        # node.committed boundary publishes both together; an exception cannot
-        # leak a half-applied Context into the authoritative Runtime.
-        original_invocation_context = invocation.context
-        original_session_context = session.context
-        invocation.context = deepcopy(original_invocation_context)
-        session.context = deepcopy(original_session_context)
-        try:
-            await invoke_hook_async(
-                node_ir.output_binding,
-                OutputBindingContext.create(
-                    invocation_input=invocation.input,
-                    invocation_context=invocation.context,
-                    session_context=session.context,
-                    outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
-                    node_id=node_ir.local_id or node_ir.id,
-                    output=output,
-                ),
-            )
-        except BaseException:
-            invocation.context = original_invocation_context
-            session.context = original_session_context
-            raise
+        # WorkflowExecutor is the single Context writer. The hook works on two
+        # detached copies; both candidate commits are validated before either
+        # authoritative Context reference is replaced.
+        working_invocation_context = deepcopy(invocation.context)
+        working_session_context = deepcopy(session.context)
+        await invoke_hook_async(
+            node_ir.output_binding,
+            OutputBindingContext.create(
+                invocation_input=invocation.input,
+                invocation_context=working_invocation_context,
+                session_context=working_session_context,
+                outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
+                node_id=node_ir.local_id or node_ir.id,
+                output=output,
+            ),
+        )
+        candidate_invocation_context = deepcopy(invocation.context)
+        candidate_session_context = deepcopy(session.context)
+        candidate_invocation_context.commit_isolated(
+            working_invocation_context,
+            base_revision=node_execution.base_invocation_context_revision,
+            node_id=node_execution.node_id,
+        )
+        candidate_session_context.commit_isolated(
+            working_session_context,
+            base_revision=node_execution.base_session_context_revision,
+            node_id=node_execution.node_id,
+        )
+        invocation.context = candidate_invocation_context
+        session.context = candidate_session_context
 
     async def _complete_resumed_execution(
         self,
@@ -1103,28 +1473,6 @@ class WorkflowExecutor:
                 execution_scope=execution.execution_scope,
             ),
         )
-
-    def _routing_boundary_detail(
-        self,
-        invocation: Invocation,
-        transitions: list[Any],
-    ) -> dict[str, Any]:
-        """Identify changed graph decisions without duplicating reducer state."""
-
-        source_ids = {transition.node_execution_id for transition in transitions}
-        evaluation_ids: list[str] = []
-        for execution_id in source_ids:
-            execution = invocation.get_node_execution(execution_id)
-            if execution is None:
-                continue
-            evaluation_ids.extend(
-                str(evaluation.id)
-                for evaluation in execution.edge_evaluations
-            )
-        return {
-            "source_execution_ids": [str(value) for value in source_ids],
-            "edge_evaluation_ids": evaluation_ids,
-        }
 
     def _check_node_execution_resource(
         self,

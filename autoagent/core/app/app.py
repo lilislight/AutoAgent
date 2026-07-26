@@ -23,6 +23,7 @@ from autoagent.core.runtime import (
     Invocation,
     JsonRuntimeSerializer,
     RuntimeCodec,
+    RuntimeEventMode,
     RuntimeStore,
     Session,
     SessionBusyError,
@@ -380,6 +381,7 @@ class AutoAgentApp:
         *,
         session_id: str | None = None,
         entry_node_id: str | None = None,
+        event_mode: RuntimeEventMode = "standard",
     ) -> Invocation:
         """Invoke a Workflow from synchronous code.
 
@@ -393,6 +395,7 @@ class AutoAgentApp:
                 input=input,
                 session_id=session_id,
                 entry_node_id=entry_node_id,
+                event_mode=event_mode,
             ),
         )
 
@@ -403,6 +406,7 @@ class AutoAgentApp:
         *,
         session_id: str | None = None,
         entry_node_id: str | None = None,
+        event_mode: RuntimeEventMode = "standard",
     ) -> Invocation:
         """Invoke a Workflow through the native async execution pipeline.
 
@@ -427,6 +431,7 @@ class AutoAgentApp:
                     input=input,
                     session_id=session_id,
                     entry_node_id=entry_node_id,
+                    event_mode=event_mode,
                 )
             )
         self._ensure_open()
@@ -437,6 +442,7 @@ class AutoAgentApp:
             input=input,
             session_id=session_id,
             entry_node_id=entry_node_id,
+            event_mode=event_mode,
         )
         try:
             if prepared.recover_existing:
@@ -462,6 +468,7 @@ class AutoAgentApp:
         *,
         session_id: str | None = None,
         entry_node_id: str | None = None,
+        event_mode: RuntimeEventMode = "standard",
     ) -> _PreparedInvocation:
         """Durably admit work without introducing background-task semantics."""
 
@@ -472,6 +479,7 @@ class AutoAgentApp:
                     input=input,
                     session_id=session_id,
                     entry_node_id=entry_node_id,
+                    event_mode=event_mode,
                 )
             )
         self._ensure_open()
@@ -481,6 +489,7 @@ class AutoAgentApp:
             input=input,
             session_id=session_id,
             entry_node_id=entry_node_id,
+            event_mode=event_mode,
         )
 
     async def _aexecute_admitted(
@@ -540,12 +549,13 @@ class AutoAgentApp:
         wait_key: str,
         output: Any = _MISSING,
     ) -> Invocation:
-        """Atomically claim and resume one persisted external wait.
+        """Atomically claim and resume one external wait.
 
         The Store validates both Workflow structure and Operator environment
-        before changing the invocation from ``waiting`` to ``running``. A
-        consumed wait key cannot be resumed again, including after process
-        restart when a durable RuntimeStore is used.
+        before changing the invocation from ``waiting`` to ``running``.
+        Standard and Full waits survive a process restart with a durable
+        backend; Minimal waits intentionally exist only in current process
+        memory.
         """
 
         if not self._runtime_loop.is_current():
@@ -648,9 +658,12 @@ class AutoAgentApp:
         *,
         session_id: str | None,
         entry_node_id: str | None,
+        event_mode: RuntimeEventMode,
     ) -> _PreparedInvocation:
         """Compile, persist snapshot, check session admission, and claim liveness."""
 
+        if event_mode not in {"minimal", "standard", "full"}:
+            raise ValueError(f"Invalid event_mode: {event_mode}")
         workflow_ir = self._get_or_compile_workflow(workflow)
         workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
         await self.runtime_store.asave_workflow_snapshot(
@@ -693,6 +706,7 @@ class AutoAgentApp:
             session=session,
             entry_node_id=selected_entry_node_id,
             input=input,
+            event_mode=event_mode,
         )
 
     async def _prepare_fresh_invocation(
@@ -703,6 +717,7 @@ class AutoAgentApp:
         session: Session,
         entry_node_id: str,
         input: dict[str, Any] | None,
+        event_mode: RuntimeEventMode,
     ) -> _PreparedInvocation:
         invocation = Invocation(
             workflow_id=workflow_ir.workflow_id,
@@ -711,6 +726,7 @@ class AutoAgentApp:
             workflow_operator_manifest_hash=workflow_snapshot.operator_manifest_hash,
             entry_node_id=entry_node_id,
             input=input,
+            event_mode=event_mode,
         )
         self._set_invocation_live(invocation.id, True)
         try:

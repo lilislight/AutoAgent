@@ -29,12 +29,13 @@ from autoagent import (
     WorkflowPolicy,
 )
 from autoagent.core.runtime import (
+    ArtifactPolicy,
     Invocation,
     PersistenceEnvelope,
     RuntimeEvent,
     RuntimeStore,
     SessionBusyError,
-    build_boundary_state_operations,
+    build_state_operations,
     capture_execution_state,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
@@ -45,6 +46,8 @@ from autoagent.core.runtime.backends.database import (
 from autoagent.core.runtime.backends.models import (
     ArtifactRow,
     InvocationRow,
+    RecoveryStateRow,
+    RuntimeEventRow,
     SessionRow,
 )
 
@@ -79,6 +82,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 "sessions",
                 "invocations",
                 "runtime_events",
+                "runtime_recovery_states",
                 "artifacts",
             },
             names,
@@ -104,8 +108,11 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             table_columns("workflow_versions")
         )
         self.assertIn("genesis_state_json", invocation_columns)
-        self.assertIn("recovery_state_json", invocation_columns)
-        self.assertIn("recovery_sequence", invocation_columns)
+        self.assertIn("event_mode", invocation_columns)
+        self.assertIn("input_json", invocation_columns)
+        self.assertIn("result_json", invocation_columns)
+        self.assertNotIn("recovery_state_json", invocation_columns)
+        self.assertNotIn("recovery_sequence", invocation_columns)
         self.assertNotIn("state_json", invocation_columns)
         self.assertNotIn("snapshot_json", workflow_columns)
         self.assertNotIn("operator_manifests_json", workflow_columns)
@@ -200,16 +207,23 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         await self.store.aclose()
         serializer = JsonRuntimeSerializer(max_inline_bytes=10_000)
-        self.backend = DatabaseBackend.from_path(self.path)
+        self.backend = DatabaseBackend.from_path(
+            self.path,
+            artifact_policy=ArtifactPolicy(enabled=False),
+        )
         self.store = RuntimeStore(
             backend=self.backend,
             serializer=serializer,
         )
         workflow = Workflow(id="atomic_event")
-        workflow.add_node(lambda: "x" * 6_000, node_id="node")
+        workflow.add_node(lambda: "x" * 20_000, node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
 
-        invocation = await app.ainvoke(workflow, session_id="same")
+        invocation = await app.ainvoke(
+            workflow,
+            session_id="same",
+            event_mode="full",
+        )
 
         session = self.store.find_session(
             namespace="default",
@@ -223,7 +237,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("completed", invocation.state)
         self.assertEqual(
             capture_execution_state(session, invocation),
-            self.store.committed_state(invocation.id),
+            self.store.reduced_state(invocation.id),
         )
         self.assertEqual(
             invocation.event_sequence,
@@ -433,7 +447,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_is_retryable_database_error(locked))
         self.assertFalse(_is_retryable_database_error(invalid_query))
 
-    async def test_sqlite_round_trip_rebuilds_from_genesis_and_boundary_events(self) -> None:
+    async def test_sqlite_round_trip_rebuilds_from_genesis_and_runtime_events(self) -> None:
         workflow = Workflow(id="database_round_trip")
         workflow.add_node(lambda value: value + 1, node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
@@ -441,6 +455,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             workflow,
             input={"value": 1},
             session_id="session",
+            event_mode="full",
         )
         await app.aclose()
 
@@ -459,7 +474,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             list(range(1, len(events) + 1)),
             [event.sequence for event in events],
         )
-        self.assertTrue(all(event.role == "boundary" for event in events))
+        self.assertTrue(all(event.operations is not None for event in events))
 
     async def test_large_runtime_value_is_deduplicated_and_hydrated(self) -> None:
         await self.store.aclose()
@@ -477,7 +492,11 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         workflow.add_edge("source", "target")
         app = AutoAgentApp(runtime_store=self.store)
-        invocation = await app.ainvoke(workflow, session_id="artifact")
+        invocation = await app.ainvoke(
+            workflow,
+            session_id="artifact",
+            event_mode="full",
+        )
         await self.store.aflush()
 
         async def persisted_artifacts() -> tuple[int, int, bool]:
@@ -486,7 +505,12 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                     await database.scalars(select(ArtifactRow))
                 ).all()
                 events = await database.execute(
-                    text("SELECT payload_json FROM runtime_events")
+                    text(
+                        "SELECT COALESCE(payload_json, '') || "
+                        "COALESCE(input_json, '') || "
+                        "COALESCE(output_json, '') || "
+                        "COALESCE(operations_json, '') FROM runtime_events"
+                    )
                 )
                 return (
                     len(artifacts),
@@ -522,15 +546,10 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         output_event = next(
             event
             for event in events
-            if event.boundary == "node.output_ready"
-            and event.payload["detail"]["node_id"] == "source"
+            if event.event_name == "operator_call.completed"
+            and event.payload["node_id"] == "source"
         )
-        output_operation = next(
-            operation
-            for operation in output_event.payload["operations"]
-            if operation["path"][-1] == "output"
-        )
-        self.assertEqual("x" * 100_000, output_operation["value"])
+        self.assertEqual("x" * 100_000, output_event.output)
 
     async def test_terminal_event_does_not_force_recovery_state_write(self) -> None:
         await self.store.aclose()
@@ -545,19 +564,134 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         invocation = await app.ainvoke(workflow)
         await self.store.aflush()
 
-        async def load_row() -> InvocationRow:
+        async def load_row() -> tuple[InvocationRow, RecoveryStateRow | None]:
             async with self.backend._database_sessions() as database:
                 row = await database.get(InvocationRow, str(invocation.id))
                 assert row is not None
-                return row
+                recovery = await database.get(
+                    RecoveryStateRow,
+                    str(invocation.id),
+                )
+                return row, recovery
 
-        row = await self.backend._database_loop.arun(load_row())
+        row, recovery = await self.backend._database_loop.arun(load_row())
         self.assertEqual(invocation.event_sequence, row.durable_sequence)
-        self.assertIsNone(row.recovery_sequence)
-        self.assertIsNone(row.recovery_state_json)
+        self.assertIsNone(recovery)
         await app.aclose()
 
-    async def test_wait_boundary_requests_recovery_state_without_waiting(self) -> None:
+    async def test_event_modes_share_schema_but_persist_distinct_detail(self) -> None:
+        workflow = Workflow(id="event_mode_storage")
+        workflow.add_node(lambda value: value + 1, node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        invocations = {
+            mode: await app.ainvoke(
+                workflow,
+                input={"value": index},
+                session_id=mode,
+                event_mode=mode,
+            )
+            for index, mode in enumerate(("minimal", "standard", "full"))
+        }
+        await self.store.aflush()
+
+        async def load_rows():
+            async with self.backend._database_sessions() as database:
+                invocation_rows = {
+                    row.event_mode: row
+                    for row in (await database.scalars(select(InvocationRow))).all()
+                }
+                event_rows = (
+                    await database.scalars(select(RuntimeEventRow))
+                ).all()
+                recovery_rows = (
+                    await database.scalars(select(RecoveryStateRow))
+                ).all()
+                return invocation_rows, event_rows, recovery_rows
+
+        rows, events, recovery = await self.backend._database_loop.arun(load_rows())
+        by_invocation: dict[str, list[RuntimeEventRow]] = {}
+        for event in events:
+            by_invocation.setdefault(event.invocation_id, []).append(event)
+
+        minimal = rows["minimal"]
+        self.assertEqual([], by_invocation.get(minimal.id, []))
+        self.assertIsNone(minimal.genesis_state_json)
+        self.assertEqual({"value": 0}, self.store.serializer.loads(minimal.input_json))
+        self.assertEqual(
+            {"output": 1},
+            self.store.serializer.loads(minimal.result_json),
+        )
+
+        standard = rows["standard"]
+        standard_events = by_invocation[standard.id]
+        self.assertTrue(standard_events)
+        self.assertTrue(all(row.operations_json is None for row in standard_events))
+        self.assertNotIn(
+            "input_mapping.completed",
+            {row.event_name for row in standard_events},
+        )
+        self.assertIsNone(standard.genesis_state_json)
+
+        full = rows["full"]
+        full_events = by_invocation[full.id]
+        self.assertTrue(all(row.operations_json is not None for row in full_events))
+        self.assertIn(
+            "input_mapping.completed",
+            {row.event_name for row in full_events},
+        )
+        self.assertIsNotNone(full.genesis_state_json)
+        self.assertEqual(
+            {str(invocations["full"].id)},
+            {row.invocation_id for row in recovery},
+        )
+        await app.aclose()
+
+    async def test_minimal_wait_resumes_only_while_runtime_memory_survives(
+        self,
+    ) -> None:
+        workflow = Workflow(id="minimal_wait")
+        workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+        app = AutoAgentApp(runtime_store=self.store)
+
+        waiting = await app.ainvoke(
+            workflow,
+            input={"wait_key": "same-process"},
+            session_id="same-process",
+            event_mode="minimal",
+        )
+        waiting_state = waiting.state
+        resumed = await app.aresume(
+            workflow,
+            session_id="same-process",
+            wait_key="same-process",
+            output="ok",
+        )
+        self.assertEqual("waiting", waiting_state)
+        self.assertEqual("completed", resumed.state)
+
+        await app.ainvoke(
+            workflow,
+            input={"wait_key": "after-restart"},
+            session_id="restart",
+            event_mode="minimal",
+        )
+        await self.store.aflush()
+        await app.aclose()
+
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(backend=self.backend)
+        reopened = AutoAgentApp(runtime_store=self.store)
+        with self.assertRaisesRegex(ValueError, "current Invocation"):
+            await reopened.aresume(
+                workflow,
+                session_id="restart",
+                wait_key="after-restart",
+                output="unavailable",
+            )
+        await reopened.aclose()
+
+    async def test_wait_event_requests_recovery_state_without_waiting(self) -> None:
         await self.store.aclose()
         self.backend = DatabaseBackend.from_path(
             self.path,
@@ -575,15 +709,17 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("waiting", invocation.state)
         await self.store.aflush()
 
-        async def load_row() -> InvocationRow:
+        async def load_row() -> RecoveryStateRow | None:
             async with self.backend._database_sessions() as database:
-                row = await database.get(InvocationRow, str(invocation.id))
-                assert row is not None
-                return row
+                return await database.get(
+                    RecoveryStateRow,
+                    str(invocation.id),
+                )
 
         row = await self.backend._database_loop.arun(load_row())
-        self.assertEqual(invocation.event_sequence, row.recovery_sequence)
-        self.assertIsNotNone(row.recovery_state_json)
+        assert row is not None
+        self.assertEqual(invocation.event_sequence, row.event_sequence)
+        self.assertIsNotNone(row.state_json)
         await app.aclose()
 
     async def test_retention_can_evict_only_durable_terminal_invocations(
@@ -600,7 +736,11 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="durable_retention")
         workflow.add_node(lambda: "done", node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
-        invocation = await app.ainvoke(workflow, session_id="retention")
+        invocation = await app.ainvoke(
+            workflow,
+            session_id="retention",
+            event_mode="full",
+        )
         await self.store.aflush()
 
         self.assertNotIn(invocation.id, self.store.invocations)
@@ -618,6 +758,35 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invocation.result, rebuilt.result)
         await app.aclose()
 
+    async def test_minimal_retention_waits_for_terminal_state_persistence(
+        self,
+    ) -> None:
+        await self.store.aclose()
+        self.backend = DatabaseBackend.from_path(self.path)
+        self.store = RuntimeStore(
+            backend=self.backend,
+            retention_policy=RuntimeRetentionPolicy(
+                mode="evict_durable_terminal",
+            ),
+        )
+        workflow = Workflow(id="minimal_retention")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        invocation = await app.ainvoke(
+            workflow,
+            session_id="minimal",
+            event_mode="minimal",
+        )
+        await self.store.aflush()
+
+        self.assertNotIn(invocation.id, self.store.invocations)
+        self.assertEqual("durable", self.store.persistence_status(invocation.id))
+        self.assertEqual(
+            (),
+            await self.store.alist_runtime_events(invocation_id=invocation.id),
+        )
+        await app.aclose()
+
     async def test_rebuild_from_recovery_state_caches_complete_event_history(
         self,
     ) -> None:
@@ -630,14 +799,22 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="snapshot_event_cache")
         workflow.add_node(lambda value: value + 1, node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
-        invocation = await app.ainvoke(workflow, input={"value": 1})
+        invocation = await app.ainvoke(
+            workflow,
+            input={"value": 1},
+            event_mode="full",
+        )
         await self.store.aflush()
 
         async def recovery_cursor() -> tuple[int | None, str | None]:
             async with self.backend._database_sessions() as database:
-                row = await database.get(InvocationRow, str(invocation.id))
-                assert row is not None
-                return row.recovery_sequence, row.recovery_state_json
+                row = await database.get(
+                    RecoveryStateRow,
+                    str(invocation.id),
+                )
+                if row is None:
+                    return None, None
+                return row.event_sequence, row.state_json
 
         cursor, recovery_state = await self.backend._database_loop.arun(
             recovery_cursor()
@@ -1272,9 +1449,11 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             event=RuntimeEvent(
                 invocation_id=waiting.id,
                 sequence=waiting.event_sequence + 1,
-                type="test.pressure",
+                event_type="state_change",
+                event_name="invocation.running",
+                subject_type="invocation",
+                subject_id=str(waiting.id),
                 occurred_at_ms=0,
-                payload={"operations": []},
             ),
             estimated_bytes=30 * 1024,
             force_recovery_checkpoint=False,
@@ -1293,7 +1472,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             self.store.persistence.cancel(reservation)
         await app.aclose()
 
-    async def test_boundary_events_are_coalesced_into_database_batches(self) -> None:
+    async def test_runtime_events_are_coalesced_into_database_batches(self) -> None:
         class RecordingBackend(DatabaseBackend):
             event_batch_sizes: list[int]
 
@@ -1326,143 +1505,195 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         await app.aclose()
 
 
-class BoundaryEventTests(unittest.TestCase):
-    def test_simple_node_emits_only_semantic_boundary_roles(self) -> None:
+class RuntimeEventTests(unittest.TestCase):
+    def test_invalid_event_mode_is_rejected_before_admission(self) -> None:
+        workflow = Workflow(id="invalid_event_mode")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp()
+
+        with self.assertRaisesRegex(ValueError, "Invalid event_mode"):
+            app.invoke(workflow, event_mode="verbose")  # type: ignore[arg-type]
+        self.assertEqual({}, app.runtime_store.invocations)
+
+    def test_standard_records_graph_events_without_operations(self) -> None:
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
-        workflow = Workflow(id="boundary_roles")
+        workflow = Workflow(id="standard_events")
         workflow.add_node(lambda value: value, node_id="node")
-        invocation = app.invoke(workflow, input={"value": 1})
+        invocation = app.invoke(
+            workflow,
+            input={"value": 1},
+            event_mode="standard",
+        )
         events = asyncio.run(
             store.alist_runtime_events(invocation_id=invocation.id, limit=10_000)
         )
-        boundaries = [event.boundary for event in events if event.role == "boundary"]
         self.assertEqual(
             [
-                "node.activation_ready",
-                "node.input_ready",
-                "node.output_ready",
-                "node.committed",
-                "routing.committed",
+                "invocation.running",
+                "node.running",
+                "operator_call.completed",
+                "node.completed",
                 "invocation.completed",
             ],
-            boundaries,
+            [event.event_name for event in events],
         )
-        self.assertFalse(any("ready_queue" in event.type for event in events))
+        self.assertTrue(all(event.operations is None for event in events))
+        self.assertTrue(all(event.occurred_at_ms > 0 for event in events))
 
-    def test_reducer_rebuilds_exact_node_phase_by_boundary_sequence(self) -> None:
+    def test_standard_records_scheduler_skips_as_node_state_events(self) -> None:
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
-        workflow = Workflow(id="boundary_rebuild")
+        workflow = Workflow(id="standard_skip_events")
+        workflow.add_node(lambda: "source", node_id="source")
+        workflow.add_node(
+            lambda: "target",
+            node_id="target",
+            input_mapping=lambda _ctx: {},
+        )
+        workflow.add_edge(
+            "source",
+            "target",
+            condition=lambda _ctx: False,
+        )
+        invocation = app.invoke(workflow, event_mode="standard")
+        events = asyncio.run(
+            store.alist_runtime_events(invocation_id=invocation.id, limit=10_000)
+        )
+
+        skipped = [
+            event for event in events if event.event_name == "node.skipped"
+        ]
+        self.assertEqual(1, len(skipped))
+        self.assertEqual("target", skipped[0].subject_id)
+        self.assertEqual("skipped", skipped[0].status)
+
+    def test_full_records_internal_phases_and_rebuilds_each_event(self) -> None:
+        store = RuntimeStore()
+        app = AutoAgentApp(runtime_store=store)
+        workflow = Workflow(id="full_events")
         workflow.add_node(lambda value: value.upper(), node_id="node")
-        invocation = app.invoke(workflow, input={"value": "hello"})
+        invocation = app.invoke(
+            workflow,
+            input={"value": "hello"},
+            event_mode="full",
+        )
         events = asyncio.run(
             store.alist_runtime_events(invocation_id=invocation.id, limit=10_000)
         )
         cursors = {
-            event.boundary: event.sequence
+            event.event_name: event.sequence
             for event in events
-            if event.role == "boundary"
         }
 
-        _, input_ready = asyncio.run(
+        _, mapped = asyncio.run(
             store.arebuild_execution(
                 invocation.id,
-                through_sequence=cursors["node.input_ready"],
+                through_sequence=cursors["input_mapping.completed"],
             )
         )
-        _, output_ready = asyncio.run(
+        _, called = asyncio.run(
             store.arebuild_execution(
                 invocation.id,
-                through_sequence=cursors["node.output_ready"],
+                through_sequence=cursors["operator_call.completed"],
             )
         )
 
-        self.assertEqual("running", input_ready.node_executions[0].state)
-        self.assertEqual({"value": "hello"}, input_ready.node_executions[0].input)
-        self.assertEqual([], input_ready.node_executions[0].operator_executions)
-        self.assertEqual("running", output_ready.node_executions[0].state)
-        self.assertEqual("HELLO", output_ready.node_executions[0].output)
-        self.assertEqual(1, len(output_ready.node_executions[0].operator_executions))
+        self.assertEqual("running", mapped.node_executions[0].state)
+        self.assertEqual({"value": "hello"}, mapped.node_executions[0].input)
+        self.assertEqual([], mapped.node_executions[0].operator_executions)
+        self.assertEqual(1, len(called.node_executions[0].operator_executions))
+        self.assertTrue(all(event.operations is not None for event in events))
 
-    def test_boundary_operations_replace_only_explicit_aggregate_fields(self) -> None:
+    def test_full_freezes_each_parallel_edge_decision_independently(self) -> None:
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
-        workflow = Workflow(id="explicit_boundary_operations")
-        workflow.add_node(lambda: "first", node_id="first")
-        workflow.add_node(lambda value: value, node_id="second")
-        workflow.add_edge("first", "second")
-
-        invocation = app.invoke(workflow)
+        workflow = Workflow(id="atomic_edge_events")
+        workflow.add_node(lambda: "source", node_id="source")
+        workflow.add_node(
+            lambda: "left",
+            node_id="left",
+            input_mapping=lambda _ctx: {},
+        )
+        workflow.add_node(
+            lambda: "right",
+            node_id="right",
+            input_mapping=lambda _ctx: {},
+        )
+        workflow.add_edge("source", "left", edge_id="left-edge")
+        workflow.add_edge("source", "right", edge_id="right-edge")
+        invocation = app.invoke(workflow, event_mode="full")
         events = asyncio.run(
             store.alist_runtime_events(invocation_id=invocation.id, limit=10_000)
         )
+        edge_events = [
+            event for event in events if event.event_name == "edge.evaluated"
+        ]
 
-        for event in events:
-            for operation in event.payload["operations"]:
-                path = operation["path"]
-                self.assertIn(
-                    path[0],
-                    {"session", "invocation", "node_executions"},
-                )
-                if path[0] == "node_executions":
-                    self.assertIn(len(path), {2, 3})
-                    self.assertIsInstance(path[1], int)
-                    if len(path) == 3:
-                        self.assertIsInstance(path[2], str)
-                else:
-                    self.assertEqual(2, len(path))
-                    self.assertIsInstance(path[1], str)
-
-        committed = next(
-            event
-            for event in events
-            if event.boundary == "node.committed"
-            and event.payload["detail"]["node_id"] == "first"
+        _, after_first = asyncio.run(
+            store.arebuild_execution(
+                invocation.id,
+                through_sequence=edge_events[0].sequence,
+            )
         )
-        committed_paths = {
-            tuple(operation["path"])
-            for operation in committed.payload["operations"]
-        }
-        self.assertNotIn(("node_executions", 0, "output"), committed_paths)
-        self.assertNotIn(
-            ("node_executions", 0, "operator_executions"),
-            committed_paths,
+        _, after_second = asyncio.run(
+            store.arebuild_execution(
+                invocation.id,
+                through_sequence=edge_events[1].sequence,
+            )
         )
 
-    def test_map_selector_units_are_not_persisted_at_input_boundary(self) -> None:
+        source_first = after_first.latest_node_execution("source")
+        source_second = after_second.latest_node_execution("source")
+        self.assertEqual(["left-edge"], [
+            item.edge_id for item in source_first.edge_evaluations
+        ])
+        self.assertEqual(["left-edge", "right-edge"], [
+            item.edge_id for item in source_second.edge_evaluations
+        ])
+        self.assertEqual(
+            {"left-edge", "right-edge"},
+            {event.subject_id for event in edge_events},
+        )
+
+    def test_event_timing_uses_wall_clock_occurrence_and_monotonic_duration(
+        self,
+    ) -> None:
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
-        workflow = Workflow(id="map_input_boundary")
-        workflow.add_node(lambda values: values, node_id="source")
-        workflow.add_node(lambda value: value * 2, node_id="target")
+        workflow = Workflow(id="event_timing")
+        workflow.add_node(lambda: "source", node_id="source")
+        workflow.add_node(
+            lambda: "target",
+            node_id="target",
+            input_mapping=lambda _ctx: {},
+        )
         workflow.add_edge(
             "source",
             "target",
-            policy=EdgePolicy(
-                map=MapPolicy(item_selector=lambda ctx: [
-                    {"value": value} for value in ctx.input
-                ])
-            ),
+            condition=lambda _ctx: True,
         )
-        invocation = app.invoke(workflow, input={"values": [1, 2]})
+        invocation = app.invoke(workflow, event_mode="full")
         events = asyncio.run(
             store.alist_runtime_events(invocation_id=invocation.id, limit=10_000)
         )
-        cursor = next(
-            event.sequence
-            for event in events
-            if event.boundary == "node.input_ready"
-            and event.payload["detail"]["node_id"] == "target"
-        )
-        _, rebuilt = asyncio.run(
-            store.arebuild_execution(invocation.id, through_sequence=cursor)
-        )
-        target = rebuilt.latest_node_execution("target")
-        self.assertEqual([1, 2], target.input)
-        self.assertEqual([], target.operator_executions)
 
-    def test_map_unit_count_does_not_expand_event_or_execution_records(self) -> None:
+        self.assertTrue(all(event.occurred_at_ms > 0 for event in events))
+        timed = [
+            event
+            for event in events
+            if event.event_name in {
+                "input_mapping.completed",
+                "operator_call.completed",
+                "node.completed",
+                "edge.evaluated",
+            }
+        ]
+        self.assertTrue(timed)
+        self.assertTrue(all(event.elapsed_ns is not None for event in timed))
+        self.assertTrue(all(event.elapsed_ns >= 0 for event in timed))
+
+    def test_map_units_collapse_into_one_logical_operator_event(self) -> None:
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="bounded_map_history")
@@ -1481,7 +1712,7 @@ class BoundaryEventTests(unittest.TestCase):
             ),
         )
 
-        invocation = app.invoke(workflow)
+        invocation = app.invoke(workflow, event_mode="full")
         events = asyncio.run(
             store.alist_runtime_events(
                 invocation_id=invocation.id,
@@ -1489,13 +1720,35 @@ class BoundaryEventTests(unittest.TestCase):
             )
         )
         target = invocation.latest_node_execution("target")
-        self.assertLessEqual(len(events), 12)
+        operator_events = [
+            event
+            for event in events
+            if event.event_name == "operator_call.completed"
+            and event.payload.get("node_id") == "target"
+        ]
+        self.assertEqual(1, len(operator_events))
         self.assertEqual(1, len(target.operator_executions))
         logical = target.operator_executions[0]
         self.assertEqual("map", logical.kind)
         self.assertEqual(100, logical.summary.call_count)
         self.assertEqual(100, logical.summary.attempt_count)
         self.assertFalse(hasattr(logical, "output"))
+        operations = operator_events[0].operations
+        assert operations is not None
+        self.assertTrue(
+            any(
+                operation.op == "add"
+                and operation.path[-2:] == ("operator_executions", 0)
+                for operation in operations
+            )
+        )
+        self.assertFalse(
+            any(
+                operation.op == "replace"
+                and operation.path[-1:] == ("operator_executions",)
+                for operation in operations
+            )
+        )
 
 
 class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
@@ -1550,6 +1803,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
             workflow_definition_hash=entry.workflow_ir.definition_hash,
             workflow_operator_manifest_hash=entry.workflow_snapshot.operator_manifest_hash,
             entry_node_id="safe",
+            event_mode="full",
         )
         session = await store.aadmit_invocation(session.id, invocation)
         # Persist a realistic crash point: the safe node has started, but its
@@ -1560,26 +1814,24 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         execution = invocation.create_node_execution("safe")
         invocation.mark_node_running(execution.id)
         sequence = invocation.next_event_sequence()
-        operations = build_boundary_state_operations(
+        operations = build_state_operations(
             previous,
             session,
             invocation,
             node_execution_ids=(execution.id,),
         )
-        await store.aapply_event(
+        await store.arecord_event(
             session,
             invocation,
             RuntimeEvent(
                 invocation_id=invocation.id,
                 sequence=sequence,
-                type="node.input_ready",
+                event_type="state_change",
+                event_name="node.running",
+                subject_type="node",
+                subject_id=str(execution.id),
                 occurred_at_ms=utc_timestamp_ms(),
-                payload={
-                    "operations": [
-                        operation.model_dump(mode="python")
-                        for operation in operations
-                    ]
-                },
+                operations=operations,
             ),
         )
 
@@ -1599,7 +1851,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("interrupted", recovered.state)
         self.assertEqual(
             "recovery.interrupted",
-            [event for event in events if event.role == "boundary"][-1].boundary,
+            events[-1].event_name,
         )
 
     async def test_recovery_policy_can_finish_other_active_branches(self) -> None:
@@ -1643,6 +1895,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
             workflow_definition_hash=entry.workflow_ir.definition_hash,
             workflow_operator_manifest_hash=entry.workflow_snapshot.operator_manifest_hash,
             entry_node_id="blocked",
+            event_mode="full",
         )
         session = await store.aadmit_invocation(session.id, invocation)
         previous = capture_execution_state(session, invocation)
@@ -1651,25 +1904,23 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         invocation.scheduler.enqueue_ready("allowed")
         invocation.mark_running()
         sequence = invocation.next_event_sequence()
-        operations = build_boundary_state_operations(
+        operations = build_state_operations(
             previous,
             session,
             invocation,
         )
-        await store.aapply_event(
+        await store.arecord_event(
             session,
             invocation,
             RuntimeEvent(
                 invocation_id=invocation.id,
                 sequence=sequence,
-                type="routing.committed",
+                event_type="routing",
+                event_name="routing.evaluated",
+                subject_type="invocation",
+                subject_id=str(invocation.id),
                 occurred_at_ms=utc_timestamp_ms(),
-                payload={
-                    "operations": [
-                        operation.model_dump(mode="python")
-                        for operation in operations
-                    ]
-                },
+                operations=operations,
             ),
         )
 
@@ -1708,6 +1959,7 @@ class PostgreSQLDatabaseBackendIntegrationTests(
             workflow,
             input={"value": 1},
             session_id=f"session_{id(self)}",
+            event_mode="full",
         )
         await store.aflush()
         await app.aclose()

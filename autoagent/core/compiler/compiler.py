@@ -1135,19 +1135,10 @@ class WorkflowCompiler:
                             subject=node_id,
                         )
                     )
-                if policy.replication.output_aggregator is None:
-                    diagnostics.append(
-                        Diagnostic(
-                            code="POLICY_REPLICATION_INVALID",
-                            severity="error",
-                            message=(
-                                "ReplicationPolicy requires output_aggregator "
-                                "to produce the final NodeExecution output."
-                            ),
-                            subject=node_id,
-                        )
-                    )
-                elif not callable(policy.replication.output_aggregator):
+                if (
+                    policy.replication.output_aggregator is not None
+                    and not callable(policy.replication.output_aggregator)
+                ):
                     diagnostics.append(
                         Diagnostic(
                             code="POLICY_REPLICATION_INVALID",
@@ -1299,6 +1290,10 @@ class WorkflowCompiler:
         for node_id, node in nodes.items():
             replication = node.policy.replication if node.policy is not None else None
             if replication is None:
+                continue
+            if replication.output_aggregator is None:
+                item_annotation = node.operator_output_contract.annotation
+                node.output_contract = value_contract(list[item_annotation])
                 continue
             contract, _ = callable_contract(replication.output_aggregator)
             node.output_contract = contract.output

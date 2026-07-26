@@ -1889,6 +1889,91 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual({}, invocation.context.data)
         self.assertEqual({}, session.context.data)
 
+    def test_parallel_output_bindings_reject_overlapping_context_paths(self) -> None:
+        def bind_a(ctx) -> None:
+            ctx.invocation_context.data["shared"] = "a"
+
+        def bind_b(ctx) -> None:
+            ctx.invocation_context.data["shared"] = "b"
+
+        workflow = Workflow(id="parallel_context_conflict")
+        workflow.add_node(lambda: "start", node_id="start")
+        workflow.add_node(
+            lambda: "a",
+            node_id="a",
+            input_mapping=lambda _ctx: {},
+            output_binding=bind_a,
+        )
+        workflow.add_node(
+            lambda: "b",
+            node_id="b",
+            input_mapping=lambda _ctx: {},
+            output_binding=bind_b,
+        )
+        workflow.add_edge("start", "a")
+        workflow.add_edge("start", "b")
+
+        invocation = AutoAgentApp().invoke(workflow)
+
+        failed = [
+            execution
+            for execution in invocation.node_executions
+            if execution.error is not None
+            and execution.error.code == "OUTPUT_BINDING_FAILED"
+        ]
+        self.assertEqual("failed", invocation.state)
+        self.assertEqual(1, len(failed))
+        self.assertIn("Concurrent Context write", failed[0].error.message)
+        self.assertIn(invocation.context.data["shared"], {"a", "b"})
+
+    def test_parallel_output_bindings_merge_disjoint_context_paths(self) -> None:
+        def bind_a(ctx) -> None:
+            ctx.invocation_context.data["a"] = ctx.output
+
+        def bind_b(ctx) -> None:
+            ctx.invocation_context.data["b"] = ctx.output
+
+        workflow = Workflow(id="parallel_context_merge")
+        workflow.add_node(lambda: "start", node_id="start")
+        workflow.add_node(
+            lambda: 1,
+            node_id="a",
+            input_mapping=lambda _ctx: {},
+            output_binding=bind_a,
+        )
+        workflow.add_node(
+            lambda: 2,
+            node_id="b",
+            input_mapping=lambda _ctx: {},
+            output_binding=bind_b,
+        )
+        workflow.add_edge("start", "a")
+        workflow.add_edge("start", "b")
+
+        invocation = AutoAgentApp().invoke(workflow)
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual({"a": 1, "b": 2}, invocation.context.data)
+
+    def test_serial_output_bindings_can_overwrite_the_same_context_path(self) -> None:
+        def bind(ctx) -> None:
+            ctx.invocation_context.data["value"] = ctx.output
+
+        workflow = Workflow(id="serial_context_overwrite")
+        workflow.add_node(lambda: 1, node_id="first", output_binding=bind)
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="second",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+            output_binding=bind,
+        )
+        workflow.add_edge("first", "second")
+
+        invocation = AutoAgentApp().invoke(workflow)
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual({"value": 2}, invocation.context.data)
+
     def test_unselected_entries_are_skipped_before_fan_in(self) -> None:
         workflow = Workflow(id="selected_multi_entry")
         workflow.add_node(lambda: {"value": "A"}, node_id="a")

@@ -35,11 +35,15 @@ class RuntimeContext(BaseModel):
         default_factory=dict,
         description="Auxiliary user/tooling metadata with the same lifetime.",
     )
+    revision: int = Field(default=0, ge=0)
+    path_revisions: dict[str, int] = Field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
             "data": deepcopy(self.data),
             "metadata": deepcopy(self.metadata),
+            "revision": self.revision,
+            "path_revisions": dict(self.path_revisions),
         }
 
     @classmethod
@@ -47,7 +51,131 @@ class RuntimeContext(BaseModel):
         return cls(
             data=dict(record.get("data", {})),
             metadata=dict(record.get("metadata", {})),
+            revision=int(record.get("revision", 0)),
+            path_revisions={
+                str(path): int(revision)
+                for path, revision in record.get("path_revisions", {}).items()
+            },
         )
+
+    def commit_isolated(
+        self,
+        working: RuntimeContext,
+        *,
+        base_revision: int,
+        node_id: str,
+    ) -> tuple[str, ...]:
+        """Atomically publish one Output Binding or reject a concurrent overlap."""
+
+        changed = _changed_paths(
+            {"data": self.data, "metadata": self.metadata},
+            {"data": working.data, "metadata": working.metadata},
+        )
+        if not changed:
+            return ()
+        conflicts = tuple(
+            path
+            for path in changed
+            if any(
+                revision > base_revision and _paths_overlap(path, previous)
+                for previous, revision in self.path_revisions.items()
+            )
+        )
+        if conflicts:
+            raise ConcurrentContextWriteError(
+                node_id=node_id,
+                paths=conflicts,
+                base_revision=base_revision,
+                current_revision=self.revision,
+            )
+        authoritative = {
+            "data": deepcopy(self.data),
+            "metadata": deepcopy(self.metadata),
+        }
+        working_value = {
+            "data": working.data,
+            "metadata": working.metadata,
+        }
+        for path in changed:
+            _merge_changed_path(authoritative, working_value, path)
+        self.revision += 1
+        self.data = authoritative["data"]
+        self.metadata = authoritative["metadata"]
+        for path in changed:
+            self.path_revisions[path] = self.revision
+        return changed
+
+
+class ConcurrentContextWriteError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        node_id: str,
+        paths: tuple[str, ...],
+        base_revision: int,
+        current_revision: int,
+    ) -> None:
+        super().__init__(
+            "Concurrent Context write overlaps a path changed after this Node "
+            f"started: node_id={node_id}, paths={list(paths)}, "
+            f"base_revision={base_revision}, current_revision={current_revision}"
+        )
+        self.node_id = node_id
+        self.paths = paths
+        self.base_revision = base_revision
+        self.current_revision = current_revision
+
+
+def _changed_paths(previous: Any, current: Any, prefix: str = "") -> tuple[str, ...]:
+    if isinstance(previous, dict) and isinstance(current, dict):
+        values: list[str] = []
+        for key in sorted(set(previous) | set(current)):
+            path = f"{prefix}/{_escape_path(str(key))}"
+            if key not in previous or key not in current:
+                values.append(path)
+                continue
+            values.extend(_changed_paths(previous[key], current[key], path))
+        return tuple(values)
+    if isinstance(previous, list) and isinstance(current, list):
+        if previous == current:
+            return ()
+        # Lists are one logical write location. Index-level merging would make
+        # append ordering depend on task completion timing.
+        return (prefix or "/",)
+    return () if previous == current else (prefix or "/",)
+
+
+def _escape_path(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def _merge_changed_path(
+    authoritative: dict[str, Any],
+    working: dict[str, Any],
+    path: str,
+) -> None:
+    segments = [
+        value.replace("~1", "/").replace("~0", "~")
+        for value in path.split("/")[1:]
+    ]
+    current_parent: Any = authoritative
+    working_parent: Any = working
+    for segment in segments[:-1]:
+        current_parent = current_parent[segment]
+        working_parent = working_parent[segment]
+    leaf = segments[-1]
+    if isinstance(working_parent, dict) and leaf not in working_parent:
+        del current_parent[leaf]
+        return
+    current_parent[leaf] = deepcopy(working_parent[leaf])
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    return (
+        left == right
+        or left.startswith(f"{right}/")
+        or right.startswith(f"{left}/")
+    )
 
 
 class SessionContext(RuntimeContext):

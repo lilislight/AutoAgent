@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
+from time import perf_counter_ns
 
 from autoagent.core.compiler import EdgeIR, LoopRegionIR, WorkflowIR
 from autoagent.core.runtime import (
     ConditionContext,
+    EdgeEvaluation,
     Invocation,
     NodeExecution,
     RuntimeErrorInfo,
@@ -80,6 +82,9 @@ class Scheduler:
         session: Session,
         invocation: Invocation,
         transitions: Iterable[NodeExecutionTransition],
+        on_edge_evaluated: Callable[
+            [NodeExecution, EdgeEvaluation], Awaitable[None]
+        ] | None = None,
     ) -> None:
         for transition in transitions:
             if invocation.state == "failed":
@@ -90,6 +95,7 @@ class Scheduler:
                     session=session,
                     invocation=invocation,
                     transition=transition,
+                    on_edge_evaluated=on_edge_evaluated,
                 )
             elif transition.state == "failed":
                 execution = invocation.get_node_execution(transition.node_execution_id)
@@ -206,6 +212,9 @@ class Scheduler:
         session: Session,
         invocation: Invocation,
         transition: NodeExecutionTransition,
+        on_edge_evaluated: Callable[
+            [NodeExecution, EdgeEvaluation], Awaitable[None]
+        ] | None,
     ) -> None:
         source_execution = invocation.get_node_execution(transition.node_execution_id)
         if source_execution is None:
@@ -224,20 +233,23 @@ class Scheduler:
             source_execution.node_id, ()
         ):
             edge = workflow_ir.edges[edge_id]
-            selected, reason = await self._evaluate_edge(
+            selected, reason, elapsed_ns = await self._evaluate_edge(
                 edge=edge,
                 session=session,
                 invocation=invocation,
                 source_output=source_execution.output,
             )
             if selected is None:
-                source_execution.add_edge_evaluation(
+                evaluation = source_execution.add_edge_evaluation(
                     edge_id=edge.id,
                     target_node_id=edge.to_node,
                     state="failed",
                     selected=False,
                     reason=reason,
+                    elapsed_ns=elapsed_ns,
                 )
+                if on_edge_evaluated is not None:
+                    await on_edge_evaluated(source_execution, evaluation)
                 invocation.mark_failed(
                     RuntimeErrorInfo(
                         code="EDGE_CONDITION_FAILED",
@@ -246,12 +258,13 @@ class Scheduler:
                     )
                 )
                 return
-            source_execution.add_edge_evaluation(
+            evaluation = source_execution.add_edge_evaluation(
                 edge_id=edge.id,
                 target_node_id=edge.to_node,
                 state="selected" if selected else "skipped",
                 selected=selected,
                 reason=reason,
+                elapsed_ns=elapsed_ns,
             )
             activation = (
                 EdgeActivation(
@@ -288,6 +301,8 @@ class Scheduler:
                     scope=target_scope,
                 )
                 affected.append((edge.to_node, target_scope))
+            if on_edge_evaluated is not None:
+                await on_edge_evaluated(source_execution, evaluation)
 
         self._resolve_node_instances(
             workflow_ir=workflow_ir,
@@ -309,13 +324,13 @@ class Scheduler:
         session: Session,
         invocation: Invocation,
         source_output: object,
-    ) -> tuple[bool | None, str | None]:
+    ) -> tuple[bool | None, str | None, int | None]:
         if edge.condition is None:
-            return True, None
+            return True, None, None
         if isinstance(edge.condition, str):
-            return False, "String edge conditions are not supported at runtime yet."
+            return False, "String edge conditions are not supported at runtime yet.", None
         if not callable(edge.condition):
-            return False, "Edge condition is not callable."
+            return False, "Edge condition is not callable.", None
         context = ConditionContext.create(
             invocation_input=invocation.input,
             invocation_context=invocation.context,
@@ -326,10 +341,19 @@ class Scheduler:
             target_node_id=edge.local_to_node or edge.to_node,
             source_output=source_output,
         )
+        started_ns = perf_counter_ns()
         try:
-            return bool(await invoke_hook_async(edge.condition, context)), None
+            return (
+                bool(await invoke_hook_async(edge.condition, context)),
+                None,
+                max(0, perf_counter_ns() - started_ns),
+            )
         except Exception as exc:
-            return None, f"{type(exc).__name__}: {exc}"
+            return (
+                None,
+                f"{type(exc).__name__}: {exc}",
+                max(0, perf_counter_ns() - started_ns),
+            )
 
     def _resolve_node_instances(
         self,

@@ -38,6 +38,7 @@ def _build_chain(workflow_id: str, *, node_count: int) -> Workflow:
 @dataclass(frozen=True)
 class BenchmarkResult:
     backend: str
+    event_mode: str
     node_count: int
     invocation_count: int
     median_invoke_ms: float
@@ -58,6 +59,7 @@ async def _run_case(
     backend_name: str,
     node_count: int,
     invocation_count: int,
+    event_mode: str,
 ) -> BenchmarkResult:
     temporary_directory: tempfile.TemporaryDirectory[str] | None = None
     if backend_name == "memory":
@@ -71,14 +73,18 @@ async def _run_case(
 
     app = AutoAgentApp(runtime_store=store)
     workflow = _build_chain(
-        f"{backend_name}_runtime_benchmark",
+        f"{backend_name}_{event_mode}_runtime_benchmark",
         node_count=node_count,
     )
     latencies: list[float] = []
 
     try:
         await app.astart()
-        warmup = await app.ainvoke(workflow, session_id="warmup")
+        warmup = await app.ainvoke(
+            workflow,
+            session_id="warmup",
+            event_mode=event_mode,
+        )
         if warmup.state != "completed":
             raise RuntimeError(f"Warmup did not complete: {warmup.state}")
         await store.aflush()
@@ -90,6 +96,7 @@ async def _run_case(
             last_invocation = await app.ainvoke(
                 workflow,
                 session_id=f"measured-{index}",
+                event_mode=event_mode,
             )
             latencies.append(perf_counter() - started)
             if last_invocation.state != "completed":
@@ -114,6 +121,7 @@ async def _run_case(
 
     return BenchmarkResult(
         backend=backend_name,
+        event_mode=event_mode,
         node_count=node_count,
         invocation_count=invocation_count,
         median_invoke_ms=median(latencies) * 1_000,
@@ -136,6 +144,11 @@ async def _main() -> None:
         default="both",
     )
     parser.add_argument(
+        "--event-mode",
+        choices=("minimal", "standard", "full", "all"),
+        default="all",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON for storing benchmark history.",
@@ -145,13 +158,20 @@ async def _main() -> None:
         parser.error("--nodes and --invocations must be positive")
 
     backends = ("memory", "sqlite") if args.backend == "both" else (args.backend,)
+    event_modes = (
+        ("minimal", "standard", "full")
+        if args.event_mode == "all"
+        else (args.event_mode,)
+    )
     results = [
         await _run_case(
             backend_name=backend,
             node_count=args.nodes,
             invocation_count=args.invocations,
+            event_mode=event_mode,
         )
         for backend in backends
+        for event_mode in event_modes
     ]
 
     if args.json:
@@ -160,7 +180,7 @@ async def _main() -> None:
 
     for result in results:
         print(
-            f"{result.backend:>6}  "
+            f"{result.backend:>6}/{result.event_mode:<8}  "
             f"median={result.median_invoke_ms:8.2f} ms  "
             f"p95={result.p95_invoke_ms:8.2f} ms  "
             f"throughput={result.invocations_per_second:7.2f} inv/s  "

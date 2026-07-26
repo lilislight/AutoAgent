@@ -89,6 +89,24 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted.invocation_id, resumed.invocation_id)
         self.assertEqual("completed", resumed.state)
 
+    async def test_submit_selects_event_mode_per_invocation(self) -> None:
+        submitted = await self.submit(
+            self.workflow.id,
+            InvocationSubmitRequest(
+                input={"wait_key": "minimal"},
+                session_key="minimal",
+                event_mode="minimal",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+
+        invocation = self.app.runtime_store.invocations[submitted.invocation_id]
+        events = await self.app.runtime_store.alist_runtime_events(
+            invocation_id=invocation.id,
+        )
+        self.assertEqual("minimal", invocation.event_mode)
+        self.assertEqual([], list(events))
+
     async def test_background_failure_is_retrieved_and_retained(self) -> None:
         invocation_id = uuid4()
 

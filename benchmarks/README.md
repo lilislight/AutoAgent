@@ -39,4 +39,5 @@ bytes, production rate, traced Python heap growth, admission backpressure, and
 the final SQLite JSON/file sizes after releasing the writer.
 
 Pass `--database-mode normal` to measure the peak queue while SQLite consumes
-events normally.
+events normally. Pass `--event-mode minimal`, `standard`, or `full` to compare
+the three Invocation-level persistence profiles with the same workload.

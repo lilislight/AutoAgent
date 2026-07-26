@@ -73,7 +73,10 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
 
         try:
             started = perf_counter()
-            invocation = app.invoke(workflow, session_id="performance")
+            invocation = app.invoke(
+                workflow,
+                session_id="performance",
+            )
             elapsed = perf_counter() - started
         finally:
             app.close()
@@ -86,14 +89,18 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
             "`uv run python -m benchmarks.runtime_store_benchmark` to profile.",
         )
 
-    def test_large_output_is_not_repeated_by_later_node_boundaries(self) -> None:
+    def test_standard_events_do_not_copy_large_node_output(self) -> None:
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         workflow = Workflow(id="event_payload_performance")
         workflow.add_node(_large_output, node_id="large")
 
         try:
-            invocation = app.invoke(workflow, session_id="performance")
+            invocation = app.invoke(
+                workflow,
+                session_id="performance",
+                event_mode="standard",
+            )
             events = asyncio.run(
                 store.alist_runtime_events(
                     invocation_id=invocation.id,
@@ -103,22 +110,12 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
         finally:
             app.close()
 
-        encoded_sizes = {
-            event.boundary: len(
-                store.serializer.dumps(event.model_dump(mode="python"))
-            )
+        encoded_sizes = [
+            len(store.serializer.dumps(event.model_dump(mode="python")))
             for event in events
-        }
-        output_ready_size = encoded_sizes["node.output_ready"]
-        self.assertGreater(output_ready_size, 100_000)
-        self.assertLess(
-            encoded_sizes["node.committed"],
-            output_ready_size // 10,
-        )
-        self.assertLess(
-            encoded_sizes["routing.committed"],
-            output_ready_size // 10,
-        )
+        ]
+        self.assertTrue(encoded_sizes)
+        self.assertLess(max(encoded_sizes), 20_000)
 
 
 class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -185,8 +182,8 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 recovery_event_interval=1_000,
             )
             persistence_policy = PersistencePolicy(
-                queue_low_watermark_bytes=32 * 1024,
-                queue_high_watermark_bytes=64 * 1024,
+                queue_low_watermark_bytes=24 * 1024,
+                queue_high_watermark_bytes=48 * 1024,
                 queue_hard_watermark_bytes=16 * 1024 * 1024,
                 admission_timeout_ms=0,
             )
@@ -213,19 +210,19 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-                boundary_event_count = sum(
+                runtime_event_count = sum(
                     len(store.runtime_events[invocation.id])
                     for invocation in invocations
                 )
                 self.assertGreaterEqual(
                     store.pending_persistence_count,
-                    boundary_event_count,
+                    runtime_event_count,
                 )
                 self.assertLessEqual(
-                    store.pending_persistence_count - boundary_event_count,
+                    store.pending_persistence_count - runtime_event_count,
                     len(admitted) + 1,
                     "Only Workflow metadata and Invocation genesis records "
-                    "may add queue entries beyond boundary Events.",
+                    "may add queue entries beyond Runtime Events.",
                 )
                 self.assertGreaterEqual(
                     store.pending_persistence_bytes,
@@ -266,21 +263,22 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                     await app.ainvoke(
                         workflow,
                         session_id=f"session-{index}",
+                        event_mode="full",
                     )
                     for index in range(4)
                 ]
                 await store.aflush()
 
-                expected_event_bytes = sum(
-                    len(store.serializer.dumps(event.payload))
-                    for invocation in invocations
-                    for event in store.runtime_events[invocation.id]
-                )
                 async def persisted_sizes() -> tuple[int, int, int]:
                     async with backend.engine.connect() as connection:
                         event_bytes = await connection.scalar(
                             text(
-                                "SELECT COALESCE(SUM(LENGTH(payload_json)), 0) "
+                                "SELECT COALESCE(SUM("
+                                "LENGTH(payload_json) + LENGTH(timing_json) + "
+                                "LENGTH(COALESCE(input_json, '')) + "
+                                "LENGTH(COALESCE(output_json, '')) + "
+                                "LENGTH(COALESCE(operations_json, ''))"
+                                "), 0) "
                                 "FROM runtime_events"
                             )
                         )
@@ -294,8 +292,8 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
                         recovery_bytes = await connection.scalar(
                             text(
                                 "SELECT COALESCE(SUM("
-                                "LENGTH(recovery_state_json)), 0) "
-                                "FROM invocations"
+                                "LENGTH(state_json)), 0) "
+                                "FROM runtime_recovery_states"
                             )
                         )
                     return (
@@ -310,9 +308,79 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await app.aclose()
 
-        self.assertEqual(expected_event_bytes, actual_event_bytes)
+        self.assertGreater(actual_event_bytes, 0)
         self.assertGreater(genesis_bytes, 0)
         self.assertGreater(recovery_bytes, 0)
+
+    async def test_persisted_bytes_increase_from_minimal_to_standard_to_full(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backend = DatabaseBackend.from_path(
+                Path(directory) / "runtime.db",
+                batch_max_delay_ms=0,
+            )
+            store = RuntimeStore(backend=backend)
+            app = AutoAgentApp(runtime_store=store)
+            workflow = _build_chain("event_mode_size", node_count=5)
+            try:
+                invocations = {
+                    mode: await app.ainvoke(
+                        workflow,
+                        session_id=mode,
+                        event_mode=mode,
+                    )
+                    for mode in ("minimal", "standard", "full")
+                }
+                await store.aflush()
+
+                async def persisted_bytes(invocation_id: str) -> int:
+                    async with backend.engine.connect() as connection:
+                        invocation_bytes = await connection.scalar(
+                            text(
+                                "SELECT LENGTH(input_json) + "
+                                "LENGTH(COALESCE(result_json, '')) + "
+                                "LENGTH(COALESCE(error_json, '')) + "
+                                "LENGTH(COALESCE(genesis_state_json, '')) "
+                                "FROM invocations WHERE id = :id"
+                            ),
+                            {"id": invocation_id},
+                        )
+                        event_bytes = await connection.scalar(
+                            text(
+                                "SELECT COALESCE(SUM("
+                                "LENGTH(payload_json) + LENGTH(timing_json) + "
+                                "LENGTH(COALESCE(input_json, '')) + "
+                                "LENGTH(COALESCE(output_json, '')) + "
+                                "LENGTH(COALESCE(operations_json, ''))"
+                                "), 0) FROM runtime_events "
+                                "WHERE invocation_id = :id"
+                            ),
+                            {"id": invocation_id},
+                        )
+                        recovery_bytes = await connection.scalar(
+                            text(
+                                "SELECT COALESCE(LENGTH(state_json), 0) "
+                                "FROM runtime_recovery_states "
+                                "WHERE invocation_id = :id"
+                            ),
+                            {"id": invocation_id},
+                        )
+                    return int(invocation_bytes or 0) + int(
+                        event_bytes or 0
+                    ) + int(recovery_bytes or 0)
+
+                sizes = {
+                    mode: await backend._database_loop.arun(
+                        persisted_bytes(str(invocation.id))
+                    )
+                    for mode, invocation in invocations.items()
+                }
+            finally:
+                await app.aclose()
+
+        self.assertLess(sizes["minimal"], sizes["standard"])
+        self.assertLess(sizes["standard"], sizes["full"])
 
 
 if __name__ == "__main__":

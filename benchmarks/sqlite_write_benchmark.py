@@ -82,7 +82,7 @@ def _run_mode(
                             f"event-{i:08d}",
                             "inv-bench-001",
                             i + 1,
-                            "node.committed",
+                            "node.completed",
                             json.dumps(
                                 {"detail": {"i": i}, "blob": payload}
                             ),

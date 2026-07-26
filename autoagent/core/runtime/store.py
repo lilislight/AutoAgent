@@ -18,6 +18,7 @@ from autoagent.core.runtime.persistence import (
     PersistencePolicy,
     freeze_admission_envelope,
     freeze_event_envelope,
+    freeze_invocation_state_envelope,
     freeze_workflow_envelope,
 )
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
@@ -25,9 +26,9 @@ from autoagent.core.runtime.retention import RuntimeRetentionPolicy
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
-    StateOperation,
     apply_state_operations,
     capture_execution_state,
+    compact_recovery_state,
     reduce_execution_state,
     restore_execution_state,
 )
@@ -35,6 +36,24 @@ from autoagent.core.runtime.time import utc_timestamp_ms
 
 
 logger = logging.getLogger(__name__)
+
+
+def _standard_recovery_point(event: RuntimeEvent) -> bool:
+    """Return whether Standard mode must persist a restartable state image."""
+
+    if event.event_type == "recovery":
+        return True
+    if event.event_name == "wait.created":
+        return True
+    if event.event_name.startswith("node."):
+        return event.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "skipped",
+        }
+    return event.event_name in {"invocation.running"}
 
 
 class SessionBusyError(RuntimeError):
@@ -126,7 +145,7 @@ class RuntimeStore:
             tuple[UUID, int],
             ExecutionSnapshot,
         ] = {}
-        self._committed_states: dict[UUID, dict[str, Any]] = {}
+        self._reduced_states: dict[UUID, dict[str, Any]] = {}
         self._pending_admissions: dict[UUID, Invocation] = {}
         self._durable_terminal_lru: OrderedDict[UUID, None] = OrderedDict()
         self._evicted_event_sequences: dict[UUID, int] = {}
@@ -324,17 +343,54 @@ class RuntimeStore:
             session_record = session.to_record()
             session_record["current_invocation_id"] = str(invocation.id)
             session_record["updated_at_ms"] = admitted_at_ms
-            state = deepcopy(
-                {
-                    "session": session_record,
-                    "invocation": invocation.to_record(session.id),
+            invocation_record = invocation.to_record(session.id)
+            if invocation.event_mode == "minimal":
+                state = {
+                    "session": {
+                        key: deepcopy(session_record[key])
+                        for key in (
+                            "id",
+                            "namespace",
+                            "workflow_id",
+                            "session_key",
+                            "current_invocation_id",
+                            "created_at_ms",
+                            "updated_at_ms",
+                        )
+                    },
+                    "invocation": {
+                        key: deepcopy(invocation_record[key])
+                        for key in (
+                            "id",
+                            "session_id",
+                            "entry_node_id",
+                            "state",
+                            "execution_mode",
+                            "event_mode",
+                            "input",
+                            "created_at_ms",
+                            "updated_at_ms",
+                        )
+                    },
                     "node_executions": [],
                 }
+            else:
+                state = deepcopy(
+                    {
+                        "session": session_record,
+                        "invocation": invocation_record,
+                        "node_executions": [],
+                    }
+                )
+            persisted_snapshot_state = (
+                compact_recovery_state(state)
+                if invocation.event_mode == "standard"
+                else state
             )
             snapshot = ExecutionSnapshot(
                 invocation_id=invocation.id,
                 through_sequence=0,
-                state=state,
+                state=persisted_snapshot_state,
             )
             self._pending_admissions[session_id] = invocation
         with self._lock:
@@ -349,8 +405,9 @@ class RuntimeStore:
             self.invocations[invocation.id] = invocation
             self.invocation_sessions[invocation.id] = session.id
             self.runtime_events[invocation.id] = []
-            self._committed_states[invocation.id] = state
-            self._replay_checkpoints[(invocation.id, 0)] = snapshot
+            if invocation.event_mode == "full":
+                self._reduced_states[invocation.id] = state
+                self._replay_checkpoints[(invocation.id, 0)] = snapshot
         if self.persistence is not None:
             try:
                 envelope = freeze_admission_envelope(
@@ -427,7 +484,7 @@ class RuntimeStore:
             raise KeyError(f"Unknown wait key: {wait_key}")
         return session
 
-    async def aapply_event(
+    async def arecord_event(
         self,
         session: Session,
         invocation: Invocation,
@@ -439,8 +496,12 @@ class RuntimeStore:
         del node_execution_ids
         if event.invocation_id != invocation.id:
             raise ValueError("RuntimeEvent invocation does not match aggregate.")
-        if "operations" not in event.payload:
-            raise ValueError("Boundary RuntimeEvent has no state operations.")
+        if invocation.event_mode == "minimal":
+            raise ValueError("Minimal Invocations do not record RuntimeEvents.")
+        if invocation.event_mode == "full" and event.operations is None:
+            raise ValueError("Full RuntimeEvent has no StateOperations.")
+        if invocation.event_mode == "standard" and event.operations is not None:
+            raise ValueError("Standard RuntimeEvent cannot contain StateOperations.")
         with self._lock:
             events = self.runtime_events.setdefault(invocation.id, [])
             expected = events[-1].sequence + 1 if events else 1
@@ -448,28 +509,38 @@ class RuntimeStore:
                 raise ValueError(
                     f"Expected event sequence {expected}, got {event.sequence}."
                 )
-            previous = self._committed_states.get(invocation.id)
-            if previous is None:
-                raise KeyError(f"Unknown Invocation aggregate: {invocation.id}")
-            operations = tuple(
-                StateOperation.model_validate(value)
-                for value in event.payload["operations"]
-            )
-            reduced = apply_state_operations(previous, operations)
+            reduced = None
+            if event.operations is not None:
+                previous = self._reduced_states.get(invocation.id)
+                if previous is None:
+                    raise KeyError(f"Unknown Invocation aggregate: {invocation.id}")
+                reduced = apply_state_operations(previous, event.operations)
         with self._lock:
             events = self.runtime_events.setdefault(invocation.id, [])
             expected = events[-1].sequence + 1 if events else 1
             if event.sequence != expected:
                 raise RuntimeError(
                     "Invocation Event sequence changed while persistence "
-                    "accepted a boundary."
+                    "accepted an Event."
                 )
             events.append(event)
-            self._committed_states[invocation.id] = reduced
+            if reduced is not None:
+                self._reduced_states[invocation.id] = reduced
             self.sessions[session.id] = session
             self.invocations[invocation.id] = invocation
         if self.persistence is not None:
             try:
+                recovery_snapshot = (
+                    ExecutionSnapshot.capture(session, invocation)
+                    if (
+                        force_recovery_checkpoint
+                        or (
+                            invocation.event_mode == "standard"
+                            and _standard_recovery_point(event)
+                        )
+                    )
+                    else None
+                )
                 envelope = freeze_event_envelope(
                     namespace=session.namespace,
                     session_id=session.id,
@@ -478,7 +549,14 @@ class RuntimeStore:
                     invocation_state=invocation.state,
                     execution_mode=invocation.execution_mode,
                     invocation_updated_at_ms=invocation.updated_at_ms,
+                    invocation_result=invocation.result,
+                    invocation_error=(
+                        invocation.error.to_record()
+                        if invocation.error is not None
+                        else None
+                    ),
                     event=event,
+                    recovery_snapshot=recovery_snapshot,
                     force_recovery_checkpoint=force_recovery_checkpoint,
                 )
             except Exception as exc:
@@ -498,6 +576,36 @@ class RuntimeStore:
         if self.backend is not None:
             self._persistence_advanced(invocation.id)
         return event
+
+    async def apersist_invocation_state(
+        self,
+        session: Session,
+        invocation: Invocation,
+    ) -> None:
+        """Publish minimal-mode Invocation state without creating an Event."""
+
+        with self._lock:
+            self.sessions[session.id] = session
+            self.invocations[invocation.id] = invocation
+        if self.persistence is None:
+            return
+        try:
+            envelope = freeze_invocation_state_envelope(
+                namespace=session.namespace,
+                session_id=session.id,
+                invocation_id=invocation.id,
+                session_record=session.to_record(),
+                invocation_record=invocation.to_record(session.id),
+            )
+        except Exception as exc:
+            self.persistence.fail_invocation(invocation.id, 0, exc)
+            logger.exception(
+                "Minimal Invocation state could not be copied for persistence; "
+                "execution remains available: invocation_id=%s",
+                invocation.id,
+            )
+        else:
+            self._publish_persistence(envelope)
 
     def _publish_persistence(self, envelope: PersistenceEnvelope) -> bool:
         persistence = self.persistence
@@ -551,11 +659,11 @@ class RuntimeStore:
         self.sessions[session.id] = session
         self.invocations[invocation.id] = invocation
 
-    def committed_state(self, invocation_id: UUID) -> dict[str, Any]:
+    def reduced_state(self, invocation_id: UUID) -> dict[str, Any]:
         """Return the immutable-by-contract reducer baseline for event creation."""
 
         with self._lock:
-            state = self._committed_states.get(invocation_id)
+            state = self._reduced_states.get(invocation_id)
             if state is None:
                 raise KeyError(f"Unknown Invocation aggregate: {invocation_id}")
             return state
@@ -639,11 +747,21 @@ class RuntimeStore:
                 else None
             ),
         )
-        session, invocation = reduce_execution_state(
-            snapshot,
-            events,
-            through_sequence=through_sequence,
-        )
+        snapshot_session, snapshot_invocation = snapshot.restore()
+        if snapshot_invocation.event_mode == "standard":
+            if through_sequence is not None:
+                raise ValueError(
+                    "Standard RuntimeEvents cannot rebuild historical state."
+                )
+            session, invocation = snapshot_session, snapshot_invocation
+            if events:
+                invocation.event_sequence = events[-1].sequence
+        else:
+            session, invocation = reduce_execution_state(
+                snapshot,
+                events,
+                through_sequence=through_sequence,
+            )
         if through_sequence is not None:
             self.cache_replay_checkpoint(
                 ExecutionSnapshot.capture(
@@ -669,10 +787,10 @@ class RuntimeStore:
                 self.invocations[invocation.id] = invocation
                 self.invocation_sessions[invocation.id] = session.id
                 self.runtime_events[invocation.id] = list(all_events)
-                self._committed_states[invocation.id] = capture_execution_state(
-                    session,
-                    invocation,
-                )
+                if invocation.event_mode == "full":
+                    self._reduced_states[invocation.id] = (
+                        capture_execution_state(session, invocation)
+                    )
         return session, invocation
 
     async def alist_runtime_events(
@@ -783,13 +901,17 @@ class RuntimeStore:
             }:
                 return
             events = self.runtime_events.get(invocation_id, ())
-            if (
-                not events
-                or events[-1].sequence < invocation.event_sequence
-            ):
-                return
-            if self.durable_sequence(invocation_id) < invocation.event_sequence:
-                return
+            if invocation.event_mode == "minimal":
+                if self.persistence_status(invocation_id) != "durable":
+                    return
+            else:
+                if (
+                    not events
+                    or events[-1].sequence < invocation.event_sequence
+                ):
+                    return
+                if self.durable_sequence(invocation_id) < invocation.event_sequence:
+                    return
             release = getattr(self.backend, "release_invocation_cache", None)
             if release is not None:
                 release(invocation_id)
@@ -827,7 +949,7 @@ class RuntimeStore:
                 if session.current_invocation_id == invocation_id:
                     session.current_invocation_id = None
         self.runtime_events.pop(invocation_id, None)
-        self._committed_states.pop(invocation_id, None)
+        self._reduced_states.pop(invocation_id, None)
         for key in [
             key
             for key in self._replay_checkpoints

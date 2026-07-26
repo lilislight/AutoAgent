@@ -654,7 +654,7 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         self.assertIs(policy, workflow_ir.edges["map_edge"].policy)
 
-    def test_replication_policy_requires_output_aggregator(self):
+    def test_replication_policy_allows_default_ordered_list_aggregation(self):
         result = WorkflowCompiler().compile(
             make_workflow(
                 nodes=[
@@ -667,9 +667,8 @@ class WorkflowCompilerTests(unittest.TestCase):
             )
         )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(["POLICY_REPLICATION_INVALID"], self.diagnostic_codes(result))
-        self.assertIn("requires output_aggregator", result.diagnostics[0].message)
+        self.assertTrue(result.ok)
+        self.assertEqual([], self.diagnostic_codes(result))
 
     def test_invalid_map_policy_emits_diagnostic(self):
         workflow = make_workflow(

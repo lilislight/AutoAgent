@@ -1,0 +1,16 @@
+schema_version = 1
+
+[project]
+name = "example-agent"
+version = "0.1.0"
+description = "Replace this metadata with the AutoAgent project identity."
+
+# Each entrypoint uses "<python-module>:<exported-object>" syntax.
+# This example resolves the `workflow` variable from `workflows/weather.py`.
+[[workflows]]
+entrypoint = "workflows.weather:workflow"
+
+# A project may export multiple Workflows, including multiple objects from the
+# same Python module.
+[[workflows]]
+entrypoint = "workflows.weather:forecast_workflow"

@@ -1,3 +1,15 @@
+"""Stable Workflow-authoring API.
+
+The names in ``__all__`` are the root-package contract intended for Workflow
+authors and Coding Agents. Runtime hosting, persistence, Server, compiler, and
+execution objects remain available from their owning modules, but are not part
+of this authoring contract.
+
+Some historical root attributes are still imported below so existing
+feature-testing examples keep running. Their presence does not make them part
+of the stable public API; only ``__all__`` defines that contract.
+"""
+
 from autoagent.core.app import AutoAgentApp, AutoAgentSettings
 from autoagent.core.operators import (
     Capability,
@@ -38,11 +50,17 @@ from autoagent.core.workflow import (
 from autoagent.core.runtime import (
     ArtifactPolicy,
     ArtifactRef,
+    ConditionContext,
     DatabaseBackend,
+    InputMappingContext,
     JsonRuntimeSerializer,
+    MapAggregationContext,
+    MapItemSelectionContext,
+    OutputBindingContext,
     PersistenceAdmissionError,
     PersistenceHealth,
     PersistencePolicy,
+    ReplicationAggregationContext,
     RuntimeCodec,
     RuntimeRetentionPolicy,
     RuntimeStore,
@@ -50,49 +68,29 @@ from autoagent.core.runtime import (
 from autoagent.core.server import AutoAgentServer
 
 __all__ = [
-    "AutoAgentApp",
-    "AutoAgentSettings",
-    "AutoAgentServer",
     "ArtifactRef",
-    "ArtifactPolicy",
     "BackoffPolicy",
     "CapabilityRef",
-    "Capability",
     "CapabilitySelectionPolicy",
-    "DiagramEdge",
-    "DiagramNode",
-    "Edge",
+    "ConditionContext",
     "EdgePolicy",
     "FailurePolicy",
     "InputMapping",
-    "HookVersion",
+    "InputMappingContext",
     "MapPolicy",
-    "JsonRuntimeSerializer",
-    "Node",
+    "MapAggregationContext",
+    "MapItemSelectionContext",
     "NodePolicy",
     "OutputBinding",
-    "OperatorRef",
-    "Operator",
-    "OperatorContract",
-    "OperatorContractWarning",
-    "OperatorManifest",
-    "ParameterContract",
-    "PersistenceAdmissionError",
-    "PersistenceHealth",
-    "PersistencePolicy",
+    "OutputBindingContext",
+    "ReplicationAggregationContext",
     "ResourcePolicy",
     "ReplicationPolicy",
     "RecoveryPolicy",
     "RetryPolicy",
-    "RuntimeCodec",
-    "RuntimeRetentionPolicy",
-    "SchemaContract",
-    "DatabaseBackend",
-    "RuntimeStore",
     "SystemCommand",
     "TimeoutPolicy",
     "Workflow",
     "WorkflowPolicy",
-    "WorkflowDiagram",
     "workflow_hook",
 ]

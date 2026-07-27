@@ -3,6 +3,25 @@
 Only unfinished work is kept here. Completed stage items should be removed
 instead of archived in this file.
 
+## MVP 1: Agent Authoring Foundation
+
+Complete these items in order:
+
+1. Define the CLI runtime options and environment boundary, then add one shared
+   ProjectHost path used by the CLI, embedded Server, and future platform.
+   ProjectHost creates and owns the App, providers, RuntimeStore, registered
+   Workflows, startup, recovery, and shutdown without moving those concerns
+   into Workflow source or `auto-agent.toml`.
+2. Add a new set of Coding-Agent-oriented examples instead of migrating the
+   current feature-testing examples. Each normative example must include its
+   dependency declaration, manifest, Workflow source, documented input/output,
+   runnable inputs, and expected results.
+3. Add the local CLI for deterministic project check, Workflow list/check/
+   inspect, Invocation run, and tracing operations. Text and JSON rendering
+   must share the same Project Loader, Compiler diagnostics, and ProjectHost.
+4. Write the standard Authoring Skill against only the locked public API,
+   project manifest, normative examples, and CLI workflow.
+
 ## Stage 4: Runtime Events and Observability
 
 - Add validated Runtime profiles without forking Scheduler, WorkflowExecutor,

@@ -1044,6 +1044,50 @@ class WorkflowCompilerTests(unittest.TestCase):
             ).ok
         )
 
+    def test_diagnostics_include_agent_facing_location_and_hint(self):
+        workflow = Workflow(id="diagnostic_context")
+        workflow.add_node(lambda: None, node_id="known")
+        workflow.add_edge("known", "missing", edge_id="broken_edge")
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("diagnostic_context", result.workflow_id)
+        diagnostic = next(
+            item for item in result.diagnostics if item.code == "EDGE_UNKNOWN_NODE"
+        )
+        self.assertEqual("diagnostic_context", diagnostic.workflow_id)
+        self.assertEqual("edge", diagnostic.object_type)
+        self.assertEqual("broken_edge", diagnostic.object_id)
+        self.assertEqual("to_node", diagnostic.field)
+        self.assertEqual(0, diagnostic.source_index)
+        self.assertIn("existing Node", diagnostic.hint)
+
+    def test_diagnostic_document_is_lightweight_and_deterministic(self):
+        workflow = Workflow(id="diagnostic_document")
+        workflow.add_node(lambda: None, node_id="duplicate")
+        workflow.add_node(lambda: None, node_id="duplicate")
+
+        first = WorkflowCompiler().compile(workflow)
+        second = WorkflowCompiler().compile(workflow)
+        document = first.to_diagnostic_document()
+
+        self.assertEqual(first.to_diagnostic_json(), second.to_diagnostic_json())
+        self.assertEqual(
+            {
+                "error": 1,
+                "warning": 0,
+                "info": 0,
+            },
+            document["summary"],
+        )
+        self.assertNotIn("workflow_ir", document)
+        self.assertNotIn("workflow_snapshot", document)
+        self.assertEqual("diagnostic_document", document["workflow_id"])
+        self.assertEqual("node", document["diagnostics"][0]["object_type"])
+        self.assertEqual("duplicate", document["diagnostics"][0]["object_id"])
+        self.assertNotIn("subject", document["diagnostics"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

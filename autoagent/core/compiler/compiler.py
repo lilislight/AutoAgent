@@ -108,7 +108,16 @@ class WorkflowCompiler:
         self._mark_entry_exit_flags(nodes, entry_node_ids, exit_node_ids)
 
         if self._has_errors(diagnostics):
-            return CompileResult(diagnostics=diagnostics)
+            return CompileResult(
+                workflow_id=workflow_id,
+                workflow_version=workflow_version,
+                diagnostics=self._finalize_diagnostics(
+                    workflow_id=workflow_id,
+                    diagnostics=diagnostics,
+                    nodes=nodes,
+                    edges=edges,
+                ),
+            )
 
         workflow_ir = WorkflowIR(
             ir_version=WORKFLOW_IR_VERSION,
@@ -134,9 +143,16 @@ class WorkflowCompiler:
         )
         workflow_ir.definition_hash = snapshot.definition_hash
         return CompileResult(
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
             workflow_ir=workflow_ir,
             workflow_snapshot=snapshot,
-            diagnostics=diagnostics,
+            diagnostics=self._finalize_diagnostics(
+                workflow_id=workflow_id,
+                diagnostics=diagnostics,
+                nodes=nodes,
+                edges=edges,
+            ),
         )
 
     def _compile_node_ids(
@@ -1336,3 +1352,162 @@ class WorkflowCompiler:
 
     def _has_errors(self, diagnostics: list[Diagnostic]) -> bool:
         return any(diagnostic.severity == "error" for diagnostic in diagnostics)
+
+    def _finalize_diagnostics(
+        self,
+        *,
+        workflow_id: str,
+        diagnostics: list[Diagnostic],
+        nodes: dict[str, NodeIR],
+        edges: dict[str, EdgeIR],
+    ) -> list[Diagnostic]:
+        """Attach stable agent-facing context and deterministically order results."""
+
+        finalized: list[Diagnostic] = []
+        for diagnostic in diagnostics:
+            object_id = diagnostic.object_id or diagnostic.subject
+            object_type = diagnostic.object_type or _diagnostic_object_type(
+                diagnostic.code,
+                object_id=object_id,
+                node_ids=nodes.keys(),
+                edge_ids=edges.keys(),
+            )
+            source_index = diagnostic.source_index
+            if source_index is None:
+                raw_source_index = diagnostic.metadata.get("source_index")
+                if isinstance(raw_source_index, int) and raw_source_index >= 0:
+                    source_index = raw_source_index
+
+            finalized.append(
+                diagnostic.model_copy(
+                    update={
+                        "workflow_id": diagnostic.workflow_id or workflow_id,
+                        "object_type": object_type,
+                        "object_id": object_id,
+                        "field": diagnostic.field
+                        or _diagnostic_field(diagnostic.code, diagnostic.message),
+                        "hint": diagnostic.hint
+                        or _diagnostic_hint(diagnostic.code),
+                        "source_index": source_index,
+                    },
+                )
+            )
+
+        severity_order = {"error": 0, "warning": 1, "info": 2}
+        object_order = {"workflow": 0, "node": 1, "edge": 2, None: 3}
+        return sorted(
+            finalized,
+            key=lambda item: (
+                severity_order[item.severity],
+                item.source_index if item.source_index is not None else 2**31,
+                object_order[item.object_type],
+                item.object_id or "",
+                item.field or "",
+                item.code,
+                item.message,
+            ),
+        )
+
+
+def _diagnostic_object_type(
+    code: str,
+    *,
+    object_id: str | None,
+    node_ids: Any,
+    edge_ids: Any,
+) -> str:
+    if code in {"WF_NO_ENTRY", "LOOP_IRREDUCIBLE", "LOOP_OVERLAP_INVALID"}:
+        return "workflow"
+    if code == "LOOP_ENTRY_INVALID":
+        return "edge"
+    if code == "SUBWORKFLOW_RECURSION":
+        return "workflow"
+    if code.startswith("EDGE_") or code in {
+        "CONDITION_UNSUPPORTED",
+        "STRING_CONDITION_UNSUPPORTED",
+        "SUBWORKFLOW_MAP_UNSUPPORTED",
+        "SYSTEM_COMMAND_MAP_UNSUPPORTED",
+    }:
+        return "edge"
+    if code.startswith("POLICY_MAP_"):
+        return "edge"
+    if object_id is not None and object_id in edge_ids:
+        return "edge"
+    if object_id is not None and object_id in node_ids:
+        return "node"
+    if code.startswith("WF_"):
+        return "node"
+    return "node" if object_id is not None else "workflow"
+
+
+def _diagnostic_field(code: str, message: str) -> str | None:
+    if code in {"NODE_ID_REQUIRED", "NODE_DUPLICATE_ID"}:
+        return "id"
+    if code == "EDGE_DUPLICATE_ID":
+        return "id"
+    if code == "EDGE_UNKNOWN_NODE":
+        return "from_node" if "source" in message.lower() else "to_node"
+    if code in {"CONDITION_UNSUPPORTED", "STRING_CONDITION_UNSUPPORTED"}:
+        return "condition"
+    if code == "MAPPING_UNSUPPORTED":
+        return "output_binding" if "output_binding" in message else "input_mapping"
+    if code.startswith("POLICY_") or code.endswith("_POLICY_UNSUPPORTED"):
+        return "policy"
+    if code.startswith("CAPABILITY_") or code.startswith("OPERATOR_"):
+        return "capability"
+    if code == "SYSTEM_COMMAND_CONFIG_UNSUPPORTED":
+        return "capability.command"
+    if code.startswith("SUBWORKFLOW_"):
+        if "_ENTRY_" in code:
+            return "child_entry_node_id"
+        if "_EXIT_" in code:
+            return "child_exit_node_id"
+        return "capability"
+    if code == "WF_ENTRY_HAS_INCOMING_EDGE":
+        return "entry"
+    return None
+
+
+_DIAGNOSTIC_HINTS = {
+    "NODE_ID_REQUIRED": "Pass a stable non-empty node_id to workflow.add_node().",
+    "NODE_DUPLICATE_ID": "Give every Node in the Workflow a unique stable id.",
+    "EDGE_DUPLICATE_ID": "Give manually identified Edges unique ids.",
+    "EDGE_UNKNOWN_NODE": "Correct the Edge endpoint to reference an existing Node id.",
+    "WF_NO_ENTRY": "Add a Node with no incoming Edge to create a Workflow entry.",
+    "WF_ENTRY_HAS_INCOMING_EDGE": (
+        "Remove the incoming Edge or do not mark this Node as an explicit entry."
+    ),
+    "STRING_CONDITION_UNSUPPORTED": (
+        "Replace the string condition with a callable condition."
+    ),
+    "CONDITION_UNSUPPORTED": "Use a callable Edge condition.",
+    "MAPPING_UNSUPPORTED": "Use a callable mapping or binding function.",
+    "CAPABILITY_NOT_REGISTERED": (
+        "Register a provider for the Capability before compiling for execution."
+    ),
+    "CAPABILITY_HAS_NO_OPERATOR": (
+        "Install at least one Operator that implements this Capability."
+    ),
+    "OPERATOR_NOT_REGISTERED": (
+        "Register the referenced Operator or bind a callable directly."
+    ),
+    "SUBWORKFLOW_RECURSION": "Remove the recursive child Workflow reference.",
+}
+
+
+def _diagnostic_hint(code: str) -> str | None:
+    if code in _DIAGNOSTIC_HINTS:
+        return _DIAGNOSTIC_HINTS[code]
+    if code.startswith("POLICY_"):
+        return "Update the referenced Policy field to satisfy the diagnostic."
+    if code.startswith("CAPABILITY_"):
+        return "Correct the Capability reference or install a matching provider."
+    if code.startswith("OPERATOR_"):
+        return "Correct the callable or Operator contract used by this Node."
+    if code.startswith("SUBWORKFLOW_"):
+        return "Update the child Workflow boundary or placeholder configuration."
+    if code.startswith("SYSTEM_COMMAND_"):
+        return "Remove the unsupported behavior from the SystemCommand Node."
+    if code.startswith("LOOP_"):
+        return "Restructure the cycle as a natural loop with one entry header."
+    return None

@@ -28,6 +28,12 @@ import {
 } from "lucide-react";
 
 import {
+  affectedEdgeIdsAfterNodeMove,
+  GRAPH_NODE_HEIGHT,
+  GRAPH_NODE_WIDTH,
+  routeEdgesAroundNodes,
+} from "../graphRouting";
+import {
   layoutWorkflow,
   loadSavedLayout,
   saveLayout,
@@ -174,6 +180,10 @@ export function WorkflowCanvas({
             selected:
               currentSelection?.type === "node" &&
               currentSelection.id === node.id,
+            style: {
+              width: GRAPH_NODE_WIDTH,
+              height: GRAPH_NODE_HEIGHT,
+            },
             zIndex: 100,
           };
         });
@@ -249,16 +259,12 @@ export function WorkflowCanvas({
 
   const edges = useMemo<FlowEdge[]>(
     () => {
-      const seen = new Set<string>();
-      return graph.edges.flatMap((edge) => {
+      return graph.edges.map((edge) => {
         const projected = projection.edges[edge.id];
         const selected = projected?.selected ?? false;
         const inspected = selection?.type === "edge" && selection.id === edge.id;
         const hovered = hoveredEdgeId === edge.id;
         const edgeState = edgeStateClass(projected?.state, selected);
-        const edgeKey = `${edge.from_node}->${edge.to_node}:${edge.id}`;
-        if (seen.has(edgeKey)) return [];
-        seen.add(edgeKey);
         return {
           id: edge.id,
           source: edge.from_node,
@@ -325,12 +331,31 @@ export function WorkflowCanvas({
           edgeRoutesRef.current = nextRoutes;
           setEdgeRoutes(nextRoutes);
         }}
-        onNodeDragStop={() => {
+        onNodeDragStop={(_event, node) => {
+          if (node.type === "workflowGroup") return;
           const current = flow.current?.getNodes() ?? [];
           const positions = traceNodePositions(current);
+          const affectedEdgeIds = affectedEdgeIdsAfterNodeMove(
+            edgeRoutesRef.current,
+            graph.edges,
+            node.id,
+            positions,
+          );
+          const reroutedEdges = routeEdgesAroundNodes(
+            graph.nodes,
+            graph.edges,
+            positions,
+            affectedEdgeIds,
+          );
+          const nextRoutes = {
+            ...edgeRoutesRef.current,
+            ...reroutedEdges,
+          };
+          edgeRoutesRef.current = nextRoutes;
+          setEdgeRoutes(nextRoutes);
           saveLayout(graph.definition_hash, {
             positions,
-            edgeRoutes: edgeRoutesRef.current,
+            edgeRoutes: nextRoutes,
           });
           setNodes((existing) =>
             resizeGroupNodes(
@@ -686,7 +711,7 @@ function buildGroupNodes(
       id: group.id,
       type: "workflowGroup",
       position: { x: bounds.x, y: bounds.y },
-      selectable: false,
+      selectable: true,
       draggable: false,
       className: "workflow-group-flow-node is-expanded",
       data: {
@@ -749,8 +774,12 @@ function groupBounds(
   if (values.length === 0) return null;
   const minX = Math.min(...values.map((value) => value.x));
   const minY = Math.min(...values.map((value) => value.y));
-  const maxX = Math.max(...values.map((value) => value.x + 224));
-  const maxY = Math.max(...values.map((value) => value.y + 104));
+  const maxX = Math.max(
+    ...values.map((value) => value.x + GRAPH_NODE_WIDTH),
+  );
+  const maxY = Math.max(
+    ...values.map((value) => value.y + GRAPH_NODE_HEIGHT),
+  );
   return {
     x: minX - 26,
     y: minY - 38,

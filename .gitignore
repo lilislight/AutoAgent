@@ -19,6 +19,7 @@ dist/
 *.egg-info/
 ui/node_modules/
 ui/dist/
+ui/.test-dist/
 
 # Local Workflow previews
 workflow_preview.mmd

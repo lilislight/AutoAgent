@@ -1,171 +1,48 @@
-import type { WorkflowGraphView } from "./types";
+import type {
+  LayoutWorkerResponse,
+  WorkflowLayout,
+} from "./layoutTypes.js";
+import type { WorkflowGraphView } from "./types.js";
 
-export interface NodePosition {
-  x: number;
-  y: number;
-}
+export type {
+  EdgeRoute,
+  NodePosition,
+  WorkflowLayout,
+} from "./layoutTypes.js";
 
-export interface EdgeRoute {
-  points: NodePosition[];
-  label: NodePosition;
-}
-
-export interface WorkflowLayout {
-  positions: Record<string, NodePosition>;
-  edgeRoutes: Record<string, EdgeRoute>;
-}
-
-type RoutedLayoutEdge = {
-  id: string;
-  sections?: {
-    startPoint: NodePosition;
-    bendPoints?: NodePosition[];
-    endPoint: NodePosition;
-  }[];
+type PendingLayout = {
+  resolve: (layout: WorkflowLayout) => void;
+  reject: (error: Error) => void;
 };
 
-const NODE_WIDTH = 224;
-const NODE_HEIGHT = 104;
-const ENTRY_ANCHOR_ID = "__autoagent_entry_anchor__";
-const EXIT_ANCHOR_ID = "__autoagent_exit_anchor__";
-const VIRTUAL_EDGE_PREFIX = "__autoagent_layout_edge__";
+let layoutWorker: Worker | null = null;
+let nextRequestId = 1;
+const pendingLayouts = new Map<number, PendingLayout>();
 
 export async function layoutWorkflow(
   graph: WorkflowGraphView,
 ): Promise<WorkflowLayout> {
-  // ELK is substantially larger than the tracing shell. Load it only when a
-  // Workflow version has no saved layout or the user requests auto-layout.
-  const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
-  const elk = new ELK();
-  const visibleChildren = graph.nodes.map((node) => ({
-    id: node.id,
-    width: NODE_WIDTH,
-    height: NODE_HEIGHT,
-  }));
-  const entryAnchor = {
-    id: ENTRY_ANCHOR_ID,
-    width: 1,
-    height: 1,
-    layoutOptions: {
-      "elk.layered.layering.layerConstraint": "FIRST_SEPARATE",
-    },
-  };
-  const exitAnchor = {
-    id: EXIT_ANCHOR_ID,
-    width: 1,
-    height: 1,
-    layoutOptions: {
-      "elk.layered.layering.layerConstraint": "LAST_SEPARATE",
-    },
-  };
-  const groupAnchors = graph.groups.flatMap((group, index) => [
-    {
-      id: groupAnchorId("entry", index),
-      width: 1,
-      height: 1,
-    },
-    {
-      id: groupAnchorId("exit", index),
-      width: 1,
-      height: 1,
-    },
-  ]);
-  const entryEdges = graph.entry_node_ids.map((nodeId, index) => ({
-    id: `${VIRTUAL_EDGE_PREFIX}entry_${index}`,
-    sources: [ENTRY_ANCHOR_ID],
-    targets: [nodeId],
-  }));
-  const exitEdges = graph.exit_node_ids.map((nodeId, index) => ({
-    id: `${VIRTUAL_EDGE_PREFIX}exit_${index}`,
-    sources: [nodeId],
-    targets: [EXIT_ANCHOR_ID],
-  }));
-  const groupAnchorEdges = graph.groups.flatMap((group, groupIndex) => [
-    ...group.entry_node_ids.map((nodeId, nodeIndex) => ({
-      id: `${VIRTUAL_EDGE_PREFIX}group_${groupIndex}_entry_${nodeIndex}`,
-      sources: [groupAnchorId("entry", groupIndex)],
-      targets: [nodeId],
-    })),
-    ...group.exit_node_ids.map((nodeId, nodeIndex) => ({
-      id: `${VIRTUAL_EDGE_PREFIX}group_${groupIndex}_exit_${nodeIndex}`,
-      sources: [nodeId],
-      targets: [groupAnchorId("exit", groupIndex)],
-    })),
-  ]);
-  const result = await elk.layout({
-    id: "root",
-    layoutOptions: {
-      "elk.algorithm": "layered",
-      "elk.direction": "RIGHT",
-      "elk.edgeRouting": "ORTHOGONAL",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "82",
-      "elk.layered.spacing.edgeNodeBetweenLayers": "38",
-      "elk.layered.spacing.edgeEdgeBetweenLayers": "22",
-      "elk.spacing.nodeNode": "44",
-      "elk.spacing.edgeNode": "36",
-      "elk.padding": "[top=48,left=48,bottom=48,right=48]",
-      "elk.layered.cycleBreaking.strategy": "DEPTH_FIRST",
-      "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-      "elk.layered.nodePlacement.favorStraightEdges": "true",
-    },
-    children: [
-      entryAnchor,
-      ...visibleChildren,
-      ...groupAnchors,
-      exitAnchor,
-    ],
-    edges: [
-      ...entryEdges,
-      ...graph.edges.map((edge) => ({
-        id: edge.id,
-        sources: [edge.from_node],
-        targets: [edge.to_node],
-      })),
-      ...groupAnchorEdges,
-      ...exitEdges,
-    ],
-  });
-  const positions = Object.fromEntries(
-    (result.children ?? [])
-      .filter(
-        (node) =>
-          node.id !== ENTRY_ANCHOR_ID &&
-          node.id !== EXIT_ANCHOR_ID &&
-          !node.id.startsWith(`${VIRTUAL_EDGE_PREFIX}group_anchor_`),
-      )
-      .map((node) => [
-        node.id,
-        { x: node.x ?? 0, y: node.y ?? 0 },
-      ]),
-  );
-  const routedEdges = (result.edges ?? []) as RoutedLayoutEdge[];
-  const edgeRoutes: Record<string, EdgeRoute> = Object.fromEntries(
-    routedEdges
-      .filter((edge) => !edge.id.startsWith(VIRTUAL_EDGE_PREFIX))
-      .flatMap((edge) => {
-      const points = (edge.sections ?? []).flatMap((section, sectionIndex) => {
-        const sectionPoints = [
-          section.startPoint,
-          ...(section.bendPoints ?? []),
-          section.endPoint,
-        ].map((point) => ({ x: point.x, y: point.y }));
-        return sectionIndex === 0 ? sectionPoints : sectionPoints.slice(1);
-      });
-      if (points.length < 2) return [];
-      return [[edge.id, { points, label: routeMidpoint(points) }]];
-    }),
-  );
-  return { positions, edgeRoutes };
+  if (typeof Worker === "undefined") {
+    return computeWithoutWorker(graph);
+  }
+  try {
+    return await computeInWorker(graph);
+  } catch {
+    // Worker construction may be blocked by a restrictive CSP or unsupported
+    // embedding environment. Layout remains available on the main thread.
+    return computeWithoutWorker(graph);
+  }
 }
 
 export function loadSavedLayout(
   definitionHash: string,
 ): WorkflowLayout | null {
-  const raw = localStorage.getItem(layoutKey(definitionHash));
-  if (!raw) return null;
   try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(layoutKey(definitionHash));
+    if (!raw) return null;
     const value = JSON.parse(raw) as WorkflowLayout;
-    if (!value.positions || !value.edgeRoutes) return null;
+    if (!isWorkflowLayout(value)) return null;
     return value;
   } catch {
     return null;
@@ -175,38 +52,102 @@ export function loadSavedLayout(
 export function saveLayout(
   definitionHash: string,
   layout: WorkflowLayout,
-): void {
-  localStorage.setItem(layoutKey(definitionHash), JSON.stringify(layout));
+): boolean {
+  try {
+    if (typeof localStorage === "undefined") return false;
+    localStorage.setItem(layoutKey(definitionHash), JSON.stringify(layout));
+    return true;
+  } catch {
+    // Layout persistence is optional. Quota, privacy mode, or an embedded
+    // browser policy must never prevent the graph itself from rendering.
+    return false;
+  }
+}
+
+function computeInWorker(
+  graph: WorkflowGraphView,
+): Promise<WorkflowLayout> {
+  const worker = getLayoutWorker();
+  const requestId = nextRequestId++;
+  return new Promise((resolve, reject) => {
+    pendingLayouts.set(requestId, { resolve, reject });
+    worker.postMessage({ requestId, graph });
+  });
+}
+
+async function computeWithoutWorker(
+  graph: WorkflowGraphView,
+): Promise<WorkflowLayout> {
+  const { computeWorkflowLayout } = await import("./layoutEngine.js");
+  return computeWorkflowLayout(graph);
+}
+
+function getLayoutWorker(): Worker {
+  if (layoutWorker) return layoutWorker;
+  const worker = new Worker(
+    new URL("./layout.worker.ts", import.meta.url),
+    { type: "module", name: "autoagent-layout" },
+  );
+  worker.onmessage = (event: MessageEvent<LayoutWorkerResponse>) => {
+    const response = event.data;
+    const pending = pendingLayouts.get(response.requestId);
+    if (!pending) return;
+    pendingLayouts.delete(response.requestId);
+    if ("error" in response) {
+      pending.reject(new Error(response.error));
+    } else {
+      pending.resolve(response.layout);
+    }
+  };
+  worker.onerror = () => {
+    failLayoutWorker(new Error("Workflow layout Worker failed."));
+  };
+  layoutWorker = worker;
+  return worker;
+}
+
+function failLayoutWorker(error: Error): void {
+  layoutWorker?.terminate();
+  layoutWorker = null;
+  for (const pending of pendingLayouts.values()) {
+    pending.reject(error);
+  }
+  pendingLayouts.clear();
 }
 
 function layoutKey(definitionHash: string): string {
-  return `autoagent:layout:v6:${definitionHash}`;
+  return `autoagent:layout:v7:${definitionHash}`;
 }
 
-function groupAnchorId(kind: "entry" | "exit", index: number): string {
-  return `${VIRTUAL_EDGE_PREFIX}group_anchor_${kind}_${index}`;
+function isWorkflowLayout(value: unknown): value is WorkflowLayout {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<WorkflowLayout>;
+  return (
+    isRecord(candidate.positions) &&
+    isRecord(candidate.edgeRoutes) &&
+    Object.values(candidate.positions).every(isPoint) &&
+    Object.values(candidate.edgeRoutes).every(
+      (route) =>
+        Boolean(route) &&
+        Array.isArray(route.points) &&
+        route.points.length >= 2 &&
+        route.points.every(isPoint) &&
+        isPoint(route.label),
+    )
+  );
 }
 
-function routeMidpoint(points: NodePosition[]): NodePosition {
-  const segments = points.slice(1).map((point, index) => {
-    const previous = points[index];
-    return {
-      from: previous,
-      to: point,
-      length: Math.hypot(point.x - previous.x, point.y - previous.y),
-    };
-  });
-  const total = segments.reduce((sum, segment) => sum + segment.length, 0);
-  let remaining = total / 2;
-  for (const segment of segments) {
-    if (remaining <= segment.length) {
-      const ratio = segment.length === 0 ? 0 : remaining / segment.length;
-      return {
-        x: segment.from.x + (segment.to.x - segment.from.x) * ratio,
-        y: segment.from.y + (segment.to.y - segment.from.y) * ratio,
-      };
-    }
-    remaining -= segment.length;
-  }
-  return points.at(-1) ?? { x: 0, y: 0 };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  if (!value || typeof value !== "object") return false;
+  const point = value as { x?: unknown; y?: unknown };
+  return (
+    typeof point.x === "number" &&
+    Number.isFinite(point.x) &&
+    typeof point.y === "number" &&
+    Number.isFinite(point.y)
+  );
 }

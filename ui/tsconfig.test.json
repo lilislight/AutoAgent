@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "rootDir": ".",
+    "outDir": ".test-dist",
+    "noEmit": false
+  },
+  "include": [
+    "src/graphRouting.ts",
+    "src/layout.ts",
+    "src/layoutEngine.ts",
+    "src/layoutTypes.ts",
+    "src/types.ts",
+    "tests/graphRouting.test.ts"
+  ]
+}

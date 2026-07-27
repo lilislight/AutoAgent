@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -177,6 +178,46 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/v1/runtime/stream", paths)
         self.assertIn("/api/v1/health/live", paths)
         self.assertIn("/api/v1/health/ready", paths)
+
+    async def test_standalone_server_bounds_uvicorn_graceful_shutdown(
+        self,
+    ) -> None:
+        with patch("uvicorn.run") as run:
+            self.server.run(host="127.0.0.1", port=8765)
+
+        run.assert_called_once_with(
+            self.server.api,
+            host="127.0.0.1",
+            port=8765,
+            reload=False,
+            timeout_graceful_shutdown=5.0,
+        )
+
+    async def test_runtime_status_stream_stops_after_client_disconnect(
+        self,
+    ) -> None:
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "stream_runtime_status"
+        )
+
+        class DisconnectingRequest:
+            def __init__(self) -> None:
+                self.poll_count = 0
+
+            async def is_disconnected(self) -> bool:
+                self.poll_count += 1
+                return self.poll_count > 1
+
+        request = DisconnectingRequest()
+        response = await endpoint(request)
+        first = await anext(response.body_iterator)
+
+        self.assertIn("event: runtime_status", first)
+        with self.assertRaises(StopAsyncIteration):
+            await anext(response.body_iterator)
+        self.assertEqual(2, request.poll_count)
 
     async def test_runtime_status_separates_execution_and_persistence(self) -> None:
         status = self.server._runtime_status()

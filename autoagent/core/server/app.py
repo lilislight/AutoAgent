@@ -18,6 +18,7 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     Response,
 )
 from fastapi.responses import StreamingResponse
@@ -119,7 +120,16 @@ class AutoAgentServer:
     ) -> None:
         import uvicorn
 
-        uvicorn.run(self.api, host=host, port=port, reload=reload)
+        uvicorn.run(
+            self.api,
+            host=host,
+            port=port,
+            reload=reload,
+            timeout_graceful_shutdown=max(
+                0.1,
+                self.agent.settings.shutdown_grace_timeout_ms / 1_000,
+            ),
+        )
 
     def create_app(self) -> FastAPI:
         api = FastAPI(title="AutoAgent Server API", version="1")
@@ -231,11 +241,11 @@ class AutoAgentServer:
             return self._runtime_status()
 
         @router.get("/runtime/stream", dependencies=auth)
-        async def stream_runtime_status() -> StreamingResponse:
+        async def stream_runtime_status(request: Request) -> StreamingResponse:
             async def generate() -> AsyncIterator[str]:
                 previous: str | None = None
                 heartbeat_at = asyncio.get_running_loop().time()
-                while True:
+                while not await request.is_disconnected():
                     payload = json.dumps(
                         self._runtime_status(),
                         separators=(",", ":"),
@@ -430,6 +440,7 @@ class AutoAgentServer:
 
         @router.get("/invocations/{invocation_id}/stream", dependencies=auth)
         async def stream_invocation(
+            request: Request,
             invocation_id: UUID,
             after_sequence: int = Query(default=0, ge=0),
             last_event_id: str | None = Header(
@@ -450,7 +461,7 @@ class AutoAgentServer:
                 cursor = after_sequence
                 heartbeat_at = asyncio.get_running_loop().time()
                 previous_detail: str | None = None
-                while True:
+                while not await request.is_disconnected():
                     page = await self.trace.event_page(
                         invocation_id,
                         after_sequence=cursor,

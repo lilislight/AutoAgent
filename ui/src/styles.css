@@ -1033,8 +1033,8 @@ button {
 
 .workflow-group-node {
   position: relative;
-  border: 1px dashed color-mix(in srgb, var(--accent-strong) 72%, transparent);
-  border-radius: 8px;
+  border: 2px dashed color-mix(in srgb, var(--accent-strong) 82%, transparent);
+  border-radius: 10px;
   background: transparent;
   color: var(--text);
   transition:
@@ -1049,27 +1049,29 @@ button {
 }
 
 .workflow-group-node.state-running {
-  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  border-color: color-mix(in srgb, var(--accent-strong) 92%, transparent);
+  background: transparent;
   box-shadow: none;
 }
 
 .workflow-group-node.state-ready {
-  border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 78%, transparent);
   box-shadow: none;
 }
 
 .workflow-group-node.state-completed {
-  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  border-color: color-mix(in srgb, var(--success) 72%, transparent);
   background: transparent;
 }
 
 .workflow-group-node.state-waiting {
-  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 78%, transparent);
+  background: transparent;
   box-shadow: none;
 }
 
 .workflow-group-node.state-failed {
-  border-color: color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 78%, transparent);
   background: transparent;
   box-shadow: none;
 }

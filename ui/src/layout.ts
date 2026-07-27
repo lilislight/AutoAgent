@@ -24,6 +24,12 @@ type RoutedLayoutEdge = {
   }[];
 };
 
+const NODE_WIDTH = 224;
+const NODE_HEIGHT = 104;
+const ENTRY_ANCHOR_ID = "__autoagent_entry_anchor__";
+const EXIT_ANCHOR_ID = "__autoagent_exit_anchor__";
+const VIRTUAL_EDGE_PREFIX = "__autoagent_layout_edge__";
+
 export async function layoutWorkflow(
   graph: WorkflowGraphView,
 ): Promise<WorkflowLayout> {
@@ -31,50 +37,112 @@ export async function layoutWorkflow(
   // Workflow version has no saved layout or the user requests auto-layout.
   const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
   const elk = new ELK();
+  const visibleChildren = graph.nodes.map((node) => ({
+    id: node.id,
+    width: NODE_WIDTH,
+    height: NODE_HEIGHT,
+  }));
+  const entryAnchor = {
+    id: ENTRY_ANCHOR_ID,
+    width: 1,
+    height: 1,
+    layoutOptions: {
+      "elk.layered.layering.layerConstraint": "FIRST_SEPARATE",
+    },
+  };
+  const exitAnchor = {
+    id: EXIT_ANCHOR_ID,
+    width: 1,
+    height: 1,
+    layoutOptions: {
+      "elk.layered.layering.layerConstraint": "LAST_SEPARATE",
+    },
+  };
+  const groupAnchors = graph.groups.flatMap((group, index) => [
+    {
+      id: groupAnchorId("entry", index),
+      width: 1,
+      height: 1,
+    },
+    {
+      id: groupAnchorId("exit", index),
+      width: 1,
+      height: 1,
+    },
+  ]);
+  const entryEdges = graph.entry_node_ids.map((nodeId, index) => ({
+    id: `${VIRTUAL_EDGE_PREFIX}entry_${index}`,
+    sources: [ENTRY_ANCHOR_ID],
+    targets: [nodeId],
+  }));
+  const exitEdges = graph.exit_node_ids.map((nodeId, index) => ({
+    id: `${VIRTUAL_EDGE_PREFIX}exit_${index}`,
+    sources: [nodeId],
+    targets: [EXIT_ANCHOR_ID],
+  }));
+  const groupAnchorEdges = graph.groups.flatMap((group, groupIndex) => [
+    ...group.entry_node_ids.map((nodeId, nodeIndex) => ({
+      id: `${VIRTUAL_EDGE_PREFIX}group_${groupIndex}_entry_${nodeIndex}`,
+      sources: [groupAnchorId("entry", groupIndex)],
+      targets: [nodeId],
+    })),
+    ...group.exit_node_ids.map((nodeId, nodeIndex) => ({
+      id: `${VIRTUAL_EDGE_PREFIX}group_${groupIndex}_exit_${nodeIndex}`,
+      sources: [nodeId],
+      targets: [groupAnchorId("exit", groupIndex)],
+    })),
+  ]);
   const result = await elk.layout({
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
       "elk.direction": "RIGHT",
       "elk.edgeRouting": "ORTHOGONAL",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "120",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "82",
       "elk.layered.spacing.edgeNodeBetweenLayers": "38",
-      "elk.spacing.nodeNode": "64",
-      "elk.spacing.edgeNode": "32",
-      "elk.padding": "[top=64,left=64,bottom=64,right=64]",
+      "elk.layered.spacing.edgeEdgeBetweenLayers": "22",
+      "elk.spacing.nodeNode": "44",
+      "elk.spacing.edgeNode": "36",
+      "elk.padding": "[top=48,left=48,bottom=48,right=48]",
       "elk.layered.cycleBreaking.strategy": "DEPTH_FIRST",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
       "elk.layered.nodePlacement.favorStraightEdges": "true",
     },
-    children: graph.nodes.map((node) => ({
-      id: node.id,
-      width: 224,
-      height: 104,
-      layoutOptions: node.entry
-        ? {
-            "elk.layered.layering.layerConstraint": "FIRST_SEPARATE",
-          }
-        : node.exit
-          ? {
-              "elk.layered.layering.layerConstraint": "LAST_SEPARATE",
-            }
-          : undefined,
-    })),
-    edges: graph.edges.map((edge) => ({
-      id: edge.id,
-      sources: [edge.from_node],
-      targets: [edge.to_node],
-    })),
+    children: [
+      entryAnchor,
+      ...visibleChildren,
+      ...groupAnchors,
+      exitAnchor,
+    ],
+    edges: [
+      ...entryEdges,
+      ...graph.edges.map((edge) => ({
+        id: edge.id,
+        sources: [edge.from_node],
+        targets: [edge.to_node],
+      })),
+      ...groupAnchorEdges,
+      ...exitEdges,
+    ],
   });
   const positions = Object.fromEntries(
-    (result.children ?? []).map((node) => [
-      node.id,
-      { x: node.x ?? 0, y: node.y ?? 0 },
-    ]),
+    (result.children ?? [])
+      .filter(
+        (node) =>
+          node.id !== ENTRY_ANCHOR_ID &&
+          node.id !== EXIT_ANCHOR_ID &&
+          !node.id.startsWith(`${VIRTUAL_EDGE_PREFIX}group_anchor_`),
+      )
+      .map((node) => [
+        node.id,
+        { x: node.x ?? 0, y: node.y ?? 0 },
+      ]),
   );
   const routedEdges = (result.edges ?? []) as RoutedLayoutEdge[];
   const edgeRoutes: Record<string, EdgeRoute> = Object.fromEntries(
-    routedEdges.flatMap((edge) => {
+    routedEdges
+      .filter((edge) => !edge.id.startsWith(VIRTUAL_EDGE_PREFIX))
+      .flatMap((edge) => {
       const points = (edge.sections ?? []).flatMap((section, sectionIndex) => {
         const sectionPoints = [
           section.startPoint,
@@ -112,7 +180,11 @@ export function saveLayout(
 }
 
 function layoutKey(definitionHash: string): string {
-  return `autoagent:layout:v3:${definitionHash}`;
+  return `autoagent:layout:v6:${definitionHash}`;
+}
+
+function groupAnchorId(kind: "entry" | "exit", index: number): string {
+  return `${VIRTUAL_EDGE_PREFIX}group_anchor_${kind}_${index}`;
 }
 
 function routeMidpoint(points: NodePosition[]): NodePosition {

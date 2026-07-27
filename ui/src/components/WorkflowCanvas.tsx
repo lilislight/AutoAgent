@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   BaseEdge,
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -14,6 +15,7 @@ import {
   type Edge as FlowEdge,
   type EdgeProps,
   type Node as FlowNode,
+  type NodeChange,
   type NodeProps,
   type ReactFlowInstance,
   useNodesState,
@@ -106,7 +108,7 @@ export function WorkflowCanvas({
   onInvoke,
   onResume,
 }: WorkflowCanvasProps) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<TraceFlowNode>([]);
+  const [nodes, setNodes] = useNodesState<TraceFlowNode>([]);
   const [edgeRoutes, setEdgeRoutes] = useState<Record<string, EdgeRoute>>({});
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance<TraceFlowNode, FlowEdge> | null>(null);
@@ -170,7 +172,7 @@ export function WorkflowCanvas({
             selected:
               currentSelection?.type === "node" &&
               currentSelection.id === node.id,
-            zIndex: 10,
+            zIndex: 100,
           };
         });
       setNodes([...groupNodes, ...traceNodes]);
@@ -224,6 +226,25 @@ export function WorkflowCanvas({
     );
   }, [graph.groups, invocation.node_executions, projection, selection, setNodes]);
 
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<TraceFlowNode>[]) => {
+      setNodes((current) => {
+        const changed = applyNodeChanges(changes, current);
+        if (!changes.some((change) => change.type === "position")) {
+          return changed;
+        }
+        return resizeGroupNodes(
+          changed,
+          graph.groups ?? [],
+          graph.nodes,
+          projectionRef.current,
+          selectionRef.current,
+        );
+      });
+    },
+    [graph.groups, graph.nodes, setNodes],
+  );
+
   const edges = useMemo<FlowEdge[]>(
     () => {
       const seen = new Set<string>();
@@ -251,7 +272,7 @@ export function WorkflowCanvas({
             : undefined,
           selected: inspected,
           interactionWidth: 28,
-          zIndex: hovered || inspected ? 80 : selected ? 40 : 8,
+          zIndex: hovered || inspected ? 60 : selected ? 40 : 8,
           markerEnd: {
             type: MarkerType.ArrowClosed,
             color: edgeVisualColor(projected?.state, selected, inspected, hovered),
@@ -288,7 +309,7 @@ export function WorkflowCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        onNodesChange={onNodesChange}
+        onNodesChange={handleNodesChange}
         onNodeDragStart={(_event, node) => {
           if (node.type === "workflowGroup") return;
           // ELK routes use absolute points. Once a user moves a Node, switch
@@ -297,30 +318,20 @@ export function WorkflowCanvas({
         }}
         onNodeDragStop={() => {
           const current = flow.current?.getNodes() ?? [];
-          const positions = Object.fromEntries(
-            current
-              .filter((node) => node.type !== "workflowGroup")
-              .map((node) => [node.id, node.position]),
-          );
+          const positions = traceNodePositions(current);
           saveLayout(graph.definition_hash, {
             positions,
             edgeRoutes: {},
           });
-          setNodes((existing) => {
-            const traceNodes = existing.filter(
-              (node) => node.type !== "workflowGroup",
-            );
-            return [
-              ...buildGroupNodes(
-                graph.groups ?? [],
-                graph.nodes,
-                projectionRef.current,
-                positions,
-                selectionRef.current,
-              ),
-              ...traceNodes,
-            ];
-          });
+          setNodes((existing) =>
+            resizeGroupNodes(
+              existing,
+              graph.groups ?? [],
+              graph.nodes,
+              projectionRef.current,
+              selectionRef.current,
+            ),
+          );
         }}
         onNodeClick={(event, node) => {
           event.stopPropagation();
@@ -363,6 +374,7 @@ export function WorkflowCanvas({
         nodesConnectable={false}
         nodesDraggable
         elementsSelectable
+        elevateEdgesOnSelect={false}
         minZoom={0.2}
         maxZoom={1.8}
         fitView
@@ -656,11 +668,45 @@ function buildGroupNodes(
         width: bounds.width,
         height: bounds.height,
       },
+      style: {
+        width: bounds.width,
+        height: bounds.height,
+      },
       selected: selection?.type === "group" && selection.id === group.id,
       zIndex: -10,
     });
   }
   return result;
+}
+
+function traceNodePositions(
+  nodes: Pick<TraceFlowNode, "id" | "type" | "position">[],
+): Record<string, { x: number; y: number }> {
+  return Object.fromEntries(
+    nodes
+      .filter((node) => node.type !== "workflowGroup")
+      .map((node) => [node.id, { ...node.position }]),
+  );
+}
+
+function resizeGroupNodes(
+  nodes: TraceFlowNode[],
+  groups: WorkflowGroupView[],
+  graphNodes: WorkflowNodeView[],
+  projection: RuntimeProjection,
+  selection: TraceSelection,
+): TraceFlowNode[] {
+  const traceNodes = nodes.filter((node) => node.type !== "workflowGroup");
+  return [
+    ...buildGroupNodes(
+      groups,
+      graphNodes,
+      projection,
+      traceNodePositions(traceNodes),
+      selection,
+    ),
+    ...traceNodes,
+  ];
 }
 
 function groupBounds(

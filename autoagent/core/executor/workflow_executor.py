@@ -12,7 +12,10 @@ from autoagent.core.executor.node_executor import (
     NodeExecutionJob,
     NodeExecutor,
 )
-from autoagent.core.executor.result import NodeExecutionResult
+from autoagent.core.executor.result import (
+    NodeExecutionProgress,
+    NodeExecutionResult,
+)
 from autoagent.core.runtime import (
     InputMappingContext,
     IncomingOutput,
@@ -469,16 +472,23 @@ class WorkflowExecutor:
                 continue
 
             if self.node_executor.has_running(invocation.execution_mailbox):
-                results = await self.node_executor.wait_next_completed(
+                messages = await self.node_executor.wait_next_messages(
                     invocation.execution_mailbox
                 )
                 changed_execution_ids = []
-                for result in results:
+                for message in messages:
+                    if isinstance(message, NodeExecutionProgress):
+                        await self._apply_progress(
+                            session=session,
+                            invocation=invocation,
+                            progress=message,
+                        )
+                        continue
                     changed_execution_id = await self._apply_result(
                         workflow_ir=workflow_ir,
                         session=session,
                         invocation=invocation,
-                        result=result,
+                        result=message,
                     )
                     if changed_execution_id is not None:
                         changed_execution_ids.append(changed_execution_id)
@@ -977,6 +987,71 @@ class WorkflowExecutor:
 
         return tuple(changed_execution_ids), jobs
 
+    async def _apply_progress(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+        progress: NodeExecutionProgress,
+    ) -> None:
+        """Apply one completed internal Node step on the Runtime control path."""
+
+        node_execution = invocation.get_node_execution(progress.node_execution_id)
+        if node_execution is None:
+            invocation.mark_failed(
+                RuntimeErrorInfo(
+                    code="UNKNOWN_NODE_EXECUTION_PROGRESS",
+                    message=(
+                        "NodeExecutor returned progress for an unknown "
+                        "NodeExecution."
+                    ),
+                    detail={
+                        "node_execution_id": str(progress.node_execution_id),
+                    },
+                )
+            )
+            return
+
+        if progress.kind == "operator_call":
+            operator_execution = progress.operator_execution
+            if operator_execution is None:  # pragma: no cover - validated message.
+                return
+            if any(
+                existing.id == operator_execution.id
+                for existing in node_execution.operator_executions
+            ):
+                return
+            node_execution.operator_executions.append(operator_execution)
+            await self._record_operator_call(
+                session,
+                invocation,
+                node_execution,
+                operator_execution,
+                logical_elapsed_ns=progress.logical_elapsed_ns,
+            )
+            return
+
+        phase = progress.phase
+        if phase is None:  # pragma: no cover - validated message.
+            return
+        if phase.name == "aggregation.completed" and phase.status == "completed":
+            node_execution.output = deepcopy(phase.output)
+        await self._record_event(
+            session,
+            invocation,
+            phase.name,
+            node_execution_ids=(node_execution.id,),
+            detail={
+                "node_id": node_execution.node_id,
+                "state": phase.status,
+            },
+            elapsed_ns=phase.elapsed_ns,
+            timing=phase.timing,
+            input=phase.input,
+            output=phase.output,
+            occurred_at_ms=phase.occurred_at_ms,
+        )
+
     async def _apply_result(
         self,
         *,
@@ -1021,11 +1096,12 @@ class WorkflowExecutor:
                 occurred_at_ms=phase.occurred_at_ms,
             )
         for operator_execution in result.operator_executions:
-            if not any(
+            if any(
                 existing.id == operator_execution.id
                 for existing in node_execution.operator_executions
             ):
-                node_execution.operator_executions.append(operator_execution)
+                continue
+            node_execution.operator_executions.append(operator_execution)
             await self._record_operator_call(
                 session,
                 invocation,

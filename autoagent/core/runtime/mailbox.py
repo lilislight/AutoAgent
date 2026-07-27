@@ -17,33 +17,53 @@ class InvocationExecutionMailbox:
 
     def __init__(self) -> None:
         self._running: dict[asyncio.Task[Any], UUID] = {}
-        self._completed: deque[Any] = deque()
+        self._messages: deque[Any] = deque()
+        self._message_ready: asyncio.Event | None = None
 
     def track(self, task: asyncio.Task[Any], node_execution_id: UUID) -> None:
         self._running[task] = node_execution_id
-
-    def running_tasks(self) -> tuple[asyncio.Task[Any], ...]:
-        return tuple(self._running)
 
     def finish_task(self, task: asyncio.Task[Any], result: Any) -> None:
         if task not in self._running:
             raise KeyError("Task does not belong to this Invocation mailbox.")
         self._running.pop(task)
-        self._completed.append(result)
+        self.put_message(result)
 
-    def node_execution_id_for(self, task: asyncio.Task[Any]) -> UUID:
-        return self._running[task]
+    def put_message(self, message: Any) -> None:
+        self._messages.append(message)
+        if self._message_ready is not None:
+            self._message_ready.set()
 
-    def put_completed(self, result: Any) -> None:
-        self._completed.append(result)
+    def drain_messages(self) -> list[Any]:
+        messages = list(self._messages)
+        self._messages.clear()
+        return messages
 
-    def drain_completed(self) -> list[Any]:
-        results = list(self._completed)
-        self._completed.clear()
-        return results
+    async def wait_for_messages(self) -> list[Any]:
+        """Wait until progress or a terminal result reaches this mailbox."""
+
+        messages = self.drain_messages()
+        if messages:
+            return messages
+        if not self._running:
+            return []
+        if self._message_ready is None:
+            self._message_ready = asyncio.Event()
+        while True:
+            self._message_ready.clear()
+            # A producer may have published between the first drain and clear.
+            messages = self.drain_messages()
+            if messages:
+                return messages
+            if not self._running:
+                return []
+            await self._message_ready.wait()
+            messages = self.drain_messages()
+            if messages:
+                return messages
 
     def has_pending(self) -> bool:
-        return bool(self._running) or bool(self._completed)
+        return bool(self._running) or bool(self._messages)
 
     async def abandon(self) -> None:
         """Detach all work after fail-fast/cancellation.
@@ -59,4 +79,4 @@ class InvocationExecutionMailbox:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._running.clear()
-        self.drain_completed()
+        self.drain_messages()

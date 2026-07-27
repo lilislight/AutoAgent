@@ -500,6 +500,80 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(event.operations is not None for event in events))
 
+    async def test_parallel_internal_event_sequence_survives_sqlite_round_trip(
+        self,
+    ) -> None:
+        selector_completed = False
+
+        def select_items(ctx):
+            nonlocal selector_completed
+            selector_completed = True
+            return [{"value": value} for value in ctx.input]
+
+        async def finish_after_selector(value):
+            while not selector_completed:
+                await asyncio.sleep(0)
+            return value
+
+        async def slow_map_item(value):
+            await asyncio.sleep(0.03)
+            return value
+
+        workflow = Workflow(id="database_parallel_event_sequence")
+        workflow.add_node(lambda: [1], node_id="start")
+        workflow.add_node(
+            finish_after_selector,
+            node_id="fast",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_node(slow_map_item, node_id="mapped")
+        workflow.add_edge("start", "fast")
+        workflow.add_edge(
+            "start",
+            "mapped",
+            policy=EdgePolicy(
+                map=MapPolicy(item_selector=select_items),
+            ),
+        )
+
+        app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
+        invocation = await app.ainvoke(
+            workflow,
+            event_mode="full",
+        )
+        await app.aclose()
+
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened = RuntimeStore(backend=self.backend)
+        self.store = reopened
+        events = await reopened.alist_runtime_events(
+            invocation_id=invocation.id,
+            limit=10_000,
+        )
+
+        self.assertEqual(
+            list(range(1, len(events) + 1)),
+            [event.sequence for event in events],
+        )
+
+        def sequence(event_name: str, node_id: str) -> int:
+            return next(
+                event.sequence
+                for event in events
+                if event.event_name == event_name
+                and event.payload.get("node_id") == node_id
+            )
+
+        self.assertLess(
+            sequence("item_selection.completed", "mapped"),
+            sequence("node.completed", "fast"),
+        )
+        self.assertLess(
+            sequence("node.completed", "fast"),
+            sequence("operator_call.completed", "mapped"),
+        )
+
     async def test_large_runtime_value_is_deduplicated_and_hydrated(self) -> None:
         await self.store.aclose()
         self.backend = DatabaseBackend.from_path(

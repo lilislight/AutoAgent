@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from autoagent.core.runtime.execution import (
@@ -22,6 +22,32 @@ class NodePhaseResult:
     input: Any | None = None
     output: Any | None = None
     timing: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NodeExecutionProgress:
+    """One completed internal Node step published before the Node terminates.
+
+    WorkflowExecutor remains the only Runtime writer and event-sequence
+    allocator. NodeExecutor uses this detached message to report the actual
+    completion order of concurrent Node work without mutating Runtime state.
+    """
+
+    node_execution_id: UUID
+    kind: Literal["phase", "operator_call"]
+    phase: NodePhaseResult | None = None
+    operator_execution: OperatorExecution | None = None
+    logical_elapsed_ns: int = 0
+
+    def __post_init__(self) -> None:
+        if self.kind == "phase":
+            if self.phase is None or self.operator_execution is not None:
+                raise ValueError("Phase progress must contain only a phase result.")
+            return
+        if self.operator_execution is None or self.phase is not None:
+            raise ValueError(
+                "Operator-call progress must contain only an OperatorExecution."
+            )
 
 
 @dataclass

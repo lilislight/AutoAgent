@@ -4,9 +4,10 @@ import asyncio
 from copy import deepcopy
 import inspect
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from time import perf_counter_ns
 from typing import Any
 from uuid import UUID
@@ -14,7 +15,11 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from autoagent.core.compiler import NodeIR
-from autoagent.core.executor.result import NodeExecutionResult, NodePhaseResult
+from autoagent.core.executor.result import (
+    NodeExecutionProgress,
+    NodeExecutionResult,
+    NodePhaseResult,
+)
 from autoagent.core.operators import (
     CapabilityRegistry,
     Operator,
@@ -86,6 +91,7 @@ class ResolvedNodeExecutionJob:
     concurrency_controller: RuntimeConcurrencyController | None = None
     thread_pool: ThreadPoolExecutor | None = None
     max_parallel_units: int = 8
+    publish_progress: Callable[[NodeExecutionProgress], None] | None = None
 
 
 class NodeExecutor:
@@ -93,8 +99,8 @@ class NodeExecutor:
 
     Public contract:
       - submit_batch is non-blocking. It records asyncio Tasks and returns.
-      - wait_next_completed awaits only until at least one submitted job finishes.
-      - completed results are returned to WorkflowExecutor for state writes.
+      - wait_next_messages wakes for internal progress or a completed job.
+      - progress and terminal results return to WorkflowExecutor for state writes.
 
     Coroutine Operators run directly as Tasks. Synchronous Operators use the
     shared thread pool so they cannot block the event loop. Retry, fallback,
@@ -135,7 +141,7 @@ class NodeExecutor:
     ) -> None:
         for job in jobs:
             if isinstance(job.node_ir.capability, SystemCommand):
-                mailbox.put_completed(_execute_system_command(job))
+                mailbox.put_message(_execute_system_command(job))
                 continue
 
             selection_policy = (
@@ -149,7 +155,7 @@ class NodeExecutor:
                     selection_policy,
                 )
             except OperatorResolutionError as exc:
-                mailbox.put_completed(
+                mailbox.put_message(
                     NodeExecutionResult(
                         node_execution_id=job.node_execution.id,
                         state="failed",
@@ -165,7 +171,7 @@ class NodeExecutor:
             if job.max_operator_attempts is not None:
                 operators = operators[:job.max_operator_attempts]
             if not operators:
-                mailbox.put_completed(
+                mailbox.put_message(
                     NodeExecutionResult(
                         node_execution_id=job.node_execution.id,
                         state="failed",
@@ -192,9 +198,21 @@ class NodeExecutor:
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
                 max_parallel_units=self.max_parallel_units,
+                publish_progress=(
+                    None
+                    if job.event_mode == "minimal"
+                    else mailbox.put_message
+                ),
             )
             task = asyncio.create_task(_execute_job(resolved_job))
             mailbox.track(task, job.node_execution.id)
+            task.add_done_callback(
+                partial(
+                    self._finish_task,
+                    mailbox,
+                    job.node_execution.id,
+                )
+            )
 
     def has_running(self, mailbox: InvocationExecutionMailbox) -> bool:
         return mailbox.has_pending()
@@ -204,28 +222,22 @@ class NodeExecutor:
 
         self.thread_pool.shutdown(wait=False, cancel_futures=True)
 
-    async def wait_next_completed(
+    async def wait_next_messages(
         self,
         mailbox: InvocationExecutionMailbox,
-    ) -> list[NodeExecutionResult]:
-        ready = mailbox.drain_completed()
-        if ready:
-            return ready
-        running = mailbox.running_tasks()
-        if not running:
-            return []
+    ) -> list[NodeExecutionProgress | NodeExecutionResult]:
+        return await mailbox.wait_for_messages()
 
-        done, _ = await asyncio.wait(
-            running,
-            return_when=asyncio.FIRST_COMPLETED,
+    def _finish_task(
+        self,
+        mailbox: InvocationExecutionMailbox,
+        node_execution_id: UUID,
+        task: asyncio.Task[NodeExecutionResult],
+    ) -> None:
+        mailbox.finish_task(
+            task,
+            self._task_result(task, node_execution_id),
         )
-        for task in done:
-            node_execution_id = mailbox.node_execution_id_for(task)
-            mailbox.finish_task(
-                task,
-                self._task_result(task, node_execution_id),
-            )
-        return mailbox.drain_completed()
 
     async def abandon(self, mailbox: InvocationExecutionMailbox) -> None:
         await mailbox.abandon()
@@ -426,6 +438,39 @@ class _NodeOutputInvalid(TypeError):
     pass
 
 
+def _publish_phase(
+    job: ResolvedNodeExecutionJob,
+    phase: NodePhaseResult | None,
+) -> None:
+    if phase is None or job.publish_progress is None:
+        return
+    job.publish_progress(
+        NodeExecutionProgress(
+            node_execution_id=job.node_execution.id,
+            kind="phase",
+            phase=deepcopy(phase),
+        )
+    )
+
+
+def _publish_operator_call(
+    job: ResolvedNodeExecutionJob,
+    operator_execution: DirectOperatorExecution | ParallelOperatorExecution,
+    *,
+    logical_elapsed_ns: int,
+) -> None:
+    if job.event_mode == "minimal" or job.publish_progress is None:
+        return
+    job.publish_progress(
+        NodeExecutionProgress(
+            node_execution_id=job.node_execution.id,
+            kind="operator_call",
+            operator_execution=deepcopy(operator_execution),
+            logical_elapsed_ns=logical_elapsed_ns,
+        )
+    )
+
+
 async def _prepare_units(
     job: ResolvedNodeExecutionJob,
 ) -> _PreparedUnits:
@@ -456,22 +501,23 @@ async def _prepare_units(
             units = _map_units(job, selected)
         except Exception as exc:
             elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
-            return _PreparedUnits(
-                units=[],
-                unit_kind="map_item",
-                phases=(
-                    NodePhaseResult(
-                        name="item_selection.completed",
-                        status="failed",
-                        elapsed_ns=elapsed_ns,
-                        timing={"execution_ns": elapsed_ns},
-                    ),
+            phase = (
+                NodePhaseResult(
+                    name="item_selection.completed",
+                    status="failed",
+                    elapsed_ns=elapsed_ns,
+                    timing={"execution_ns": elapsed_ns},
                 )
                 if (
                     job.event_mode == "full"
                     and job.map_policy.item_selector is not None
                 )
-                else (),
+                else None
+            )
+            _publish_phase(job, phase)
+            return _PreparedUnits(
+                units=[],
+                unit_kind="map_item",
                 error=RuntimeErrorInfo(
                     code="MAP_ITEM_SELECTION_FAILED",
                     message=str(exc),
@@ -480,22 +526,23 @@ async def _prepare_units(
             )
         if isinstance(units, RuntimeErrorInfo):
             elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
-            return _PreparedUnits(
-                units=[],
-                unit_kind="map_item",
-                phases=(
-                    NodePhaseResult(
-                        name="item_selection.completed",
-                        status="failed",
-                        elapsed_ns=elapsed_ns,
-                        timing={"execution_ns": elapsed_ns},
-                    ),
+            phase = (
+                NodePhaseResult(
+                    name="item_selection.completed",
+                    status="failed",
+                    elapsed_ns=elapsed_ns,
+                    timing={"execution_ns": elapsed_ns},
                 )
                 if (
                     job.event_mode == "full"
                     and job.map_policy.item_selector is not None
                 )
-                else (),
+                else None
+            )
+            _publish_phase(job, phase)
+            return _PreparedUnits(
+                units=[],
+                unit_kind="map_item",
                 error=units,
             )
         if (
@@ -515,22 +562,21 @@ async def _prepare_units(
                 )
                 for index, value in units
             ]
-        phases = ()
+        phase = None
         if (
             job.event_mode == "full"
             and job.map_policy.item_selector is not None
         ):
             elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
-            phases = (
-                NodePhaseResult(
-                    name="item_selection.completed",
-                    status="completed",
-                    elapsed_ns=elapsed_ns,
-                    output=deepcopy(selected),
-                    timing={"execution_ns": elapsed_ns},
-                ),
+            phase = NodePhaseResult(
+                name="item_selection.completed",
+                status="completed",
+                elapsed_ns=elapsed_ns,
+                output=deepcopy(selected),
+                timing={"execution_ns": elapsed_ns},
             )
-        return _PreparedUnits(units=units, unit_kind="map_item", phases=phases)
+        _publish_phase(job, phase)
+        return _PreparedUnits(units=units, unit_kind="map_item")
 
     if replication is not None:
         units = [
@@ -821,6 +867,12 @@ async def _execute_unit(
                 )
                 attempt.mark_completed(output)
                 attempts.append(attempt)
+                if unit_kind == "normal":
+                    _publish_operator_call(
+                        job,
+                        attempt,
+                        logical_elapsed_ns=attempt.resource_usage.duration_ns,
+                    )
                 return _UnitResult(
                     unit_index,
                     output,
@@ -837,6 +889,12 @@ async def _execute_unit(
                 )
                 attempt.mark_failed(error)
                 attempts.append(attempt)
+                if unit_kind == "normal":
+                    _publish_operator_call(
+                        job,
+                        attempt,
+                        logical_elapsed_ns=attempt.resource_usage.duration_ns,
+                    )
                 if attempt_index + 1 < max_attempts:
                     backoff_started_ns = perf_counter_ns()
                     await asyncio.sleep(
@@ -985,6 +1043,11 @@ async def _aggregate_unit_results(
                 ),
                 default=parallel_execution.started_at_ms,
             )
+            _publish_operator_call(
+                job,
+                parallel_execution,
+                logical_elapsed_ns=operator_elapsed_ns,
+            )
         return NodeExecutionResult(
             node_execution_id=job.node_execution.id,
             state="failed",
@@ -993,6 +1056,17 @@ async def _aggregate_unit_results(
             operator_elapsed_ns=operator_elapsed_ns,
             phases=phases,
             resource_usage=resource_usage,
+        )
+
+    if parallel_execution is not None:
+        # Map/replication calls are complete before the user-defined
+        # aggregation phase begins. Aggregation failure belongs to the phase
+        # and Node, not to the already completed logical Operator call.
+        parallel_execution.state = "completed"
+        _publish_operator_call(
+            job,
+            parallel_execution,
+            logical_elapsed_ns=operator_elapsed_ns,
         )
 
     outputs = [deepcopy(item.output) for item in unit_results]
@@ -1058,25 +1132,17 @@ async def _aggregate_unit_results(
             message=str(exc),
             detail={"node_id": job.node_ir.id, "error_type": type(exc).__name__},
         )
-        if parallel_execution is not None:
-            parallel_execution.state = "failed"
-            parallel_execution.error = error
+        _publish_phase(job, aggregation_phase)
         return NodeExecutionResult(
             node_execution_id=job.node_execution.id,
             state="failed",
             error=error,
             operator_executions=retained_executions,
             operator_elapsed_ns=operator_elapsed_ns,
-            phases=(
-                (*phases, aggregation_phase)
-                if aggregation_phase is not None
-                else phases
-            ),
+            phases=phases,
             resource_usage=resource_usage,
         )
 
-    if parallel_execution is not None:
-        parallel_execution.state = "completed"
     if record_aggregator:
         aggregation_elapsed_ns = max(
             0,
@@ -1090,17 +1156,14 @@ async def _aggregate_unit_results(
             output=deepcopy(output),
             timing={"execution_ns": aggregation_elapsed_ns},
         )
+    _publish_phase(job, aggregation_phase)
     return NodeExecutionResult(
         node_execution_id=job.node_execution.id,
         state="completed",
         output=output,
         operator_executions=retained_executions,
         operator_elapsed_ns=operator_elapsed_ns,
-        phases=(
-            (*phases, aggregation_phase)
-            if aggregation_phase is not None
-            else phases
-        ),
+        phases=phases,
         resource_usage=resource_usage,
     )
 

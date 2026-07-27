@@ -93,6 +93,33 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertFalse(hasattr(app.workflow_executor, "resume"))
         app.close()
 
+    def test_minimal_defers_operator_records_until_node_completion(self) -> None:
+        app = started_app()
+        progress_messages = []
+        apply_progress = app.workflow_executor._apply_progress
+
+        async def observe_progress(**kwargs):
+            progress_messages.append(kwargs["progress"])
+            await apply_progress(**kwargs)
+
+        app.workflow_executor._apply_progress = observe_progress
+        workflow = Workflow(id="minimal_without_operator_progress")
+        workflow.add_node(lambda value: value + 1, node_id="node")
+
+        invocation = app.invoke(
+            workflow,
+            input={"value": 1},
+            event_mode="minimal",
+        )
+        app.close()
+
+        self.assertEqual([], progress_messages)
+        self.assertEqual(0, invocation.event_sequence)
+        execution = invocation.latest_node_execution("node")
+        self.assertEqual("completed", execution.state)
+        self.assertEqual(1, len(execution.operator_executions))
+        self.assertEqual("completed", execution.operator_executions[0].state)
+
     def test_expanded_child_workflow_executes_with_local_hook_ids(self) -> None:
         observed_condition: list[tuple[str, str, str, int]] = []
         observed_binding: list[tuple[str, int]] = []
@@ -689,6 +716,78 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "completed")
         self.assertLess(events.index("after_fast"), events.index("slow"))
+
+    def test_parallel_internal_events_receive_sequence_when_they_complete(
+        self,
+    ) -> None:
+        selector_completed = False
+
+        def select_items(ctx):
+            nonlocal selector_completed
+            selector_completed = True
+            return [{"value": value} for value in ctx.input]
+
+        async def finish_after_selector(value):
+            while not selector_completed:
+                await asyncio.sleep(0)
+            return value
+
+        async def slow_map_item(value):
+            await asyncio.sleep(0.03)
+            return value
+
+        store = RuntimeStore()
+        app = started_app(runtime_store=store)
+        workflow = Workflow(id="parallel_internal_event_sequence")
+        workflow.add_node(lambda: [1], node_id="start")
+        workflow.add_node(
+            finish_after_selector,
+            node_id="fast",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_node(slow_map_item, node_id="mapped")
+        workflow.add_edge("start", "fast")
+        workflow.add_edge(
+            "start",
+            "mapped",
+            policy=EdgePolicy(
+                map=MapPolicy(item_selector=select_items),
+            ),
+        )
+
+        invocation = app.invoke(workflow, event_mode="full")
+        events = store.runtime_events[invocation.id]
+        app.close()
+
+        self.assertEqual(
+            list(range(1, len(events) + 1)),
+            [event.sequence for event in events],
+        )
+
+        def sequence(event_name: str, node_id: str) -> int:
+            return next(
+                event.sequence
+                for event in events
+                if event.event_name == event_name
+                and event.payload.get("node_id") == node_id
+            )
+
+        self.assertLess(
+            sequence("item_selection.completed", "mapped"),
+            sequence("operator_call.completed", "fast"),
+        )
+        self.assertLess(
+            sequence("operator_call.completed", "fast"),
+            sequence("node.completed", "fast"),
+        )
+        self.assertLess(
+            sequence("node.completed", "fast"),
+            sequence("operator_call.completed", "mapped"),
+        )
+        self.assertLess(
+            sequence("operator_call.completed", "mapped"),
+            sequence("node.completed", "mapped"),
+        )
 
     def test_dynamic_branch_skips_propagate_before_complete_fan_in(self) -> None:
         calls: list[str] = []

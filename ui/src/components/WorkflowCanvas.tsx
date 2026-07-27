@@ -110,6 +110,7 @@ export function WorkflowCanvas({
 }: WorkflowCanvasProps) {
   const [nodes, setNodes] = useNodesState<TraceFlowNode>([]);
   const [edgeRoutes, setEdgeRoutes] = useState<Record<string, EdgeRoute>>({});
+  const edgeRoutesRef = useRef<Record<string, EdgeRoute>>({});
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance<TraceFlowNode, FlowEdge> | null>(null);
   const layoutRequestRef = useRef(0);
@@ -130,6 +131,7 @@ export function WorkflowCanvas({
         saveLayout(graph.definition_hash, layout);
       }
       const positions = layout.positions;
+      edgeRoutesRef.current = layout.edgeRoutes;
       setEdgeRoutes(layout.edgeRoutes);
       const currentProjection = projectionRef.current;
       const currentInvocation = invocationRef.current;
@@ -312,16 +314,23 @@ export function WorkflowCanvas({
         onNodesChange={handleNodesChange}
         onNodeDragStart={(_event, node) => {
           if (node.type === "workflowGroup") return;
-          // ELK routes use absolute points. Once a user moves a Node, switch
-          // to routes derived from React Flow's live endpoints.
-          setEdgeRoutes({});
+          // ELK routes use absolute points. Only routes connected to the
+          // moving Node become invalid; unrelated obstacle-avoiding routes
+          // remain stable.
+          const nextRoutes = withoutIncidentEdgeRoutes(
+            edgeRoutesRef.current,
+            graph.edges,
+            node.id,
+          );
+          edgeRoutesRef.current = nextRoutes;
+          setEdgeRoutes(nextRoutes);
         }}
         onNodeDragStop={() => {
           const current = flow.current?.getNodes() ?? [];
           const positions = traceNodePositions(current);
           saveLayout(graph.definition_hash, {
             positions,
-            edgeRoutes: {},
+            edgeRoutes: edgeRoutesRef.current,
           });
           setNodes((existing) =>
             resizeGroupNodes(
@@ -521,6 +530,25 @@ function orthogonalPath(points: { x: number; y: number }[]): string {
   return points
     .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
     .join(" ");
+}
+
+function withoutIncidentEdgeRoutes(
+  routes: Record<string, EdgeRoute>,
+  edges: WorkflowGraphView["edges"],
+  nodeId: string,
+): Record<string, EdgeRoute> {
+  const incidentEdgeIds = new Set(
+    edges
+      .filter(
+        (edge) => edge.from_node === nodeId || edge.to_node === nodeId,
+      )
+      .map((edge) => edge.id),
+  );
+  return Object.fromEntries(
+    Object.entries(routes).filter(
+      ([edgeId]) => !incidentEdgeIds.has(edgeId),
+    ),
+  );
 }
 
 function nodeOperatorSummary(

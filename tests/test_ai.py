@@ -506,6 +506,42 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertIn("1 repair attempt", invocation.error.message)
         self.assertIn("Unknown tool: still_missing", invocation.error.message)
 
+    def test_tool_execution_error_is_returned_to_model_for_recovery(self) -> None:
+        calls: list[int] = []
+
+        @tool(id="unstable", description="Fail for negative values.")
+        def unstable(value: int) -> int:
+            calls.append(value)
+            if value < 0:
+                raise RuntimeError("negative values are unavailable")
+            return value * 2
+
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [
+                _tool_response("call_bad", "unstable", '{"value":-1}'),
+                _tool_response("call_good", "unstable", '{"value":3}'),
+                _text_response("recovered"),
+            ],
+            requests,
+        )
+        workflow = react_workflow(
+            id="tool_execution_recovery",
+            instructions="Use tools.",
+            tools=[unstable],
+        )
+
+        invocation = app.invoke(workflow, input={"input": "run tool"})
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual({"output": "recovered"}, invocation.result)
+        self.assertEqual([-1, 3], calls)
+        self.assertEqual(3, len(requests))
+        error_message = requests[1].messages[-1].content
+        self.assertIn("tool_execution_error", error_message)
+        self.assertIn("RuntimeError", error_message)
+        self.assertIn("negative values are unavailable", error_message)
+
     def test_multiple_calls_to_one_tool_use_one_generated_map_node(self) -> None:
         calls: list[int] = []
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
@@ -65,12 +66,27 @@ class ToolCallBatch(BaseModel):
     invalid_calls: tuple[InvalidToolCall, ...] = ()
 
 
+class ToolExecutionError(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: str
+    message: str
+
+
 class ToolExecutionResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", frozen=True)
 
     tool_call_id: str
     tool_id: str
-    output: Any
+    output: Any = None
+    error: ToolExecutionError | None = None
+
+
+class _ToolInvocationOutcome(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", frozen=True)
+
+    output: Any = None
+    error: ToolExecutionError | None = None
 
 
 class ToolExecutionBatch(BaseModel):
@@ -283,7 +299,20 @@ def react_workflow(
                 )
             else:
                 executed = results[call.id]
-                content = _tool_output_json(executed.output)
+                if executed.error is None:
+                    content = _tool_output_json(executed.output)
+                else:
+                    content = json.dumps(
+                        {
+                            "error": {
+                                "type": "tool_execution_error",
+                                "tool": call.name,
+                                "exception_type": executed.error.type,
+                                "message": executed.error.message,
+                            }
+                        },
+                        separators=(",", ":"),
+                    )
             messages.append(
                 LLMMessage(
                     role="tool",
@@ -464,7 +493,7 @@ def react_workflow(
             selected_name: str = definition.name,
         ) -> list[Mapping[str, Any]]:
             return [
-                item.arguments
+                {"arguments": item.arguments}
                 for item in ctx.input.valid_calls
                 if item.call.name == selected_name
             ]
@@ -486,7 +515,8 @@ def react_workflow(
                     ToolExecutionResult(
                         tool_call_id=item.call.id,
                         tool_id=selected_id,
-                        output=output,
+                        output=output.output,
+                        error=output.error,
                     )
                     for item, output in zip(
                         selected,
@@ -496,10 +526,22 @@ def react_workflow(
                 )
             )
 
+        recoverable_handler = _recoverable_tool_handler(handler)
+        setattr(
+            recoverable_handler,
+            "__autoagent_runtime_annotations__",
+            (
+                definition.contract.output.annotation,
+                *(
+                    parameter.annotation
+                    for parameter in definition.contract.input.parameters
+                ),
+            ),
+        )
         workflow.add_node(
             Operator(
                 id=definition.id,
-                handler=handler,
+                handler=recoverable_handler,
                 version=semantic_version,
             ),
             node_id=node_id,
@@ -556,6 +598,42 @@ def react_workflow(
         edge_id="repair_prepare",
     )
     return workflow
+
+
+def _recoverable_tool_handler(
+    handler: Callable[..., Any],
+) -> Callable[[dict[str, Any]], _ToolInvocationOutcome]:
+    """Turn user Tool exceptions into observations the LLM can repair."""
+
+    if inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(
+        getattr(handler, "__call__", None)
+    ):
+
+        async def invoke(arguments: dict[str, Any]) -> _ToolInvocationOutcome:
+            try:
+                return _ToolInvocationOutcome(output=await handler(**arguments))
+            except Exception as exc:
+                return _ToolInvocationOutcome(
+                    error=ToolExecutionError(
+                        type=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
+
+        return invoke
+
+    def invoke(arguments: dict[str, Any]) -> _ToolInvocationOutcome:
+        try:
+            return _ToolInvocationOutcome(output=handler(**arguments))
+        except Exception as exc:
+            return _ToolInvocationOutcome(
+                error=ToolExecutionError(
+                    type=type(exc).__name__,
+                    message=str(exc),
+                )
+            )
+
+    return invoke
 
 
 def _validate_tools(definitions: tuple[ToolDefinition, ...]) -> None:

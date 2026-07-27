@@ -74,11 +74,14 @@ class DatabaseBackend:
         recovery_event_interval: int = 200,
         artifact_policy: ArtifactPolicy | None = None,
         sqlite_synchronous: str = "FULL",
+        shutdown_timeout_ms: int = 5_000,
     ) -> None:
         if batch_max_items < 1 or batch_max_bytes < 1 or batch_max_delay_ms < 0:
             raise ValueError("Invalid persistence batch limits.")
         if recovery_event_interval < 1:
             raise ValueError("recovery_event_interval must be positive.")
+        if shutdown_timeout_ms < 0:
+            raise ValueError("shutdown_timeout_ms cannot be negative.")
         normalized_synchronous = sqlite_synchronous.upper()
         if normalized_synchronous not in {"FULL", "NORMAL"}:
             raise ValueError("sqlite_synchronous must be FULL or NORMAL.")
@@ -98,6 +101,7 @@ class DatabaseBackend:
         self.recovery_event_interval = recovery_event_interval
         self.artifact_policy = artifact_policy or ArtifactPolicy()
         self.sqlite_synchronous = normalized_synchronous
+        self.shutdown_timeout_ms = shutdown_timeout_ms
 
         self._database_loop = RuntimeEventLoop(
             name="autoagent-persistence-runtime"
@@ -176,6 +180,11 @@ class DatabaseBackend:
             control = self._pending_count + self._inflight_count
         return control + self.coordinator.pending_count
 
+    def _total_pending_bytes(self) -> int:
+        with self._pressure_lock:
+            control = self._pending_bytes + self._inflight_bytes
+        return control + self.coordinator.pending_bytes
+
     def _wake_persistence(self) -> None:
         self._database_loop.call_soon(self._signal_persistence)
 
@@ -221,26 +230,52 @@ class DatabaseBackend:
         if not self._database_loop.is_current():
             if not self._initialized:
                 await self.engine.dispose()
-                self._database_loop.stop()
+                self._database_loop.stop(
+                    timeout_s=self.shutdown_timeout_ms / 1000
+                )
                 return
             try:
                 await self._database_loop.arun(self.aclose())
             finally:
-                self._database_loop.stop()
+                self._database_loop.stop(
+                    timeout_s=self.shutdown_timeout_ms / 1000
+                )
             return
         if self._closing:
             return
         self._closing = True
+        flush_error: Exception | None = None
         try:
-            await self.aflush()
+            try:
+                async with asyncio.timeout(self.shutdown_timeout_ms / 1000):
+                    await self.aflush()
+            except TimeoutError:
+                logger.error(
+                    "Persistence shutdown exceeded %d ms; abandoning "
+                    "undurable in-memory backlog: pending_count=%d "
+                    "pending_bytes=%d",
+                    self.shutdown_timeout_ms,
+                    self._total_pending_count(),
+                    self._total_pending_bytes(),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Persistence could not flush during shutdown; undurable "
+                    "in-memory records are being abandoned."
+                )
+                flush_error = exc
         finally:
             if self._worker is not None:
                 assert self._queue_event is not None
                 self._queue_event.set()
-                await self._worker
+                if not self._worker.done():
+                    self._worker.cancel()
+                await asyncio.gather(self._worker, return_exceptions=True)
                 self._worker = None
             await self.engine.dispose()
             self._initialized = False
+        if flush_error is not None:
+            raise flush_error
 
     async def aflush(self) -> None:
         if not self._database_loop.is_current():
@@ -1245,14 +1280,17 @@ class DatabaseBackend:
                 self._inflight_bytes += batch_bytes
                 self._inflight_count += len(control_items)
             retry_delay = 0.05
+            self._database_loop.begin_busy()
             while True:
                 try:
                     await self._persist_batch(batch)
                 except asyncio.CancelledError:
+                    self._database_loop.end_busy()
                     raise
                 except (OperationalError, DBAPIError) as exc:
                     if not _is_retryable_database_error(exc):
                         self._halt_unavailable_persistence(batch, exc)
+                        self._database_loop.end_busy()
                         return
                     self.coordinator.mark_retrying(exc)
                     logger.warning(
@@ -1265,6 +1303,7 @@ class DatabaseBackend:
                     continue
                 except Exception as exc:
                     self._halt_unavailable_persistence(batch, exc)
+                    self._database_loop.end_busy()
                     return
                 else:
                     self.coordinator.mark_healthy()
@@ -1299,6 +1338,7 @@ class DatabaseBackend:
                     for invocation_id in advanced:
                         self.store._persistence_advanced(invocation_id)
                     break
+            self._database_loop.end_busy()
             with self._pressure_lock:
                 self._inflight_bytes -= batch_bytes
                 self._inflight_count -= len(control_items)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -33,6 +34,7 @@ from autoagent.core.server.trace import TraceService
 
 
 _AUTH_COOKIE = "autoagent_session"
+logger = logging.getLogger(__name__)
 
 
 class _ApiModel(BaseModel):
@@ -130,6 +132,35 @@ class AutoAgentServer:
             )
         return api
 
+    async def ashutdown(self) -> None:
+        """Bound graceful execution shutdown before closing App resources."""
+
+        tasks = {
+            task for task in self._invocation_tasks.values() if not task.done()
+        }
+        timeout_s = self.agent.settings.shutdown_grace_timeout_ms / 1000
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=timeout_s)
+            if pending:
+                logger.warning(
+                    "Server shutdown grace period expired; cancelling %d "
+                    "running Invocation task(s).",
+                    len(pending),
+                )
+                for task in pending:
+                    task.cancel()
+                _, still_pending = await asyncio.wait(
+                    pending,
+                    timeout=timeout_s,
+                )
+                if still_pending:
+                    logger.error(
+                        "%d Invocation task(s) did not acknowledge cancellation "
+                        "before App shutdown.",
+                        len(still_pending),
+                    )
+        await self.agent.aclose()
+
     def _build_router(self) -> APIRouter:
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -137,12 +168,7 @@ class AutoAgentServer:
             try:
                 yield
             finally:
-                if self._invocation_tasks:
-                    await asyncio.gather(
-                        *tuple(self._invocation_tasks.values()),
-                        return_exceptions=True,
-                    )
-                await self.agent.aclose()
+                await self.ashutdown()
 
         router = APIRouter(prefix="/api/v1", lifespan=lifespan)
 

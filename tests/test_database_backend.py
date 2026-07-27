@@ -119,6 +119,22 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("definition_json", workflow_columns)
         self.assertIn("operator_manifests_json", workflow_columns)
 
+    async def test_close_abandons_flush_after_shutdown_deadline(self) -> None:
+        self.backend.shutdown_timeout_ms = 10
+        await self.store.ainitialize()
+        original_aflush = self.backend.aflush
+
+        async def blocked_flush() -> None:
+            await asyncio.Event().wait()
+
+        self.backend.aflush = blocked_flush  # type: ignore[method-assign]
+        try:
+            await asyncio.wait_for(self.store.aclose(), timeout=0.5)
+        finally:
+            self.backend.aflush = original_aflush  # type: ignore[method-assign]
+
+        self.assertFalse(self.backend._initialized)
+
     async def test_sqlite_uses_wal_with_full_durability_by_default(
         self,
     ) -> None:

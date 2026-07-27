@@ -267,7 +267,7 @@ class PersistenceIdentityTests(unittest.TestCase):
         )
         self.assertEqual(2, len(app.runtime_store.workflow_versions))
 
-    def test_source_workflow_mutation_after_compilation_is_rejected(self) -> None:
+    def test_registered_workflow_uses_fixed_ir_without_recompiling(self) -> None:
         def finish(value: str) -> str:
             return f"finished:{value}"
 
@@ -286,10 +286,15 @@ class PersistenceIdentityTests(unittest.TestCase):
         )
         workflow.add_edge("echo", "finish")
 
-        with self.assertRaisesRegex(ValueError, "changed after it was compiled"):
-            app.invoke(workflow, input={"value": "two"}, session_id="second")
+        second = app.invoke(
+            workflow,
+            input={"value": "two"},
+            session_id="second",
+        )
 
         self.assertEqual(first.result, {"output": "one"})
+        self.assertEqual(second.result, {"output": "two"})
+        self.assertEqual(1, len(second.node_executions))
         self.assertEqual(
             app.workflow_registry[workflow.id].workflow_ir.definition_hash,
             first_hash,

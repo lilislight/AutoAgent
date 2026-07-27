@@ -8,7 +8,13 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
-from autoagent import AutoAgentApp, DatabaseBackend, SystemCommand, Workflow
+from autoagent import (
+    AutoAgentApp,
+    AutoAgentSettings,
+    DatabaseBackend,
+    SystemCommand,
+    Workflow,
+)
 from autoagent.core.runtime import RuntimeEvent, RuntimeStore
 from autoagent.core.server import AutoAgentServer
 from autoagent.core.server.trace import TraceProjectionReducer
@@ -140,6 +146,26 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             self.server._invocation_failures[invocation_id],
             RuntimeError,
         )
+
+    async def test_shutdown_cancels_invocation_after_bounded_grace(self) -> None:
+        app = AutoAgentApp(
+            settings=AutoAgentSettings(shutdown_grace_timeout_ms=10)
+        )
+        server = AutoAgentServer(app)
+        started = asyncio.Event()
+
+        async def never_finishes() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        invocation_id = uuid4()
+        task = asyncio.create_task(never_finishes())
+        server._invocation_tasks[invocation_id] = task
+        await started.wait()
+
+        await asyncio.wait_for(server.ashutdown(), timeout=0.5)
+
+        self.assertTrue(task.cancelled())
 
     async def test_server_exposes_embeddable_v1_router(self) -> None:
         paths = {route.path for route in self.server.router.routes}

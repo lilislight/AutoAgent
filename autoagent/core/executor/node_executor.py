@@ -85,6 +85,7 @@ class ResolvedNodeExecutionJob:
     event_mode: RuntimeEventMode = "standard"
     concurrency_controller: RuntimeConcurrencyController | None = None
     thread_pool: ThreadPoolExecutor | None = None
+    max_parallel_units: int = 8
 
 
 class NodeExecutor:
@@ -109,10 +110,14 @@ class NodeExecutor:
         self,
         *,
         max_thread_workers: int = 8,
+        max_parallel_units: int = 8,
         operator_resolver: OperatorResolver | None = None,
         concurrency_controller: RuntimeConcurrencyController | None = None,
     ) -> None:
+        if max_thread_workers < 1 or max_parallel_units < 1:
+            raise ValueError("Executor worker limits must be positive.")
         self.thread_pool = ThreadPoolExecutor(max_workers=max_thread_workers)
+        self.max_parallel_units = max_parallel_units
         if operator_resolver is None:
             capabilities = CapabilityRegistry()
             operators = OperatorRegistry(capabilities)
@@ -186,12 +191,18 @@ class NodeExecutor:
                 event_mode=job.event_mode,
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
+                max_parallel_units=self.max_parallel_units,
             )
             task = asyncio.create_task(_execute_job(resolved_job))
             mailbox.track(task, job.node_execution.id)
 
     def has_running(self, mailbox: InvocationExecutionMailbox) -> bool:
         return mailbox.has_pending()
+
+    def close(self) -> None:
+        """Stop accepting synchronous calls without waiting on user code."""
+
+        self.thread_pool.shutdown(wait=False, cancel_futures=True)
 
     async def wait_next_completed(
         self,
@@ -604,7 +615,7 @@ def _map_units(
 
 
 def _max_parallelism(job: ResolvedNodeExecutionJob, unit_count: int) -> int:
-    limits = [max(1, unit_count)]
+    limits = [max(1, unit_count), job.max_parallel_units]
     policy = job.node_ir.policy
     if job.map_policy is not None and job.map_policy.max_parallelism is not None:
         limits.append(job.map_policy.max_parallelism)
@@ -698,17 +709,21 @@ async def _execute_units(
     unit_kind: str,
     max_parallelism: int,
 ) -> tuple[list[_UnitResult], int]:
-    semaphore = asyncio.Semaphore(max_parallelism)
+    unit_iterator = iter(units)
     active = 0
     peak_parallelism = 0
 
-    async def execute(unit_index: int, unit_input: Any) -> _UnitResult:
+    async def worker() -> bool:
         nonlocal active, peak_parallelism
-        async with semaphore:
+        while True:
+            try:
+                unit_index, unit_input = next(unit_iterator)
+            except StopIteration:
+                return False
             active += 1
             peak_parallelism = max(peak_parallelism, active)
             try:
-                return await _execute_unit(
+                result = await _execute_unit(
                     job,
                     unit_input,
                     budget,
@@ -718,21 +733,26 @@ async def _execute_units(
                 )
             finally:
                 active -= 1
+            results.append(result)
+            if result.error is not None:
+                return True
 
-    pending = {
-        asyncio.create_task(execute(unit_index, unit_input))
-        for unit_index, unit_input in units
-    }
     results: list[_UnitResult] = []
+    worker_count = min(max_parallelism, len(units))
+    pending = {
+        asyncio.create_task(
+            worker(),
+            name=f"autoagent-unit-worker-{index}",
+        )
+        for index in range(worker_count)
+    }
     try:
         while pending:
             done, pending = await asyncio.wait(
                 pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            completed = [task.result() for task in done]
-            results.extend(completed)
-            if not any(result.error is not None for result in completed):
+            if not any(task.result() for task in done):
                 continue
             for task in pending:
                 task.cancel()
@@ -869,11 +889,9 @@ async def _invoke_operator(
 
         future = job.thread_pool.submit(invoke_sync)
         try:
-            # Polling keeps the event loop responsive and works across restricted
-            # runtimes where asyncio's cross-thread self-pipe wakeup is blocked.
-            while not future.done():
-                await asyncio.sleep(0.001)
-            output, worker_started_ns, worker_ended_ns = future.result()
+            output, worker_started_ns, worker_ended_ns = await asyncio.wrap_future(
+                future
+            )
         except asyncio.CancelledError:
             future.cancel()
             raise

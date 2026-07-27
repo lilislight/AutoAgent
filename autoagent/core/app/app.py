@@ -87,6 +87,7 @@ class AutoAgentApp:
         ).strip()
         if not resolved_namespace:
             raise ValueError("App namespace cannot be empty.")
+        self.settings = resolved_settings
         self.namespace = resolved_namespace
         self.capability_registry = CapabilityRegistry()
         self.operator_registry = OperatorRegistry(self.capability_registry)
@@ -112,6 +113,8 @@ class AutoAgentApp:
         for model_type in runtime_models:
             self.register_runtime_model(model_type)
         node_executor = NodeExecutor(
+            max_thread_workers=resolved_settings.executor_max_thread_workers,
+            max_parallel_units=resolved_settings.executor_max_parallel_units,
             operator_resolver=OperatorResolver(
                 self.capability_registry,
                 self.operator_registry,
@@ -236,7 +239,9 @@ class AutoAgentApp:
         try:
             self._runtime_loop.run(self._aclose_on_runtime_loop())
         finally:
-            self._runtime_loop.stop()
+            self._runtime_loop.stop(
+                timeout_s=self.settings.shutdown_grace_timeout_ms / 1000
+            )
             self._closed = True
 
     async def aclose(self) -> None:
@@ -249,15 +254,23 @@ class AutoAgentApp:
                 await self._aclose_on_runtime_loop()
             finally:
                 self._closed = True
+                # Stop on the next loop turn so this close coroutine can finish
+                # and publish its completion before _run cancels leftovers.
+                self._runtime_loop.call_soon(self._runtime_loop.stop)
             return
         try:
             await self._runtime_loop.arun(self._aclose_on_runtime_loop())
         finally:
-            self._runtime_loop.stop()
+            self._runtime_loop.stop(
+                timeout_s=self.settings.shutdown_grace_timeout_ms / 1000
+            )
             self._closed = True
 
     async def _aclose_on_runtime_loop(self) -> None:
-        await self.runtime_store.aclose()
+        try:
+            await self.runtime_store.aclose()
+        finally:
+            self.workflow_executor.node_executor.close()
 
     def register_workflow(self, workflow: Workflow) -> WorkflowRegistryEntry:
         """Compile and cache a Workflow without invoking it.
@@ -642,15 +655,6 @@ class AutoAgentApp:
                 raise ValueError(
                     f"Duplicate workflow id already registered: {workflow.id}"
                 )
-            else:
-                workflow_ir, workflow_snapshot = self._compile_workflow_locked(workflow)
-                if workflow_ir.definition_hash != registry_entry.workflow_ir.definition_hash:
-                    raise ValueError(
-                        "Workflow source changed after it was compiled by this App. "
-                        "Create a new Workflow id/version or wait for optimizer "
-                        "hot-patch support instead of mutating an already compiled "
-                        f"Workflow: {workflow.id}"
-                    )
             return registry_entry.workflow_ir
 
     def _compile_workflow_locked(
@@ -659,11 +663,10 @@ class AutoAgentApp:
     ) -> tuple[WorkflowIR, WorkflowVersionSnapshot]:
         """Compile Workflow source while the App registry lock is held.
 
-        AutoAgentApp caches compiled WorkflowIR for invocation speed. The source
-        Workflow object is still mutable Python state, so existing registry
-        entries are recompiled only to detect unsupported user mutation. Future
-        optimizer hot-patch support should promote a new version explicitly
-        instead of silently replacing active source definitions.
+        AutoAgentApp compiles each Workflow object once. The registered
+        WorkflowIR is immutable execution input; later source-object mutation
+        is deliberately ignored. A changed definition must use a new Workflow
+        id/version and be registered explicitly.
         """
 
         compile_result = self.compiler.compile(workflow)
@@ -701,6 +704,16 @@ class AutoAgentApp:
                 annotations = [contract.annotation, contract.extra_annotation]
                 annotations.extend(
                     parameter.annotation for parameter in contract.parameters
+                )
+                for annotation in annotations:
+                    for model_type in _pydantic_model_types(annotation):
+                        self.register_runtime_model(model_type)
+            capability = node.capability
+            if isinstance(capability, Operator):
+                annotations = getattr(
+                    capability.handler,
+                    "__autoagent_runtime_annotations__",
+                    (),
                 )
                 for annotation in annotations:
                     for model_type in _pydantic_model_types(annotation):

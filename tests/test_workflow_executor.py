@@ -1555,6 +1555,46 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(3, calls[0].summary.call_count)
         self.assertEqual(3, calls[0].summary.success_count)
 
+    def test_map_uses_fixed_app_worker_pool_without_policy_limit(self) -> None:
+        active = 0
+        peak = 0
+        worker_tasks: set[str] = set()
+
+        async def transform(value: int) -> int:
+            nonlocal active, peak
+            worker_tasks.add(asyncio.current_task().get_name())
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.005)
+                return value * 2
+            finally:
+                active -= 1
+
+        workflow = Workflow(id="bounded_default_map_workers")
+        workflow.add_node(lambda: list(range(64)), node_id="source")
+        workflow.add_node(transform, node_id="target")
+        workflow.add_edge(
+            "source",
+            "target",
+            policy=EdgePolicy(
+                map=MapPolicy(
+                    item_selector=lambda ctx: [
+                        {"value": value} for value in ctx.input
+                    ]
+                )
+            ),
+        )
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual(8, peak)
+        self.assertEqual(8, len(worker_tasks))
+        self.assertTrue(
+            all(name.startswith("autoagent-unit-worker-") for name in worker_tasks)
+        )
+
     def test_input_mapping_failure_bypasses_retry_and_fallback(self) -> None:
         app = started_app()
         primary_calls = 0

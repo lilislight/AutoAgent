@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from concurrent.futures import Future
 from collections.abc import Awaitable, Callable
 from threading import Event, Lock, Thread, get_ident
@@ -9,6 +10,7 @@ from typing import Any, TypeVar
 
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class RuntimeEventLoop:
@@ -20,17 +22,23 @@ class RuntimeEventLoop:
         self._thread: Thread | None = None
         self._thread_id: int | None = None
         self._started = Event()
+        self._ready = Event()
         self._lock = Lock()
+        self._active_lock = Lock()
+        self._active_work = 0
 
     def start(self) -> None:
-        if self._loop is not None:
-            return
+        owner = False
         with self._lock:
-            if self._loop is not None:
-                return
-            self._thread = Thread(target=self._run, name=self.name, daemon=True)
-            self._thread.start()
+            if self._thread is None:
+                self._thread = Thread(target=self._run, name=self.name, daemon=True)
+                self._thread.start()
+                owner = True
+        if owner:
             self._started.wait()
+            self._ready.set()
+        else:
+            self._ready.wait()
 
     def is_current(self) -> bool:
         return self._thread_id == get_ident()
@@ -38,13 +46,16 @@ class RuntimeEventLoop:
     def submit(self, awaitable: Awaitable[T]) -> Future[T]:
         self.start()
         assert self._loop is not None
-        completed = Event()
+        completed: Future[None] = Future()
+        self.begin_busy()
 
         async def tracked() -> T:
             try:
                 return await awaitable
             finally:
-                completed.set()
+                self.end_busy()
+                if not completed.done():
+                    completed.set_result(None)
 
         future = asyncio.run_coroutine_threadsafe(tracked(), self._loop)
         setattr(future, "_autoagent_completed", completed)
@@ -55,7 +66,29 @@ class RuntimeEventLoop:
 
         self.start()
         assert self._loop is not None
-        self._loop.call_soon_threadsafe(callback, *args)
+        self.begin_busy()
+
+        def tracked_callback() -> None:
+            try:
+                callback(*args)
+            finally:
+                self.end_busy()
+
+        self._loop.call_soon_threadsafe(tracked_callback)
+
+    def begin_busy(self) -> None:
+        """Request the low-latency compatibility pulse for active work."""
+
+        with self._active_lock:
+            self._active_work += 1
+
+    def end_busy(self) -> None:
+        with self._active_lock:
+            self._active_work = max(0, self._active_work - 1)
+
+    def _is_busy(self) -> bool:
+        with self._active_lock:
+            return self._active_work > 0
 
     def run(self, awaitable: Awaitable[T]) -> T:
         if self.is_current():
@@ -69,12 +102,8 @@ class RuntimeEventLoop:
         if self.is_current():
             return await awaitable
         future = self.submit(awaitable)
-        # Polling avoids relying on a restricted host's cross-thread self-pipe
-        # to wake the caller loop when the concurrent Future completes.
         try:
-            while not future.done():
-                await asyncio.sleep(0.001)
-            return future.result()
+            return await _await_concurrent_future(future)
         except asyncio.CancelledError:
             # Cancellation belongs to the invocation, not merely to this
             # caller-side proxy. Forward it to the App runtime loop and wait
@@ -82,11 +111,10 @@ class RuntimeEventLoop:
             # the terminal Event.
             future.cancel()
             completed = getattr(future, "_autoagent_completed")
-            while not completed.is_set():
-                await asyncio.sleep(0.001)
+            await asyncio.shield(_await_concurrent_future(completed))
             raise
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_s: float = 5.0) -> None:
         loop = self._loop
         thread = self._thread
         if loop is None:
@@ -96,11 +124,24 @@ class RuntimeEventLoop:
             return
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
-            thread.join()
+            # The compatibility pulse itself can take up to 50 ms to recover a
+            # lost stop wakeup, so reserve that small cleanup floor even when a
+            # deployment configures a shorter application grace period.
+            effective_timeout_s = max(0.1, timeout_s)
+            thread.join(timeout=effective_timeout_s)
+            if thread.is_alive():
+                logger.error(
+                    "Runtime Event Loop thread %s did not stop within %.3f seconds; "
+                    "leaving the daemon thread isolated during process shutdown.",
+                    self.name,
+                    effective_timeout_s,
+                )
+                return
         self._loop = None
         self._thread = None
         self._thread_id = None
         self._started.clear()
+        self._ready.clear()
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
@@ -108,18 +149,18 @@ class RuntimeEventLoop:
         self._loop = loop
         self._thread_id = get_ident()
         self._started.set()
-        # Some restricted runtimes disable asyncio's cross-thread self-pipe.
-        # A tiny heartbeat bounds command pickup latency even when
-        # call_soon_threadsafe cannot wake the selector directly.
-        async def heartbeat() -> None:
+        # Hardened/embedded hosts can intermittently drop asyncio's selector
+        # self-pipe wakeup. Idle loops pulse at 20 Hz; only active cross-thread
+        # work uses the old 1 ms latency bound.
+        async def compatibility_pulse() -> None:
             while True:
-                await asyncio.sleep(0.001)
+                await asyncio.sleep(0.001 if self._is_busy() else 0.05)
 
-        heartbeat_task = loop.create_task(heartbeat())
+        pulse_task = loop.create_task(compatibility_pulse())
         try:
             loop.run_forever()
         finally:
-            heartbeat_task.cancel()
+            pulse_task.cancel()
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
@@ -128,6 +169,26 @@ class RuntimeEventLoop:
                     asyncio.gather(*pending, return_exceptions=True)
                 )
             loop.close()
+
+
+async def _await_concurrent_future(future: Future[T]) -> T:
+    """Await immediately when wakeups work, with a 50 ms lost-wakeup fallback."""
+
+    wrapped = asyncio.wrap_future(future)
+    while not wrapped.done():
+        tick = asyncio.create_task(asyncio.sleep(0.05))
+        try:
+            done, _ = await asyncio.wait(
+                (wrapped, tick),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not tick.done():
+                tick.cancel()
+                await asyncio.gather(tick, return_exceptions=True)
+        if wrapped in done:
+            break
+    return wrapped.result()
 
 
 async def invoke_hook_async(hook: Callable[..., Any], *args: Any) -> Any:

@@ -35,6 +35,9 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
                     "AUTOAGENT_DATABASE_BATCH_MAX_DELAY_MS": "7",
                     "AUTOAGENT_DATABASE_RECOVERY_EVENT_INTERVAL": "15",
                     "AUTOAGENT_SQLITE_SYNCHRONOUS": "normal",
+                    "AUTOAGENT_EXECUTOR_MAX_THREAD_WORKERS": "5",
+                    "AUTOAGENT_EXECUTOR_MAX_PARALLEL_UNITS": "3",
+                    "AUTOAGENT_SHUTDOWN_GRACE_TIMEOUT_MS": "1250",
                     "AUTOAGENT_ARTIFACT_ENABLED": "false",
                     "AUTOAGENT_ARTIFACT_INLINE_MAX_BYTES": "4096",
                     "AUTOAGENT_RETENTION_MODE": "lru_durable_terminal",
@@ -58,6 +61,16 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(7, backend.batch_max_delay_ms)
             self.assertEqual(15, backend.recovery_event_interval)
             self.assertEqual("NORMAL", backend.sqlite_synchronous)
+            self.assertEqual(1_250, backend.shutdown_timeout_ms)
+            self.assertEqual(
+                5,
+                app.workflow_executor.node_executor.thread_pool._max_workers,
+            )
+            self.assertEqual(
+                3,
+                app.workflow_executor.node_executor.max_parallel_units,
+            )
+            self.assertEqual(1_250, app.settings.shutdown_grace_timeout_ms)
             self.assertFalse(backend.artifact_policy.enabled)
             self.assertEqual(4_096, backend.artifact_policy.inline_max_bytes)
 

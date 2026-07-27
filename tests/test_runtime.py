@@ -51,6 +51,17 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(second, reduced["node_executions"][1])
         self.assertEqual("completed", reduced["node_executions"][1]["state"])
 
+    def test_app_close_from_owned_runtime_loop_stops_thread(self) -> None:
+        app = started_app()
+        thread = app._runtime_loop._thread
+        assert thread is not None
+
+        app._runtime_loop.run(app.aclose())
+        thread.join(timeout=0.5)
+
+        self.assertTrue(app._closed)
+        self.assertFalse(thread.is_alive())
+
     def test_state_operations_copy_only_nested_changed_paths(self) -> None:
         untouched_session = {"context": {"data": {"tenant": "one"}}}
         previous_context = {

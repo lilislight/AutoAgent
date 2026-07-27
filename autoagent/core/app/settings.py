@@ -34,6 +34,9 @@ AUTOAGENT_ENV_KEYS = frozenset(
         "AUTOAGENT_DATABASE_BATCH_MAX_DELAY_MS",
         "AUTOAGENT_DATABASE_RECOVERY_EVENT_INTERVAL",
         "AUTOAGENT_SQLITE_SYNCHRONOUS",
+        "AUTOAGENT_EXECUTOR_MAX_THREAD_WORKERS",
+        "AUTOAGENT_EXECUTOR_MAX_PARALLEL_UNITS",
+        "AUTOAGENT_SHUTDOWN_GRACE_TIMEOUT_MS",
         "AUTOAGENT_ARTIFACT_ENABLED",
         "AUTOAGENT_ARTIFACT_INLINE_MAX_BYTES",
         "AUTOAGENT_RETENTION_MODE",
@@ -68,6 +71,10 @@ class AutoAgentSettings:
     database_batch_max_delay_ms: int = 5
     database_recovery_event_interval: int = 200
     sqlite_synchronous: str = "FULL"
+
+    executor_max_thread_workers: int = 8
+    executor_max_parallel_units: int = 8
+    shutdown_grace_timeout_ms: int = 5_000
 
     artifact_enabled: bool = True
     artifact_inline_max_bytes: int = 8 * 1024
@@ -109,6 +116,15 @@ class AutoAgentSettings:
         if self.database_recovery_event_interval < 1:
             raise ValueError(
                 "AUTOAGENT_DATABASE_RECOVERY_EVENT_INTERVAL must be positive."
+            )
+        if (
+            self.executor_max_thread_workers < 1
+            or self.executor_max_parallel_units < 1
+        ):
+            raise ValueError("AUTOAGENT_EXECUTOR_MAX_* values must be positive.")
+        if self.shutdown_grace_timeout_ms < 0:
+            raise ValueError(
+                "AUTOAGENT_SHUTDOWN_GRACE_TIMEOUT_MS cannot be negative."
             )
         synchronous = self.sqlite_synchronous.upper()
         if synchronous not in {"FULL", "NORMAL"}:
@@ -189,6 +205,21 @@ class AutoAgentSettings:
                 200,
             ),
             sqlite_synchronous=_text(values, "SQLITE_SYNCHRONOUS", "FULL"),
+            executor_max_thread_workers=_int(
+                values,
+                "EXECUTOR_MAX_THREAD_WORKERS",
+                8,
+            ),
+            executor_max_parallel_units=_int(
+                values,
+                "EXECUTOR_MAX_PARALLEL_UNITS",
+                8,
+            ),
+            shutdown_grace_timeout_ms=_int(
+                values,
+                "SHUTDOWN_GRACE_TIMEOUT_MS",
+                5_000,
+            ),
             artifact_enabled=_bool(values, "ARTIFACT_ENABLED", True),
             artifact_inline_max_bytes=_int(
                 values,
@@ -266,6 +297,7 @@ class AutoAgentSettings:
                 ),
                 artifact_policy=self.artifact_policy(),
                 sqlite_synchronous=self.sqlite_synchronous,
+                shutdown_timeout_ms=self.shutdown_grace_timeout_ms,
             )
         return RuntimeStore(
             backend=backend,

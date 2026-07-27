@@ -19,7 +19,7 @@ from autoagent.core.operators import (
     OperatorRegistry,
     OperatorResolver,
 )
-from autoagent.core.operators.contract import ensure_callable_contract
+from autoagent.core.operators.contract import OperatorContract, ensure_callable_contract
 from autoagent.core.runtime import (
     Invocation,
     JsonRuntimeSerializer,
@@ -276,19 +276,21 @@ class AutoAgentApp:
         self,
         capability_id: str,
         *,
+        contract: OperatorContract | None = None,
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Capability:
         """Register one Capability identity in this App's isolated registry.
 
-        This method does not accept or create a schema. The first associated
-        Operator establishes the Capability contract from its Python callable;
-        a CapabilityRef compiles only after that implementation is registered.
+        Prefer an explicit contract when the Capability is a reusable public
+        protocol. When omitted, the first associated Operator establishes the
+        contract for simple application-local capabilities.
         """
 
         return self.capability_registry.register(
             Capability(
                 id=capability_id,
+                contract=contract,
                 description=description,
                 metadata=metadata or {},
             )
@@ -380,6 +382,7 @@ class AutoAgentApp:
             )
             self.register_capability(
                 resolved_capability_id,
+                contract=registered_operator.contract,
                 description=description,
                 metadata=metadata,
             )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from autoagent.core.operators.contract import OperatorContract
 
@@ -33,20 +33,21 @@ class Capability(BaseModel):
         default_factory=dict,
         description="Non-semantic data for tooling and integrations.",
     )
-    _contract: OperatorContract | None = PrivateAttr(default=None)
-
-    @property
-    def contract(self) -> OperatorContract | None:
-        """Contract established by the first registered Operator implementation."""
-
-        return self._contract
+    contract: OperatorContract | None = Field(
+        default=None,
+        description=(
+            "Capability-owned input/output contract. Applications should declare "
+            "it explicitly when the contract is known before implementations are "
+            "registered."
+        ),
+    )
 
     def _bind_contract(self, contract: OperatorContract) -> None:
-        """Bind the implementation-derived contract once; registry owns this call."""
+        """Bind a legacy implementation-derived contract once."""
 
-        if self._contract is not None:
+        if self.contract is not None:
             raise ValueError(f"Capability contract is already established: {self.id}")
-        self._contract = contract
+        object.__setattr__(self, "contract", contract)
 
     @field_validator("id")
     @classmethod

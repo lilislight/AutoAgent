@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import RLock
-from typing import Any, TypeVar
+from typing import Any, TypeVar, get_args, get_origin
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
@@ -674,7 +674,37 @@ class AutoAgentApp:
             raise ValueError(f"Workflow validation failed: {diagnostics}")
         if compile_result.workflow_snapshot is None:
             raise RuntimeError("Compiler omitted WorkflowVersionSnapshot.")
+        self._register_runtime_models_from_workflow_ir(
+            compile_result.workflow_ir
+        )
         return compile_result.workflow_ir, compile_result.workflow_snapshot
+
+    def _register_runtime_models_from_workflow_ir(
+        self,
+        workflow_ir: WorkflowIR,
+    ) -> None:
+        """Trust and register Pydantic types declared by compiled contracts.
+
+        Runtime values written in one process must be decodable after restart.
+        Compiled callable annotations are part of the executable application
+        definition, so their Pydantic models are safe to register without
+        allowing persisted data to import arbitrary Python types.
+        """
+
+        for node in workflow_ir.nodes.values():
+            contracts = (
+                node.input_contract,
+                node.operator_output_contract,
+                node.output_contract,
+            )
+            for contract in contracts:
+                annotations = [contract.annotation, contract.extra_annotation]
+                annotations.extend(
+                    parameter.annotation for parameter in contract.parameters
+                )
+                for annotation in annotations:
+                    for model_type in _pydantic_model_types(annotation):
+                        self.register_runtime_model(model_type)
 
     async def _prepare_invocation(
         self,
@@ -812,3 +842,30 @@ class AutoAgentApp:
                 "code or await app.astart() from asynchronous code before "
                 "invoking, submitting, or resuming Workflows."
             )
+
+
+def _pydantic_model_types(annotation: Any) -> tuple[type[BaseModel], ...]:
+    """Return every Pydantic model reachable from one type annotation."""
+
+    found: list[type[BaseModel]] = []
+    visited: set[Any] = set()
+
+    def visit(value: Any) -> None:
+        try:
+            if value in visited:
+                return
+            visited.add(value)
+        except TypeError:
+            return
+        if isinstance(value, type) and issubclass(value, BaseModel):
+            found.append(value)
+            for field in value.model_fields.values():
+                visit(field.annotation)
+            return
+        origin = get_origin(value)
+        if origin is not None:
+            for argument in get_args(value):
+                visit(argument)
+
+    visit(annotation)
+    return tuple(found)

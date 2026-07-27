@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -31,8 +33,11 @@ OPENAI_COMPATIBLE_ENV_KEYS = frozenset(
         "AUTOAGENT_OPENAI_API_KEY",
         "AUTOAGENT_OPENAI_MODEL",
         "AUTOAGENT_OPENAI_TIMEOUT_MS",
+        "AUTOAGENT_OPENAI_STRUCTURED_OUTPUT_MODE",
     }
 )
+
+StructuredOutputMode = Literal["auto", "json_schema", "json_object", "prompt"]
 
 
 class OpenAICompatibleConfig(BaseModel):
@@ -44,6 +49,7 @@ class OpenAICompatibleConfig(BaseModel):
     api_key: SecretStr
     default_model: str
     timeout_ms: int = Field(default=60_000, gt=0)
+    structured_output_mode: StructuredOutputMode = "auto"
     headers: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
@@ -79,6 +85,10 @@ class OpenAICompatibleConfig(BaseModel):
             timeout_ms=int(
                 values.get("AUTOAGENT_OPENAI_TIMEOUT_MS", "60000")
             ),
+            structured_output_mode=values.get(
+                "AUTOAGENT_OPENAI_STRUCTURED_OUTPUT_MODE",
+                "auto",
+            ).strip(),
         )
 
 
@@ -103,7 +113,11 @@ def create_openai_compatible_operator(
     selected_transport = transport or _post_json
 
     async def handler(request: LLMRequest) -> LLMResponse:
-        payload = _request_payload(request, default_model=config.default_model)
+        payload = _request_payload(
+            request,
+            default_model=config.default_model,
+            structured_output_mode=_resolve_structured_output_mode(config),
+        )
         headers = {
             "authorization": f"Bearer {config.api_key.get_secret_value()}",
             "content-type": "application/json",
@@ -157,10 +171,25 @@ async def _post_json(
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.post(url, headers=dict(headers), json=dict(payload))
-            response.raise_for_status()
-            body = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.HTTPError as exc:
         raise OpenAICompatibleError(str(exc)) from exc
+    if response.is_error:
+        detail = response.text.strip()
+        if len(detail) > 4_096:
+            detail = f"{detail[:4_096]}..."
+        request_id = response.headers.get("x-request-id")
+        message = f"Provider returned HTTP {response.status_code}"
+        if request_id:
+            message += f" (request_id={request_id})"
+        if detail:
+            message += f": {detail}"
+        raise OpenAICompatibleError(message)
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise OpenAICompatibleError(
+            "Chat Completions response is not valid JSON."
+        ) from exc
     if not isinstance(body, Mapping):
         raise OpenAICompatibleError("Chat Completions response must be a JSON object.")
     return body
@@ -170,6 +199,9 @@ def _request_payload(
     request: LLMRequest,
     *,
     default_model: str,
+    structured_output_mode: Literal["json_schema", "json_object", "prompt"] = (
+        "json_schema"
+    ),
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": request.model or default_model,
@@ -197,20 +229,81 @@ def _request_payload(
             payload["tool_choice"] = request.tool_choice
     response_format = request.response_format_spec
     if response_format is not None:
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": response_format.name,
-                "schema": response_format.json_schema,
-                "strict": response_format.strict,
-            },
-        }
+        if structured_output_mode == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_format.name,
+                    "schema": response_format.json_schema,
+                    "strict": response_format.strict,
+                },
+            }
+        else:
+            may_call_tools = _may_call_tools(request)
+            payload["messages"].insert(
+                0,
+                _json_output_instruction(
+                    response_format.json_schema,
+                    may_call_tools=may_call_tools,
+                ),
+            )
+            # Some compatible providers reject response_format=json_object
+            # when Tool calling is enabled. Keep the provider option deferred,
+            # but never defer the schema instruction: otherwise a ReAct model
+            # commonly returns prose once before the repair turn constrains it.
+            if structured_output_mode == "json_object" and not may_call_tools:
+                payload["response_format"] = {"type": "json_object"}
     if request.temperature is not None:
         payload["temperature"] = request.temperature
     if request.max_output_tokens is not None:
         payload["max_completion_tokens"] = request.max_output_tokens
     payload.update(request.provider_options)
     return payload
+
+
+def _may_call_tools(request: LLMRequest) -> bool:
+    return bool(request.tools) and request.tool_choice != "none"
+
+
+def _resolve_structured_output_mode(
+    config: OpenAICompatibleConfig,
+) -> Literal["json_schema", "json_object", "prompt"]:
+    if config.structured_output_mode != "auto":
+        return config.structured_output_mode
+    hostname = (urlparse(config.base_url).hostname or "").lower()
+    if hostname == "api.deepseek.com" or hostname.endswith(".deepseek.com"):
+        return "json_object"
+    return "json_schema"
+
+
+def _json_output_instruction(
+    json_schema: Mapping[str, Any],
+    *,
+    may_call_tools: bool,
+) -> dict[str, Any]:
+    schema = json.dumps(json_schema, ensure_ascii=False, separators=(",", ":"))
+    response_rule = (
+        "You have exactly two permitted response forms: (1) call one or more "
+        "provided tools with tool_calls, or (2) return the final answer as "
+        "assistant content containing exactly one valid JSON value matching "
+        "the JSON Schema below. When returning a final answer, do not include "
+        "natural-language prose, Markdown fences, labels, or explanatory text "
+        "outside the JSON value."
+        if may_call_tools
+        else
+        "Your entire assistant response must contain exactly one valid JSON "
+        "value matching the JSON Schema below. Do not include natural-language "
+        "prose, Markdown fences, labels, or explanatory text outside the JSON "
+        "value."
+    )
+    return {
+        "role": "system",
+        "content": (
+            f"{response_rule} This output constraint is mandatory even if "
+            "another message asks for a prose answer.\n"
+            f"JSON Schema: {schema}"
+        ),
+    }
 
 
 def _message_payload(message: LLMMessage) -> dict[str, Any]:

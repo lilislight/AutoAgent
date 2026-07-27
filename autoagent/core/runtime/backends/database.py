@@ -746,10 +746,18 @@ class DatabaseBackend:
         if event.operations is not None:
             operations = []
             for raw_operation in event.operations:
-                operation = raw_operation.model_dump(mode="python")
-                if "value" in operation:
+                # Do not use model_dump() here. StateOperation.value is typed
+                # as Any, so Pydantic would recursively turn nested Runtime
+                # models into plain dictionaries before the Runtime serializer
+                # has a chance to attach their trusted type identifiers.
+                operation = {
+                    "op": raw_operation.op,
+                    "path": raw_operation.path,
+                    "value": raw_operation.value,
+                }
+                if raw_operation.op != "remove":
                     persisted, encoded = self.artifact_encoder.externalize(
-                        operation["value"],
+                        raw_operation.value,
                         namespace=namespace,
                         invocation_id=invocation_id,
                     )

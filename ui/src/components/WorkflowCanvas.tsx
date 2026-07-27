@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
+  BaseEdge,
   Background,
   BackgroundVariant,
   Controls,
@@ -11,6 +12,7 @@ import {
   Position,
   ReactFlow,
   type Edge as FlowEdge,
+  type EdgeProps,
   type Node as FlowNode,
   type NodeProps,
   type ReactFlowInstance,
@@ -23,7 +25,12 @@ import {
   RotateCcw,
 } from "lucide-react";
 
-import { layoutWorkflow, loadSavedLayout, saveLayout } from "../layout";
+import {
+  layoutWorkflow,
+  loadSavedLayout,
+  saveLayout,
+  type EdgeRoute,
+} from "../layout";
 import type {
   EdgeRuntimeState,
   InvocationDetail,
@@ -43,6 +50,8 @@ type TraceNodeData = {
   entry: boolean;
   exit: boolean;
   executionCount: number;
+  skippedCount: number;
+  latestOccurrenceState: RuntimeState | null;
   operatorSummary: string | null;
   issue: NodeIssue | null;
 };
@@ -61,11 +70,16 @@ type NodeIssue = {
   title: string;
 };
 
+type RoutedEdgeData = {
+  route?: EdgeRoute;
+};
+
 type TraceFlowNode =
   | FlowNode<TraceNodeData, "trace">
   | FlowNode<GroupNodeData, "workflowGroup">;
 
 const nodeTypes = { trace: TraceNode, workflowGroup: WorkflowGroupNode };
+const edgeTypes = { routed: RoutedEdge };
 
 interface WorkflowCanvasProps {
   graph: WorkflowGraphView;
@@ -93,29 +107,46 @@ export function WorkflowCanvas({
   onResume,
 }: WorkflowCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<TraceFlowNode>([]);
+  const [edgeRoutes, setEdgeRoutes] = useState<Record<string, EdgeRoute>>({});
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance<TraceFlowNode, FlowEdge> | null>(null);
+  const layoutRequestRef = useRef(0);
+  const projectionRef = useRef(projection);
+  const invocationRef = useRef(invocation);
+  const selectionRef = useRef(selection);
+  projectionRef.current = projection;
+  invocationRef.current = invocation;
+  selectionRef.current = selection;
 
   const buildLayout = useCallback(
     async (force = false) => {
-      const positions =
-        (!force && loadSavedLayout(graph.definition_hash)) ||
-        (await layoutWorkflow(graph));
+      const request = ++layoutRequestRef.current;
+      const saved = force ? null : loadSavedLayout(graph.definition_hash);
+      const layout = saved ?? (await layoutWorkflow(graph));
+      if (request !== layoutRequestRef.current) return;
+      if (saved === null) {
+        saveLayout(graph.definition_hash, layout);
+      }
+      const positions = layout.positions;
+      setEdgeRoutes(layout.edgeRoutes);
+      const currentProjection = projectionRef.current;
+      const currentInvocation = invocationRef.current;
+      const currentSelection = selectionRef.current;
       const groupNodes = buildGroupNodes(
         graph.groups ?? [],
         graph.nodes,
-        projection,
+        currentProjection,
         positions,
-        selection,
+        currentSelection,
       );
       const traceNodes: TraceFlowNode[] = graph.nodes
         .map((node) => {
-          const projected = projection.nodes[node.id];
+          const projected = currentProjection.nodes[node.id];
           const capability = `${String(node.capability.kind ?? "operator")}:${String(
             node.capability.id ?? "unknown",
           )}`;
           const latestExecution = projected
-            ? invocation.node_executions.find(
+            ? currentInvocation.node_executions.find(
                 (execution) => execution.id === projected.latest_execution_id,
               )
             : undefined;
@@ -130,10 +161,15 @@ export function WorkflowCanvas({
               entry: node.entry,
               exit: node.exit,
               executionCount: projected?.execution_count ?? 0,
+              skippedCount: projected?.skipped_count ?? 0,
+              latestOccurrenceState:
+                projected?.latest_occurrence_state ?? null,
               operatorSummary: nodeOperatorSummary(projected),
               issue: nodeIssue(latestExecution),
             },
-            selected: selection?.type === "node" && selection.id === node.id,
+            selected:
+              currentSelection?.type === "node" &&
+              currentSelection.id === node.id,
             zIndex: 10,
           };
         });
@@ -177,6 +213,9 @@ export function WorkflowCanvas({
             ...node.data,
             state: projected?.state ?? "created",
             executionCount: projected?.execution_count ?? 0,
+            skippedCount: projected?.skipped_count ?? 0,
+            latestOccurrenceState:
+              projected?.latest_occurrence_state ?? null,
             operatorSummary: nodeOperatorSummary(projected),
             issue: nodeIssue(latestExecution),
           },
@@ -201,8 +240,12 @@ export function WorkflowCanvas({
           id: edge.id,
           source: edge.from_node,
           target: edge.to_node,
-          type: "smoothstep",
-          animated: followLive && selected && projection.invocation_state === "running",
+          type: "routed",
+          data: { route: edgeRoutes[edge.id] },
+          animated:
+            followLive &&
+            (projected?.latest_selected ?? selected) &&
+            projection.invocation_state === "running",
           label: projected && projected.evaluation_count > 1
             ? `${projected.selected_count}/${projected.evaluation_count}`
             : undefined,
@@ -230,27 +273,12 @@ export function WorkflowCanvas({
     [
       followLive,
       graph.edges,
+      edgeRoutes,
       projection.edges,
       projection.invocation_state,
       selection,
       hoveredEdgeId,
     ],
-  );
-
-  const persistPositions = useCallback(() => {
-    const positions = Object.fromEntries(
-      flow.current
-        ?.getNodes()
-        .filter((node) => node.type === "trace")
-        .map((node) => [node.id, node.position]) ?? [],
-    );
-    saveLayout(graph.definition_hash, positions);
-  }, [graph.definition_hash]);
-
-  const refreshGroupFrames = useCallback(
-    (nextNodes: TraceFlowNode[]) =>
-      refreshGroupNodes(nextNodes, graph.groups ?? [], graph.nodes, projection, selection),
-    [graph.groups, graph.nodes, projection, selection],
   );
 
   return (
@@ -259,19 +287,40 @@ export function WorkflowCanvas({
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
-        onNodeDrag={(_event, draggedNode) => {
-          setNodes((current) =>
-            refreshGroupFrames(
-              current.map((node) =>
-                node.id === draggedNode.id ? { ...node, position: draggedNode.position } : node,
-              ),
-            ),
-          );
+        onNodeDragStart={(_event, node) => {
+          if (node.type === "workflowGroup") return;
+          // ELK routes use absolute points. Once a user moves a Node, switch
+          // to routes derived from React Flow's live endpoints.
+          setEdgeRoutes({});
         }}
         onNodeDragStop={() => {
-          persistPositions();
-          setNodes((current) => refreshGroupFrames(current));
+          const current = flow.current?.getNodes() ?? [];
+          const positions = Object.fromEntries(
+            current
+              .filter((node) => node.type !== "workflowGroup")
+              .map((node) => [node.id, node.position]),
+          );
+          saveLayout(graph.definition_hash, {
+            positions,
+            edgeRoutes: {},
+          });
+          setNodes((existing) => {
+            const traceNodes = existing.filter(
+              (node) => node.type !== "workflowGroup",
+            );
+            return [
+              ...buildGroupNodes(
+                graph.groups ?? [],
+                graph.nodes,
+                projectionRef.current,
+                positions,
+                selectionRef.current,
+              ),
+              ...traceNodes,
+            ];
+          });
         }}
         onNodeClick={(event, node) => {
           event.stopPropagation();
@@ -312,6 +361,7 @@ export function WorkflowCanvas({
           flow.current = instance;
         }}
         nodesConnectable={false}
+        nodesDraggable
         elementsSelectable
         minZoom={0.2}
         maxZoom={1.8}
@@ -374,6 +424,18 @@ function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
         {traceData.executionCount > 1 && (
           <span className="execution-count">×{traceData.executionCount}</span>
         )}
+        {traceData.skippedCount > 0 && (
+          <span
+            className="execution-count"
+            title={
+              traceData.latestOccurrenceState === "skipped"
+                ? "The latest scoped Node occurrence was skipped."
+                : "One or more scoped Node occurrences were skipped."
+            }
+          >
+            skip ×{traceData.skippedCount}
+          </span>
+        )}
       </div>
       <div className="trace-node-capability">{traceData.capability}</div>
       {traceData.operatorSummary && (
@@ -399,6 +461,54 @@ function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
       <Handle type="source" position={Position.Right} />
     </div>
   );
+}
+
+function RoutedEdge({
+  id,
+  data,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  markerEnd,
+  style,
+  interactionWidth,
+  label,
+}: EdgeProps<FlowEdge<RoutedEdgeData>>) {
+  const points = data?.route?.points;
+  const path = points && points.length >= 2
+    ? orthogonalPath(points)
+    : orthogonalPath([
+        { x: sourceX, y: sourceY },
+        { x: (sourceX + targetX) / 2, y: sourceY },
+        { x: (sourceX + targetX) / 2, y: targetY },
+        { x: targetX, y: targetY },
+      ]);
+  const labelPosition = data?.route?.label ?? {
+    x: (sourceX + targetX) / 2,
+    y: (sourceY + targetY) / 2,
+  };
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      markerEnd={markerEnd}
+      style={style}
+      interactionWidth={interactionWidth}
+      label={label}
+      labelX={labelPosition.x}
+      labelY={labelPosition.y}
+      labelShowBg
+      labelBgPadding={[5, 3]}
+      labelBgBorderRadius={4}
+    />
+  );
+}
+
+function orthogonalPath(points: { x: number; y: number }[]): string {
+  return points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .join(" ");
 }
 
 function nodeOperatorSummary(
@@ -551,23 +661,6 @@ function buildGroupNodes(
     });
   }
   return result;
-}
-
-function refreshGroupNodes(
-  current: TraceFlowNode[],
-  groups: WorkflowGroupView[],
-  graphNodes: WorkflowNodeView[],
-  projection: RuntimeProjection,
-  selection: TraceSelection,
-): TraceFlowNode[] {
-  const positions = Object.fromEntries(
-    current
-      .filter((node) => node.type === "trace")
-      .map((node) => [node.id, node.position]),
-  );
-  const nextGroups = buildGroupNodes(groups, graphNodes, projection, positions, selection);
-  const traceNodes = current.filter((node) => node.type === "trace");
-  return [...nextGroups, ...traceNodes];
 }
 
 function groupBounds(

@@ -19,6 +19,7 @@ from autoagent.ai.openai_compatible import (
     OPENAI_COMPATIBLE_ENV_KEYS,
     OpenAICompatibleConfig,
     OpenAICompatibleError,
+    StructuredOutputMode,
     create_openai_compatible_operator,
     register_openai_compatible_operator,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "OpenAICompatibleConfig",
     "OpenAICompatibleError",
     "OPENAI_COMPATIBLE_ENV_KEYS",
+    "StructuredOutputMode",
     "StructuredOutputRepairExhausted",
     "ToolArgumentsRepairExhausted",
     "ToolDefinition",

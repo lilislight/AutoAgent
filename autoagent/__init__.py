@@ -1,4 +1,4 @@
-from autoagent.core.app import AutoAgentApp, AutoAgentSettings, get_default_app
+from autoagent.core.app import AutoAgentApp, AutoAgentSettings
 from autoagent.core.operators import (
     Capability,
     Operator,
@@ -7,8 +7,6 @@ from autoagent.core.operators import (
     OperatorManifest,
     ParameterContract,
     SchemaContract,
-    capability,
-    operator,
 )
 from autoagent.core.workflow import (
     BackoffPolicy,
@@ -96,8 +94,5 @@ __all__ = [
     "Workflow",
     "WorkflowPolicy",
     "WorkflowDiagram",
-    "capability",
-    "get_default_app",
-    "operator",
     "workflow_hook",
 ]

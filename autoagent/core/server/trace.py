@@ -67,7 +67,7 @@ def _node_operator_summary(
 class TraceProjectionReducer:
     """Pure graph/read-model reducer shared semantically with the UI."""
 
-    schema_version = 2
+    schema_version = 3
 
     @classmethod
     def initial(cls, invocation_id: UUID | str) -> dict[str, Any]:
@@ -172,20 +172,37 @@ class TraceProjectionReducer:
                 default=None,
             )
             previous_node = result["nodes"].get(node_id, {})
+            skipped_count = int(previous_node.get("skipped_count", 0)) + int(
+                name == "node.skipped"
+            )
             result["nodes"][node_id] = {
                 "node_id": node_id,
-                "state": state,
+                # A synthetic skipped Node Instance must not erase an earlier
+                # real execution of the same static Node (notably in loops).
+                "state": latest["state"] if latest is not None else state,
+                "latest_occurrence_state": state,
+                "latest_occurrence_sequence": event.sequence,
+                "latest_skipped_instance_key": (
+                    payload.get("node_instance_key")
+                    if name == "node.skipped"
+                    else previous_node.get("latest_skipped_instance_key")
+                ),
                 "latest_execution_id": (
                     latest["execution_id"] if latest is not None else None
                 ),
-                "execution_count": max(
-                    len(node_executions),
-                    int(previous_node.get("execution_count", 0)),
-                    1 if name == "node.skipped" else 0,
+                "execution_count": len(node_executions),
+                "skipped_count": skipped_count,
+                "latest_error": (
+                    latest.get("error") if latest is not None else payload.get("error")
                 ),
-                "latest_error": payload.get("error"),
-                "latest_elapsed_ns": event.elapsed_ns,
-                "latest_timing": dict(event.timing),
+                "latest_elapsed_ns": (
+                    latest.get("elapsed_ns") if latest is not None else event.elapsed_ns
+                ),
+                "latest_timing": (
+                    dict(latest.get("timing", {}))
+                    if latest is not None
+                    else dict(event.timing)
+                ),
                 **_node_operator_summary(latest),
             }
             return result
@@ -194,18 +211,36 @@ class TraceProjectionReducer:
             edge_id = str(payload.get("edge_id") or event.subject_id)
             previous = result["edges"].get(edge_id, {})
             selected = bool(payload.get("selected"))
-            state = str(payload.get("state") or event.status or "evaluated")
+            latest_state = str(
+                payload.get("state") or event.status or "evaluated"
+            )
+            selected_count = int(previous.get("selected_count", 0)) + int(
+                selected
+            )
+            skipped_count = int(previous.get("skipped_count", 0)) + int(
+                latest_state == "skipped"
+            )
+            failed_count = int(previous.get("failed_count", 0)) + int(
+                latest_state == "failed"
+            )
+            state = (
+                "failed"
+                if failed_count
+                else "selected"
+                if selected_count
+                else latest_state
+            )
             result["edges"][edge_id] = {
                 "edge_id": edge_id,
                 "state": state,
-                "selected": selected,
+                "latest_state": latest_state,
+                "latest_evaluation_sequence": event.sequence,
+                "selected": selected_count > 0,
+                "latest_selected": selected,
                 "evaluation_count": int(previous.get("evaluation_count", 0)) + 1,
-                "selected_count": int(previous.get("selected_count", 0))
-                + int(selected),
-                "skipped_count": int(previous.get("skipped_count", 0))
-                + int(state == "skipped"),
-                "failed_count": int(previous.get("failed_count", 0))
-                + int(state == "failed"),
+                "selected_count": selected_count,
+                "skipped_count": skipped_count,
+                "failed_count": failed_count,
                 "source_execution_id": payload.get("source_execution_id"),
                 "target_node_id": payload.get("target_node_id"),
                 "reason": payload.get("reason"),

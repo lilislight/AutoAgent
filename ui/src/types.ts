@@ -317,8 +317,12 @@ export interface ProjectedOperatorCall {
 export interface ProjectedNode {
   node_id: string;
   state: RuntimeState;
+  latest_occurrence_state?: RuntimeState;
+  latest_occurrence_sequence?: number;
+  latest_skipped_instance_key?: string | null;
   latest_execution_id: string | null;
   execution_count: number;
+  skipped_count?: number;
   latest_error?: unknown;
   latest_elapsed_ns?: number | null;
   latest_timing?: Record<string, number>;
@@ -334,7 +338,10 @@ export interface ProjectedNode {
 export interface ProjectedEdge {
   edge_id: string;
   state: EdgeRuntimeState;
+  latest_state?: EdgeRuntimeState;
+  latest_evaluation_sequence?: number;
   selected: boolean;
+  latest_selected?: boolean;
   evaluation_count: number;
   selected_count: number;
   skipped_count: number;

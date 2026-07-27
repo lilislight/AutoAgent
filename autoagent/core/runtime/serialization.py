@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -238,7 +238,7 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             return {
                 _TYPE_TAG: "pydantic",
                 "type_id": type_id,
-                "value": self._encode(value.model_dump(mode="python")),
+                "value": self._encode_model_fields(value),
             }
         if isinstance(value, Mapping):
             if any(not isinstance(key, str) for key in value):
@@ -265,6 +265,31 @@ class JsonRuntimeSerializer(RuntimeSerializer):
         raise RuntimeSerializationError(
             f"Unsupported runtime value: {type(value).__module__}.{type(value).__qualname__}"
         )
+
+    def _encode_model_fields(self, value: BaseModel) -> dict[str, Any]:
+        """Encode broad Pydantic fields without erasing nested runtime types.
+
+        Pydantic's model_dump recursively converts nested BaseModel values to
+        dictionaries. That is correct for concretely typed fields because the
+        outer model reconstructs them, but an Any-bearing field cannot recover
+        the original type. Use raw field values for broad annotations and fall
+        back to Pydantic's serialized value for custom field serializers such
+        as LLMRequest.response_format.
+        """
+
+        dumped = value.model_dump(mode="python")
+        encoded: dict[str, Any] = {}
+        for name, dumped_item in dumped.items():
+            field = type(value).model_fields.get(name)
+            use_raw = field is None or _annotation_contains_any(field.annotation)
+            if use_raw and hasattr(value, name):
+                try:
+                    encoded[name] = self._encode(getattr(value, name))
+                    continue
+                except RuntimeSerializationError:
+                    pass
+            encoded[name] = self._encode(dumped_item)
+        return encoded
 
     def _decode(self, value: Any) -> Any:
         if isinstance(value, list):
@@ -332,3 +357,28 @@ class JsonRuntimeSerializer(RuntimeSerializer):
 
 def _python_type_id(model_type: type[Any]) -> str:
     return f"{model_type.__module__}:{model_type.__qualname__}"
+
+
+def _annotation_contains_any(
+    annotation: Any,
+    visited: set[Any] | None = None,
+) -> bool:
+    if annotation is Any or annotation is object:
+        return True
+    seen = visited if visited is not None else set()
+    try:
+        if annotation in seen:
+            return False
+        seen.add(annotation)
+    except TypeError:
+        return False
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return any(
+            _annotation_contains_any(field.annotation, seen)
+            for field in annotation.model_fields.values()
+        )
+    origin = get_origin(annotation)
+    return origin is not None and any(
+        _annotation_contains_any(argument, seen)
+        for argument in get_args(annotation)
+    )

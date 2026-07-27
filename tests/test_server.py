@@ -458,6 +458,118 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(8, projection["nodes"]["worker"]["parallel_call_count"])
         self.assertEqual(6, projection["through_sequence"])
 
+    async def test_projection_preserves_executed_loop_node_after_later_skip(
+        self,
+    ) -> None:
+        invocation_id = uuid4()
+        execution_id = uuid4()
+        projection = TraceProjectionReducer.initial(invocation_id)
+        events = (
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=1,
+                event_type="state_change",
+                event_name="node.running",
+                subject_type="node",
+                subject_id="loop_worker",
+                occurred_at_ms=1,
+                status="running",
+                payload={
+                    "node_id": "loop_worker",
+                    "node_execution_id": str(execution_id),
+                },
+            ),
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=2,
+                event_type="state_change",
+                event_name="node.completed",
+                subject_type="node",
+                subject_id="loop_worker",
+                occurred_at_ms=2,
+                status="completed",
+                payload={
+                    "node_id": "loop_worker",
+                    "node_execution_id": str(execution_id),
+                },
+            ),
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=3,
+                event_type="state_change",
+                event_name="node.skipped",
+                subject_type="node",
+                subject_id="loop_worker",
+                occurred_at_ms=3,
+                status="skipped",
+                payload={
+                    "node_id": "loop_worker",
+                    "node_instance_key": "loop_worker@loop:2",
+                },
+            ),
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=4,
+                event_type="state_change",
+                event_name="node.skipped",
+                subject_type="node",
+                subject_id="never_run",
+                occurred_at_ms=4,
+                status="skipped",
+                payload={
+                    "node_id": "never_run",
+                    "node_instance_key": "never_run@loop:2",
+                },
+            ),
+        )
+        for event in events:
+            projection = TraceProjectionReducer.apply(projection, event)
+
+        loop_worker = projection["nodes"]["loop_worker"]
+        self.assertEqual("completed", loop_worker["state"])
+        self.assertEqual("skipped", loop_worker["latest_occurrence_state"])
+        self.assertEqual(1, loop_worker["execution_count"])
+        self.assertEqual(1, loop_worker["skipped_count"])
+        self.assertEqual("skipped", projection["nodes"]["never_run"]["state"])
+        self.assertEqual(
+            0,
+            projection["nodes"]["never_run"]["execution_count"],
+        )
+
+    async def test_projection_preserves_edge_traversal_across_loop_evaluations(
+        self,
+    ) -> None:
+        invocation_id = uuid4()
+        projection = TraceProjectionReducer.initial(invocation_id)
+        for sequence, selected in ((1, True), (2, False)):
+            projection = TraceProjectionReducer.apply(
+                projection,
+                RuntimeEvent(
+                    invocation_id=invocation_id,
+                    sequence=sequence,
+                    event_type="routing",
+                    event_name="edge.evaluated",
+                    subject_type="edge",
+                    subject_id="loop_edge",
+                    occurred_at_ms=sequence,
+                    status="selected" if selected else "skipped",
+                    payload={
+                        "edge_id": "loop_edge",
+                        "selected": selected,
+                        "state": "selected" if selected else "skipped",
+                        "target_node_id": "worker",
+                    },
+                ),
+            )
+
+        edge = projection["edges"]["loop_edge"]
+        self.assertEqual("selected", edge["state"])
+        self.assertTrue(edge["selected"])
+        self.assertEqual("skipped", edge["latest_state"])
+        self.assertFalse(edge["latest_selected"])
+        self.assertEqual(1, edge["selected_count"])
+        self.assertEqual(1, edge["skipped_count"])
+
     async def _wait_for_state(
         self,
         invocation_id,

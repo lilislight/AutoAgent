@@ -42,16 +42,32 @@ export function projectEvents(
     if (name === "edge.evaluated") {
       const edgeId = String(payload.edge_id ?? event.subject_id);
       const previous = edges[edgeId];
-      const selected = Boolean(payload.selected);
-      const state = String(payload.state ?? event.status ?? "evaluated");
+      const latestSelected = Boolean(payload.selected);
+      const latestState = String(
+        payload.state ?? event.status ?? "evaluated",
+      ) as ProjectedEdge["state"];
+      const selectedCount =
+        (previous?.selected_count ?? 0) + Number(latestSelected);
+      const skippedCount =
+        (previous?.skipped_count ?? 0) + Number(latestState === "skipped");
+      const failedCount =
+        (previous?.failed_count ?? 0) + Number(latestState === "failed");
+      const state: ProjectedEdge["state"] = failedCount > 0
+        ? "failed"
+        : selectedCount > 0
+          ? "selected"
+          : latestState;
       edges[edgeId] = {
         edge_id: edgeId,
         state,
-        selected,
+        latest_state: latestState,
+        latest_evaluation_sequence: event.sequence,
+        selected: selectedCount > 0,
+        latest_selected: latestSelected,
         evaluation_count: (previous?.evaluation_count ?? 0) + 1,
-        selected_count: (previous?.selected_count ?? 0) + Number(selected),
-        skipped_count: (previous?.skipped_count ?? 0) + Number(state === "skipped"),
-        failed_count: (previous?.failed_count ?? 0) + Number(state === "failed"),
+        selected_count: selectedCount,
+        skipped_count: skippedCount,
+        failed_count: failedCount,
         source_execution_id: nullableString(payload.source_execution_id),
         target_node_id: nullableString(payload.target_node_id),
       };
@@ -142,7 +158,7 @@ export function projectEvents(
     }
   }
   return {
-    schema_version: base?.schema_version ?? 2,
+    schema_version: base?.schema_version ?? 3,
     invocation_id: invocationId,
     through_sequence: appliedSequence,
     invocation_state: invocationState,
@@ -193,14 +209,26 @@ function applyNodeEvent(
       ? b.execution_id.localeCompare(a.execution_id)
       : b.sequence - a.sequence,
   )[0];
+  const previousNode = nodes[nodeId];
+  const skippedCount =
+    (previousNode?.skipped_count ?? 0) +
+    Number(event.event_name === "node.skipped");
   nodes[nodeId] = {
     node_id: nodeId,
-    state,
+    // Synthetic skipped occurrences are scheduler facts, not executions. Once
+    // a static Node has really run, keep its latest execution state visible.
+    state: latest?.state ?? state,
+    latest_occurrence_state: state,
+    latest_occurrence_sequence: event.sequence,
+    latest_skipped_instance_key: event.event_name === "node.skipped"
+      ? nullableString(payload.node_instance_key)
+      : previousNode?.latest_skipped_instance_key ?? null,
     latest_execution_id: latest?.execution_id ?? null,
-    execution_count: Math.max(matching.length, event.event_name === "node.skipped" ? 1 : 0),
-    latest_error: payload.error,
-    latest_elapsed_ns: event.elapsed_ns,
-    latest_timing: event.timing,
+    execution_count: matching.length,
+    skipped_count: skippedCount,
+    latest_error: latest?.error ?? payload.error,
+    latest_elapsed_ns: latest?.elapsed_ns ?? event.elapsed_ns,
+    latest_timing: latest?.timing ?? event.timing,
     ...nodeOperatorSummary(latest),
   };
 }

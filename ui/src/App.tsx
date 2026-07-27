@@ -101,6 +101,7 @@ export default function App() {
     historyLoaded: boolean;
   }>());
   const eventOwnerRef = useRef<string | null>(null);
+  const lastReceivedSequenceRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     document.documentElement.dataset.theme = darkMode ? "dark" : "light";
@@ -306,6 +307,13 @@ export default function App() {
     }
     eventOwnerRef.current = view.invocation.id;
     setEvents(cached?.events ?? view.events);
+    lastReceivedSequenceRef.current.set(
+      view.invocation.id,
+      Math.max(
+        lastReceivedSequenceRef.current.get(view.invocation.id) ?? 0,
+        cached?.events.at(-1)?.sequence ?? view.events.at(-1)?.sequence ?? 0,
+      ),
+    );
     setEventBuffer([]);
     setHistoryLoaded(cached?.historyLoaded ?? !view.has_more_events);
     setHistoryError(null);
@@ -328,12 +336,22 @@ export default function App() {
         ? events
         : cachedEvents
     ).at(-1)?.sequence ?? 0;
+    const resumeSequence = Math.max(
+      startSequence,
+      lastReceivedSequenceRef.current.get(activeInvocationId) ?? 0,
+    );
     return subscribeToInvocation(
       activeInvocationId,
-      startSequence,
+      resumeSequence,
       (event) => {
         const state = useTraceUi.getState();
         if (state.invocationId !== activeInvocationId) return;
+        const previousSequence =
+          lastReceivedSequenceRef.current.get(activeInvocationId) ?? 0;
+        lastReceivedSequenceRef.current.set(
+          activeInvocationId,
+          Math.max(previousSequence, event.sequence),
+        );
         if (state.followLive) {
           setEvents((current) => {
             const merged = mergeEvents(current, [event]);
@@ -343,7 +361,10 @@ export default function App() {
             });
             return merged;
           });
-          state.setCursor(event.sequence, true);
+          state.setCursor(
+            Math.max(state.cursorSequence ?? 0, event.sequence),
+            true,
+          );
         } else {
           setEventBuffer((current) => mergeEvents(current, [event]));
         }
@@ -368,9 +389,6 @@ export default function App() {
           ),
         );
         if (!shouldStreamInvocation(status)) {
-          setLiveDraftGraph(null);
-          setLiveDraftInvocation(null);
-          setLiveDraftTimeline(null);
           void queryClient.invalidateQueries({
             queryKey: ["trace-view", activeSessionId, activeInvocationId],
           });
@@ -385,6 +403,24 @@ export default function App() {
     queryClient,
     streamEligible,
   ]);
+
+  useEffect(() => {
+    if (
+      !liveDraftInvocation ||
+      !view ||
+      liveDraftInvocation.id !== view.invocation.id ||
+      !isTerminalInvocation(liveDraftInvocation.state)
+    ) return;
+    const lastReceived =
+      lastReceivedSequenceRef.current.get(liveDraftInvocation.id) ?? 0;
+    if (view.projection.through_sequence < lastReceived) return;
+    // Keep the locally reduced SSE state until the refreshed authoritative
+    // Bootstrap has caught up. Clearing it on terminal status alone can flash
+    // or strand the graph at an older checkpoint.
+    setLiveDraftGraph(null);
+    setLiveDraftInvocation(null);
+    setLiveDraftTimeline(null);
+  }, [liveDraftInvocation, view]);
 
   const cursorSequence =
     ui.cursorSequence ?? view?.projection.through_sequence ?? 0;
@@ -640,6 +676,7 @@ export default function App() {
       });
       setInvokeMessage(`Created invocation ${response.invocation_id.slice(0, 8)}.`);
       eventOwnerRef.current = response.invocation_id;
+      lastReceivedSequenceRef.current.set(response.invocation_id, 0);
       setEvents([]);
       setEventBuffer([]);
       setHistoryLoaded(true);

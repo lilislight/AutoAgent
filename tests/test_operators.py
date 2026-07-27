@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from uuid import uuid4
 
+import autoagent
 from pydantic import BaseModel, ValidationError
 
 from autoagent import (
@@ -15,9 +15,6 @@ from autoagent import (
     Operator,
     OperatorRef,
     Workflow,
-    capability,
-    get_default_app,
-    operator,
 )
 from autoagent.core.operators import OperatorContractWarning
 from tests.helpers import started_app
@@ -29,6 +26,11 @@ class SearchRequest(BaseModel):
 
 
 class OperatorRegistrationTests(unittest.TestCase):
+    def test_public_registration_requires_an_explicit_app(self) -> None:
+        self.assertFalse(hasattr(autoagent, "get_default_app"))
+        self.assertFalse(hasattr(autoagent, "operator"))
+        self.assertFalse(hasattr(autoagent, "capability"))
+
     def test_app_capability_decorator_registers_contract_and_default_operator(self) -> None:
         app = AutoAgentApp()
 
@@ -291,28 +293,6 @@ class OperatorRegistrationTests(unittest.TestCase):
         assert registered is not None
         self.assertIsNone(registered.capability_id)
         self.assertIs(registered.handler, specific_task)
-
-    def test_module_decorators_register_with_default_app(self) -> None:
-        suffix = uuid4().hex
-        capability_id = f"global_capability_{suffix}"
-        default_operator_id = f"global_default_{suffix}"
-        alternate_operator_id = f"global_alternate_{suffix}"
-
-        @capability(capability_id, operator_id=default_operator_id)
-        def default_handler(value: str) -> str:
-            return value
-
-        @operator(alternate_operator_id, capability=capability_id)
-        def alternate_handler(value: str) -> str:
-            return value.upper()
-
-        app = get_default_app()
-        self.assertIs(app.operator_registry.get(default_operator_id).handler, default_handler)
-        self.assertIs(
-            app.operator_registry.get(alternate_operator_id).handler,
-            alternate_handler,
-        )
-
 
 class OperatorExecutionTests(unittest.TestCase):
     def test_direct_operator_executes_without_app_registration(self) -> None:

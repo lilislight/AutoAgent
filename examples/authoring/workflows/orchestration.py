@@ -9,6 +9,7 @@ from autoagent import (
     InputMappingContext,
     ResourcePolicy,
     NodePolicy,
+    UserEventMapping,
     Workflow,
 )
 
@@ -155,6 +156,17 @@ def finalize_report(summary: ReviewSummary) -> ReviewReport:
     )
 
 
+def review_completed_event(report: ReviewReport) -> dict[str, object]:
+    """Expose one application-specific event without changing Runtime state."""
+
+    return {
+        "service": report.service,
+        "decision": report.decision,
+        "review_rounds": report.review_rounds,
+        "path": report.path,
+    }
+
+
 workflow = Workflow(
     id="release_review",
     version=1,
@@ -193,6 +205,10 @@ workflow.add_node(
     finalize_report,
     node_id="finalize_report",
     input_mapping=map_final_report,
+    user_event_mapping=UserEventMapping(
+        type="release_review_completed",
+        transform=review_completed_event,
+    ),
 )
 
 workflow.add_edge(

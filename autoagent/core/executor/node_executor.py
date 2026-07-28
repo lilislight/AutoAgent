@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+from threading import Lock
 from time import perf_counter_ns
 from typing import Any
 from uuid import UUID
@@ -96,6 +97,139 @@ class ResolvedNodeExecutionJob:
     thread_pool: ThreadPoolExecutor | None = None
     max_parallel_units: int = 8
     publish_progress: Callable[[NodeExecutionProgress], None] | None = None
+
+
+_USER_EVENT_BATCH_MAX_ITEMS = 32
+_USER_EVENT_BATCH_MAX_DELAY_SECONDS = 0.020
+
+
+class _StreamUserEventBatcher:
+    """Batch internal transport without changing individual UserEvent semantics."""
+
+    __slots__ = (
+        "_generation",
+        "_job",
+        "_lock",
+        "_loop",
+        "_mappings",
+        "_operator_call_id",
+        "_specs",
+    )
+
+    def __init__(
+        self,
+        job: ResolvedNodeExecutionJob,
+        *,
+        operator_call_id: UUID,
+    ) -> None:
+        self._job = job
+        self._operator_call_id = operator_call_id
+        self._mappings = normalize_user_event_mappings(
+            job.node_ir.stream_user_event_mapping
+        )
+        self._specs: list[UserEventSpec] = []
+        self._loop = asyncio.get_running_loop()
+        self._lock = Lock()
+        self._generation = 0
+
+    def add(self, chunk: Any) -> None:
+        if not self._mappings or self._job.publish_progress is None:
+            return
+        for mapping in self._mappings:
+            try:
+                data = mapping.transform(deepcopy(chunk))
+                if inspect.isawaitable(data):
+                    close = getattr(data, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError(
+                        "UserEventMapping.transform() must be synchronous."
+                    )
+                if data is None:
+                    continue
+                spec = UserEventSpec(
+                    type=mapping.type,
+                    # Own the mapping result until RuntimeStore serializes it;
+                    # user code may otherwise mutate a returned container while
+                    # this batch is waiting to flush.
+                    data=deepcopy(data),
+                    node_id=self._job.node_ir.id,
+                    node_execution_id=self._job.node_execution.id,
+                    operator_call_id=self._operator_call_id,
+                )
+            except Exception as exc:
+                spec = UserEventSpec(
+                    type="user_event_mapping_failed",
+                    data={
+                        "mapping_type": mapping.type,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "source": "stream",
+                    },
+                    node_id=self._job.node_ir.id,
+                    node_execution_id=self._job.node_execution.id,
+                    operator_call_id=self._operator_call_id,
+                )
+            self._append(spec)
+
+    def flush(self) -> None:
+        with self._lock:
+            specs = self._take_locked()
+        self._publish(specs)
+
+    def _append(self, spec: UserEventSpec) -> None:
+        schedule_generation: int | None = None
+        with self._lock:
+            if not self._specs:
+                self._generation += 1
+                schedule_generation = self._generation
+            self._specs.append(spec)
+            specs = (
+                self._take_locked()
+                if len(self._specs) >= _USER_EVENT_BATCH_MAX_ITEMS
+                else ()
+            )
+        if schedule_generation is not None:
+            self._loop.call_soon_threadsafe(
+                self._schedule_deadline,
+                schedule_generation,
+            )
+        self._publish(specs)
+
+    def _schedule_deadline(self, generation: int) -> None:
+        self._loop.call_later(
+            _USER_EVENT_BATCH_MAX_DELAY_SECONDS,
+            self._flush_generation,
+            generation,
+        )
+
+    def _flush_generation(self, generation: int) -> None:
+        with self._lock:
+            specs = (
+                self._take_locked()
+                if generation == self._generation
+                else ()
+            )
+        self._publish(specs)
+
+    def _take_locked(self) -> tuple[UserEventSpec, ...]:
+        if not self._specs:
+            return ()
+        specs = tuple(self._specs)
+        self._specs.clear()
+        self._generation += 1
+        return specs
+
+    def _publish(self, specs: tuple[UserEventSpec, ...]) -> None:
+        if not specs or self._job.publish_progress is None:
+            return
+        self._job.publish_progress(
+            NodeExecutionProgress(
+                node_execution_id=self._job.node_execution.id,
+                kind="user_event",
+                user_event_specs=specs,
+            )
+        )
 
 
 class NodeExecutor:
@@ -1142,42 +1276,48 @@ async def _consume_streaming_result(
     operator_call_id: UUID,
 ) -> _OperatorInvocationResult:
     source = result.source
+    user_events = _StreamUserEventBatcher(
+        job,
+        operator_call_id=operator_call_id,
+    )
     try:
         if hasattr(source, "__aiter__"):
-            return await _consume_async_stream(
+            streamed = await _consume_async_stream(
                 source,
                 result.reducer,
                 metrics,
-                job=job,
-                operator_call_id=operator_call_id,
+                user_events=user_events,
             )
-        if job.thread_pool is None:  # pragma: no cover
-            raise RuntimeError("NodeExecutor thread pool is unavailable.")
+        else:
+            if job.thread_pool is None:  # pragma: no cover
+                raise RuntimeError("NodeExecutor thread pool is unavailable.")
 
-        submitted_ns = perf_counter_ns()
-        future = job.thread_pool.submit(
-            _consume_sync_stream,
-            source,
-            result.reducer,
-            metrics,
-            job,
-            operator_call_id,
-        )
-        try:
-            streamed, worker_started_ns = await asyncio.wrap_future(future)
-        except asyncio.CancelledError:
-            future.cancel()
-            raise
-        return _OperatorInvocationResult(
-            output=streamed.output,
-            execution_ns=streamed.execution_ns,
-            thread_pool_queue_ns=max(0, worker_started_ns - submitted_ns),
-            streaming=True,
-            stream_chunk_count=streamed.stream_chunk_count,
-            stream_consumption_ns=streamed.stream_consumption_ns,
-            stream_reduction_ns=streamed.stream_reduction_ns,
-        )
+            submitted_ns = perf_counter_ns()
+            future = job.thread_pool.submit(
+                _consume_sync_stream,
+                source,
+                result.reducer,
+                metrics,
+                user_events,
+            )
+            try:
+                streamed, worker_started_ns = await asyncio.wrap_future(future)
+            except asyncio.CancelledError:
+                future.cancel()
+                raise
+            streamed = _OperatorInvocationResult(
+                output=streamed.output,
+                execution_ns=streamed.execution_ns,
+                thread_pool_queue_ns=max(0, worker_started_ns - submitted_ns),
+                streaming=True,
+                stream_chunk_count=streamed.stream_chunk_count,
+                stream_consumption_ns=streamed.stream_consumption_ns,
+                stream_reduction_ns=streamed.stream_reduction_ns,
+            )
+        user_events.flush()
+        return streamed
     except BaseException as exc:
+        user_events.flush()
         _publish_stream_aborted_user_event(
             job,
             error=exc,
@@ -1191,8 +1331,7 @@ async def _consume_async_stream(
     reducer: Any,
     metrics: _StreamMetrics,
     *,
-    job: ResolvedNodeExecutionJob,
-    operator_call_id: UUID,
+    user_events: _StreamUserEventBatcher,
 ) -> _OperatorInvocationResult:
     iterator: AsyncIterator[Any] | None = None
     try:
@@ -1231,11 +1370,7 @@ async def _consume_async_stream(
                 perf_counter_ns() - reduction_started_ns,
             )
             metrics.chunk_count += 1
-            _publish_stream_user_events(
-                job,
-                chunk,
-                operator_call_id=operator_call_id,
-            )
+            user_events.add(chunk)
 
         reduction_started_ns = perf_counter_ns()
         try:
@@ -1270,8 +1405,7 @@ def _consume_sync_stream(
     source: Any,
     reducer: Any,
     metrics: _StreamMetrics,
-    job: ResolvedNodeExecutionJob,
-    operator_call_id: UUID,
+    user_events: _StreamUserEventBatcher,
 ) -> tuple[_OperatorInvocationResult, int]:
     worker_started_ns = perf_counter_ns()
     iterator: Iterator[Any] | None = None
@@ -1311,11 +1445,7 @@ def _consume_sync_stream(
                 perf_counter_ns() - reduction_started_ns,
             )
             metrics.chunk_count += 1
-            _publish_stream_user_events(
-                job,
-                chunk,
-                operator_call_id=operator_call_id,
-            )
+            user_events.add(chunk)
 
         reduction_started_ns = perf_counter_ns()
         try:
@@ -1374,58 +1504,6 @@ async def _close_stream_source(
             raise
 
 
-def _publish_stream_user_events(
-    job: ResolvedNodeExecutionJob,
-    chunk: Any,
-    *,
-    operator_call_id: UUID,
-) -> None:
-    mappings = normalize_user_event_mappings(
-        job.node_ir.stream_user_event_mapping
-    )
-    if not mappings or job.publish_progress is None:
-        return
-    for mapping in mappings:
-        try:
-            data = mapping.transform(deepcopy(chunk))
-            if inspect.isawaitable(data):
-                close = getattr(data, "close", None)
-                if callable(close):
-                    close()
-                raise TypeError(
-                    "UserEventMapping.transform() must be synchronous."
-                )
-            if data is None:
-                continue
-            spec = UserEventSpec(
-                type=mapping.type,
-                data=deepcopy(data),
-                node_id=job.node_ir.id,
-                node_execution_id=job.node_execution.id,
-                operator_call_id=operator_call_id,
-            )
-        except Exception as exc:
-            spec = UserEventSpec(
-                type="user_event_mapping_failed",
-                data={
-                    "mapping_type": mapping.type,
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                    "source": "stream",
-                },
-                node_id=job.node_ir.id,
-                node_execution_id=job.node_execution.id,
-                operator_call_id=operator_call_id,
-            )
-        job.publish_progress(
-            NodeExecutionProgress(
-                node_execution_id=job.node_execution.id,
-                kind="user_event",
-                user_event_spec=spec,
-            )
-        )
-
-
 def _publish_stream_aborted_user_event(
     job: ResolvedNodeExecutionJob,
     *,
@@ -1442,15 +1520,17 @@ def _publish_stream_aborted_user_event(
         NodeExecutionProgress(
             node_execution_id=job.node_execution.id,
             kind="user_event",
-            user_event_spec=UserEventSpec(
-                type="message_aborted",
-                data={
-                    "error_type": type(visible_error).__name__,
-                    "message": str(error),
-                },
-                node_id=job.node_ir.id,
-                node_execution_id=job.node_execution.id,
-                operator_call_id=operator_call_id,
+            user_event_specs=(
+                UserEventSpec(
+                    type="message_aborted",
+                    data={
+                        "error_type": type(visible_error).__name__,
+                        "message": str(error),
+                    },
+                    node_id=job.node_ir.id,
+                    node_execution_id=job.node_execution.id,
+                    operator_call_id=operator_call_id,
+                ),
             ),
         )
     )

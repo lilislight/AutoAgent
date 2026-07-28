@@ -53,6 +53,9 @@ implementation history belongs in Git, tests, and benchmark results.
   which high-volume deltas must remain process-local.
 - Define compaction and retention before persisting message or reasoning
   deltas. Never make token-level persistence the default.
+- After the Agent UI contract is stable, replace UserEvent SSE polling with
+  notification-driven delivery and batch UI updates per render frame. Do not
+  optimize the current provisional UI protocol first.
 
 ## 5. Add optimization workflows
 

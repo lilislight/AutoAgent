@@ -1040,10 +1040,10 @@ class WorkflowExecutor:
             return
 
         if progress.kind == "user_event":
-            if progress.user_event_spec is not None:
-                self._record_user_event_spec(
+            if progress.user_event_specs:
+                self._record_user_event_specs(
                     invocation,
-                    progress.user_event_spec,
+                    progress.user_event_specs,
                 )
             return
 
@@ -1344,6 +1344,7 @@ class WorkflowExecutor:
             if node_execution.operator_executions
             else None
         )
+        specs: list[UserEventSpec] = []
         for mapping in mappings:
             try:
                 data = mapping.transform(deepcopy(output))
@@ -1358,7 +1359,10 @@ class WorkflowExecutor:
                     continue
                 spec = UserEventSpec(
                     type=mapping.type,
-                    data=deepcopy(data),
+                    # Output mappings run on an isolated output copy and are
+                    # recorded synchronously below, so RuntimeStore's JSON
+                    # detachment is the only additional ownership copy needed.
+                    data=data,
                     node_id=node_ir.id,
                     node_execution_id=node_execution.id,
                     operator_call_id=operator_call_id,
@@ -1376,36 +1380,54 @@ class WorkflowExecutor:
                     node_execution_id=node_execution.id,
                     operator_call_id=operator_call_id,
                 )
-            self._record_user_event_spec(invocation, spec)
+            specs.append(spec)
+        self._record_user_event_specs(invocation, tuple(specs))
 
     def _record_user_event_spec(
         self,
         invocation: Invocation,
         spec: UserEventSpec,
     ) -> None:
+        self._record_user_event_specs(invocation, (spec,))
+
+    def _record_user_event_specs(
+        self,
+        invocation: Invocation,
+        specs: tuple[UserEventSpec, ...],
+    ) -> None:
+        if not specs:
+            return
         try:
-            self.runtime_store.record_user_event(
+            self.runtime_store._record_user_events(
                 invocation_id=invocation.id,
-                spec=spec,
+                specs=specs,
             )
         except Exception as exc:
-            if spec.type == "user_event_mapping_failed":
+            # Batch serialization is all-or-nothing. Isolate the invalid spec
+            # only on this exceptional path so valid siblings remain visible.
+            if len(specs) > 1:
+                for spec in specs:
+                    self._record_user_event_specs(invocation, (spec,))
                 return
-            self.runtime_store.record_user_event(
-                invocation_id=invocation.id,
-                spec=UserEventSpec(
-                    type="user_event_mapping_failed",
-                    data={
-                        "mapping_type": spec.type,
-                        "error_type": type(exc).__name__,
-                        "message": str(exc),
-                        "source": "serialization",
-                    },
-                    node_id=spec.node_id,
-                    node_execution_id=spec.node_execution_id,
-                    operator_call_id=spec.operator_call_id,
-                ),
-            )
+            spec = specs[0]
+            if spec.type != "user_event_mapping_failed":
+                self.runtime_store._record_user_events(
+                    invocation_id=invocation.id,
+                    specs=(
+                        UserEventSpec(
+                            type="user_event_mapping_failed",
+                            data={
+                                "mapping_type": spec.type,
+                                "error_type": type(exc).__name__,
+                                "message": str(exc),
+                                "source": "serialization",
+                            },
+                            node_id=spec.node_id,
+                            node_execution_id=spec.node_execution_id,
+                            operator_call_id=spec.operator_call_id,
+                        ),
+                    ),
+                )
 
     def _record_agent_failed_user_event(
         self,
@@ -1455,11 +1477,11 @@ class WorkflowExecutor:
             if (
                 isinstance(message, NodeExecutionProgress)
                 and message.kind == "user_event"
-                and message.user_event_spec is not None
+                and message.user_event_specs
             ):
-                self._record_user_event_spec(
+                self._record_user_event_specs(
                     invocation,
-                    message.user_event_spec,
+                    message.user_event_specs,
                 )
 
     async def _record_operator_call(

@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
-from autoagent.core.workflow.user_event import UserEventMapping
+from autoagent.core.workflow.user_event import validate_user_event_type
 
 
 @dataclass(frozen=True)
@@ -22,9 +22,11 @@ class UserEventSpec:
     occurred_at_ms: TimestampMs = 0
 
     def __post_init__(self) -> None:
-        # Reuse the public mapping validator so internal and custom Event types
-        # obey exactly one naming contract.
-        UserEventMapping(type=self.type, transform=lambda value: value)
+        object.__setattr__(
+            self,
+            "type",
+            validate_user_event_type(self.type),
+        )
         if self.occurred_at_ms == 0:
             object.__setattr__(self, "occurred_at_ms", utc_timestamp_ms())
 
@@ -48,7 +50,4 @@ class UserEvent(BaseModel):
     @field_validator("type")
     @classmethod
     def validate_type(cls, value: str) -> str:
-        return UserEventMapping(
-            type=value,
-            transform=lambda item: item,
-        ).type
+        return validate_user_event_type(value)

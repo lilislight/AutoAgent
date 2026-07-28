@@ -155,6 +155,113 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(app.runtime_store.runtime_events[invocation.id], [])
 
+    def test_stream_user_event_transport_batches_without_changing_events(
+        self,
+    ) -> None:
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(
+                (str(index) for index in range(70)),
+                reducer=TextReducer(),
+            )
+
+        workflow = Workflow(id="batched_stream_user_events")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            stream_user_event_mapping=UserEventMapping(
+                type="text_delta",
+                transform=lambda chunk: {"delta": chunk},
+            ),
+        )
+        app = started_app()
+        original = app.runtime_store._record_user_events
+        try:
+            with patch.object(
+                app.runtime_store,
+                "_record_user_events",
+                wraps=original,
+            ) as record_batch:
+                invocation = app.invoke(workflow, event_mode="minimal")
+            events = app.runtime_store.list_user_events(
+                invocation_id=invocation.id,
+                limit=100,
+            )
+        finally:
+            app.close()
+
+        batch_sizes = [
+            len(call.kwargs["specs"])
+            for call in record_batch.call_args_list
+        ]
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(len(events), 70)
+        self.assertEqual([event.sequence for event in events], list(range(1, 71)))
+        self.assertEqual(
+            [event.data["delta"] for event in events],
+            [str(index) for index in range(70)],
+        )
+        self.assertEqual(sum(batch_sizes), 70)
+        self.assertLess(len(batch_sizes), 70)
+        self.assertLessEqual(max(batch_sizes), 32)
+
+    def test_partial_user_event_batch_flushes_while_stream_is_running(
+        self,
+    ) -> None:
+        first_chunk = threading.Event()
+        release_stream = threading.Event()
+        result: list[object] = []
+
+        def chunks():
+            first_chunk.set()
+            yield "first"
+            release_stream.wait(timeout=1)
+            yield "second"
+
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(chunks(), reducer=TextReducer())
+
+        workflow = Workflow(id="timed_user_event_batch")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            stream_user_event_mapping=UserEventMapping(
+                type="text_delta",
+                transform=lambda chunk: {"delta": chunk},
+            ),
+        )
+        app = started_app()
+        execution = threading.Thread(
+            target=lambda: result.append(
+                app.invoke(workflow, event_mode="minimal")
+            )
+        )
+        execution.start()
+        try:
+            self.assertTrue(first_chunk.wait(timeout=1))
+            deadline = time.monotonic() + 1
+            visible = ()
+            while time.monotonic() < deadline:
+                invocations = tuple(app.runtime_store.invocations.values())
+                if invocations:
+                    visible = app.runtime_store.list_user_events(
+                        invocation_id=invocations[0].id,
+                    )
+                    if visible:
+                        break
+                time.sleep(0.005)
+            self.assertEqual(
+                [event.data for event in visible],
+                [{"delta": "first"}],
+            )
+            self.assertTrue(execution.is_alive())
+        finally:
+            release_stream.set()
+            execution.join(timeout=2)
+            app.close()
+
+        self.assertFalse(execution.is_alive())
+        self.assertEqual(result[0].state, "completed")
+
     def test_user_event_mapping_failure_does_not_fail_node(self) -> None:
         def complete() -> str:
             return "business output"
@@ -208,6 +315,45 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(events[0].type, "user_event_mapping_failed")
         self.assertEqual(events[0].data["source"], "serialization")
+
+    def test_batched_serialization_failure_preserves_valid_sibling_order(
+        self,
+    ) -> None:
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(
+                iter(("valid", "invalid", "after")),
+                reducer=TextReducer(),
+            )
+
+        workflow = Workflow(id="batched_serialization_failure")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            stream_user_event_mapping=UserEventMapping(
+                type="text_delta",
+                transform=lambda chunk: {
+                    "delta": b"not-json" if chunk == "invalid" else chunk
+                },
+            ),
+        )
+        app = started_app()
+        try:
+            invocation = app.invoke(workflow, event_mode="minimal")
+            events = app.runtime_store.list_user_events(
+                invocation_id=invocation.id,
+            )
+        finally:
+            app.close()
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            [event.type for event in events],
+            ["text_delta", "user_event_mapping_failed", "text_delta"],
+        )
+        self.assertEqual([event.sequence for event in events], [1, 2, 3])
+        self.assertEqual(events[0].data, {"delta": "valid"})
+        self.assertEqual(events[1].data["source"], "serialization")
+        self.assertEqual(events[2].data, {"delta": "after"})
 
     def test_message_stream_abort_is_emitted_without_persisting_chunks(
         self,

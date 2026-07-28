@@ -1,3 +1,4 @@
 {
-  "input": "What is the mocked weather in Tokyo and what should I bring?"
+  "input": "What is the mocked weather in Tokyo and what should I bring?",
+  "mode": "stream"
 }

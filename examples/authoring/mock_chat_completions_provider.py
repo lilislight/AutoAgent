@@ -1,18 +1,32 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 
 
 app = FastAPI(title="AutoAgent deterministic Chat Completions mock")
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: dict[str, Any]) -> dict[str, Any]:
+async def chat_completions(
+    request: dict[str, Any],
+) -> Any:
     """Return a fixed Tool turn followed by one fixed structured answer."""
 
+    response = _completion_response(request)
+    if request.get("stream") is True:
+        return StreamingResponse(
+            _stream_response(response),
+            media_type="text/event-stream",
+        )
+    return response
+
+
+def _completion_response(request: dict[str, Any]) -> dict[str, Any]:
     messages = request.get("messages") or []
     has_tool_result = any(
         isinstance(message, dict) and message.get("role") == "tool"
@@ -74,3 +88,72 @@ async def chat_completions(request: dict[str, Any]) -> dict[str, Any]:
             "total_tokens": 20,
         },
     }
+
+
+async def _stream_response(
+    response: dict[str, Any],
+) -> AsyncIterator[str]:
+    choice = response["choices"][0]
+    message = choice["message"]
+    common = {
+        "id": response["id"],
+        "object": "chat.completion.chunk",
+        "model": response["model"],
+    }
+
+    if message.get("tool_calls"):
+        for index, call in enumerate(message["tool_calls"]):
+            yield _sse(
+                {
+                    **common,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": index,
+                                        "id": call["id"],
+                                        "type": "function",
+                                        "function": call["function"],
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+    else:
+        content = message.get("content") or ""
+        for start in range(0, len(content), 12):
+            yield _sse(
+                {
+                    **common,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": content[start : start + 12]},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+
+    yield _sse(
+        {
+            **common,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": choice["finish_reason"],
+                }
+            ],
+        }
+    )
+    yield "data: [DONE]\n\n"
+
+
+def _sse(value: dict[str, Any]) -> str:
+    return f"data: {json.dumps(value, separators=(',', ':'))}\n\n"

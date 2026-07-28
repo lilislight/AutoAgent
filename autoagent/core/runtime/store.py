@@ -6,7 +6,7 @@ from copy import deepcopy
 import logging
 from threading import RLock
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.event import RuntimeEvent
@@ -875,26 +875,57 @@ class RuntimeStore:
     ) -> UserEvent:
         """Validate, detach, sequence, and retain one process-local UserEvent."""
 
+        event = self._record_user_events(
+            invocation_id=invocation_id,
+            specs=(spec,),
+        )[0]
+        return event.model_copy(deep=True)
+
+    def _record_user_events(
+        self,
+        *,
+        invocation_id: UUID,
+        specs: tuple[UserEventSpec, ...],
+    ) -> tuple[UserEvent, ...]:
+        """Record one internal batch with one serialization and lock pass."""
+
+        if not specs:
+            return ()
+        with self._lock:
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+
+        # Serialize before taking the write lock. Serialization detaches every
+        # payload from its producer, and a failure leaves the batch unapplied so
+        # WorkflowExecutor can isolate the bad spec without partial writes.
+        detached_data = tuple(
+            self.serializer.json_view(self.serializer.dumps(spec.data))
+            for spec in specs
+        )
         with self._lock:
             if invocation_id not in self.invocations:
                 raise KeyError(f"Unknown Invocation: {invocation_id}")
             values = self.user_events.setdefault(invocation_id, [])
-            sequence = values[-1].sequence + 1 if values else 1
-            # User-facing transport data must be serializable even though the
-            # initial implementation does not persist it.
-            data = self.serializer.json_view(self.serializer.dumps(spec.data))
-            event = UserEvent(
-                invocation_id=invocation_id,
-                sequence=sequence,
-                type=spec.type,
-                data=data,
-                node_id=spec.node_id,
-                node_execution_id=spec.node_execution_id,
-                operator_call_id=spec.operator_call_id,
-                occurred_at_ms=spec.occurred_at_ms,
+            first_sequence = values[-1].sequence + 1 if values else 1
+            events = tuple(
+                UserEvent.model_construct(
+                    id=uuid4(),
+                    invocation_id=invocation_id,
+                    sequence=first_sequence + index,
+                    schema_version=1,
+                    type=spec.type,
+                    data=data,
+                    node_id=spec.node_id,
+                    node_execution_id=spec.node_execution_id,
+                    operator_call_id=spec.operator_call_id,
+                    occurred_at_ms=spec.occurred_at_ms,
+                )
+                for index, (spec, data) in enumerate(
+                    zip(specs, detached_data, strict=True)
+                )
             )
-            values.append(event)
-            return event.model_copy(deep=True)
+            values.extend(events)
+            return events
 
     def list_user_events(
         self,

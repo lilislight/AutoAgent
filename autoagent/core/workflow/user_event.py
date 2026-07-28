@@ -10,6 +10,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _USER_EVENT_TYPE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
 
+def validate_user_event_type(value: str) -> str:
+    resolved = value.strip()
+    if not _USER_EVENT_TYPE.fullmatch(resolved):
+        raise ValueError(
+            "UserEvent type must use lowercase snake_case and start with "
+            "a letter."
+        )
+    return resolved
+
+
 class UserEventMapping(BaseModel):
     """Convert one framework-selected value into a UserEvent payload.
 
@@ -30,13 +40,7 @@ class UserEventMapping(BaseModel):
     @field_validator("type")
     @classmethod
     def validate_type(cls, value: str) -> str:
-        resolved = value.strip()
-        if not _USER_EVENT_TYPE.fullmatch(resolved):
-            raise ValueError(
-                "UserEvent type must use lowercase snake_case and start with "
-                "a letter."
-            )
-        return resolved
+        return validate_user_event_type(value)
 
 
 UserEventMappings = (

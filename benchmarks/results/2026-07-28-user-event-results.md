@@ -157,3 +157,68 @@ python -m benchmarks.user_event_benchmark \
 
 Use `--json` for machine-readable stdout or `--output PATH` to write the
 complete JSON document while retaining the compact terminal report.
+
+## Internal batching optimization follow-up
+
+The first implementation above published one mailbox message, acquired the
+RuntimeStore lock, validated a Pydantic model, and returned a defensive deep
+copy for every stream Event. The optimized working tree changes only internal
+transport:
+
+- adjacent small LLM text, reasoning, or matching Tool Call deltas are combined
+  to a target of 32 characters before generic stream execution;
+- arbitrary user-defined stream chunks are not combined;
+- generated UserEventSpecs are transported in batches of at most 32;
+- a partial batch flushes after at most approximately 20 ms;
+- stream completion, failure, and cancellation force a flush;
+- RuntimeStore serializes a whole batch before one lock acquisition and applies
+  it atomically;
+- serialization failure falls back to per-spec isolation without losing valid
+  sibling Events or changing their order;
+- repeated Event-type Pydantic construction and unused internal result deep
+  copies were removed.
+
+No public `StreamingResult`, `UserEventMapping`, Node, RuntimeStore paging, or
+Server API changed. Provider `astream()` output also remains raw; LLM delta
+coalescing is applied only by the framework `llm_call` Operator.
+
+### 64 chunks, concurrency 16
+
+The optimized run used the same 5 repeats, 96 measured Invocations per repeat,
+3 warmups, 64 chunks, 32-byte payload, memory backend, and Minimal Event mode.
+
+| Case | Original throughput | Optimized throughput | Direct change | Original median | Optimized median |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `none` | 232.77 inv/s | 249.81 inv/s | +7.32% host/run variance | 51.857 ms | 51.506 ms |
+| `completed` | 233.09 inv/s | 239.20 inv/s | +2.62% | 51.799 ms | 52.153 ms |
+| `stream` | 115.66 inv/s | 181.64 inv/s | **+57.05%** | 121.565 ms | 102.128 ms |
+| `stream_and_completed` | 110.70 inv/s | 182.13 inv/s | **+64.53%** | 152.762 ms | 102.386 ms |
+
+Normalized to the no-Event case in each run, 64 stream Events previously
+reduced throughput by 50.31%. After batching they reduce it by 27.29%.
+The retained Event count and 24,056-byte compact JSON representation are
+unchanged because transport batching deliberately preserves individual Event
+semantics.
+
+### 256 chunks, concurrency 16
+
+This run used the same 3 repeats and 64 measured Invocations per repeat:
+
+| Case | Original throughput | Optimized throughput | Direct change | Original median | Optimized median |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `none` | 240.69 inv/s | 226.25 inv/s | -6.00% host/run variance | 51.614 ms | 51.924 ms |
+| `stream` | 46.73 inv/s | 116.76 inv/s | **+149.86%** | 329.986 ms | 153.026 ms |
+| `stream_and_completed` | 43.68 inv/s | 109.77 inv/s | **+151.31%** | 351.185 ms | 156.955 ms |
+
+Normalized stream throughput rises from 19.41% to 51.61% of the corresponding
+no-Event case. Retained bytes remain unchanged, so LLM-specific coalescing is
+still required to reduce memory rather than only transport cost.
+
+### LLM delta count
+
+A deterministic Operator test feeds 100 consecutive one-character text deltas
+through a real `llm_call` Operator. The Provider still yields 100 deltas, while
+the Operator's `StreamingResult` yields four text deltas with lengths
+`32, 32, 32, 4`, followed by the unchanged completed response. Type changes,
+different Tool Call indexes, completed responses, errors, and cancellation are
+coalescing boundaries.

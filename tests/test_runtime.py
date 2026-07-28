@@ -16,6 +16,7 @@ from autoagent.core.runtime import (
     RuntimeEvent,
     Session,
     StateOperation,
+    UserEventSpec,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.runtime.snapshot import (
@@ -26,6 +27,36 @@ from tests.helpers import started_app
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
+    def test_record_user_event_keeps_public_defensive_copy_contract(self) -> None:
+        def done() -> str:
+            return "done"
+
+        workflow = Workflow(id="user_event_copy")
+        workflow.add_node(done, node_id="done")
+        app = started_app()
+        try:
+            invocation = app.invoke(workflow, event_mode="minimal")
+            execution = invocation.latest_node_execution("done")
+            source = {"nested": {"value": 1}}
+            returned = app.runtime_store.record_user_event(
+                invocation_id=invocation.id,
+                spec=UserEventSpec(
+                    type="done",
+                    data=source,
+                    node_id="done",
+                    node_execution_id=execution.id,
+                ),
+            )
+            source["nested"]["value"] = 2
+            returned.data["nested"]["value"] = 3
+            stored = app.runtime_store.list_user_events(
+                invocation_id=invocation.id,
+            )
+        finally:
+            app.close()
+
+        self.assertEqual(stored[0].data, {"nested": {"value": 1}})
+
     def test_state_operations_copy_only_changed_aggregate_paths(self) -> None:
         first = {"id": "first", "state": "completed"}
         second = {"id": "second", "state": "running"}

@@ -22,6 +22,7 @@ from autoagent.ai import (
     LLM_CALL_CAPABILITY_ID,
     LLM_CALL_CONTRACT,
     LLMMessage,
+    LLMProvider,
     LLMRequest,
     LLMResponse,
     LLMStreamChunk,
@@ -830,6 +831,189 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.message.content, "streamed")
 
+    async def test_llm_call_operator_coalesces_adjacent_small_text_deltas(
+        self,
+    ) -> None:
+        pieces = ["x"] * 100
+
+        async def handler(params):
+            self.assertTrue(params["stream"])
+            return FakeStream(
+                [
+                    {
+                        "id": "chatcmpl_coalesced",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {"content": piece},
+                                "finish_reason": (
+                                    "stop" if index == len(pieces) - 1 else None
+                                ),
+                            }
+                        ],
+                    }
+                    for index, piece in enumerate(pieces)
+                ]
+            )
+
+        operator = _create_test_operator(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            handler=handler,
+        )
+        result = await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                ),
+                "mode": "stream",
+            }
+        )
+        assert isinstance(result, StreamingResult)
+        chunks = [chunk async for chunk in result.source]
+        for chunk in chunks:
+            result.reducer.add(chunk)
+
+        self.assertEqual(
+            [
+                chunk.text_delta
+                for chunk in chunks
+                if chunk.type == "text_delta"
+            ],
+            ["x" * 32, "x" * 32, "x" * 32, "x" * 4],
+        )
+        self.assertEqual(chunks[-1].type, "completed")
+        self.assertEqual(
+            result.reducer.finish().message.content,
+            "".join(pieces),
+        )
+
+    async def test_llm_call_operator_coalesces_only_matching_tool_call_deltas(
+        self,
+    ) -> None:
+        async def handler(params):
+            self.assertTrue(params["stream"])
+            return FakeStream(
+                [
+                    {
+                        "id": "chatcmpl_tools",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "lookup",
+                                                "arguments": '{"city":',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "chatcmpl_tools",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {
+                                                "arguments": '"Tokyo"}',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    },
+                ]
+            )
+
+        operator = _create_test_operator(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            handler=handler,
+        )
+        result = await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                ),
+                "mode": "stream",
+            }
+        )
+        assert isinstance(result, StreamingResult)
+        chunks = [chunk async for chunk in result.source]
+        tool_chunks = [
+            chunk for chunk in chunks if chunk.type == "tool_call_delta"
+        ]
+        for chunk in chunks:
+            result.reducer.add(chunk)
+
+        self.assertEqual(len(tool_chunks), 1)
+        self.assertEqual(tool_chunks[0].tool_call_id, "call_1")
+        self.assertEqual(tool_chunks[0].tool_name, "lookup")
+        self.assertEqual(
+            tool_chunks[0].tool_arguments_delta,
+            '{"city":"Tokyo"}',
+        )
+        self.assertEqual(
+            result.reducer.finish().message.tool_calls[0].raw_arguments,
+            '{"city":"Tokyo"}',
+        )
+
+    async def test_closing_coalesced_llm_stream_closes_provider_source(
+        self,
+    ) -> None:
+        closed = asyncio.Event()
+
+        class BlockingProvider(LLMProvider):
+            provider_name = "blocking"
+
+            async def ainvoke(self, request: LLMRequest) -> LLMResponse:
+                raise AssertionError("ainvoke should not be used")
+
+            async def astream(self, request: LLMRequest):
+                try:
+                    yield LLMStreamChunk(
+                        type="text_delta",
+                        text_delta="x" * 32,
+                    )
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        operator = create_llm_call_operator(BlockingProvider())
+        result = await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                ),
+                "mode": "stream",
+            }
+        )
+        assert isinstance(result, StreamingResult)
+        iterator = result.source.__aiter__()
+
+        first = await iterator.__anext__()
+        await iterator.aclose()
+
+        self.assertEqual(first.text_delta, "x" * 32)
+        self.assertTrue(closed.is_set())
+
     async def test_deepseek_streams_reasoning_and_preserves_usage(self) -> None:
         async def handler(params):
             self.assertTrue(params["stream"])
@@ -1133,12 +1317,34 @@ class ReActWorkflowTests(unittest.TestCase):
         events = app.runtime_store.list_user_events(
             invocation_id=invocation.id,
         )
-        self.assertIn("tool_call_rejected", [event.type for event in events])
-        rejected = next(
-            event for event in events
-            if event.type == "tool_call_rejected"
+        self.assertNotIn(
+            "tool_call_rejected",
+            [event.type for event in events],
         )
-        self.assertEqual(rejected.data["calls"][0]["tool_call_id"], "call_bad")
+        self.assertNotIn(
+            "validate_tool_calls",
+            {event.node_id for event in events},
+        )
+        requested = [
+            event
+            for event in events
+            if event.type == "tool_call_requested"
+        ]
+        self.assertEqual(
+            ["call_bad", "call_good"],
+            [
+                event.data["calls"][0]["tool_call_id"]
+                for event in requested
+            ],
+        )
+        tool_results = [
+            event for event in events if event.type == "tool_result"
+        ]
+        self.assertEqual(1, len(tool_results))
+        self.assertEqual(
+            "call_good",
+            tool_results[0].data["results"][0]["tool_call_id"],
+        )
 
     def test_unknown_tool_is_returned_to_model_then_exhausts_retry(self) -> None:
         @tool(id="known", description="Known Tool.")
@@ -1283,7 +1489,14 @@ class ReActWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(len(requested.data["calls"]), 2)
         self.assertEqual(len(result.data["results"]), 2)
+        self.assertEqual("llm_call", requested.node_id)
+        self.assertEqual("tool_0_double", result.node_id)
+        self.assertNotIn(
+            "validate_tool_calls",
+            {event.node_id for event in events},
+        )
         self.assertEqual(events[-1].type, "agent_output")
+        self.assertEqual(events[-1].node_id, "finish")
 
     def test_react_workflow_can_execute_as_one_child_workflow(self) -> None:
         requests: list[LLMRequest] = []
@@ -1340,6 +1553,19 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[1].tool_choice, "none")
         self.assertIn("Validation error", requests[1].messages[-1].content)
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+        self.assertNotIn(
+            "validate_output",
+            {event.node_id for event in events},
+        )
+        self.assertEqual(
+            2,
+            sum(event.type == "message_completed" for event in events),
+        )
+        self.assertEqual("agent_output", events[-1].type)
+        self.assertEqual("finish", events[-1].node_id)
 
     def test_default_output_repair_limit_fails_second_invalid_response(self) -> None:
         requests: list[LLMRequest] = []

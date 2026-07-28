@@ -59,6 +59,7 @@ This example demonstrates:
 - fan-in aggregation;
 - a natural Loop with one external entry;
 - an explicit execution limit protecting the Loop.
+- a custom `release_review_completed` UserEvent mapped from the final Node.
 
 Run it:
 
@@ -162,8 +163,23 @@ autoagent \
   --trace
 ```
 
-The mock first requests `get_city_profile` and `get_current_weather`, then
-returns `expected/react-weather.json`.
+The input selects ReAct streaming mode. The mock first streams calls to
+`get_city_profile` and `get_current_weather`, then streams the structured answer
+in `expected/react-weather.json`.
+
+ReActWorkflow installs its Agent-facing UserEvent mappings automatically:
+
+- `llm_call` emits message, reasoning, and Tool-call deltas, followed by either
+  `message_completed` or `tool_call_requested`;
+- generated Tool Nodes emit `tool_result` after execution;
+- `finish` emits the validated, non-streaming `agent_output`;
+- Tool-call parsing and structured-output validation are internal repair steps
+  and do not emit failure-specific UserEvents. The raw request remains visible
+  as `tool_call_requested`, but no `tool_result` exists unless a Tool runs.
+
+UserEvents are independent of Runtime Event mode and are process-local in this
+version. The final Invocation result remains the same whether the LLM runs in
+`invoke` or `stream` mode.
 
 ## Common errors
 
@@ -207,5 +223,6 @@ python -m unittest discover -s tests -v
 ```
 
 The tests compile every exported Workflow, compare deterministic results,
-exercise parallel Loop execution, resume a Wait through a new CLI host, run the
-ReAct Tool loop with a fake LLM Operator, and validate the HTTP mock responses.
+exercise parallel Loop execution and a custom UserEvent, resume a Wait through
+a new CLI host, run the streaming ReAct Tool loop with a fake LLM Operator, and
+validate both regular and streaming HTTP mock responses.

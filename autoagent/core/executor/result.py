@@ -38,7 +38,7 @@ class NodeExecutionProgress:
     kind: Literal["phase", "operator_call", "user_event"]
     phase: NodePhaseResult | None = None
     operator_execution: OperatorExecution | None = None
-    user_event_spec: UserEventSpec | None = None
+    user_event_specs: tuple[UserEventSpec, ...] = ()
     logical_elapsed_ns: int = 0
 
     def __post_init__(self) -> None:
@@ -46,7 +46,7 @@ class NodeExecutionProgress:
             if (
                 self.phase is None
                 or self.operator_execution is not None
-                or self.user_event_spec is not None
+                or self.user_event_specs
             ):
                 raise ValueError("Phase progress must contain only a phase result.")
             return
@@ -54,19 +54,19 @@ class NodeExecutionProgress:
             if (
                 self.operator_execution is None
                 or self.phase is not None
-                or self.user_event_spec is not None
+                or self.user_event_specs
             ):
                 raise ValueError(
                     "Operator-call progress must contain only an OperatorExecution."
                 )
             return
         if (
-            self.user_event_spec is None
+            not self.user_event_specs
             or self.phase is not None
             or self.operator_execution is not None
         ):
             raise ValueError(
-                "User-event progress must contain only a UserEventSpec."
+                "User-event progress must contain only UserEventSpecs."
             )
 
 

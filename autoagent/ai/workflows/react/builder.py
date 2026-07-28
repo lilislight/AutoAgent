@@ -167,36 +167,24 @@ def react_workflow(
             "arguments_delta": chunk.tool_arguments_delta,
         }
 
-    def completed_message(response: LLMResponse) -> dict[str, Any]:
+    def completed_message(response: LLMResponse) -> dict[str, Any] | None:
+        if response.message.tool_calls:
+            return None
         return response.model_dump(mode="json")
 
-    def requested_tool_calls(batch: ToolCallBatch) -> dict[str, Any] | None:
-        if not batch.valid_calls:
+    def requested_tool_calls(
+        response: LLMResponse,
+    ) -> dict[str, Any] | None:
+        if not response.message.tool_calls:
             return None
         return {
             "calls": [
                 {
-                    "tool_call_id": item.call.id,
-                    "tool_id": item.tool_id,
-                    "name": item.call.name,
-                    "arguments": item.arguments,
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "raw_arguments": call.raw_arguments,
                 }
-                for item in batch.valid_calls
-            ]
-        }
-
-    def rejected_tool_calls(batch: ToolCallBatch) -> dict[str, Any] | None:
-        if not batch.invalid_calls:
-            return None
-        return {
-            "calls": [
-                {
-                    "tool_call_id": item.call.id,
-                    "name": item.call.name,
-                    "raw_arguments": item.call.raw_arguments,
-                    "error": item.error,
-                }
-                for item in batch.invalid_calls
+                for call in response.message.tool_calls
             ]
         }
 
@@ -282,9 +270,15 @@ def react_workflow(
                 transform=tool_call_delta,
             ),
         ),
-        user_event_mapping=UserEventMapping(
-            type="message_completed",
-            transform=completed_message,
+        user_event_mapping=(
+            UserEventMapping(
+                type="message_completed",
+                transform=completed_message,
+            ),
+            UserEventMapping(
+                type="tool_call_requested",
+                transform=requested_tool_calls,
+            ),
         ),
     )
     workflow.add_node(
@@ -303,16 +297,6 @@ def react_workflow(
         ),
         node_id="validate_tool_calls",
         input_mapping=map_tool_validation,
-        user_event_mapping=(
-            UserEventMapping(
-                type="tool_call_requested",
-                transform=requested_tool_calls,
-            ),
-            UserEventMapping(
-                type="tool_call_rejected",
-                transform=rejected_tool_calls,
-            ),
-        ),
     )
     workflow.add_node(
         _internal_operator(

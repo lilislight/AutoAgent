@@ -7,15 +7,16 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from typing import Literal
+from typing import Any, Literal
 
-from autoagent import AutoAgentApp
+from autoagent import AutoAgentApp, StreamingResult, streaming_result
 from autoagent.ai import (
     LLM_CALL_CAPABILITY_ID,
     LLM_CALL_CONTRACT,
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
     LLMToolCall,
 )
 from autoagent.cli import main as cli_main
@@ -73,6 +74,9 @@ class AuthoringExamplesTests(unittest.TestCase):
                 },
                 event_mode="standard",
             )
+            user_events = app.runtime_store.list_user_events(
+                invocation_id=invocation.id,
+            )
         finally:
             app.close()
 
@@ -89,6 +93,20 @@ class AuthoringExamplesTests(unittest.TestCase):
         self.assertEqual(
             "automatic",
             low_risk.result["output"].path,
+        )
+        self.assertEqual(
+            ["release_review_completed"],
+            [event.type for event in user_events],
+        )
+        self.assertEqual("finalize_report", user_events[0].node_id)
+        self.assertEqual(
+            {
+                "service": "payments-api",
+                "decision": "approved",
+                "review_rounds": 2,
+                "path": "specialist",
+            },
+            user_events[0].data,
         )
 
     def test_wait_example_resumes_through_a_new_cli_host(self) -> None:
@@ -143,10 +161,13 @@ class AuthoringExamplesTests(unittest.TestCase):
         async def fake_llm(
             request: LLMRequest,
             mode: Literal["invoke", "stream"] = "invoke",
-        ) -> LLMResponse:
+        ) -> (
+            LLMResponse
+            | StreamingResult[LLMStreamChunk, LLMResponse]
+        ):
             requests.append(request)
             if not any(message.role == "tool" for message in request.messages):
-                return LLMResponse(
+                response = LLMResponse(
                     message=LLMMessage(
                         role="assistant",
                         tool_calls=(
@@ -165,24 +186,57 @@ class AuthoringExamplesTests(unittest.TestCase):
                     finish_reason="tool_calls",
                     model="mock-weather-model",
                 )
-            return LLMResponse(
-                message=LLMMessage(
-                    role="assistant",
-                    content=json.dumps(
-                        {
-                            "city": "Tokyo",
-                            "country": "Japan",
-                            "condition": "partly cloudy",
-                            "temperature_celsius": 27.0,
-                            "recommendation": (
-                                "Carry water and a light layer."
-                            ),
-                            "data_source": "mock",
-                        }
+                chunks = (
+                    LLMStreamChunk(
+                        type="tool_call_delta",
+                        tool_call_index=0,
+                        tool_call_id="city-profile",
+                        tool_name="get_city_profile",
+                        tool_arguments_delta='{"city":"Tokyo"}',
                     ),
-                ),
-                finish_reason="stop",
-                model="mock-weather-model",
+                    LLMStreamChunk(
+                        type="tool_call_delta",
+                        tool_call_index=1,
+                        tool_call_id="current-weather",
+                        tool_name="get_current_weather",
+                        tool_arguments_delta='{"city":"Tokyo"}',
+                    ),
+                )
+            else:
+                content = json.dumps(
+                    {
+                        "city": "Tokyo",
+                        "country": "Japan",
+                        "condition": "partly cloudy",
+                        "temperature_celsius": 27.0,
+                        "recommendation": (
+                            "Carry water and a light layer."
+                        ),
+                        "data_source": "mock",
+                    }
+                )
+                response = LLMResponse(
+                    message=LLMMessage(
+                        role="assistant",
+                        content=content,
+                    ),
+                    finish_reason="stop",
+                    model="mock-weather-model",
+                )
+                chunks = (
+                    LLMStreamChunk(
+                        type="text_delta",
+                        text_delta=content[:48],
+                    ),
+                    LLMStreamChunk(
+                        type="text_delta",
+                        text_delta=content[48:],
+                    ),
+                )
+            self.assertEqual("stream", mode)
+            return streaming_result(
+                self._llm_chunks(chunks, response),
+                reducer=_CompletedResponseReducer(),
             )
 
         app = AutoAgentApp()
@@ -207,6 +261,9 @@ class AuthoringExamplesTests(unittest.TestCase):
             actual = app.runtime_serializer.json_view(
                 app.runtime_serializer.dumps_unchecked(invocation.result)
             )
+            user_events = app.runtime_store.list_user_events(
+                invocation_id=invocation.id,
+            )
         finally:
             app.close()
 
@@ -225,6 +282,39 @@ class AuthoringExamplesTests(unittest.TestCase):
             + invocation.count_node_executions(
                 "tool_1_get_current_weather"
             ),
+        )
+        event_types = [event.type for event in user_events]
+        self.assertEqual(2, event_types.count("tool_call_delta"))
+        self.assertEqual(1, event_types.count("tool_call_requested"))
+        self.assertEqual(2, event_types.count("tool_result"))
+        self.assertEqual(2, event_types.count("message_delta"))
+        self.assertEqual(1, event_types.count("message_completed"))
+        self.assertEqual("agent_output", event_types[-1])
+        self.assertEqual(
+            {"llm_call"},
+            {
+                event.node_id
+                for event in user_events
+                if event.type
+                in {
+                    "tool_call_delta",
+                    "tool_call_requested",
+                    "message_delta",
+                    "message_completed",
+                }
+            },
+        )
+        self.assertEqual(
+            {"finish"},
+            {
+                event.node_id
+                for event in user_events
+                if event.type == "agent_output"
+            },
+        )
+        self.assertNotIn(
+            "validate_tool_calls",
+            {event.node_id for event in user_events},
         )
 
     def test_mock_provider_returns_tool_and_final_turns(self) -> None:
@@ -259,12 +349,26 @@ class AuthoringExamplesTests(unittest.TestCase):
                 }
             )
         )
+        streamed = self._run_async(
+            module.chat_completions(
+                {
+                    "model": "mock-weather-model",
+                    "messages": [{"role": "user", "content": "weather"}],
+                    "stream": True,
+                }
+            )
+        )
+        streamed_body = self._run_async(
+            self._streaming_response_body(streamed)
+        )
 
         self.assertEqual(
             "tool_calls",
             first["choices"][0]["finish_reason"],
         )
         self.assertEqual("stop", second["choices"][0]["finish_reason"])
+        self.assertIn('"finish_reason":"tool_calls"', streamed_body)
+        self.assertTrue(streamed_body.endswith("data: [DONE]\n\n"))
 
     def _json(self, relative_path: str) -> dict[str, object]:
         return json.loads(
@@ -281,6 +385,38 @@ class AuthoringExamplesTests(unittest.TestCase):
         import asyncio
 
         return asyncio.run(awaitable)
+
+    async def _llm_chunks(
+        self,
+        chunks: tuple[LLMStreamChunk, ...],
+        response: LLMResponse,
+    ):
+        for chunk in chunks:
+            yield chunk
+        yield LLMStreamChunk(type="completed", response=response)
+
+    async def _streaming_response_body(self, response: Any) -> str:
+        parts: list[str] = []
+        async for part in response.body_iterator:
+            parts.append(
+                part.decode("utf-8")
+                if isinstance(part, bytes)
+                else part
+            )
+        return "".join(parts)
+
+class _CompletedResponseReducer:
+    def __init__(self) -> None:
+        self.response: LLMResponse | None = None
+
+    def add(self, chunk: LLMStreamChunk) -> None:
+        if chunk.type == "completed":
+            self.response = chunk.response
+
+    def finish(self) -> LLMResponse:
+        if self.response is None:
+            raise RuntimeError("The sample LLM stream did not complete.")
+        return self.response
 
 
 if __name__ == "__main__":

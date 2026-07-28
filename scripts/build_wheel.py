@@ -14,9 +14,26 @@ EXAMPLES_SOURCE = REPOSITORY_ROOT / "examples" / "authoring"
 EXAMPLES_STAGING = REPOSITORY_ROOT / "autoagent" / "examples" / "authoring"
 
 
+def _npm_executable() -> str:
+    candidates = ("npm.cmd", "npm") if sys.platform == "win32" else ("npm",)
+    for candidate in candidates:
+        executable = shutil.which(candidate)
+        if executable is not None:
+            return executable
+    raise RuntimeError(
+        "npm is required to build the tracing UI, but it was not found on PATH."
+    )
+
+
 def _build_ui() -> None:
+    npm = _npm_executable()
     subprocess.run(
-        ["npm", "run", "build"],
+        [npm, "ci"],
+        cwd=UI_ROOT,
+        check=True,
+    )
+    subprocess.run(
+        [npm, "run", "build"],
         cwd=UI_ROOT,
         check=True,
     )

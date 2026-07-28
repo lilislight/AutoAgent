@@ -3,6 +3,16 @@
 This reference owns CLI usage and runtime configuration entrypoints. It does
 not explain Workflow APIs or how to repair individual diagnostic codes.
 
+## Contents
+
+- Global form
+- Recommended authoring cycle
+- Project and Workflow checks
+- Invocation Run and Resume
+- Runtime overrides
+- Serve
+- Exit status
+
 ## Global form
 
 ```bash

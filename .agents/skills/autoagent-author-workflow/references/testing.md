@@ -3,6 +3,16 @@
 This reference owns deterministic validation of authored Workflow projects. It
 does not define the public API, graph design, or Diagnostic semantics.
 
+## Contents
+
+- Test layers
+- Coverage matrix
+- Fixtures
+- Wait and Resume
+- AI and Tool tests
+- Commands
+- Acceptance
+
 ## Test layers
 
 ### Project load
@@ -97,7 +107,15 @@ Do not claim cross-process Resume from an in-memory or minimal-mode test.
 
 Default tests must not call a paid model or depend on model randomness.
 
-Use a fake `llm_call` Operator or local mock Provider. Cover:
+Prefer a local OpenAI-compatible mock Provider driven by deterministic
+responses. Configure the ordinary CLI host to use it, keeping Provider
+registration out of Workflow source.
+
+Use a fake `llm_call` Operator only in test-only host code that already owns
+App construction. Do not introduce App or Operator registration into the
+authored Workflow module solely for testing.
+
+Cover:
 
 - normalized request construction;
 - valid Tool sequence;

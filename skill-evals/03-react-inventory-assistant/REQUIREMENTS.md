@@ -1,12 +1,13 @@
 # Inventory Replenishment Assistant
 
-Build an AutoAgent project containing a ReActWorkflow that recommends an
-inventory replenishment plan using deterministic Tools.
+Build an AI assistant that recommends an inventory replenishment plan for a
+warehouse.
 
-## Request and Result
+## Request and result
 
-The request contains a natural-language question plus a `warehouse_id`.
-The structured result contains:
+The request contains a natural-language question and a `warehouse_id`.
+
+Return:
 
 - `warehouse_id`
 - `sku`
@@ -15,51 +16,27 @@ The structured result contains:
 - `reasoning_summary`
 - `tool_calls_used`
 
-## Tools
+## Available business capabilities
 
-Provide typed local Tools for:
+The assistant can:
 
-- reading current inventory and recent demand for a SKU
-- listing supplier lead times and minimum order quantities
-- simulating whether a proposed order covers forecast demand
+- read current inventory and recent demand for a SKU;
+- list supplier lead times and minimum order quantities;
+- simulate whether a proposed order covers forecast demand.
 
-Tool behavior must be deterministic and must not call external services.
-Descriptions and schemas should give the model enough information to select
-and call them correctly.
+Implement deterministic in-memory versions of these capabilities for the
+prototype. The default project must not require credentials or an external
+business service.
 
-## Behavior
+The assistant must inspect inventory and suppliers before recommending an
+order. It may request multiple independent pieces of information together.
 
-- Use an LLM Call through AutoAgent's OpenAI-compatible capability and a
-  ReActWorkflow.
-- Give the model explicit instructions to inspect inventory and suppliers
-  before making a recommendation and to return the requested structured result.
-- Support multiple Tool calls in one model response.
-- A nonexistent Tool name, invalid Tool arguments, Tool execution error, or
-  structured-output validation error must be returned to the model so it can
-  correct the request within bounded retries.
-- The Workflow must terminate with either a valid structured result or a clear
-  bounded failure; it must never retry forever.
+If it requests an unknown capability, supplies invalid arguments, receives a
+capability error, or produces an invalid final result, return the error to the
+assistant so it can correct itself. Allow at most one correction for each such
+error and return a clear failure after the limit. The assistant must never
+continue indefinitely.
 
-## Project Contract
-
-- Create one `auto-agent.toml` at the project root.
-- Expose exactly one top-level Workflow from the manifest.
-- Use public AutoAgent authoring APIs only.
-- Include a deterministic fake OpenAI-compatible provider or mocked LLM
-  Operator for automated tests. Tests must not require paid services or
-  credentials.
-- Include JSON fixtures and expected results for a normal recommendation,
-  parallel Tool calls, invalid Tool arguments followed by repair, Tool failure
-  followed by repair, and malformed structured output followed by repair.
-- Include automated tests for Tool schemas, retry limits, structured output,
-  compiler validation, and top-level Workflow output.
-- Document optional environment variables for running manually against a real
-  OpenAI-compatible provider, but keep the default test path local.
-- Document the exact install, check, run, and test commands without assuming a
-  particular package manager.
-
-## Acceptance
-
-The project passes `autoagent project check`, all local tests pass without
-network access, repair cases visibly exercise the model feedback loop, and the
-final output always matches the declared structured result type.
+The default automated behavior must be reproducible without contacting a paid
+AI service. Document separately how a user can connect a compatible real model
+for manual use.

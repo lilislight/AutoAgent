@@ -1,11 +1,10 @@
-# Purchase Exception Workflow
+# Purchase Exception Review
 
-Build a deterministic AutoAgent project that evaluates a purchase request and
-returns a final approval decision.
+Build a purchase-review service that returns a final decision for each request.
 
-## Inputs
+## Request
 
-The Workflow accepts:
+Each request contains:
 
 - `request_id`: non-empty string
 - `amount`: positive number
@@ -13,44 +12,35 @@ The Workflow accepts:
 - `risk_flags`: list of strings
 - `available_budget`: non-negative number
 
-Invalid input must produce a clear failed Invocation rather than silently
-approving or coercing the request.
+Reject invalid requests with a clear reason. Do not silently coerce invalid
+values or approve an incomplete request.
 
-## Behavior
+## Review rules
 
-- Trusted suppliers with an amount no greater than 1,000 and no risk flags may
-  use a fast approval path.
-- Every other request needs both a budget review and a compliance review. These
-  reviews are independent and should be able to run concurrently.
-- Budget review passes only when the amount does not exceed the available
-  budget.
-- Compliance review passes only when there are no risk flags. A new supplier
-  must also be reported as needing manual review.
-- When the request needs manual review, perform one deterministic reassessment
-  after adding a `manual_review_completed` fact. Do not allow an unbounded
-  loop.
-- The final result must include `request_id`, `decision`, `reasons`,
-  `review_rounds`, and the individual review outcomes.
-- The Workflow may have multiple internal branches, but its public result must
-  be consistent for fast approval, normal approval, rejection, and manual
-  review.
+- A trusted supplier with an amount no greater than 1,000 and no risk flags
+  receives fast approval.
+- Every other request needs a budget review and a compliance review.
+- Budget and compliance reviews are independent and should run concurrently so
+  their processing time does not add together.
+- Budget review passes only when `amount` does not exceed `available_budget`.
+- Compliance review passes only when `risk_flags` is empty.
+- A new supplier requires manual review even when the budget and compliance
+  checks pass.
+- For this prototype, manual review is represented by one deterministic
+  reassessment after adding the fact `manual_review_completed`.
+- A request may be reassessed at most once.
 
-## Project Contract
+## Result
 
-- Create one `auto-agent.toml` at the project root.
-- Expose exactly one Workflow from the manifest.
-- Use public AutoAgent authoring APIs only.
-- Use deterministic local Operators; no network services or credentials.
-- Include JSON input fixtures and expected outputs for at least:
-  fast approval, concurrent approval, budget rejection, risk rejection, and
-  manual reassessment.
-- Include automated tests for the branching, concurrency, bounded loop, output
-  shape, and compiler validation.
-- Document the exact install, check, run, and test commands without assuming a
-  particular package manager.
+Return:
 
-## Acceptance
+- `request_id`
+- `decision`
+- `reasons`
+- `review_rounds`
+- the individual budget and compliance outcomes
 
-The project passes `autoagent project check`, all automated tests pass, every
-fixture has a deterministic result, and a repeated run does not leak Runtime
-state between Invocations.
+The result must be consistent for fast approval, normal approval, budget
+rejection, compliance rejection, and new-supplier reassessment. Every request
+must be isolated; facts or review results from one request must never affect
+another request.

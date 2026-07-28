@@ -15,11 +15,11 @@ Applications may organize their remaining files differently.
 - `expected/` contains deterministic public Invocation results.
 - No Workflow creates an App, RuntimeStore, database, or Server.
 
-Run all commands from the AutoAgent repository root:
+Run all commands from this example project directory:
 
 ```bash
-autoagent --project examples/authoring project check
-autoagent --project examples/authoring workflow list
+autoagent project check
+autoagent workflow list
 ```
 
 Expected compilation summary:
@@ -64,9 +64,8 @@ Run it:
 
 ```bash
 autoagent \
-  --project examples/authoring \
   invocation run release_review \
-  --input-file examples/authoring/inputs/orchestration.json \
+  --input-file inputs/orchestration.json \
   --event-mode standard \
   --trace
 ```
@@ -96,10 +95,9 @@ Start the Invocation:
 
 ```bash
 autoagent \
-  --project examples/authoring \
   invocation run human_approval \
   --session authoring-demo \
-  --input-file examples/authoring/inputs/wait-request.json
+  --input-file inputs/wait-request.json
 ```
 
 The command returns `STATE waiting`. A new CLI process can then resume the same
@@ -107,11 +105,10 @@ Invocation:
 
 ```bash
 autoagent \
-  --project examples/authoring \
   invocation resume human_approval \
   --session authoring-demo \
   --wait-key release:42 \
-  --response-file examples/authoring/inputs/wait-response.json
+  --response-file inputs/wait-response.json
 ```
 
 The deterministic terminal result is `expected/wait-resume.json`.
@@ -140,7 +137,7 @@ one terminal:
 
 ```bash
 uvicorn mock_openai_provider:app \
-  --app-dir examples/authoring \
+  --app-dir . \
   --host 127.0.0.1 \
   --port 8899
 ```
@@ -158,9 +155,8 @@ Run the ReAct Workflow:
 
 ```bash
 autoagent \
-  --project examples/authoring \
   invocation run weather_assistant \
-  --input-file examples/authoring/inputs/react-weather.json \
+  --input-file inputs/react-weather.json \
   --event-mode full \
   --trace
 ```
@@ -172,10 +168,10 @@ returns `expected/react-weather.json`.
 
 ### Project manifest not found
 
-Pass the project directory before the command:
+Run the command from the example root, or pass the project directory explicitly:
 
 ```bash
-autoagent --project examples/authoring project check
+autoagent project check
 ```
 
 ### OpenAI-compatible configuration is missing
@@ -203,10 +199,10 @@ A natural Loop must have one header and one external entry. Keep the initial
 
 ## Automated verification
 
-The repository test suite checks all three examples:
+The packaged project tests check all three examples:
 
 ```bash
-python -m unittest -v tests.test_authoring_examples
+python -m unittest discover -s tests -v
 ```
 
 The tests compile every exported Workflow, compare deterministic results,

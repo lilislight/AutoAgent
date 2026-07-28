@@ -6,32 +6,57 @@ description: Create, modify, validate, and test AutoAgent Workflow projects. Use
 # Author AutoAgent Workflows
 
 Create business Workflow definitions without coupling them to an App, database,
-Server, or framework internals. Treat the installed public API, CLI output, and
-current project source as authoritative.
+Server, or framework internals. Treat the selected installed package's public
+API, CLI output, and packaged authoring examples as authoritative.
 
 ## Follow this workflow
 
 1. Read the repository guidance that applies to the target directory.
-2. Find `auto-agent.toml`, exported Workflow objects, dependency files,
+2. Check that AutoAgent is installed in the selected Python environment, record
+   its version and location, and install the requested version or supplied
+   Wheel when needed. Follow
+   [project-contract.md](references/project-contract.md).
+3. Locate normative examples inside that installed package. Follow
+   [sample-index.md](references/sample-index.md).
+4. Find `auto-agent.toml`, exported Workflow objects, dependency files,
    `.env.example`, input/output models, fixtures, and tests.
-3. Translate the request into Workflow input, final output, business steps,
+5. Translate the request into Workflow input, final output, business steps,
    branches, parallel work, aggregation, loops, waits, external side effects,
    and failure behavior.
-4. Read only the references required by the routing table below.
-5. Modify the existing project structure when one exists. Do not reorganize a
+6. Read only the remaining references required by the routing table below.
+7. Modify the existing project structure when one exists. Do not reorganize a
    project merely to match an example.
-6. Implement typed callables and the Workflow graph through `autoagent` and
+8. Implement typed callables and the Workflow graph through `autoagent` and
    `autoagent.ai` public imports only.
-7. Update `auto-agent.toml`, dependencies, `.env.example`, fixtures, and tests
+9. Update `auto-agent.toml`, dependencies, `.env.example`, fixtures, and tests
    when the change requires them.
-8. Run Project Check, Workflow Check, and deterministic Invocation tests.
-9. Repair diagnostics by stable code and re-run the failing command.
-10. Report the resulting graph, input/output contract, policies, checks, tests,
+10. Run Project Check, Workflow Check, and deterministic Invocation tests.
+11. Repair diagnostics by stable code and re-run the failing command.
+12. Report the resulting graph, input/output contract, policies, checks, tests,
     environment requirements, and any unverified external dependency.
 
 Ask one focused question only when an unresolved choice would materially change
 the Workflow graph or public contract. Otherwise make the smallest reasonable
 assumption and continue.
+
+## Translate business language
+
+Assume the requester does not know AutoAgent terminology. Accept requirements
+that describe business outcomes and infer the smallest suitable graph:
+
+- independent work or a latency requirement implies parallel branches;
+- a dynamic collection implies Map;
+- repeated execution of the same input implies Replication;
+- bounded business reassessment implies a Loop;
+- a response arriving later from a person or system implies Wait;
+- continuation after process restart implies durable persistence at run time;
+- model-directed capability use and bounded self-correction imply
+  ReActWorkflow.
+
+Do not ask the requester to choose Nodes, Edges, Hooks, Policies, Event mode, or
+Runtime infrastructure. Ask only when two implementations would expose
+materially different business behavior. Do not add behavior merely to exercise
+a framework feature.
 
 ## Route reference reading
 
@@ -84,6 +109,10 @@ Examples of minimal routing:
 - Do not depend on a paid or nondeterministic external service in default tests.
 - Do not invent an API. If a referenced public symbol is unavailable in the
   installed version, stop and report the version mismatch.
+- Do not make authored Workflow code depend on framework internals. When
+  reproducible evidence points to an AutoAgent defect, inspecting the installed
+  package implementation or explicitly supplied framework source is allowed
+  for diagnosis; follow [diagnostics.md](references/diagnostics.md).
 
 ## Validate before completion
 
@@ -98,6 +127,10 @@ autoagent workflow check <workflow-id>
 Then run a deterministic Invocation and the relevant project tests. Validate
 every material branch, Loop termination, aggregation boundary, Wait/Resume
 contract, and AI schema path introduced by the change.
+
+Create these checks and tests even when the requester asks only for business
+behavior. They are part of a complete AutoAgent project, not requirements the
+requester must know to request.
 
 Do not claim completion when compilation fails, an Invocation ends in
 `failed`, `interrupted`, or `cancelled`, or required tests have not run. State

@@ -3,14 +3,18 @@
 This reference only routes an author to existing complete examples. It does
 not duplicate their source or define general API rules.
 
-All samples belong to one project rooted at:
+All normative samples belong to the selected installed `autoagent` package.
+Locate their root with Python's package-resource API:
 
-```text
-examples/authoring/
+```bash
+python -c "from importlib.resources import files; root = files('autoagent').joinpath('examples', 'authoring'); assert root.joinpath('auto-agent.toml').is_file(), 'installed AutoAgent package has no authoring examples'; print(root)"
 ```
 
-Start with `examples/authoring/README.md`, then read only the closest Workflow
-and its fixtures.
+The printed resource is the sample root used by every relative path below.
+Start with `README.md`, then read only the closest Workflow and its fixtures.
+
+If the installed package has no authoring examples, report its version and path
+as a package mismatch and install the intended package before continuing.
 
 ## Conditional orchestration
 
@@ -20,10 +24,10 @@ fan-in, or Loop.
 Files:
 
 ```text
-examples/authoring/workflows/orchestration.py
-examples/authoring/inputs/orchestration.json
-examples/authoring/expected/orchestration.json
-tests/test_authoring_examples.py
+workflows/orchestration.py
+inputs/orchestration.json
+expected/orchestration.json
+tests/test_examples.py
 ```
 
 Demonstrates:
@@ -47,11 +51,11 @@ external response.
 Files:
 
 ```text
-examples/authoring/workflows/wait_resume.py
-examples/authoring/inputs/wait-request.json
-examples/authoring/inputs/wait-response.json
-examples/authoring/expected/wait-resume.json
-tests/test_authoring_examples.py
+workflows/wait_resume.py
+inputs/wait-request.json
+inputs/wait-response.json
+expected/wait-resume.json
+tests/test_examples.py
 ```
 
 Demonstrates:
@@ -69,11 +73,11 @@ structured final output.
 Files:
 
 ```text
-examples/authoring/workflows/react_assistant.py
-examples/authoring/mock_openai_provider.py
-examples/authoring/inputs/react-weather.json
-examples/authoring/expected/react-weather.json
-tests/test_authoring_examples.py
+workflows/react_assistant.py
+mock_openai_provider.py
+inputs/react-weather.json
+expected/react-weather.json
+tests/test_examples.py
 ```
 
 Demonstrates:

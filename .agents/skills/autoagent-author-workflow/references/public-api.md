@@ -3,6 +3,15 @@
 This reference owns public imports and construction surfaces. It describes what
 Workflow authors may use, not how to design a graph or select a policy.
 
+## Contents
+
+- Contract rule
+- `autoagent` exports
+- `autoagent.ai` exports
+- Direct callable contract
+- Durable values
+- Versioned hooks
+
 ## Contract rule
 
 Only names in `autoagent.__all__` and `autoagent.ai.__all__` are stable
@@ -132,6 +141,18 @@ Avoid:
 - `Any` at durable or external boundaries without a concrete need;
 - capturing live clients, locks, generators, or other non-serializable objects
   in Runtime values.
+
+## Durable values
+
+Values crossing Node, Context, Wait, or persistence boundaries must be
+serializable by the installed Runtime contract. Prefer typed models, primitive
+containers, UUIDs, timestamps, and other explicitly supported values.
+
+Do not place large documents, media, model blobs, open streams, or live client
+objects directly in Context or Node outputs. Preserve an `ArtifactRef` supplied
+by the host and pass the reference through the Workflow instead of copying the
+payload. Workflow code must not invent an ArtifactRef for data that was never
+stored by an artifact service.
 
 ## Versioned hooks
 

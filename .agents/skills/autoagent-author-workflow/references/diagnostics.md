@@ -3,6 +3,16 @@
 This reference owns diagnosis by stable code. It does not define CLI syntax,
 Workflow APIs, or runtime Trace debugging.
 
+## Contents
+
+- Read the document
+- Project diagnostics
+- Structural diagnostics
+- Loop and child Workflow diagnostics
+- Policy diagnostics
+- Suspected framework defects
+- Repair loop
+
 ## Read the document
 
 A Compiler Diagnostic may contain:
@@ -141,6 +151,26 @@ unsupported policies.
 - `POLICY_AGGREGATOR_OUTPUT_UNVERIFIED`: add a concrete aggregator return
   annotation compatible with the target Node output contract.
 
+## Suspected framework defects
+
+Reading framework source is allowed when reproducible evidence indicates that
+the installed public API, Compiler, or Runtime is defective. It is a diagnostic
+tool, not an authoring dependency:
+
+1. record the installed AutoAgent version and module path;
+2. reduce the failure to the smallest public-API Workflow and deterministic
+   input that reproduce it;
+3. verify the failure against the selected installed package first;
+4. inspect that installed package implementation, or explicitly supplied
+   framework source, only far enough to identify the defect;
+5. keep generated Workflow source on `autoagent` and `autoagent.ai` public
+   imports and do not copy internal implementation into the project;
+6. do not modify AutoAgent framework source unless the requester explicitly
+   expands the task to a framework fix.
+
+Report the version, installed path, minimal reproducer, expected behavior,
+actual Diagnostic or Runtime result, and the suspected internal cause.
+
 ## Repair loop
 
 1. Record the stable code and object ID.
@@ -149,6 +179,6 @@ unsupported policies.
 4. Run `workflow check` again.
 5. Run the affected Invocation path and tests after compilation succeeds.
 
-If source appears correct but the same Diagnostic persists, report a possible
-framework defect with the minimal Workflow reproducer instead of reaching into
-Compiler internals.
+If authored source appears correct but the same Diagnostic persists, follow the
+suspected-framework-defect procedure rather than working around it with
+internal imports.

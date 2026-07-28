@@ -1,8 +1,8 @@
 # AutoAgent Authoring Skill Evaluations
 
-These projects evaluate whether a Coding Agent can author a working AutoAgent
-project from a product requirement. Each directory intentionally contains only
-its `REQUIREMENTS.md`.
+These projects evaluate whether a Coding Agent can translate a framework-free
+business request into a working AutoAgent project. Each scenario directory
+intentionally contains only its `REQUIREMENTS.md` before a test begins.
 
 Before an evaluation, copy the current AutoAgent Wheel and the current
 `autoagent-author-workflow` Skill into the selected directory. Then copy that
@@ -18,3 +18,6 @@ AutoAgent framework source or repository examples.
 The Agent should install the supplied Wheel, create the project, run compiler
 checks and tests, and report the commands and results. Do not copy generated
 solutions between evaluation directories.
+
+Do not copy or show `EVALUATION.md` to the Coding Agent. It is the evaluator's
+hidden acceptance contract, not part of the user request or Skill.

@@ -3,6 +3,16 @@
 This reference owns user-defined callable phases and Context behavior. It does
 not define graph topology or Policy configuration.
 
+## Contents
+
+- Typed callable Operator
+- Shared read view
+- Input Mapping and Edge Condition
+- Map and Replication Hooks
+- Output Binding
+- Async behavior
+- Semantic version
+
 ## Typed callable Operator
 
 A project function added directly as a Node becomes a direct Operator:

@@ -1,55 +1,41 @@
-# Publication Approval Workflow
+# Publication Approval
 
-Build a deterministic AutoAgent project that prepares an article for
-publication, waits for an editor decision, and resumes in a later process.
+Build a publication service that prepares an article, waits for an editor
+decision, and then publishes or rejects it.
 
-## Inputs
+## Initial request
 
-The initial request accepts:
+The initial request contains:
 
 - `article_id`: non-empty string
 - `title`: non-empty string
 - `body`: non-empty string
 - `risk_level`: `low`, `medium`, or `high`
 
-The editor response accepts:
+Validate and normalize the article before requesting approval. Low-risk
+articles still require editor approval; risk only changes the summary presented
+to the editor.
+
+## Editor decision
+
+An editor may respond hours later with:
 
 - `approved`: boolean
 - `comment`: optional string
 - `requested_title`: optional non-empty string
 
-## Behavior
+The service may restart while it is waiting. After restart, the editor must
+still be able to continue the matching article request. Several articles may
+wait at the same time, and a response for one article must never be consumed by
+another article.
 
-- Validate and normalize the initial article.
-- Low-risk articles still require editor approval; risk only affects the
-  summary presented for review.
-- Pause at a stable Wait point whose key is derived from `article_id`.
-- Resume with the editor response in a separate CLI process using SQLite
-  persistence.
-- An approval publishes the normalized article. If `requested_title` is
-  present, use it as the final title.
-- A rejection returns a rejected result and preserves the editor comment.
-- An invalid or mismatched response must fail clearly and must not resume a
-  different article.
-- The final result includes `article_id`, `status`, `title`, `risk_level`, and
-  `editor_comment`.
+Reject an invalid, duplicate, or mismatched response clearly without changing
+the state of an unrelated article.
 
-## Project Contract
+## Result
 
-- Create one `auto-agent.toml` at the project root.
-- Expose exactly one Workflow from the manifest.
-- Use public AutoAgent authoring APIs only.
-- Use deterministic local Operators; no network services or credentials.
-- Include initial-request and resume-response JSON fixtures for approval,
-  renamed approval, rejection, and invalid response.
-- Include automated tests for Wait identity, SQLite persistence, process
-  restart, Resume, duplicate or mismatched Resume handling, and compiler
-  validation.
-- Document the exact install, check, initial run, resume, and test commands
-  without assuming a particular package manager.
-
-## Acceptance
-
-The project passes `autoagent project check`; a waiting Invocation can be
-resumed by a new CLI process using the same database; all tests pass; and no
-Invocation can consume another article's response.
+- Approval publishes the normalized article.
+- When an approved response contains `requested_title`, use it as the final
+  title.
+- Rejection preserves the editor comment.
+- Return `article_id`, `status`, `title`, `risk_level`, and `editor_comment`.

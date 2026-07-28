@@ -3,6 +3,15 @@
 This reference owns project discovery, Manifest, dependency, and environment
 boundaries. It does not define Workflow topology, public APIs, or CLI behavior.
 
+## Contents
+
+- Project discovery and Manifest schema
+- Entrypoint format
+- Workflow module boundary
+- Dependencies and environment
+- Minimum project
+- Package availability and version
+
 ## Project discovery
 
 An AutoAgent project has one `auto-agent.toml`. The CLI accepts either the
@@ -127,3 +136,32 @@ entrypoint = "workflows:workflow"
 ```
 
 Additional folders for models, tools, fixtures, or tests are optional.
+
+## Package availability and version
+
+Before reading examples or authoring code, verify the AutoAgent package selected
+by the project's Python environment:
+
+```bash
+python -c "import autoagent, importlib.metadata as m; print(m.version('autoagent')); print(autoagent.__file__)"
+autoagent --version
+```
+
+The import and CLI must resolve from the same selected environment and report
+the intended version. If either command fails or they disagree:
+
+1. when the task supplies an AutoAgent Wheel, install that Wheel into the
+   active isolated project environment and prefer it over another package
+   source;
+2. otherwise, when the project declares an AutoAgent dependency, use the
+   project's selected package manager to install that declared version;
+3. otherwise, ask which package source or version to install. Do not guess by
+   blindly installing an unrelated registry package named `autoagent`;
+4. repeat both checks before reading examples, compiling, or running.
+
+Declare the matching `autoagent` version in project dependencies. Do not commit
+a supplied Wheel or an absolute local Wheel path as a permanent dependency
+unless the requester explicitly wants a vendored artifact.
+
+Do not impose a package manager. Use the environment already selected for the
+project and report the exact check and installation commands.

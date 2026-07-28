@@ -3,6 +3,15 @@
 This reference owns Workflow, Node, and Edge execution policy selection. It
 does not define Hook signatures, graph layout, or persistence internals.
 
+## Contents
+
+- Workflow failure and Capability selection
+- Retry, fallback, and timeout
+- Crash recovery
+- Resource limits
+- Replication and Map
+- Wait and Event mode
+
 ## Workflow failure
 
 `WorkflowPolicy.failure` accepts:

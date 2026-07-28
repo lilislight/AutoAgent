@@ -27,3 +27,9 @@ include = ["autoagent*"]
 
 [tool.setuptools.package-data]
 "autoagent.core.server" = ["ui/index.html", "ui/assets/*"]
+"autoagent" = [
+    "examples/authoring/**/*.json",
+    "examples/authoring/**/*.md",
+    "examples/authoring/**/*.py",
+    "examples/authoring/**/*.toml",
+]

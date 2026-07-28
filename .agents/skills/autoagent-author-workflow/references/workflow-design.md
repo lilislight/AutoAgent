@@ -3,6 +3,19 @@
 This reference owns the translation from business requirements to Node/Edge
 topology. It does not define Hook signatures, Policy fields, or CLI commands.
 
+## Contents
+
+- Start from the contract
+- Invocation and Node data flow
+- Identity, entry, and exit
+- Sequential and conditional flow
+- Parallel work and fan-in
+- Loop
+- Map and Replication
+- Wait
+- Child Workflow
+- Choose the smallest model
+
 ## Start from the contract
 
 Before drawing the graph, identify:
@@ -19,6 +32,27 @@ Before drawing the graph, identify:
 Use a Node for a meaningful execution or external boundary. Do not create Nodes
 for transient Scheduler transitions or for transformations that naturally
 belong in a mapping, Condition, or binding.
+
+## Invocation and Node data flow
+
+Default Node input follows graph structure:
+
+- an entry Node with no incoming Edge receives a copy of the Invocation input
+  mapping;
+- a Node activated by one incoming Edge receives that source Node output;
+- a Node activated by multiple incoming Edges receives a mapping keyed by
+  source Node ID;
+- an Input Mapping replaces this default construction with named target
+  arguments.
+
+Design callable parameter names around that contract or add an Input Mapping.
+Do not add pass-through Nodes merely to rename fields.
+
+Structural exits determine the public Invocation result. When one exit
+completes, the result contains its value as `output`. When multiple exits
+complete, the result contains `outputs` keyed by exit Node ID. Prefer one
+deliberate public exit when callers need one stable result shape; keep multiple
+exits only when distinct terminal outcomes are part of the public contract.
 
 ## Identity
 

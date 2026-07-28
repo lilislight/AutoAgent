@@ -4,6 +4,15 @@ This reference owns LLM, Tool, structured output, ReActWorkflow, and
 OpenAI-compatible Provider authoring. It does not define general graph or
 Runtime policy.
 
+## Contents
+
+- One model call
+- Structured output
+- Tool definition
+- ReActWorkflow
+- Provider environment
+- Test without a paid service
+
 ## One model call
 
 AutoAgent defines the abstract Capability ID `llm_call`.
@@ -142,10 +151,14 @@ key. Compilation and `workflow check` do not require Provider secrets.
 
 ## Test without a paid service
 
-Use one of:
+Prefer a local OpenAI-compatible mock HTTP service. Point the CLI host at it
+through environment variables so the Workflow continues to reference the
+abstract `llm_call` Capability exactly as production does.
 
-- a fake `llm_call` Operator returning deterministic `LLMResponse` values;
-- a local OpenAI-compatible mock HTTP service.
+A fake `llm_call` Operator is acceptable only in test-only host code that
+already owns App construction and Operator registration. Never register the
+fake Operator or create an App inside the Workflow module. When no stable
+test-host surface is available, use the mock HTTP Provider.
 
 Test at least:
 

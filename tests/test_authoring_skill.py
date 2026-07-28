@@ -9,6 +9,7 @@ import autoagent.ai
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+AUTHORING_EXAMPLE_ROOT = REPOSITORY_ROOT / "examples" / "authoring"
 SKILL_ROOT = (
     REPOSITORY_ROOT
     / ".agents"
@@ -16,6 +17,7 @@ SKILL_ROOT = (
     / "autoagent-author-workflow"
 )
 REFERENCES_ROOT = SKILL_ROOT / "references"
+SKILL_EVAL_ROOT = REPOSITORY_ROOT / "skill-evals"
 EXPECTED_REFERENCES = {
     "ai-workflows.md",
     "cli.md",
@@ -85,14 +87,90 @@ class AuthoringSkillTests(unittest.TestCase):
         text = (REFERENCES_ROOT / "sample-index.md").read_text(encoding="utf-8")
         paths = set(
             re.findall(
-                r"(?:examples/authoring|tests)/[A-Za-z0-9_./-]+\.(?:py|json|md)",
+                r"^(?:workflows|inputs|expected|tests)/"
+                r"[A-Za-z0-9_./-]+\.(?:py|json|md)$|"
+                r"^mock_openai_provider\.py$",
                 text,
+                re.MULTILINE,
             )
         )
         self.assertGreaterEqual(len(paths), 10)
         for relative in paths:
             with self.subTest(path=relative):
-                self.assertTrue((REPOSITORY_ROOT / relative).is_file())
+                self.assertTrue((AUTHORING_EXAMPLE_ROOT / relative).is_file())
+
+    def test_skill_locates_installed_package_examples(self) -> None:
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        samples = (REFERENCES_ROOT / "sample-index.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Check that AutoAgent is installed", skill)
+        self.assertIn("from importlib.resources import files", samples)
+        self.assertIn("package mismatch", samples)
+
+    def test_project_contract_checks_package_version_and_location(self) -> None:
+        text = (REFERENCES_ROOT / "project-contract.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("importlib.metadata", text)
+        self.assertIn("autoagent.__file__", text)
+        self.assertIn("autoagent --version", text)
+        self.assertIn("when the task supplies an AutoAgent Wheel", text)
+        self.assertIn("Do not guess by", text)
+
+    def test_framework_source_is_diagnostic_not_an_authoring_dependency(
+        self,
+    ) -> None:
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        diagnostics = (REFERENCES_ROOT / "diagnostics.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("inspecting the installed", skill)
+        self.assertIn("Reading framework source is allowed", diagnostics)
+        self.assertIn("do not modify AutoAgent framework source", diagnostics)
+        self.assertIn("do not copy internal implementation", diagnostics)
+
+    def test_skill_translates_framework_free_business_requests(self) -> None:
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Assume the requester does not know AutoAgent", text)
+        self.assertIn("Do not ask the requester to choose Nodes", text)
+        self.assertIn("Create these checks and tests even when", text)
+
+    def test_skill_documents_authoring_boundaries_found_by_forward_review(
+        self,
+    ) -> None:
+        required_text = {
+            "project-contract.md": "Package availability and version",
+            "workflow-design.md": "Invocation and Node data flow",
+            "public-api.md": "Durable values",
+            "ai-workflows.md": "local OpenAI-compatible mock HTTP service",
+            "testing.md": "registration out of Workflow source",
+        }
+        for name, expected in required_text.items():
+            with self.subTest(reference=name):
+                text = (REFERENCES_ROOT / name).read_text(encoding="utf-8")
+                self.assertIn(expected, text)
+
+    def test_eval_requests_contain_business_language_only(self) -> None:
+        requirements = sorted(SKILL_EVAL_ROOT.glob("*/REQUIREMENTS.md"))
+        self.assertEqual(len(requirements), 3)
+        forbidden = re.compile(
+            r"\b(?:AutoAgent|Workflow|Node|Edge|Operator|Invocation|Runtime|"
+            r"Manifest|compiler|ReActWorkflow|LLMCall|SQLite|CLI)\b|"
+            r"wait_key|event mode",
+            re.IGNORECASE,
+        )
+        for path in requirements:
+            with self.subTest(path=path.parent.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIsNone(forbidden.search(text))
+
+    def test_eval_oracle_is_separate_from_agent_requirements(self) -> None:
+        evaluator = SKILL_EVAL_ROOT / "EVALUATION.md"
+        self.assertTrue(evaluator.is_file())
+        readme = (SKILL_EVAL_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Do not copy or show `EVALUATION.md`", readme)
+        self.assertIn("evaluator-only", evaluator.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

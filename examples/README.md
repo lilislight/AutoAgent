@@ -8,5 +8,5 @@ See [`authoring/README.md`](authoring/README.md) for project checks, Invocation
 commands, fixtures, and expected results.
 
 Large Workflows used only to exercise framework internals live under
-`tests/fixtures/framework_examples/`; they are regression fixtures, not
+`tests/fixtures/`; they are regression fixtures, not
 recommended authoring examples.

@@ -15,7 +15,7 @@ from autoagent.ai import (
     OpenAICompatibleConfig,
 )
 from autoagent.ai.react import ConversationUpdate, ToolExecutionResult
-from tests.fixtures.framework_examples.react_weather_agent import (
+from tests.fixtures.react_weather_agent import (
     CityProfile,
     WeatherAnswer,
     build_app,

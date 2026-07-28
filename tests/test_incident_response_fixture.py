@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from autoagent.core.runtime import DatabaseBackend, RuntimeStore
 from autoagent.core.server import AutoAgentServer
-from tests.fixtures.framework_examples.incident_response_tracing_server import (
+from tests.fixtures.incident_response_tracing_server import (
     EscalationPacket,
     PublishedResolution,
     _new_incident_sample,
@@ -65,7 +65,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         app, workflow = build_test_app()
 
         with patch(
-            "tests.fixtures.framework_examples."
+            "tests.fixtures."
             "incident_response_tracing_server.random.random",
             return_value=0.99,
         ):
@@ -173,7 +173,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         app, workflow = build_test_app()
 
         with patch(
-            "tests.fixtures.framework_examples."
+            "tests.fixtures."
             "incident_response_tracing_server.random.random",
             return_value=0.99,
         ):
@@ -197,7 +197,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         app, workflow = build_test_app()
 
         with patch(
-            "tests.fixtures.framework_examples."
+            "tests.fixtures."
             "incident_response_tracing_server.random.random",
             side_effect=[0.0, 0.0],
         ):

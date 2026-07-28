@@ -139,29 +139,46 @@ Additional folders for models, tools, fixtures, or tests are optional.
 
 ## Package availability and version
 
-Before reading examples or authoring code, verify the AutoAgent package selected
-by the project's Python environment:
+Before reading examples or authoring code, select the project's Python
+environment and check whether it already contains AutoAgent:
 
 ```bash
 python -c "import autoagent, importlib.metadata as m; print(m.version('autoagent')); print(autoagent.__file__)"
 autoagent --version
 ```
 
-The import and CLI must resolve from the same selected environment and report
-the intended version. If either command fails or they disagree:
+Use the `autoagent` executable from the selected environment. If Python can
+import the intended version but the CLI is missing or reports another version,
+fix environment activation or executable resolution before installing another
+copy.
 
-1. when the task supplies an AutoAgent Wheel, install that Wheel into the
-   active isolated project environment and prefer it over another package
-   source;
-2. otherwise, when the project declares an AutoAgent dependency, use the
-   project's selected package manager to install that declared version;
-3. otherwise, ask which package source or version to install. Do not guess by
-   blindly installing an unrelated registry package named `autoagent`;
-4. repeat both checks before reading examples, compiling, or running.
+If the import is missing or its version does not satisfy the project:
 
-Declare the matching `autoagent` version in project dependencies. Do not commit
-a supplied Wheel or an absolute local Wheel path as a permanent dependency
-unless the requester explicitly wants a vendored artifact.
+1. search the target project directory for `autoagent-*.whl`, excluding virtual
+   environments and build caches;
+2. install a supplied or locally found compatible Wheel into the selected
+   environment:
 
-Do not impose a package manager. Use the environment already selected for the
-project and report the exact check and installation commands.
+   ```bash
+   python -m pip install <path-to-autoagent-wheel>
+   ```
+
+3. if no compatible local Wheel exists, install the required package version
+   from the configured package index:
+
+   ```bash
+   python -m pip install autoagent
+   ```
+
+   Add the project's declared version constraint to that command when one
+   exists.
+
+If several local Wheels could match and the intended version is unclear, ask
+which one to use. After installation, repeat both version commands. The import
+and CLI must resolve from the same selected environment and report the intended
+version.
+
+Declare the matching `autoagent` constraint in project dependencies. Do not
+commit a Wheel or absolute local Wheel path as a permanent dependency unless
+the requester explicitly wants a vendored artifact. Report the exact package
+check and installation command used.

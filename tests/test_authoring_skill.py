@@ -104,19 +104,26 @@ class AuthoringSkillTests(unittest.TestCase):
         samples = (REFERENCES_ROOT / "sample-index.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Check that AutoAgent is installed", skill)
+        self.assertIn("Ensure the selected Python environment", skill)
         self.assertIn("from importlib.resources import files", samples)
-        self.assertIn("package mismatch", samples)
+        self.assertIn("repeat the package availability procedure", samples)
 
-    def test_project_contract_checks_package_version_and_location(self) -> None:
+    def test_project_contract_prefers_installed_then_local_wheel_then_index(
+        self,
+    ) -> None:
         text = (REFERENCES_ROOT / "project-contract.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("importlib.metadata", text)
         self.assertIn("autoagent.__file__", text)
         self.assertIn("autoagent --version", text)
-        self.assertIn("when the task supplies an AutoAgent Wheel", text)
-        self.assertIn("Do not guess by", text)
+        installed = text.index("already contains AutoAgent")
+        wheel = text.index("search the target project directory")
+        package_index = text.index("configured package index")
+        self.assertLess(installed, wheel)
+        self.assertLess(wheel, package_index)
+        self.assertIn("python -m pip install <path-to-autoagent-wheel>", text)
+        self.assertIn("python -m pip install autoagent", text)
 
     def test_framework_source_is_diagnostic_not_an_authoring_dependency(
         self,

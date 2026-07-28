@@ -12,9 +12,8 @@ API, CLI output, and packaged authoring examples as authoritative.
 ## Follow this workflow
 
 1. Read the repository guidance that applies to the target directory.
-2. Check that AutoAgent is installed in the selected Python environment, record
-   its version and location, and install the requested version or supplied
-   Wheel when needed. Follow
+2. Ensure the selected Python environment contains the intended AutoAgent
+   package. Follow
    [project-contract.md](references/project-contract.md).
 3. Locate normative examples inside that installed package. Follow
    [sample-index.md](references/sample-index.md).

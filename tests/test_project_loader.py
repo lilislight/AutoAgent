@@ -18,16 +18,16 @@ from autoagent.project import (
 
 
 class ProjectLoaderTests(unittest.TestCase):
-    def test_repository_manifest_example_matches_v1_schema(self) -> None:
+    def test_authoring_example_manifest_matches_v1_schema(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
 
         manifest = load_project_manifest(
-            repository_root / "auto-agent.toml.example"
+            repository_root / "examples" / "authoring" / "auto-agent.toml"
         )
 
         self.assertEqual(1, manifest.schema_version)
-        self.assertEqual("example-agent", manifest.project.name)
-        self.assertEqual(2, len(manifest.workflows))
+        self.assertEqual("autoagent-authoring-samples", manifest.project.name)
+        self.assertEqual(3, len(manifest.workflows))
 
     def test_manifest_parses_project_and_entrypoint(self) -> None:
         with self.project(

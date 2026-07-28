@@ -1,65 +1,78 @@
 # AutoAgent TODO
 
-Only unfinished work is kept here. Completed stage items should be removed
-instead of archived in this file.
+This file tracks the current unfinished work and changes frequently. Stable
+stage goals and acceptance criteria live in [MVP.md](MVP.md). Completed
+implementation history belongs in Git, tests, and benchmark results.
 
-## MVP 1: Agent Authoring Foundation
+## 1. Validate the Agent authoring experience
 
-Complete these items in order:
+- Forward-test the packaged `autoagent-author-workflow` Skill in clean,
+  independent projects using business-only requirements.
+- Verify that a Coding Agent can discover or install AutoAgent, locate the
+  packaged examples, create `auto-agent.toml`, compile every Workflow, and run
+  deterministic tests without reading framework internals.
+- Exercise the three normative patterns independently and in combination:
+  conditional/parallel/Loop orchestration, durable Wait/Resume, and
+  LLM/Tool/ReActWorkflow.
+- Use failures from these evaluations to tighten the public API, Compiler
+  Diagnostics, examples, and Skill before expanding the toolchain.
 
-1. Forward-test the standard Authoring Skill with independent Workflow
-   requirements using only its references, the locked public API, normative
-   examples, and CLI output.
-2. Add the MVP2 Agent-friendly Invocation report and progressive Event queries
-   only after the Authoring Skill and normative examples are validated.
+## 2. Build the local Agent debugging kit
 
-## Stage 4: Runtime Events and Observability
+- Produce a concise, deterministic Invocation report intended for Coding
+  Agents. Summarize result, actual graph path, loops, failures, Retry/Fallback,
+  Wait/Resume, timing, and relevant identifiers without dumping the complete
+  Event journal.
+- Add progressive CLI queries for one Invocation, NodeExecution, Event, and
+  reconstructed Full-mode state.
+- Add Invocation rerun from the original input using a newly loaded Workflow
+  definition.
+- Add deterministic comparison of old and new Invocations, including result,
+  path, execution counts, errors, timing, and relevant Context differences.
+- Define legal Full-mode Fork points, Workflow compatibility checks, and a
+  backend Fork operation that creates a new Session and Invocation without
+  modifying the original execution.
+- Add Tracing UI entry points for report, compare, and Fork only after the
+  backend contracts are stable.
 
-- Add validated Runtime profiles without forking Scheduler, WorkflowExecutor,
-  or NodeExecutor implementations:
-  - `LITE`: keep only the authoritative in-memory state during execution,
-    asynchronously persist a terminal Invocation projection, and provide no
-    crash recovery or durable fork history. Process-local wait/resume may
-    remain available, but it is lost on restart.
-  - `DURABLE`: persist the minimal node-level journal and durability barriers
-    required for crash recovery and durable wait/resume, without the complete
-    fork/debug boundary history.
-  - `DEBUG`: persist the full fork-boundary journal used for replay, branching,
-    recovery, and future trace/debug tooling.
-- Introduce one Runtime `CommitPolicy` behind a shared boundary-commit API.
-  Profiles may decide whether a boundary is eventized, retained, persisted, or
-  used as a durability barrier; they must not create separate execution paths.
-- Validate profile dependencies instead of exposing unconstrained booleans:
-  fork requires genesis plus fork Events and Workflow version metadata;
-  recovery requires its recovery journal/checkpoint data; durable wait/resume
-  requires a persisted wait boundary and durability barrier.
-- Feed the unified Runtime Event protocol to optimizer inputs after event types
-  have been exercised by real workloads.
-- Add terminal Invocation memory eviction only after all Runtime Events are
-  durable and no local subscriber still needs the aggregate. A later lookup
-  must rebuild it from the Invocation genesis/recovery state plus Events
-  through RuntimeStore.
+## 3. Clarify Server and persistence ownership
 
-## Stage 5: Higher-Level Agent Features
+- Give embedded `AutoAgentServer` Router users an explicit lifecycle ownership
+  contract. A host-owned `AutoAgentApp` must not be closed by the Router, while
+  standalone Server mode must continue to own startup and shutdown.
+- Add an optional local persistence spool for prolonged database outages. The
+  current in-memory backlog and admission limit remain the safety boundary
+  until this exists.
+- Continue validating persistence queue size, serialization cost, retention,
+  and recovery latency under high-concurrency and large-output workloads.
 
-- Add `AgentNode` through `add_node` as compile-time syntax sugar over an
-  expandable child Workflow; do not add AgentRef.
-- Add tool loops, memory integration, reusable harnesses, and dynamic fan-out
-  without changing Scheduler or Runtime core semantics.
+## 4. Define Workflow-facing emissions
 
-## Stage 6: Optimizer
+- Design a Workflow-defined emission protocol for Agent or application UIs.
+  These messages may represent model text, Tool progress, approval prompts, or
+  domain events.
+- Keep Workflow-facing emissions separate from Runtime Events used for tracing,
+  replay, recovery, and debugging.
+- Allow typed, application-specific payloads without requiring the framework to
+  prescribe one Agent message model.
 
-- Start optimizer implementation only after Runtime Event and observability
-  contracts are stable.
-- Define optimizer hot-patch version promotion. Manual mutation after App
-  compilation is rejected in V1; future optimizer patches should create a new
-  workflow version/snapshot, trigger recompilation, and let the UI fetch the
-  updated workflow graph/version explicitly.
-- Produce reviewable Workflow patches instead of mutating active executions.
-- Evaluate patches against recorded runtime data before promotion.
+## 5. Add optimization workflows
 
-## Hosted Runtime (Deferred)
+- Feed Agent-friendly reports and selected production traces into offline
+  optimization tools.
+- Generate reviewable Workflow code patches instead of mutating an active
+  Workflow or Invocation.
+- Evaluate candidate patches with recorded inputs, rerun/compare, and Fork
+  before promotion.
+- Promote accepted changes as a new Workflow definition and revision.
 
-- Before multiple runner processes can own the same durable RuntimeStore, add
-  per-Invocation leases with fencing tokens and idempotent takeover. Local V1
-  intentionally has no distributed ownership protocol.
+## 6. Prepare for hosted execution
+
+- Separate project management, runner processes, remote persistence ingestion,
+  and tracing/query services while preserving the local App/Runtime contracts.
+- Add per-Invocation leases, fencing tokens, and idempotent takeover before
+  multiple runners can own the same durable RuntimeStore.
+- Add Workflow revision publishing, rollback, tenancy, authentication, Secret
+  management, quotas, and remote Artifact storage.
+- Reuse the local Skill, Compiler Diagnostics, reports, rerun/compare, and Fork
+  contracts instead of creating platform-only execution semantics.

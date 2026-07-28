@@ -155,17 +155,5 @@ Prefer a local OpenAI-compatible mock HTTP service. Point the CLI host at it
 through environment variables so the Workflow continues to reference the
 abstract `llm_call` Capability exactly as production does.
 
-A fake `llm_call` Operator is acceptable only in test-only host code that
-already owns App construction and Operator registration. Never register the
-fake Operator or create an App inside the Workflow module. When no stable
-test-host surface is available, use the mock HTTP Provider.
-
-Test at least:
-
-- valid Tool calls;
-- unknown Tool;
-- invalid argument schema and repair;
-- Tool execution exception and model recovery;
-- valid structured output;
-- invalid structured output and repair exhaustion;
-- `max_steps` termination.
+Read [testing.md](testing.md) for the fake-Operator boundary and complete AI
+test matrix.

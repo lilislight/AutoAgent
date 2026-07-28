@@ -13,8 +13,8 @@ python -c "from importlib.resources import files; root = files('autoagent').join
 The printed resource is the sample root used by every relative path below.
 Start with `README.md`, then read only the closest Workflow and its fixtures.
 
-If the installed package has no authoring examples, report its version and path
-as a package mismatch and install the intended package before continuing.
+If the installed package has no authoring examples, treat the package check as
+failed and repeat the package availability procedure.
 
 ## Conditional orchestration
 

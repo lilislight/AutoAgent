@@ -7,8 +7,9 @@ instead of archived in this file.
 
 Complete these items in order:
 
-1. Write the standard Authoring Skill against only the locked public API,
-   project manifest, normative examples, and CLI workflow.
+1. Forward-test the standard Authoring Skill with independent Workflow
+   requirements using only its references, the locked public API, normative
+   examples, and CLI output.
 2. Add the MVP2 Agent-friendly Invocation report and progressive Event queries
    only after the Authoring Skill and normative examples are validated.
 

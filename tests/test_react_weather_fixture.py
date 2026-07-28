@@ -15,7 +15,7 @@ from autoagent.ai import (
     OpenAICompatibleConfig,
 )
 from autoagent.ai.react import ConversationUpdate, ToolExecutionResult
-from examples.react_weather_agent import (
+from tests.fixtures.framework_examples.react_weather_agent import (
     CityProfile,
     WeatherAnswer,
     build_app,
@@ -26,7 +26,7 @@ from examples.react_weather_agent import (
 )
 
 
-class ReactWeatherExampleTests(unittest.TestCase):
+class ReactWeatherFixtureTests(unittest.TestCase):
     def test_mock_tools_return_deterministic_typed_data(self) -> None:
         city = get_city_profile(" Tokyo ")
         weather = get_current_weather("Tokyo", "fahrenheit")

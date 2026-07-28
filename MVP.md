@@ -464,5 +464,5 @@ MVP2.6  完成 Agent Debugging 验收
 MVP3    Hosted Platform，暂不实施
 ```
 
-当前下一步是编写 Authoring Skill。历史 Invocation 的 Agent-friendly Report、
-渐进式 Event 查询和 Fork 属于 MVP2。
+当前下一步是使用独立 Workflow 需求验收 Authoring Skill。历史 Invocation 的
+Agent-friendly Report、渐进式 Event 查询和 Fork 属于 MVP2。

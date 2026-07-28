@@ -1,7 +1,7 @@
 [project]
 name = "autoagent"
 version = "0.1.0"
-description = "Add your description here"
+description = "A code-first framework for durable, observable AI workflows"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -24,3 +24,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["autoagent*"]
+
+[tool.setuptools.package-data]
+"autoagent.core.server" = ["ui/index.html", "ui/assets/*"]

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from autoagent.core.runtime import DatabaseBackend, RuntimeStore
 from autoagent.core.server import AutoAgentServer
-from examples.incident_response_tracing_server import (
+from tests.fixtures.framework_examples.incident_response_tracing_server import (
     EscalationPacket,
     PublishedResolution,
     _new_incident_sample,
@@ -25,7 +25,7 @@ def build_test_app():
     return app, workflow
 
 
-class IncidentResponseExampleTests(unittest.TestCase):
+class IncidentResponseFixtureTests(unittest.TestCase):
     def test_demo_defaults_to_a_sqlite_runtime_store(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "demo.sqlite3"
@@ -65,7 +65,8 @@ class IncidentResponseExampleTests(unittest.TestCase):
         app, workflow = build_test_app()
 
         with patch(
-            "examples.incident_response_tracing_server.random.random",
+            "tests.fixtures.framework_examples."
+            "incident_response_tracing_server.random.random",
             return_value=0.99,
         ):
             invocation = app.invoke(
@@ -172,7 +173,8 @@ class IncidentResponseExampleTests(unittest.TestCase):
         app, workflow = build_test_app()
 
         with patch(
-            "examples.incident_response_tracing_server.random.random",
+            "tests.fixtures.framework_examples."
+            "incident_response_tracing_server.random.random",
             return_value=0.99,
         ):
             invocation = app.invoke(
@@ -195,7 +197,8 @@ class IncidentResponseExampleTests(unittest.TestCase):
         app, workflow = build_test_app()
 
         with patch(
-            "examples.incident_response_tracing_server.random.random",
+            "tests.fixtures.framework_examples."
+            "incident_response_tracing_server.random.random",
             side_effect=[0.0, 0.0],
         ):
             invocation = app.invoke(

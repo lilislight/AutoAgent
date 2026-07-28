@@ -99,7 +99,11 @@ class AutoAgentServer:
         self.execution_enabled = execution_enabled
         self.access_token = access_token
         self.secure_cookies = secure_cookies
-        default_ui = Path(__file__).resolve().parents[3] / "ui" / "dist"
+        packaged_ui = Path(__file__).resolve().parent / "ui"
+        repository_ui = Path(__file__).resolve().parents[3] / "ui" / "dist"
+        default_ui = (
+            packaged_ui if packaged_ui.is_dir() else repository_ui
+        )
         self.ui_directory = (
             Path(ui_directory)
             if ui_directory is not None

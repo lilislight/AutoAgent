@@ -934,7 +934,7 @@ def build_incident_response_app(
         )
     for model_type in _RUNTIME_MODELS:
         stable_type_id = (
-            "examples.incident_response_tracing_server:"
+            "tests.fixtures.framework_examples.incident_response_tracing_server:"
             f"{model_type.__qualname__}"
         )
         app.register_runtime_model(model_type, type_id=stable_type_id)

@@ -1,3 +1,5 @@
+"""Framework regression fixture for ReAct and LLM persistence behavior."""
+
 from __future__ import annotations
 
 import json

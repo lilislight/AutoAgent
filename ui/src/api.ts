@@ -8,6 +8,8 @@ import type {
   NodeExecutionView,
   RuntimeEvent,
   RuntimeEventPage,
+  UserEvent,
+  UserEventPage,
   RuntimeProjection,
   RuntimeStatus,
   ServerHealth,
@@ -315,6 +317,53 @@ export function subscribeToInvocation(
   };
 }
 
+export function getUserEvents(
+  invocationId: string,
+  afterSequence = 0,
+  limit = 1_000,
+): Promise<UserEventPage> {
+  return requestJson(
+    `${API}/invocations/${invocationId}/user-events?after_sequence=${afterSequence}&limit=${limit}`,
+  );
+}
+
+export async function getAllUserEvents(
+  invocationId: string,
+): Promise<UserEvent[]> {
+  const events: UserEvent[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = await getUserEvents(invocationId, cursor);
+    events.push(...page.items);
+    if (!page.has_later || page.items.length === 0) return events;
+    cursor = page.items.at(-1)!.sequence;
+  }
+}
+
+export function subscribeToUserEvents(
+  invocationId: string,
+  afterSequence: number,
+  onEvent: (event: UserEvent) => void,
+  onConnectionChange: (connected: boolean) => void,
+): () => void {
+  const source = new EventSource(
+    `${API}/invocations/${invocationId}/user-events/stream?after_sequence=${afterSequence}`,
+  );
+  source.addEventListener("user_event", ((message: MessageEvent<string>) => {
+    onEvent(JSON.parse(message.data) as UserEvent);
+  }) as EventListener);
+  source.addEventListener("stream_end", (() => {
+    source.close();
+    onConnectionChange(false);
+  }) as EventListener);
+  source.onopen = () => onConnectionChange(true);
+  source.onerror = () => onConnectionChange(false);
+  return () => {
+    source.close();
+    onConnectionChange(false);
+  };
+}
+
 function normalizeEvent(event: ServerRuntimeEvent): RuntimeEvent {
   const payload = event.payload ?? {};
   const nodeId =
@@ -394,6 +443,8 @@ function invocationDetail(
           ended_at_ms: call.occurred_at_ms,
           created_at_ms: call.occurred_at_ms,
           updated_at_ms: call.occurred_at_ms,
+          streaming: call.streaming,
+          stream_chunk_count: call.stream_chunk_count,
         })),
         resource_usage: execution.timing ?? {},
         started_at_ms: execution.started_at_ms ?? null,

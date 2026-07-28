@@ -21,6 +21,7 @@ from autoagent.core.workflow import (
     RetryPolicy,
     SystemCommand,
     TimeoutPolicy,
+    UserEventMapping,
     Workflow,
 )
 
@@ -57,6 +58,51 @@ def make_workflow(**fields) -> Workflow:
 
 
 class WorkflowCompilerTests(unittest.TestCase):
+    def test_user_event_mappings_are_compiled_and_change_definition_hash(
+        self,
+    ) -> None:
+        first = make_workflow(id="user_event_hash")
+        first.add_node(
+            task,
+            node_id="task",
+            user_event_mapping=UserEventMapping(
+                type="task_completed",
+                transform=lambda value: {"value": value},
+            ),
+        )
+        second = make_workflow(id="user_event_hash")
+        second.add_node(
+            task,
+            node_id="task",
+            user_event_mapping=UserEventMapping(
+                type="different_event",
+                transform=lambda value: {"value": value},
+            ),
+        )
+
+        first_result = WorkflowCompiler().compile(first)
+        second_result = WorkflowCompiler().compile(second)
+
+        self.assertTrue(first_result.ok, first_result.diagnostics)
+        self.assertTrue(second_result.ok, second_result.diagnostics)
+        assert first_result.workflow_ir is not None
+        assert second_result.workflow_ir is not None
+        self.assertEqual(
+            first_result.workflow_ir.nodes["task"].user_event_mapping.type,
+            "task_completed",
+        )
+        self.assertNotEqual(
+            first_result.workflow_ir.definition_hash,
+            second_result.workflow_ir.definition_hash,
+        )
+
+    def test_user_event_type_requires_lowercase_snake_case(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lowercase snake_case"):
+            UserEventMapping(
+                type="message.delta",
+                transform=lambda value: value,
+            )
+
     def compile_ok(self, workflow: Workflow) -> WorkflowIR:
         result = WorkflowCompiler().compile(workflow)
         diagnostics = [diagnostic.model_dump() for diagnostic in result.diagnostics]

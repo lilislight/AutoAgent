@@ -54,6 +54,9 @@ Workflow 代码只描述业务行为。宿主环境负责 App 生命周期、持
 - natural Loop、fan-in、动态 Map 和 Replication；
 - 类型化 Input Mapping、Output Binding、Condition、selector 和 aggregator；
 - Retry、Fallback、Timeout、Recovery、Resource 和 Failure Policy；
+- 具有单一类型化最终输出的同步/异步 `StreamingResult` 执行；
+- 通过 snake_case `UserEventMapping` 配置的独立进程内 UserEvent 流，
+  并为 ReAct 提供标准消息和 Tool 事件；
 - 进程内及跨进程 Wait/Resume；
 - 可复用子 Workflow。
 
@@ -61,6 +64,7 @@ Workflow 代码只描述业务行为。宿主环境负责 App 生命周期、持
 
 - Provider 无关的 `llm_call` Capability；
 - 适配到内置 `llm_call` Operator 的 Chat Completions Provider；
+- 由 NodeExecutor 归并 Provider 流且不持久化临时 chunk；
 - 从 Python 函数生成的类型化 Tool；
 - 结构化模型输出；
 - 支持 Tool 和 output 修复的有界 ReActWorkflow。

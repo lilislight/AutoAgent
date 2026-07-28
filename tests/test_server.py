@@ -16,7 +16,7 @@ from autoagent import (
     SystemCommand,
     Workflow,
 )
-from autoagent.core.runtime import RuntimeEvent, RuntimeStore
+from autoagent.core.runtime import RuntimeEvent, RuntimeStore, UserEventSpec
 from autoagent.core.server import AutoAgentServer
 from autoagent.core.server.trace import TraceProjectionReducer
 from autoagent.core.server.app import (
@@ -174,10 +174,85 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/v1/invocations/{invocation_id}/trace", paths)
         self.assertIn("/api/v1/invocations/{invocation_id}", paths)
         self.assertIn("/api/v1/invocations/{invocation_id}/stream", paths)
+        self.assertIn(
+            "/api/v1/invocations/{invocation_id}/user-events",
+            paths,
+        )
+        self.assertIn(
+            "/api/v1/invocations/{invocation_id}/user-events/stream",
+            paths,
+        )
         self.assertIn("/api/v1/runtime/status", paths)
         self.assertIn("/api/v1/runtime/stream", paths)
         self.assertIn("/api/v1/health/live", paths)
         self.assertIn("/api/v1/health/ready", paths)
+
+    async def test_user_event_page_is_independent_from_runtime_events(
+        self,
+    ) -> None:
+        submitted = await self.submit(
+            self.workflow.id,
+            InvocationSubmitRequest(
+                input={"wait_key": "approval"},
+                session_key="user-events",
+                event_mode="minimal",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+        invocation = self.app.runtime_store.invocations[
+            submitted.invocation_id
+        ]
+        execution = invocation.latest_node_execution("wait")
+        self.app.runtime_store.record_user_event(
+            invocation_id=invocation.id,
+            spec=UserEventSpec(
+                type="approval_requested",
+                data={"wait_key": "approval"},
+                node_id="wait",
+                node_execution_id=execution.id,
+            ),
+        )
+
+        page = await self.server.trace.user_event_page(
+            invocation.id,
+            after_sequence=0,
+            limit=200,
+        )
+
+        self.assertEqual(page["live_sequence"], 1)
+        self.assertFalse(page["has_later"])
+        self.assertEqual(page["items"][0]["type"], "approval_requested")
+        self.assertEqual(
+            page["items"][0]["data"],
+            {"wait_key": "approval"},
+        )
+        self.assertEqual(
+            self.app.runtime_store.runtime_events[invocation.id],
+            [],
+        )
+
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "")
+            == "stream_invocation_user_events"
+        )
+
+        class DisconnectingRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        response = await endpoint(
+            DisconnectingRequest(),
+            invocation.id,
+            0,
+            None,
+        )
+        first = await anext(response.body_iterator)
+        await response.body_iterator.aclose()
+
+        self.assertIn("event: user_event", first)
+        self.assertIn('"type":"approval_requested"', first)
 
     async def test_standalone_server_bounds_uvicorn_graceful_shutdown(
         self,
@@ -463,6 +538,8 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                     "operator_id": "fallback",
                     "reason": "fallback",
                     "state": "completed",
+                    "streaming": True,
+                    "stream_chunk_count": 7,
                 },
             ),
         )
@@ -522,6 +599,21 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(3, execution["operator_call_count"])
         self.assertEqual(1, execution["fallback_count"])
         self.assertEqual(1, execution["timeout_count"])
+        fallback = next(
+            call
+            for call in execution["operator_calls"]
+            if call["id"] == "fallback"
+        )
+        self.assertTrue(fallback["streaming"])
+        self.assertEqual(7, fallback["stream_chunk_count"])
+        self.assertEqual(
+            1,
+            projection["nodes"]["worker"]["streaming_call_count"],
+        )
+        self.assertEqual(
+            7,
+            projection["nodes"]["worker"]["stream_chunk_count"],
+        )
         self.assertEqual(8, projection["nodes"]["worker"]["parallel_call_count"])
         self.assertEqual(6, projection["through_sequence"])
 

@@ -10,6 +10,7 @@ from autoagent.ai.models.llm import (
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
 )
 from autoagent.ai.models.react import (
     PreparedLLMCall,
@@ -41,6 +42,7 @@ from autoagent.core.workflow import (
     RecoveryPolicy,
     ResourcePolicy,
     Workflow,
+    UserEventMapping,
 )
 
 
@@ -145,6 +147,65 @@ def react_workflow(
     def classify_response(response: LLMResponse) -> LLMResponse:
         return response
 
+    def text_delta(chunk: LLMStreamChunk) -> dict[str, Any] | None:
+        if chunk.type != "text_delta":
+            return None
+        return {"delta": chunk.text_delta}
+
+    def reasoning_delta(chunk: LLMStreamChunk) -> dict[str, Any] | None:
+        if chunk.type != "reasoning_delta":
+            return None
+        return {"delta": chunk.reasoning_delta}
+
+    def tool_call_delta(chunk: LLMStreamChunk) -> dict[str, Any] | None:
+        if chunk.type != "tool_call_delta":
+            return None
+        return {
+            "tool_call_index": chunk.tool_call_index,
+            "tool_call_id": chunk.tool_call_id,
+            "tool_name": chunk.tool_name,
+            "arguments_delta": chunk.tool_arguments_delta,
+        }
+
+    def completed_message(response: LLMResponse) -> dict[str, Any]:
+        return response.model_dump(mode="json")
+
+    def requested_tool_calls(batch: ToolCallBatch) -> dict[str, Any] | None:
+        if not batch.valid_calls:
+            return None
+        return {
+            "calls": [
+                {
+                    "tool_call_id": item.call.id,
+                    "tool_id": item.tool_id,
+                    "name": item.call.name,
+                    "arguments": item.arguments,
+                }
+                for item in batch.valid_calls
+            ]
+        }
+
+    def rejected_tool_calls(batch: ToolCallBatch) -> dict[str, Any] | None:
+        if not batch.invalid_calls:
+            return None
+        return {
+            "calls": [
+                {
+                    "tool_call_id": item.call.id,
+                    "name": item.call.name,
+                    "raw_arguments": item.call.raw_arguments,
+                    "error": item.error,
+                }
+                for item in batch.invalid_calls
+            ]
+        }
+
+    def tool_results(batch: ToolExecutionBatch) -> dict[str, Any]:
+        return batch.model_dump(mode="json")
+
+    def agent_output(value: Any) -> dict[str, Any]:
+        return {"output": value}
+
     def map_response(ctx: Any) -> dict[str, Any]:
         return {"response": ctx.incoming[0].value}
 
@@ -209,6 +270,22 @@ def react_workflow(
                 max_node_executions_per_invocation=max_steps,
             ),
         ),
+        metadata={"_autoagent_user_event_stream": "message"},
+        stream_user_event_mapping=(
+            UserEventMapping(type="message_delta", transform=text_delta),
+            UserEventMapping(
+                type="reasoning_delta",
+                transform=reasoning_delta,
+            ),
+            UserEventMapping(
+                type="tool_call_delta",
+                transform=tool_call_delta,
+            ),
+        ),
+        user_event_mapping=UserEventMapping(
+            type="message_completed",
+            transform=completed_message,
+        ),
     )
     workflow.add_node(
         _internal_operator(
@@ -226,6 +303,16 @@ def react_workflow(
         ),
         node_id="validate_tool_calls",
         input_mapping=map_tool_validation,
+        user_event_mapping=(
+            UserEventMapping(
+                type="tool_call_requested",
+                transform=requested_tool_calls,
+            ),
+            UserEventMapping(
+                type="tool_call_rejected",
+                transform=rejected_tool_calls,
+            ),
+        ),
     )
     workflow.add_node(
         _internal_operator(
@@ -261,6 +348,10 @@ def react_workflow(
         _internal_operator(id, "finish", semantic_version, output_validator.finish),
         node_id="finish",
         input_mapping=map_validation_result,
+        user_event_mapping=UserEventMapping(
+            type="agent_output",
+            transform=agent_output,
+        ),
     )
 
     workflow.add_edge("start", "prepare_conversation", edge_id="start_prepare")
@@ -340,6 +431,10 @@ def react_workflow(
                 version=semantic_version,
             ),
             node_id=node_id,
+            user_event_mapping=UserEventMapping(
+                type="tool_result",
+                transform=tool_results,
+            ),
         )
         workflow.add_edge(
             "validate_tool_calls",

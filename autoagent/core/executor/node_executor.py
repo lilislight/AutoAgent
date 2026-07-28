@@ -4,7 +4,7 @@ import asyncio
 from copy import deepcopy
 import inspect
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -26,7 +26,9 @@ from autoagent.core.operators import (
     OperatorRegistry,
     OperatorResolutionError,
     OperatorResolver,
+    StreamingResult,
 )
+from autoagent.core.operators.streaming import is_raw_stream_result
 from autoagent.core.runtime import (
     DirectOperatorExecution,
     InvocationExecutionMailbox,
@@ -40,12 +42,14 @@ from autoagent.core.runtime import (
     RuntimeErrorInfo,
     RuntimeEventMode,
     RuntimeConcurrencyController,
+    UserEventSpec,
 )
 from autoagent.core.runtime.context import HookContextSnapshot
 from autoagent.core.runtime.hooks import invoke_hook_async
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.workflow import BackoffPolicy, MapPolicy
 from autoagent.core.workflow.capability import SystemCommand, WAIT_SYSTEM_COMMAND_ID
+from autoagent.core.workflow.user_event import normalize_user_event_mappings
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,25 @@ class NodeExecutor:
                 )
                 continue
 
+            loop = asyncio.get_running_loop()
+
+            def publish_progress(
+                message: NodeExecutionProgress,
+                *,
+                target_loop: asyncio.AbstractEventLoop = loop,
+                target_mailbox: InvocationExecutionMailbox = mailbox,
+            ) -> None:
+                try:
+                    if asyncio.get_running_loop() is target_loop:
+                        target_mailbox.put_message(message)
+                        return
+                except RuntimeError:
+                    pass
+                target_loop.call_soon_threadsafe(
+                    target_mailbox.put_message,
+                    message,
+                )
+
             resolved_job = ResolvedNodeExecutionJob(
                 node_ir=job.node_ir,
                 node_execution=job.node_execution,
@@ -198,11 +221,10 @@ class NodeExecutor:
                 concurrency_controller=self.concurrency_controller,
                 thread_pool=self.thread_pool,
                 max_parallel_units=self.max_parallel_units,
-                publish_progress=(
-                    None
-                    if job.event_mode == "minimal"
-                    else mailbox.put_message
-                ),
+                # UserEvents are independent of RuntimeEvent mode. Runtime
+                # progress helpers still suppress trace-only messages in
+                # minimal mode.
+                publish_progress=publish_progress,
             )
             task = asyncio.create_task(_execute_job(resolved_job))
             mailbox.track(task, job.node_execution.id)
@@ -239,8 +261,11 @@ class NodeExecutor:
             self._task_result(task, node_execution_id),
         )
 
-    async def abandon(self, mailbox: InvocationExecutionMailbox) -> None:
-        await mailbox.abandon()
+    async def abandon(
+        self,
+        mailbox: InvocationExecutionMailbox,
+    ) -> list[NodeExecutionProgress | NodeExecutionResult]:
+        return await mailbox.abandon()
 
     def _task_result(
         self,
@@ -425,12 +450,44 @@ class _CallSequence:
 
 
 class _OperatorTimedOut(TimeoutError):
-    def __init__(self, message: str, *, execution_may_continue: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        execution_may_continue: bool,
+        stream_metrics: _StreamMetrics | None = None,
+    ) -> None:
         super().__init__(message)
         self.execution_may_continue = execution_may_continue
+        self.stream_metrics = stream_metrics
 
 
 class _OperatorOutputInvalid(TypeError):
+    pass
+
+
+class _UnsupportedStreamResult(TypeError):
+    pass
+
+
+@dataclass
+class _StreamMetrics:
+    chunk_count: int = 0
+    consumption_ns: int = 0
+    reduction_ns: int = 0
+
+
+class _StreamExecutionFailed(RuntimeError):
+    def __init__(self, message: str, metrics: _StreamMetrics) -> None:
+        super().__init__(message)
+        self.metrics = metrics
+
+
+class _StreamConsumptionFailed(_StreamExecutionFailed):
+    pass
+
+
+class _StreamReductionFailed(_StreamExecutionFailed):
     pass
 
 
@@ -438,11 +495,26 @@ class _NodeOutputInvalid(TypeError):
     pass
 
 
+@dataclass(frozen=True)
+class _OperatorInvocationResult:
+    output: Any
+    execution_ns: int
+    thread_pool_queue_ns: int
+    streaming: bool = False
+    stream_chunk_count: int = 0
+    stream_consumption_ns: int = 0
+    stream_reduction_ns: int = 0
+
+
 def _publish_phase(
     job: ResolvedNodeExecutionJob,
     phase: NodePhaseResult | None,
 ) -> None:
-    if phase is None or job.publish_progress is None:
+    if (
+        phase is None
+        or job.event_mode == "minimal"
+        or job.publish_progress is None
+    ):
         return
     job.publish_progress(
         NodeExecutionProgress(
@@ -853,17 +925,31 @@ async def _execute_unit(
 
             started_ns = perf_counter_ns()
             try:
-                (
-                    output,
-                    execution_ns,
-                    thread_pool_queue_ns,
-                ) = await _invoke_operator(job, operator, unit_input)
+                invocation_result = await _invoke_operator(
+                    job,
+                    operator,
+                    unit_input,
+                    operator_call_id=attempt.id,
+                )
+                output = invocation_result.output
                 _validate_operator_output(job, operator, output)
                 duration_ns = max(0, perf_counter_ns() - started_ns)
                 attempt.resource_usage = ResourceUsage(
                     duration_ns=duration_ns,
-                    execution_ns=execution_ns,
-                    thread_pool_queue_ns=thread_pool_queue_ns,
+                    execution_ns=invocation_result.execution_ns,
+                    thread_pool_queue_ns=(
+                        invocation_result.thread_pool_queue_ns
+                    ),
+                    stream_consumption_ns=(
+                        invocation_result.stream_consumption_ns
+                    ),
+                    stream_reduction_ns=(
+                        invocation_result.stream_reduction_ns
+                    ),
+                )
+                attempt.streaming = invocation_result.streaming
+                attempt.stream_chunk_count = (
+                    invocation_result.stream_chunk_count
                 )
                 attempt.mark_completed(output)
                 attempts.append(attempt)
@@ -883,9 +969,34 @@ async def _execute_unit(
             except Exception as exc:
                 duration_ns = max(0, perf_counter_ns() - started_ns)
                 error = _operator_error(job, operator, exc)
+                stream_metrics = (
+                    exc.metrics
+                    if isinstance(exc, _StreamExecutionFailed)
+                    else (
+                        exc.stream_metrics
+                        if isinstance(exc, _OperatorTimedOut)
+                        else None
+                    )
+                )
                 attempt.resource_usage = ResourceUsage(
                     duration_ns=duration_ns,
                     execution_ns=duration_ns,
+                    stream_consumption_ns=(
+                        stream_metrics.consumption_ns
+                        if stream_metrics is not None
+                        else 0
+                    ),
+                    stream_reduction_ns=(
+                        stream_metrics.reduction_ns
+                        if stream_metrics is not None
+                        else 0
+                    ),
+                )
+                attempt.streaming = stream_metrics is not None
+                attempt.stream_chunk_count = (
+                    stream_metrics.chunk_count
+                    if stream_metrics is not None
+                    else 0
                 )
                 attempt.mark_failed(error)
                 attempts.append(attempt)
@@ -918,7 +1029,9 @@ async def _invoke_operator(
     job: ResolvedNodeExecutionJob,
     operator: Operator,
     input: Any,
-) -> tuple[Any, int, int]:
+    *,
+    operator_call_id: UUID,
+) -> _OperatorInvocationResult:
     """Invoke one Operator without blocking the event loop.
 
     Native coroutine handlers stay on the current loop. Synchronous handlers
@@ -929,36 +1042,81 @@ async def _invoke_operator(
 
     timeout = job.node_ir.policy.timeout if job.node_ir.policy is not None else None
 
-    async def invoke() -> tuple[Any, int, int]:
+    execution_may_continue = not operator.is_async
+    stream_metrics: _StreamMetrics | None = None
+
+    async def invoke() -> _OperatorInvocationResult:
+        nonlocal execution_may_continue, stream_metrics
         if operator.is_async:
             started_ns = perf_counter_ns()
             output = await operator.ainvoke(input)
-            return output, max(0, perf_counter_ns() - started_ns), 0
+            execution_ns = max(0, perf_counter_ns() - started_ns)
+            thread_pool_queue_ns = 0
+        else:
+            if job.thread_pool is None:  # pragma: no cover
+                raise RuntimeError("NodeExecutor thread pool is unavailable.")
+            submitted_ns = perf_counter_ns()
 
-        if job.thread_pool is None:  # pragma: no cover - defensive construction guard.
-            raise RuntimeError("NodeExecutor thread pool is unavailable.")
-        submitted_ns = perf_counter_ns()
+            def invoke_sync() -> tuple[Any, int, int]:
+                started_ns = perf_counter_ns()
+                output = operator.invoke(input)
+                ended_ns = perf_counter_ns()
+                return output, started_ns, ended_ns
 
-        def invoke_sync() -> tuple[Any, int, int]:
-            started_ns = perf_counter_ns()
-            output = operator.invoke(input)
-            ended_ns = perf_counter_ns()
-            return output, started_ns, ended_ns
-
-        future = job.thread_pool.submit(invoke_sync)
-        try:
-            output, worker_started_ns, worker_ended_ns = await asyncio.wrap_future(
-                future
+            future = job.thread_pool.submit(invoke_sync)
+            try:
+                output, worker_started_ns, worker_ended_ns = (
+                    await asyncio.wrap_future(future)
+                )
+            except asyncio.CancelledError:
+                future.cancel()
+                raise
+            execution_ns = max(0, worker_ended_ns - worker_started_ns)
+            thread_pool_queue_ns = max(
+                0,
+                worker_started_ns - submitted_ns,
             )
-        except asyncio.CancelledError:
-            future.cancel()
-            raise
+
         if inspect.isawaitable(output):
+            awaited_started_ns = perf_counter_ns()
             output = await output
-        return (
-            output,
-            max(0, worker_ended_ns - worker_started_ns),
-            max(0, worker_started_ns - submitted_ns),
+            execution_ns += max(0, perf_counter_ns() - awaited_started_ns)
+
+        if isinstance(output, StreamingResult):
+            execution_may_continue = not hasattr(output.source, "__aiter__")
+            stream_metrics = _StreamMetrics()
+            streamed = await _consume_streaming_result(
+                job,
+                output,
+                stream_metrics,
+                operator_call_id=operator_call_id,
+            )
+            return _OperatorInvocationResult(
+                output=streamed.output,
+                execution_ns=(
+                    execution_ns
+                    + streamed.stream_consumption_ns
+                    + streamed.stream_reduction_ns
+                ),
+                thread_pool_queue_ns=(
+                    thread_pool_queue_ns + streamed.thread_pool_queue_ns
+                ),
+                streaming=True,
+                stream_chunk_count=streamed.stream_chunk_count,
+                stream_consumption_ns=streamed.stream_consumption_ns,
+                stream_reduction_ns=streamed.stream_reduction_ns,
+            )
+        if is_raw_stream_result(output):
+            await _close_stream_source(output, suppress_errors=True)
+            raise _UnsupportedStreamResult(
+                "Operator returned a raw stream. AutoAgent cannot determine "
+                "the final Operator output; wrap the stream with "
+                "streaming_result(source, reducer=...)."
+            )
+        return _OperatorInvocationResult(
+            output=output,
+            execution_ns=execution_ns,
+            thread_pool_queue_ns=thread_pool_queue_ns,
         )
 
     try:
@@ -971,8 +1129,331 @@ async def _invoke_operator(
     except TimeoutError as exc:
         raise _OperatorTimedOut(
             "Operator attempt exceeded TimeoutPolicy.",
-            execution_may_continue=not operator.is_async,
+            execution_may_continue=execution_may_continue,
+            stream_metrics=stream_metrics,
         ) from exc
+
+
+async def _consume_streaming_result(
+    job: ResolvedNodeExecutionJob,
+    result: StreamingResult[Any, Any],
+    metrics: _StreamMetrics,
+    *,
+    operator_call_id: UUID,
+) -> _OperatorInvocationResult:
+    source = result.source
+    try:
+        if hasattr(source, "__aiter__"):
+            return await _consume_async_stream(
+                source,
+                result.reducer,
+                metrics,
+                job=job,
+                operator_call_id=operator_call_id,
+            )
+        if job.thread_pool is None:  # pragma: no cover
+            raise RuntimeError("NodeExecutor thread pool is unavailable.")
+
+        submitted_ns = perf_counter_ns()
+        future = job.thread_pool.submit(
+            _consume_sync_stream,
+            source,
+            result.reducer,
+            metrics,
+            job,
+            operator_call_id,
+        )
+        try:
+            streamed, worker_started_ns = await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        return _OperatorInvocationResult(
+            output=streamed.output,
+            execution_ns=streamed.execution_ns,
+            thread_pool_queue_ns=max(0, worker_started_ns - submitted_ns),
+            streaming=True,
+            stream_chunk_count=streamed.stream_chunk_count,
+            stream_consumption_ns=streamed.stream_consumption_ns,
+            stream_reduction_ns=streamed.stream_reduction_ns,
+        )
+    except BaseException as exc:
+        _publish_stream_aborted_user_event(
+            job,
+            error=exc,
+            operator_call_id=operator_call_id,
+        )
+        raise
+
+
+async def _consume_async_stream(
+    source: Any,
+    reducer: Any,
+    metrics: _StreamMetrics,
+    *,
+    job: ResolvedNodeExecutionJob,
+    operator_call_id: UUID,
+) -> _OperatorInvocationResult:
+    iterator: AsyncIterator[Any] | None = None
+    try:
+        try:
+            iterator = source.__aiter__()
+        except Exception as exc:
+            raise _StreamConsumptionFailed(str(exc), metrics) from exc
+        while True:
+            started_ns = perf_counter_ns()
+            try:
+                chunk = await iterator.__anext__()
+            except StopAsyncIteration:
+                metrics.consumption_ns += max(
+                    0,
+                    perf_counter_ns() - started_ns,
+                )
+                break
+            except Exception as exc:
+                raise _StreamConsumptionFailed(str(exc), metrics) from exc
+            metrics.consumption_ns += max(
+                0,
+                perf_counter_ns() - started_ns,
+            )
+            reduction_started_ns = perf_counter_ns()
+            try:
+                reduced = reducer.add(chunk)
+                if inspect.isawaitable(reduced):
+                    close = getattr(reduced, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("StreamReducer.add() must be synchronous.")
+            except Exception as exc:
+                raise _StreamReductionFailed(str(exc), metrics) from exc
+            metrics.reduction_ns += max(
+                0,
+                perf_counter_ns() - reduction_started_ns,
+            )
+            metrics.chunk_count += 1
+            _publish_stream_user_events(
+                job,
+                chunk,
+                operator_call_id=operator_call_id,
+            )
+
+        reduction_started_ns = perf_counter_ns()
+        try:
+            output = reducer.finish()
+            if inspect.isawaitable(output):
+                close = getattr(output, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError("StreamReducer.finish() must be synchronous.")
+        except Exception as exc:
+            raise _StreamReductionFailed(str(exc), metrics) from exc
+        metrics.reduction_ns += max(
+            0,
+            perf_counter_ns() - reduction_started_ns,
+        )
+        return _OperatorInvocationResult(
+            output=output,
+            execution_ns=metrics.consumption_ns + metrics.reduction_ns,
+            thread_pool_queue_ns=0,
+            streaming=True,
+            stream_chunk_count=metrics.chunk_count,
+            stream_consumption_ns=metrics.consumption_ns,
+            stream_reduction_ns=metrics.reduction_ns,
+        )
+    except BaseException:
+        if iterator is not None:
+            await _close_stream_source(iterator, suppress_errors=True)
+        raise
+
+
+def _consume_sync_stream(
+    source: Any,
+    reducer: Any,
+    metrics: _StreamMetrics,
+    job: ResolvedNodeExecutionJob,
+    operator_call_id: UUID,
+) -> tuple[_OperatorInvocationResult, int]:
+    worker_started_ns = perf_counter_ns()
+    iterator: Iterator[Any] | None = None
+    try:
+        try:
+            iterator = iter(source)
+        except Exception as exc:
+            raise _StreamConsumptionFailed(str(exc), metrics) from exc
+        while True:
+            started_ns = perf_counter_ns()
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                metrics.consumption_ns += max(
+                    0,
+                    perf_counter_ns() - started_ns,
+                )
+                break
+            except Exception as exc:
+                raise _StreamConsumptionFailed(str(exc), metrics) from exc
+            metrics.consumption_ns += max(
+                0,
+                perf_counter_ns() - started_ns,
+            )
+            reduction_started_ns = perf_counter_ns()
+            try:
+                reduced = reducer.add(chunk)
+                if inspect.isawaitable(reduced):
+                    close = getattr(reduced, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("StreamReducer.add() must be synchronous.")
+            except Exception as exc:
+                raise _StreamReductionFailed(str(exc), metrics) from exc
+            metrics.reduction_ns += max(
+                0,
+                perf_counter_ns() - reduction_started_ns,
+            )
+            metrics.chunk_count += 1
+            _publish_stream_user_events(
+                job,
+                chunk,
+                operator_call_id=operator_call_id,
+            )
+
+        reduction_started_ns = perf_counter_ns()
+        try:
+            output = reducer.finish()
+            if inspect.isawaitable(output):
+                close = getattr(output, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError("StreamReducer.finish() must be synchronous.")
+        except Exception as exc:
+            raise _StreamReductionFailed(str(exc), metrics) from exc
+        metrics.reduction_ns += max(
+            0,
+            perf_counter_ns() - reduction_started_ns,
+        )
+        return (
+            _OperatorInvocationResult(
+                output=output,
+                execution_ns=(
+                    metrics.consumption_ns + metrics.reduction_ns
+                ),
+                thread_pool_queue_ns=0,
+                streaming=True,
+                stream_chunk_count=metrics.chunk_count,
+                stream_consumption_ns=metrics.consumption_ns,
+                stream_reduction_ns=metrics.reduction_ns,
+            ),
+            worker_started_ns,
+        )
+    except BaseException:
+        if iterator is not None:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        raise
+
+
+async def _close_stream_source(
+    source: Any,
+    *,
+    suppress_errors: bool = False,
+) -> None:
+    aclose = getattr(source, "aclose", None)
+    close = getattr(source, "close", None)
+    try:
+        if callable(aclose):
+            await aclose()
+            return
+        if callable(close):
+            close()
+    except Exception:
+        if not suppress_errors:
+            raise
+
+
+def _publish_stream_user_events(
+    job: ResolvedNodeExecutionJob,
+    chunk: Any,
+    *,
+    operator_call_id: UUID,
+) -> None:
+    mappings = normalize_user_event_mappings(
+        job.node_ir.stream_user_event_mapping
+    )
+    if not mappings or job.publish_progress is None:
+        return
+    for mapping in mappings:
+        try:
+            data = mapping.transform(deepcopy(chunk))
+            if inspect.isawaitable(data):
+                close = getattr(data, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError(
+                    "UserEventMapping.transform() must be synchronous."
+                )
+            if data is None:
+                continue
+            spec = UserEventSpec(
+                type=mapping.type,
+                data=deepcopy(data),
+                node_id=job.node_ir.id,
+                node_execution_id=job.node_execution.id,
+                operator_call_id=operator_call_id,
+            )
+        except Exception as exc:
+            spec = UserEventSpec(
+                type="user_event_mapping_failed",
+                data={
+                    "mapping_type": mapping.type,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "source": "stream",
+                },
+                node_id=job.node_ir.id,
+                node_execution_id=job.node_execution.id,
+                operator_call_id=operator_call_id,
+            )
+        job.publish_progress(
+            NodeExecutionProgress(
+                node_execution_id=job.node_execution.id,
+                kind="user_event",
+                user_event_spec=spec,
+            )
+        )
+
+
+def _publish_stream_aborted_user_event(
+    job: ResolvedNodeExecutionJob,
+    *,
+    error: BaseException,
+    operator_call_id: UUID,
+) -> None:
+    if (
+        job.publish_progress is None
+        or job.node_ir.metadata.get("_autoagent_user_event_stream") != "message"
+    ):
+        return
+    visible_error = error.__cause__ or error
+    job.publish_progress(
+        NodeExecutionProgress(
+            node_execution_id=job.node_execution.id,
+            kind="user_event",
+            user_event_spec=UserEventSpec(
+                type="message_aborted",
+                data={
+                    "error_type": type(visible_error).__name__,
+                    "message": str(error),
+                },
+                node_id=job.node_ir.id,
+                node_execution_id=job.node_execution.id,
+                operator_call_id=operator_call_id,
+            ),
+        )
+    )
 
 
 async def _aggregate_unit_results(
@@ -1004,11 +1485,21 @@ async def _aggregate_unit_results(
         item.retry_backoff_ns
         for item in unit_results
     )
+    stream_consumption_ns = sum(
+        attempt.resource_usage.stream_consumption_ns
+        for attempt in attempts
+    )
+    stream_reduction_ns = sum(
+        attempt.resource_usage.stream_reduction_ns
+        for attempt in attempts
+    )
     resource_usage = ResourceUsage(
         duration_ns=operator_elapsed_ns,
         execution_ns=execution_ns,
         thread_pool_queue_ns=thread_pool_queue_ns,
         retry_backoff_ns=retry_backoff_ns,
+        stream_consumption_ns=stream_consumption_ns,
+        stream_reduction_ns=stream_reduction_ns,
     )
     duration_ns = sum(
         attempt.resource_usage.duration_ns
@@ -1282,6 +1773,20 @@ def _parallel_execution(
         min_duration_ns=min(durations) if durations else None,
         max_duration_ns=max(durations) if durations else None,
         peak_parallelism=peak_parallelism,
+        streaming_call_count=sum(
+            1 for attempt in attempts if attempt.streaming
+        ),
+        stream_chunk_count=sum(
+            attempt.stream_chunk_count for attempt in attempts
+        ),
+        stream_consumption_ns=sum(
+            attempt.resource_usage.stream_consumption_ns
+            for attempt in attempts
+        ),
+        stream_reduction_ns=sum(
+            attempt.resource_usage.stream_reduction_ns
+            for attempt in attempts
+        ),
         failure_samples=tuple(failures),
     )
     started_at_ms = min(
@@ -1360,6 +1865,33 @@ def _operator_error(
     if isinstance(error, _OperatorOutputInvalid):
         return RuntimeErrorInfo(
             code="OPERATOR_OUTPUT_INVALID",
+            message=str(error),
+            detail={
+                "node_id": job.node_ir.id,
+                "operator_id": operator.id,
+            },
+        )
+    if isinstance(error, _UnsupportedStreamResult):
+        return RuntimeErrorInfo(
+            code="UNSUPPORTED_STREAM_RESULT",
+            message=str(error),
+            detail={
+                "node_id": job.node_ir.id,
+                "operator_id": operator.id,
+            },
+        )
+    if isinstance(error, _StreamConsumptionFailed):
+        return RuntimeErrorInfo(
+            code="STREAM_CONSUMPTION_FAILED",
+            message=str(error),
+            detail={
+                "node_id": job.node_ir.id,
+                "operator_id": operator.id,
+            },
+        )
+    if isinstance(error, _StreamReductionFailed):
+        return RuntimeErrorInfo(
+            code="STREAM_REDUCTION_FAILED",
             message=str(error),
             detail={
                 "node_id": job.node_ir.id,

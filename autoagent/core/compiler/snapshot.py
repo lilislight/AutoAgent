@@ -108,6 +108,12 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
                 "output_contract": node.output_contract.describe(),
                 "input_plan": _hook_definition(node.input_plan),
                 "output_binding": _hook_definition(node.output_binding),
+                "stream_user_event_mapping": _canonicalize(
+                    node.stream_user_event_mapping
+                ),
+                "user_event_mapping": _canonicalize(
+                    node.user_event_mapping
+                ),
                 "policy": _canonicalize(node.policy),
                 "entry": node.entry,
                 "exit": node.exit,

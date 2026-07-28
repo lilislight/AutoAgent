@@ -10,7 +10,7 @@ from uuid import UUID
 
 from autoagent.core.app import AutoAgentApp
 from autoagent.core.compiler import WorkflowVersionSnapshot
-from autoagent.core.runtime import Invocation, RuntimeEvent, Session
+from autoagent.core.runtime import Invocation, RuntimeEvent, Session, UserEvent
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ def _node_operator_summary(
             "fallback_count": 0,
             "timeout_count": 0,
             "parallel_call_count": 0,
+            "streaming_call_count": 0,
+            "stream_chunk_count": 0,
             "latest_operator_kind": None,
         }
     calls = execution.get("operator_calls", ())
@@ -46,6 +48,22 @@ def _node_operator_summary(
         int((call.get("summary") or {}).get("call_count", 0))
         for call in calls
         if call.get("kind") in {"map", "replication"}
+    )
+    streaming_call_count = sum(
+        (
+            int((call.get("summary") or {}).get("streaming_call_count", 0))
+            if call.get("kind") in {"map", "replication"}
+            else int(bool(call.get("streaming", False)))
+        )
+        for call in calls
+    )
+    stream_chunk_count = sum(
+        (
+            int((call.get("summary") or {}).get("stream_chunk_count", 0))
+            if call.get("kind") in {"map", "replication"}
+            else int(call.get("stream_chunk_count", 0))
+        )
+        for call in calls
     )
     return {
         "operator_call_count": int(
@@ -58,6 +76,8 @@ def _node_operator_summary(
         "fallback_count": int(execution.get("fallback_count", 0)),
         "timeout_count": int(execution.get("timeout_count", 0)),
         "parallel_call_count": parallel_call_count,
+        "streaming_call_count": streaming_call_count,
+        "stream_chunk_count": stream_chunk_count,
         "latest_operator_kind": (
             latest.get("kind") if latest is not None else None
         ),
@@ -67,7 +87,7 @@ def _node_operator_summary(
 class TraceProjectionReducer:
     """Pure graph/read-model reducer shared semantically with the UI."""
 
-    schema_version = 3
+    schema_version = 4
 
     @classmethod
     def initial(cls, invocation_id: UUID | str) -> dict[str, Any]:
@@ -276,6 +296,10 @@ class TraceProjectionReducer:
                         "state": state,
                         "error": error,
                         "summary": summary,
+                        "streaming": bool(payload.get("streaming", False)),
+                        "stream_chunk_count": int(
+                            payload.get("stream_chunk_count", 0)
+                        ),
                         "occurred_at_ms": event.occurred_at_ms,
                         "elapsed_ns": event.elapsed_ns,
                         "timing": dict(event.timing),
@@ -630,6 +654,28 @@ class TraceService:
             )
         return self.event_view(events[0], include_values=True)
 
+    async def user_event_page(
+        self,
+        invocation_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        events = self.store.list_user_events(
+            invocation_id=invocation_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        live_sequence = self.store.latest_user_event_sequence(invocation_id)
+        return {
+            "items": [self.user_event_view(event) for event in events],
+            "last_sequence": events[-1].sequence if events else None,
+            "has_later": (
+                bool(events) and events[-1].sequence < live_sequence
+            ),
+            "live_sequence": live_sequence,
+        }
+
     async def invocation_detail(self, invocation_id: UUID) -> dict[str, Any]:
         record = await self._invocation_detail(invocation_id)
         record.pop("session", None)
@@ -767,6 +813,24 @@ class TraceService:
             ),
         }
 
+    def user_event_view(self, event: UserEvent) -> dict[str, Any]:
+        return {
+            "id": str(event.id),
+            "invocation_id": str(event.invocation_id),
+            "sequence": event.sequence,
+            "schema_version": event.schema_version,
+            "type": event.type,
+            "data": deepcopy(event.data),
+            "node_id": event.node_id,
+            "node_execution_id": str(event.node_execution_id),
+            "operator_call_id": (
+                str(event.operator_call_id)
+                if event.operator_call_id is not None
+                else None
+            ),
+            "occurred_at_ms": event.occurred_at_ms,
+        }
+
     def _enrich_latest_projection_from_memory(
         self,
         projection: dict[str, Any],
@@ -801,6 +865,11 @@ class TraceService:
                 call["reason"] = runtime_call.get("reason")
                 call["error"] = runtime_call.get("error")
                 call["summary"] = runtime_call.get("summary")
+                call["streaming"] = runtime_call.get("streaming", False)
+                call["stream_chunk_count"] = runtime_call.get(
+                    "stream_chunk_count",
+                    0,
+                )
             calls = projected.get("operator_calls", ())
             projected["retry_count"] = sum(
                 1 for call in calls if call.get("reason") == "retry"
@@ -910,6 +979,9 @@ class TraceService:
             "execution_mode": invocation.execution_mode,
             "event_mode": invocation.event_mode,
             "live_sequence": invocation.event_sequence,
+            "live_user_event_sequence": (
+                self.store.latest_user_event_sequence(invocation.id)
+            ),
             "durable_sequence": self.store.durable_sequence(invocation.id),
             "persistence_status": self.store.persistence_status(invocation.id),
             "created_at_ms": invocation.created_at_ms,

@@ -88,6 +88,7 @@ from autoagent.core.runtime.serialization import (
     RuntimeSerializer,
 )
 from autoagent.core.runtime.time import TimestampMs, utc_timestamp_ms
+from autoagent.core.runtime.user_event import UserEvent, UserEventSpec
 
 __all__ = [
     "ArtifactRef",
@@ -160,6 +161,8 @@ __all__ = [
     "TimestampMs",
     "WaitingExecution",
     "utc_timestamp_ms",
+    "UserEvent",
+    "UserEventSpec",
     "capture_execution_state",
     "build_state_operations",
     "apply_state_operations",

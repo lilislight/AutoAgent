@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import inspect
+import types
 import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import ConfigDict, TypeAdapter, create_model
+
+from autoagent.core.operators.streaming import StreamingResult
 
 
 class OperatorContractWarning(UserWarning):
@@ -231,7 +234,9 @@ def callable_contract(
             )
         )
 
-    output_annotation = signature.return_annotation
+    output_annotation = _effective_output_annotation(
+        signature.return_annotation
+    )
     if _is_unknown(output_annotation):
         output_annotation = Any
         issues.append(
@@ -267,6 +272,34 @@ def ensure_callable_contract(handler: Any) -> OperatorContract:
         if issue.severity == "warning":
             warnings.warn(issue.message, OperatorContractWarning, stacklevel=3)
     return contract
+
+
+def _effective_output_annotation(annotation: Any) -> Any:
+    """Resolve a StreamingResult annotation to its final business output.
+
+    ``Output | StreamingResult[Chunk, Output]`` is intentionally equivalent to
+    ``Output`` so one Operator can select invoke or stream mode at runtime
+    without changing the Capability contract.
+    """
+
+    origin = get_origin(annotation)
+    if origin is StreamingResult:
+        arguments = get_args(annotation)
+        return arguments[1] if len(arguments) == 2 else Any
+    if origin not in {Union, types.UnionType}:
+        return annotation
+
+    resolved = tuple(
+        _effective_output_annotation(value)
+        for value in get_args(annotation)
+    )
+    unique: list[Any] = []
+    for value in resolved:
+        if value not in unique:
+            unique.append(value)
+    if len(unique) == 1:
+        return unique[0]
+    return Union[tuple(unique)]
 
 
 def value_contract(annotation: Any) -> SchemaContract:

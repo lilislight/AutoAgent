@@ -12,6 +12,7 @@ from autoagent.core.workflow.capability import CapabilityRef, OperatorRef, Syste
 from autoagent.core.workflow.mapping import InputMapping, OutputBinding
 from autoagent.core.workflow.node import Node
 from autoagent.core.workflow.policy import EdgePolicy, WorkflowPolicy
+from autoagent.core.workflow.user_event import UserEventMappings
 
 if TYPE_CHECKING:
     from autoagent.core.compiler import WorkflowCompiler
@@ -109,6 +110,8 @@ class Workflow(BaseModel):
         description: str | None = None,
         input_mapping: InputMapping | None = None,
         output_binding: OutputBinding | None = None,
+        stream_user_event_mapping: UserEventMappings = None,
+        user_event_mapping: UserEventMappings = None,
         entry: bool | None = None,
         policy: Any | None = None,
         metadata: dict[str, Any] | None = None,
@@ -131,6 +134,8 @@ class Workflow(BaseModel):
                     description,
                     input_mapping,
                     output_binding,
+                    stream_user_event_mapping,
+                    user_event_mapping,
                     entry,
                     policy,
                     metadata,
@@ -155,6 +160,8 @@ class Workflow(BaseModel):
             description=description,
             input_mapping=input_mapping,
             output_binding=output_binding,
+            stream_user_event_mapping=stream_user_event_mapping,
+            user_event_mapping=user_event_mapping,
             entry=entry,
             policy=policy,
             metadata=metadata or {},

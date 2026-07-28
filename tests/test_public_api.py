@@ -27,10 +27,14 @@ EXPECTED_ROOT_AUTHORING_API = {
     "ResourcePolicy",
     "RetryPolicy",
     "SystemCommand",
+    "StreamReducer",
+    "StreamingResult",
     "TimeoutPolicy",
+    "UserEventMapping",
     "Workflow",
     "WorkflowPolicy",
     "workflow_hook",
+    "streaming_result",
 }
 
 

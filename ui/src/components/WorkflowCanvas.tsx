@@ -584,6 +584,11 @@ function nodeOperatorSummary(
   if (node.parallel_call_count) {
     values.push(`${node.latest_operator_kind ?? "parallel"} ×${node.parallel_call_count}`);
   }
+  if (node.streaming_call_count) {
+    values.push(
+      `stream ${node.streaming_call_count} · chunks ${node.stream_chunk_count ?? 0}`,
+    );
+  }
   if (node.retry_count) values.push(`retry ${node.retry_count}`);
   if (node.fallback_count) values.push(`fallback ${node.fallback_count}`);
   if (node.timeout_count) values.push(`timeout ${node.timeout_count}`);

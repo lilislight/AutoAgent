@@ -257,6 +257,10 @@ def _expand_child_node(
         unsupported_fields.append("input_mapping")
     if source_node.output_binding is not None:
         unsupported_fields.append("output_binding")
+    if source_node.stream_user_event_mapping is not None:
+        unsupported_fields.append("stream_user_event_mapping")
+    if source_node.user_event_mapping is not None:
+        unsupported_fields.append("user_event_mapping")
     if source_node.policy is not None:
         unsupported_fields.append("policy")
     if unsupported_fields:
@@ -266,7 +270,8 @@ def _expand_child_node(
                 severity="error",
                 message=(
                     "A child Workflow placeholder cannot define input_mapping, "
-                    "output_binding, or NodePolicy in V1; define behavior on the "
+                    "output_binding, UserEvent mapping, or NodePolicy in V1; "
+                    "define behavior on the "
                     "child boundary nodes."
                 ),
                 subject=subject,

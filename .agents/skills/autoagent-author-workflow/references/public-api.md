@@ -9,6 +9,7 @@ Workflow authors may use, not how to design a graph or select a policy.
 - `autoagent` exports
 - `autoagent.ai` exports
 - Direct callable contract
+- Streaming callable contract
 - Durable values
 - Versioned hooks
 
@@ -78,6 +79,20 @@ Read [hook-contracts.md](hook-contracts.md) before implementing these functions.
 
 Read [policies.md](policies.md) for semantics and valid combinations.
 
+### Streaming Operator results
+
+- `StreamingResult`
+- `StreamReducer`
+- `streaming_result`
+
+These names are required only when a project-owned Operator returns a live
+sync or async stream. Ordinary Operators continue to return their normal typed
+business value.
+
+### User-facing events
+
+- `UserEventMapping`
+
 ## `autoagent.ai` exports
 
 ### LLM protocol
@@ -143,6 +158,60 @@ Avoid:
 - `Any` at durable or external boundaries without a concrete need;
 - capturing live clients, locks, generators, or other non-serializable objects
   in Runtime values.
+
+## Streaming callable contract
+
+A raw Generator, AsyncGenerator, Iterator, or AsyncIterator is not a valid
+Operator output because it does not define the final value passed to Output
+Binding and downstream Nodes. Wrap an intentional stream explicitly:
+
+```python
+from autoagent import StreamReducer, StreamingResult, streaming_result
+
+class TextReducer:
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+
+    def add(self, chunk: str) -> None:
+        self.parts.append(chunk)
+
+    def finish(self) -> str:
+        return "".join(self.parts)
+
+def stream_text() -> StreamingResult[str, str]:
+    return streaming_result(generate_text(), reducer=TextReducer())
+```
+
+NodeExecutor consumes the source under normal Timeout, Retry, Fallback,
+cancellation, Map, and Replication policies. Only `finish()` becomes the
+validated and durable Operator output; transient chunks are not Runtime values.
+Both reducer methods are synchronous and should remain small. A blocking sync
+source is consumed in the shared thread pool.
+
+## UserEvent mappings
+
+Use `UserEventMapping` when a Workflow must expose application-facing data
+independently from Runtime tracing:
+
+```python
+from autoagent import UserEventMapping
+
+workflow.add_node(
+    create_answer,
+    node_id="create_answer",
+    user_event_mapping=UserEventMapping(
+        type="answer_completed",
+        transform=lambda output: {"answer": output},
+    ),
+)
+```
+
+`type` must use lowercase `snake_case`. `transform` receives only the completed
+Node output and returns a serializable payload or `None`. For an explicit
+`StreamingResult`, `stream_user_event_mapping` receives each chunk. The
+framework owns stage selection, Event identity, sequence, occurrence time, and
+execution correlation; do not create these values in Workflow code. Mapping
+failure never changes an otherwise successful Node result.
 
 ## Durable values
 

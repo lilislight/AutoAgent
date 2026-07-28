@@ -59,6 +59,9 @@ CLI, inside another service, or eventually on a hosted platform.
 - natural Loops, fan-in, dynamic Map, and Replication;
 - typed Input Mapping, Output Binding, Conditions, selectors, and aggregators;
 - Retry, fallback, timeout, recovery, resource, and failure policies;
+- explicit sync/async `StreamingResult` execution with one typed final output;
+- independent process-local `UserEvent` streams configured by snake_case
+  `UserEventMapping`, with standard ReAct message and Tool events;
 - process-local and durable Wait/Resume;
 - reusable child Workflows.
 
@@ -66,6 +69,7 @@ CLI, inside another service, or eventually on a hosted platform.
 
 - a provider-neutral `llm_call` Capability;
 - a Chat Completions Provider adapted to the built-in `llm_call` Operator;
+- Provider streaming reduced by NodeExecutor without persisting transient chunks;
 - typed Tools generated from Python functions;
 - structured model output;
 - bounded ReAct Workflows with Tool and output repair.

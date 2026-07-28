@@ -10,7 +10,12 @@ import httpx
 from openai import APIStatusError
 from pydantic import BaseModel, Field
 
-from autoagent import AutoAgentApp, JsonRuntimeSerializer
+from autoagent import (
+    AutoAgentApp,
+    JsonRuntimeSerializer,
+    StreamingResult,
+    streaming_result,
+)
 from autoagent.ai import (
     ChatCompletionsConfig,
     ChatCompletionsProvider,
@@ -809,7 +814,7 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
             ),
             handler=handler,
         )
-        response = await operator.ainvoke(
+        result = await operator.ainvoke(
             {
                 "request": LLMRequest(
                     messages=(LLMMessage(role="user", content="hello"),),
@@ -817,6 +822,11 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "stream",
             }
         )
+        self.assertIsInstance(result, StreamingResult)
+        assert isinstance(result, StreamingResult)
+        async for chunk in result.source:
+            result.reducer.add(chunk)
+        response = result.reducer.finish()
 
         self.assertEqual(response.message.content, "streamed")
 
@@ -1014,6 +1024,75 @@ class ReActWorkflowTests(unittest.TestCase):
             ],
         )
 
+    def test_react_stream_emits_message_reasoning_and_final_user_events(
+        self,
+    ) -> None:
+        response = _text_response("hello")
+
+        class ResponseReducer:
+            def __init__(self) -> None:
+                self.response: LLMResponse | None = None
+
+            def add(self, chunk: LLMStreamChunk) -> None:
+                if chunk.type == "completed":
+                    self.response = chunk.response
+
+            def finish(self) -> LLMResponse:
+                assert self.response is not None
+                return self.response
+
+        async def chunks():
+            yield LLMStreamChunk(type="reasoning_delta", reasoning_delta="think")
+            yield LLMStreamChunk(type="text_delta", text_delta="hello")
+            yield LLMStreamChunk(type="completed", response=response)
+
+        async def fake_llm(
+            request: LLMRequest,
+            mode: Literal["invoke", "stream"] = "invoke",
+        ) -> LLMResponse | StreamingResult[LLMStreamChunk, LLMResponse]:
+            self.assertEqual(mode, "stream")
+            return streaming_result(chunks(), reducer=ResponseReducer())
+
+        app = started_app()
+        self.apps.append(app)
+        app.register_capability(
+            LLM_CALL_CAPABILITY_ID,
+            contract=LLM_CALL_CONTRACT,
+        )
+        app.register_operator(
+            fake_llm,
+            operator_id="fake_streaming_llm",
+            capability_id=LLM_CALL_CAPABILITY_ID,
+            default=True,
+        )
+        workflow = react_workflow(
+            id="stream_user_events",
+            instructions="Answer.",
+        )
+
+        invocation = app.invoke(
+            workflow,
+            input={"input": "hello", "mode": "stream"},
+            event_mode="minimal",
+        )
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            [event.type for event in events],
+            [
+                "reasoning_delta",
+                "message_delta",
+                "message_completed",
+                "agent_output",
+            ],
+        )
+        self.assertEqual(events[0].data, {"delta": "think"})
+        self.assertEqual(events[1].data, {"delta": "hello"})
+        self.assertEqual(events[-1].data, {"output": "hello"})
+
     def test_tool_arguments_failure_returns_to_prepare_once(self) -> None:
         calls: list[tuple[int, int]] = []
 
@@ -1051,6 +1130,15 @@ class ReActWorkflowTests(unittest.TestCase):
             invocation.count_node_executions("prepare_conversation"),
             3,
         )
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+        self.assertIn("tool_call_rejected", [event.type for event in events])
+        rejected = next(
+            event for event in events
+            if event.type == "tool_call_rejected"
+        )
+        self.assertEqual(rejected.data["calls"][0]["tool_call_id"], "call_bad")
 
     def test_unknown_tool_is_returned_to_model_then_exhausts_retry(self) -> None:
         @tool(id="known", description="Known Tool.")
@@ -1078,6 +1166,14 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertIn("Unknown tool: missing", requests[1].messages[-1].content)
         self.assertIn("1 repair attempt", invocation.error.message)
         self.assertIn("Unknown tool: still_missing", invocation.error.message)
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+        self.assertEqual(events[-1].type, "agent_failed")
+        self.assertEqual(
+            events[-1].data["code"],
+            invocation.error.code,
+        )
 
     def test_tool_execution_error_is_returned_to_model_for_recovery(self) -> None:
         calls: list[int] = []
@@ -1174,6 +1270,20 @@ class ReActWorkflowTests(unittest.TestCase):
             tool_execution.operator_executions[0].summary.call_count,
             2,
         )
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+        requested = next(
+            event for event in events
+            if event.type == "tool_call_requested"
+        )
+        result = next(
+            event for event in events
+            if event.type == "tool_result"
+        )
+        self.assertEqual(len(requested.data["calls"]), 2)
+        self.assertEqual(len(result.data["results"]), 2)
+        self.assertEqual(events[-1].type, "agent_output")
 
     def test_react_workflow_can_execute_as_one_child_workflow(self) -> None:
         requests: list[LLMRequest] = []

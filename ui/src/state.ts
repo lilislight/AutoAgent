@@ -6,6 +6,7 @@ export type InspectorTab =
   | "overview"
   | "data"
   | "trace"
+  | "user_events"
   | "context"
   | "definition";
 interface TraceUiState {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
+import inspect
 from time import perf_counter_ns
 from typing import Any
 from uuid import UUID
@@ -31,6 +32,7 @@ from autoagent.core.runtime import (
     RuntimeEventType,
     RuntimeStore,
     Session,
+    UserEventSpec,
     build_state_operations,
 )
 from autoagent.core.runtime.context import capture_hook_context
@@ -38,6 +40,7 @@ from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance
 from autoagent.core.runtime.hooks import invoke_hook_async
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.scheduler import Scheduler
+from autoagent.core.workflow.user_event import normalize_user_event_mappings
 
 
 _MISSING = object()
@@ -442,6 +445,11 @@ class WorkflowExecutor:
                         "invocation.failed",
                         node_execution_ids=abandoned,
                     )
+                    self._record_agent_failed_user_event(
+                        workflow_ir,
+                        invocation,
+                    )
+                    invocation.execution_mailbox.close()
                     return invocation
                 continue
 
@@ -468,6 +476,11 @@ class WorkflowExecutor:
                         "invocation.failed",
                         node_execution_ids=abandoned,
                     )
+                    self._record_agent_failed_user_event(
+                        workflow_ir,
+                        invocation,
+                    )
+                    invocation.execution_mailbox.close()
                     return invocation
                 continue
 
@@ -537,6 +550,11 @@ class WorkflowExecutor:
                     invocation,
                     terminal_event_name,
                 )
+                self._record_agent_failed_user_event(
+                    workflow_ir,
+                    invocation,
+                )
+                invocation.execution_mailbox.close()
                 return invocation
 
             if self._is_completed(workflow_ir=workflow_ir, invocation=invocation):
@@ -551,6 +569,7 @@ class WorkflowExecutor:
                     invocation,
                     "invocation.completed",
                 )
+                invocation.execution_mailbox.close()
                 return invocation
 
             invocation.mark_failed(
@@ -564,6 +583,11 @@ class WorkflowExecutor:
                 invocation,
                 "invocation.failed",
             )
+            self._record_agent_failed_user_event(
+                workflow_ir,
+                invocation,
+            )
+            invocation.execution_mailbox.close()
             return invocation
 
     async def _record_edge_event(
@@ -635,7 +659,10 @@ class WorkflowExecutor:
         )
         invocation.cancel_active_node_executions(error)
         invocation.mark_cancelled()
-        await self.node_executor.abandon(invocation.execution_mailbox)
+        abandoned_messages = await self.node_executor.abandon(
+            invocation.execution_mailbox
+        )
+        self._record_abandoned_user_events(invocation, abandoned_messages)
         await self._record_event(
             session,
             invocation,
@@ -1012,6 +1039,14 @@ class WorkflowExecutor:
             )
             return
 
+        if progress.kind == "user_event":
+            if progress.user_event_spec is not None:
+                self._record_user_event_spec(
+                    invocation,
+                    progress.user_event_spec,
+                )
+            return
+
         if progress.kind == "operator_call":
             operator_execution = progress.operator_execution
             if operator_execution is None:  # pragma: no cover - validated message.
@@ -1220,6 +1255,12 @@ class WorkflowExecutor:
                     )
                 invocation.mark_node_completed(node_execution.id, result.output)
                 session.mark_context_updated()
+                self._record_completed_user_events(
+                    invocation=invocation,
+                    node_ir=node_ir,
+                    node_execution=node_execution,
+                    output=result.output,
+                )
         elif result.state == "waiting":
             try:
                 invocation.mark_node_waiting(
@@ -1287,6 +1328,140 @@ class WorkflowExecutor:
         )
         return node_execution.id
 
+    def _record_completed_user_events(
+        self,
+        *,
+        invocation: Invocation,
+        node_ir: NodeIR,
+        node_execution: NodeExecution,
+        output: Any,
+    ) -> None:
+        mappings = normalize_user_event_mappings(node_ir.user_event_mapping)
+        if not mappings:
+            return
+        operator_call_id = (
+            node_execution.operator_executions[-1].id
+            if node_execution.operator_executions
+            else None
+        )
+        for mapping in mappings:
+            try:
+                data = mapping.transform(deepcopy(output))
+                if inspect.isawaitable(data):
+                    close = getattr(data, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError(
+                        "UserEventMapping.transform() must be synchronous."
+                    )
+                if data is None:
+                    continue
+                spec = UserEventSpec(
+                    type=mapping.type,
+                    data=deepcopy(data),
+                    node_id=node_ir.id,
+                    node_execution_id=node_execution.id,
+                    operator_call_id=operator_call_id,
+                )
+            except Exception as exc:
+                spec = UserEventSpec(
+                    type="user_event_mapping_failed",
+                    data={
+                        "mapping_type": mapping.type,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "source": "output",
+                    },
+                    node_id=node_ir.id,
+                    node_execution_id=node_execution.id,
+                    operator_call_id=operator_call_id,
+                )
+            self._record_user_event_spec(invocation, spec)
+
+    def _record_user_event_spec(
+        self,
+        invocation: Invocation,
+        spec: UserEventSpec,
+    ) -> None:
+        try:
+            self.runtime_store.record_user_event(
+                invocation_id=invocation.id,
+                spec=spec,
+            )
+        except Exception as exc:
+            if spec.type == "user_event_mapping_failed":
+                return
+            self.runtime_store.record_user_event(
+                invocation_id=invocation.id,
+                spec=UserEventSpec(
+                    type="user_event_mapping_failed",
+                    data={
+                        "mapping_type": spec.type,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "source": "serialization",
+                    },
+                    node_id=spec.node_id,
+                    node_execution_id=spec.node_execution_id,
+                    operator_call_id=spec.operator_call_id,
+                ),
+            )
+
+    def _record_agent_failed_user_event(
+        self,
+        workflow_ir: WorkflowIR,
+        invocation: Invocation,
+    ) -> None:
+        if invocation.state != "failed":
+            return
+        llm_execution = next(
+            (
+                execution
+                for execution in reversed(invocation.node_executions)
+                if workflow_ir.nodes[execution.node_id].metadata.get(
+                    "_autoagent_user_event_stream"
+                )
+                == "message"
+            ),
+            None,
+        )
+        if llm_execution is None:
+            return
+        error = invocation.error or RuntimeErrorInfo(
+            code="AGENT_FAILED",
+            message="ReAct Workflow failed.",
+        )
+        self._record_user_event_spec(
+            invocation,
+            UserEventSpec(
+                type="agent_failed",
+                data=error.to_record(),
+                node_id=llm_execution.node_id,
+                node_execution_id=llm_execution.id,
+                operator_call_id=(
+                    llm_execution.operator_executions[-1].id
+                    if llm_execution.operator_executions
+                    else None
+                ),
+            ),
+        )
+
+    def _record_abandoned_user_events(
+        self,
+        invocation: Invocation,
+        messages: list[NodeExecutionProgress | NodeExecutionResult],
+    ) -> None:
+        for message in messages:
+            if (
+                isinstance(message, NodeExecutionProgress)
+                and message.kind == "user_event"
+                and message.user_event_spec is not None
+            ):
+                self._record_user_event_spec(
+                    invocation,
+                    message.user_event_spec,
+                )
+
     async def _record_operator_call(
         self,
         session: Session,
@@ -1305,6 +1480,8 @@ class WorkflowExecutor:
                 "operator_id": operator_execution.operator_id,
                 "reason": operator_execution.reason,
                 "state": operator_execution.state,
+                "streaming": operator_execution.streaming,
+                "stream_chunk_count": operator_execution.stream_chunk_count,
                 "error": (
                     operator_execution.error.to_record()
                     if operator_execution.error is not None
@@ -1323,6 +1500,10 @@ class WorkflowExecutor:
                     for key, value in {
                         "execution_ns": usage.execution_ns,
                         "thread_pool_queue_ns": usage.thread_pool_queue_ns,
+                        "stream_consumption_ns": (
+                            usage.stream_consumption_ns
+                        ),
+                        "stream_reduction_ns": usage.stream_reduction_ns,
                     }.items()
                     if value
                 },
@@ -1354,7 +1535,15 @@ class WorkflowExecutor:
             },
             elapsed_ns=logical_elapsed_ns,
             timing={
-                "execution_ns": summary.total_duration_ns,
+                key: value
+                for key, value in {
+                    "execution_ns": summary.total_duration_ns,
+                    "stream_consumption_ns": (
+                        summary.stream_consumption_ns
+                    ),
+                    "stream_reduction_ns": summary.stream_reduction_ns,
+                }.items()
+                if value
             },
             occurred_at_ms=operator_execution.ended_at_ms,
         )
@@ -1536,6 +1725,12 @@ class WorkflowExecutor:
         else:
             invocation.mark_node_completed(node_execution.id, output)
             session.mark_context_updated()
+            self._record_completed_user_events(
+                invocation=invocation,
+                node_ir=workflow_ir.nodes[node_execution.node_id],
+                node_execution=node_execution,
+                output=output,
+            )
 
     def _map_policy_for_request(
         self,
@@ -1601,7 +1796,10 @@ class WorkflowExecutor:
             if execution.state in {"created", "ready", "running"}
         )
         invocation.cancel_active_node_executions(error)
-        await self.node_executor.abandon(invocation.execution_mailbox)
+        abandoned_messages = await self.node_executor.abandon(
+            invocation.execution_mailbox
+        )
+        self._record_abandoned_user_events(invocation, abandoned_messages)
         return changed_execution_ids
 
     def _check_operator_attempt_resource(

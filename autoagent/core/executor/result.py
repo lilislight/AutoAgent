@@ -11,6 +11,7 @@ from autoagent.core.runtime.execution import (
 )
 from autoagent.core.runtime.status import NodeExecutionStateValue
 from autoagent.core.runtime.time import utc_timestamp_ms
+from autoagent.core.runtime.user_event import UserEventSpec
 
 
 @dataclass(frozen=True)
@@ -34,19 +35,38 @@ class NodeExecutionProgress:
     """
 
     node_execution_id: UUID
-    kind: Literal["phase", "operator_call"]
+    kind: Literal["phase", "operator_call", "user_event"]
     phase: NodePhaseResult | None = None
     operator_execution: OperatorExecution | None = None
+    user_event_spec: UserEventSpec | None = None
     logical_elapsed_ns: int = 0
 
     def __post_init__(self) -> None:
         if self.kind == "phase":
-            if self.phase is None or self.operator_execution is not None:
+            if (
+                self.phase is None
+                or self.operator_execution is not None
+                or self.user_event_spec is not None
+            ):
                 raise ValueError("Phase progress must contain only a phase result.")
             return
-        if self.operator_execution is None or self.phase is not None:
+        if self.kind == "operator_call":
+            if (
+                self.operator_execution is None
+                or self.phase is not None
+                or self.user_event_spec is not None
+            ):
+                raise ValueError(
+                    "Operator-call progress must contain only an OperatorExecution."
+                )
+            return
+        if (
+            self.user_event_spec is None
+            or self.phase is not None
+            or self.operator_execution is not None
+        ):
             raise ValueError(
-                "Operator-call progress must contain only an OperatorExecution."
+                "User-event progress must contain only a UserEventSpec."
             )
 
 

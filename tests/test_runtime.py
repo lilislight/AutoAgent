@@ -363,6 +363,10 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         await store.aadmit_invocation(session.id, invocation)
         execution = invocation.create_node_execution("entry")
         direct = DirectOperatorExecution(operator_id="primary", sequence=1)
+        direct.streaming = True
+        direct.stream_chunk_count = 4
+        direct.resource_usage.stream_consumption_ns = 20
+        direct.resource_usage.stream_reduction_ns = 5
         direct.mark_completed({"value": 1})
         parallel = ParallelOperatorExecution(
             kind="map",
@@ -372,6 +376,10 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
                 attempt_count=101,
                 success_count=100,
                 retry_count=1,
+                streaming_call_count=100,
+                stream_chunk_count=400,
+                stream_consumption_ns=2_000,
+                stream_reduction_ns=500,
             ),
             state="completed",
         )
@@ -381,9 +389,17 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         restored = type(execution).from_record(record)
 
         self.assertEqual("primary", restored.operator_executions[0].operator_id)
+        self.assertTrue(restored.operator_executions[0].streaming)
+        self.assertEqual(4, restored.operator_executions[0].stream_chunk_count)
+        self.assertEqual(
+            20,
+            restored.operator_executions[0].resource_usage.stream_consumption_ns,
+        )
         summary = restored.operator_executions[1].summary
         self.assertEqual(100, summary.call_count)
         self.assertEqual(101, summary.attempt_count)
+        self.assertEqual(100, summary.streaming_call_count)
+        self.assertEqual(400, summary.stream_chunk_count)
         self.assertNotIn("outputs", summary.to_record())
 
 

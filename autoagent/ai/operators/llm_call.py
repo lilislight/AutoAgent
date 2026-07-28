@@ -7,9 +7,13 @@ from autoagent.ai.capabilities.llm_call import (
     LLM_CALL_CONTRACT,
     LLMCallMode,
 )
-from autoagent.ai.models.llm import LLMRequest, LLMResponse
+from autoagent.ai.models.llm import LLMRequest, LLMResponse, LLMStreamChunk
 from autoagent.ai.providers.base import LLMProvider, LLMProviderError
-from autoagent.core.operators import Operator
+from autoagent.core.operators import (
+    Operator,
+    StreamingResult,
+    streaming_result,
+)
 
 if TYPE_CHECKING:
     from autoagent.core.app import AutoAgentApp
@@ -25,20 +29,16 @@ def create_llm_call_operator(
     async def handler(
         request: LLMRequest,
         mode: LLMCallMode = "invoke",
-    ) -> LLMResponse:
+    ) -> (
+        LLMResponse
+        | StreamingResult[LLMStreamChunk, LLMResponse]
+    ):
         if mode == "invoke":
             return await provider.ainvoke(request)
-        completed: LLMResponse | None = None
-        async for chunk in provider.astream(request):
-            if chunk.type == "completed":
-                completed = chunk.response
-        if completed is None:
-            raise LLMProviderError(
-                "LLM Provider stream ended without a completed response.",
-                provider=provider.provider_name,
-                retryable=False,
-            )
-        return completed
+        return streaming_result(
+            provider.astream(request),
+            reducer=_LLMStreamReducer(provider.provider_name),
+        )
 
     return Operator(
         id=operator_id,
@@ -67,3 +67,30 @@ def register_llm_call_operator(
         operator_id=operator_id,
     )
     return app.operator_registry.register(operator, default=default)
+
+
+class _LLMStreamReducer:
+    """Extract the Provider-normalized terminal response without retaining deltas."""
+
+    def __init__(self, provider_name: str) -> None:
+        self.provider_name = provider_name
+        self.completed: LLMResponse | None = None
+
+    def add(self, chunk: LLMStreamChunk) -> None:
+        if chunk.type == "completed":
+            if self.completed is not None:
+                raise LLMProviderError(
+                    "LLM Provider stream emitted more than one completed response.",
+                    provider=self.provider_name,
+                    retryable=False,
+                )
+            self.completed = chunk.response
+
+    def finish(self) -> LLMResponse:
+        if self.completed is None:
+            raise LLMProviderError(
+                "LLM Provider stream ended without a completed response.",
+                provider=self.provider_name,
+                retryable=False,
+            )
+        return self.completed

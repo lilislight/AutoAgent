@@ -19,8 +19,11 @@ class InvocationExecutionMailbox:
         self._running: dict[asyncio.Task[Any], UUID] = {}
         self._messages: deque[Any] = deque()
         self._message_ready: asyncio.Event | None = None
+        self._accepting = True
 
     def track(self, task: asyncio.Task[Any], node_execution_id: UUID) -> None:
+        if not self._accepting:
+            raise RuntimeError("Invocation mailbox is closed.")
         self._running[task] = node_execution_id
 
     def finish_task(self, task: asyncio.Task[Any], result: Any) -> None:
@@ -30,6 +33,8 @@ class InvocationExecutionMailbox:
         self.put_message(result)
 
     def put_message(self, message: Any) -> None:
+        if not self._accepting:
+            return
         self._messages.append(message)
         if self._message_ready is not None:
             self._message_ready.set()
@@ -65,7 +70,7 @@ class InvocationExecutionMailbox:
     def has_pending(self) -> bool:
         return bool(self._running) or bool(self._messages)
 
-    async def abandon(self) -> None:
+    async def abandon(self) -> list[Any]:
         """Detach all work after fail-fast/cancellation.
 
         Async operators receive cancellation. A synchronous handler already
@@ -79,4 +84,11 @@ class InvocationExecutionMailbox:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._running.clear()
-        self.drain_messages()
+        messages = self.drain_messages()
+        self._accepting = False
+        return messages
+
+    def close(self) -> None:
+        """Reject late worker messages after an Invocation becomes terminal."""
+
+        self._accepting = False

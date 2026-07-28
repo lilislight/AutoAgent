@@ -46,15 +46,13 @@ implementation history belongs in Git, tests, and benchmark results.
 - Continue validating persistence queue size, serialization cost, retention,
   and recovery latency under high-concurrency and large-output workloads.
 
-## 4. Define Workflow-facing emissions
+## 4. Decide durable UserEvent retention
 
-- Design a Workflow-defined emission protocol for Agent or application UIs.
-  These messages may represent model text, Tool progress, approval prompts, or
-  domain events.
-- Keep Workflow-facing emissions separate from Runtime Events used for tracing,
-  replay, recovery, and debugging.
-- Allow typed, application-specific payloads without requiring the framework to
-  prescribe one Agent message model.
+- Keep the implemented UserEvent queue independent from Runtime Event modes.
+  Decide later whether completed semantic UserEvents need durable history and
+  which high-volume deltas must remain process-local.
+- Define compaction and retention before persisting message or reasoning
+  deltas. Never make token-level persistence the default.
 
 ## 5. Add optimization workflows
 

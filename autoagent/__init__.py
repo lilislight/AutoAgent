@@ -19,6 +19,9 @@ from autoagent.core.operators import (
     OperatorManifest,
     ParameterContract,
     SchemaContract,
+    StreamReducer,
+    StreamingResult,
+    streaming_result,
 )
 from autoagent.core.workflow import (
     BackoffPolicy,
@@ -42,6 +45,7 @@ from autoagent.core.workflow import (
     RetryPolicy,
     SystemCommand,
     TimeoutPolicy,
+    UserEventMapping,
     Workflow,
     WorkflowPolicy,
     WorkflowDiagram,
@@ -89,8 +93,12 @@ __all__ = [
     "RecoveryPolicy",
     "RetryPolicy",
     "SystemCommand",
+    "StreamReducer",
+    "StreamingResult",
     "TimeoutPolicy",
+    "UserEventMapping",
     "Workflow",
     "WorkflowPolicy",
     "workflow_hook",
+    "streaming_result",
 ]

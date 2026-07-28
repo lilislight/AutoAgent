@@ -14,6 +14,7 @@ from autoagent import (
     NodePolicy,
     Operator,
     OperatorRef,
+    StreamingResult,
     Workflow,
 )
 from autoagent.core.operators import OperatorContractWarning
@@ -26,6 +27,18 @@ class SearchRequest(BaseModel):
 
 
 class OperatorRegistrationTests(unittest.TestCase):
+    def test_streaming_result_contract_uses_final_output_annotation(self) -> None:
+        def stream() -> str | StreamingResult[int, str]:
+            return "normal"
+
+        operator = Operator.from_callable(stream)
+
+        self.assertIs(operator.contract.output.annotation, str)
+        self.assertEqual(
+            operator.contract.output.json_schema,
+            {"type": "string"},
+        )
+
     def test_public_registration_requires_an_explicit_app(self) -> None:
         self.assertFalse(hasattr(autoagent, "get_default_app"))
         self.assertFalse(hasattr(autoagent, "operator"))

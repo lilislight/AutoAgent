@@ -10,11 +10,17 @@ import {
   Database,
   File,
   FileJson,
+  MessageSquareText,
   Route,
   X,
 } from "lucide-react";
 
-import { getEventDetail, getRuntimeState } from "../api";
+import {
+  getAllUserEvents,
+  getEventDetail,
+  getRuntimeState,
+  subscribeToUserEvents,
+} from "../api";
 import type {
   EdgeEvaluationView,
   InvocationDetail,
@@ -24,6 +30,7 @@ import type {
   RuntimeProjection,
   TraceSelection,
   TraceBootstrap,
+  UserEvent,
   WorkflowGraphView,
 } from "../types";
 import { useTraceUi } from "../state";
@@ -73,6 +80,46 @@ export function InspectorPanel({
     enabled: tab === "context" && Boolean(capabilities?.has_historical_runtime_state),
     staleTime: Number.POSITIVE_INFINITY,
   });
+  const userEventsQuery = useQuery({
+    queryKey: ["user-events", invocation.id],
+    queryFn: () => getAllUserEvents(invocation.id),
+    enabled: tab === "user_events",
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const [liveUserEvents, setLiveUserEvents] = useState<UserEvent[]>([]);
+  const [userEventStreamConnected, setUserEventStreamConnected] =
+    useState<boolean | null>(null);
+  useEffect(() => {
+    setLiveUserEvents(userEventsQuery.data ?? []);
+  }, [invocation.id, userEventsQuery.data]);
+  useEffect(() => {
+    if (tab !== "user_events" || userEventsQuery.isLoading) return;
+    const terminal = ["completed", "failed", "cancelled", "interrupted"].includes(
+      invocation.state,
+    );
+    if (terminal) return;
+    const cursor = liveUserEvents.at(-1)?.sequence ?? 0;
+    return subscribeToUserEvents(
+      invocation.id,
+      cursor,
+      (event) => {
+        setLiveUserEvents((current) => {
+          if (current.some((candidate) => candidate.id === event.id)) {
+            return current;
+          }
+          return [...current, event].sort(
+            (left, right) => left.sequence - right.sequence,
+          );
+        });
+      },
+      setUserEventStreamConnected,
+    );
+  }, [
+    invocation.id,
+    invocation.state,
+    tab,
+    userEventsQuery.isLoading,
+  ]);
   useEffect(() => {
     setSelectedExecutionId(null);
     setSelectedEvaluationId(null);
@@ -238,6 +285,14 @@ export function InspectorPanel({
                 events={inspected.events}
               />
             )}
+            {tab === "user_events" && (
+              <UserEventView
+                events={liveUserEvents}
+                loading={userEventsQuery.isLoading}
+                error={userEventsQuery.error}
+                connected={userEventStreamConnected}
+              />
+            )}
             {tab === "definition" && (
               <DefinitionView values={{
                 definition: inspected.definition,
@@ -298,6 +353,11 @@ function inspectorTabs(
         ? [{ id: "trace" as const, label: "Trace", icon: <Clock3 size={14} /> }]
         : []),
       ...stateTab,
+      {
+        id: "user_events",
+        label: "User events",
+        icon: <MessageSquareText size={14} />,
+      },
       { id: "definition", label: "Definition", icon: <FileJson size={14} /> },
     ];
   }
@@ -347,6 +407,9 @@ function inspectorTabDescription(
   if (tab === "context") {
     return "Runtime state reconstructed at the current replay cursor.";
   }
+  if (tab === "user_events") {
+    return "Agent and application events emitted independently from Runtime tracing.";
+  }
   if (tab === "definition") {
     return "The immutable Workflow definition, contracts, and policies used for execution.";
   }
@@ -357,6 +420,54 @@ function DefinitionView({ values }: { values: unknown }) {
   return (
     <div className="definition-view">
       <JsonBlock value={values} empty="No definition." />
+    </div>
+  );
+}
+
+function UserEventView({
+  events,
+  loading,
+  error,
+  connected,
+}: {
+  events: UserEvent[];
+  loading: boolean;
+  error: Error | null;
+  connected: boolean | null;
+}) {
+  if (loading) {
+    return <div className="inspector-empty">Loading UserEvents…</div>;
+  }
+  if (error) {
+    return <div className="inspector-capability-empty">{error.message}</div>;
+  }
+  if (events.length === 0) {
+    return (
+      <div className="inspector-empty">
+        No UserEvents were emitted by this Invocation.
+      </div>
+    );
+  }
+  return (
+    <div className="user-event-view">
+      <div className="user-event-stream-state">
+        {connected === true ? "Following live events" : `${events.length} events`}
+      </div>
+      <ol className="event-list">
+        {[...events].reverse().map((event) => (
+          <li key={event.id}>
+            <span className="event-sequence">{event.sequence}</span>
+            <div>
+              <strong>{event.type}</strong>
+              <time>{formatTimestamp(event.occurred_at_ms)}</time>
+              <span className="event-runtime-meta">
+                {event.node_id}
+              </span>
+              <JsonBlock value={event.data} empty="No UserEvent data." />
+            </div>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -557,6 +668,8 @@ function DataView({
           elapsed_ns: event.elapsed_ns,
           timing: event.timing,
           summary: event.payload.summary,
+          streaming: event.payload.streaming,
+          stream_chunk_count: event.payload.stream_chunk_count,
         }))}
       />
       {aggregation && <FieldBlock label="Aggregated output" value={aggregation.output ?? aggregation.input} />}
@@ -609,7 +722,15 @@ function PhaseView({
           <i />
           <div>
             <strong>{phaseLabel(event.event_name)}</strong>
-            <span>{event.status ?? event.event_type}</span>
+            <span>
+              {event.status ?? event.event_type}
+              {event.event_name === "operator_call.completed" &&
+              event.payload.streaming
+                ? ` · streaming · ${Number(
+                    event.payload.stream_chunk_count ?? 0,
+                  )} chunks`
+                : ""}
+            </span>
           </div>
           <time>
             {formatTimestamp(event.occurred_at_ms)}
@@ -1493,6 +1614,8 @@ function timingLabel(name: string): string {
     retry_backoff_ns: "Retry backoff",
     scheduler_wait_ns: "Scheduler wait",
     thread_pool_queue_ns: "Thread-pool queue",
+    stream_consumption_ns: "Stream consumption",
+    stream_reduction_ns: "Stream reduction",
   };
   return labels[name] ?? name
     .replace(/_ns$/, "")

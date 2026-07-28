@@ -52,6 +52,8 @@ class ResourceUsage:
     concurrency_wait_ns: int = 0
     thread_pool_queue_ns: int = 0
     retry_backoff_ns: int = 0
+    stream_consumption_ns: int = 0
+    stream_reduction_ns: int = 0
 
     @property
     def duration_ms(self) -> int:
@@ -65,12 +67,16 @@ class ResourceUsage:
         concurrency_wait_ns: int = 0,
         thread_pool_queue_ns: int = 0,
         retry_backoff_ns: int = 0,
+        stream_consumption_ns: int = 0,
+        stream_reduction_ns: int = 0,
     ) -> None:
         self.duration_ns += duration_ns
         self.execution_ns += execution_ns
         self.concurrency_wait_ns += concurrency_wait_ns
         self.thread_pool_queue_ns += thread_pool_queue_ns
         self.retry_backoff_ns += retry_backoff_ns
+        self.stream_consumption_ns += stream_consumption_ns
+        self.stream_reduction_ns += stream_reduction_ns
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -79,6 +85,8 @@ class ResourceUsage:
             "concurrency_wait_ns": self.concurrency_wait_ns,
             "thread_pool_queue_ns": self.thread_pool_queue_ns,
             "retry_backoff_ns": self.retry_backoff_ns,
+            "stream_consumption_ns": self.stream_consumption_ns,
+            "stream_reduction_ns": self.stream_reduction_ns,
         }
 
     @classmethod
@@ -90,6 +98,8 @@ class ResourceUsage:
             concurrency_wait_ns=int(value.get("concurrency_wait_ns", 0)),
             thread_pool_queue_ns=int(value.get("thread_pool_queue_ns", 0)),
             retry_backoff_ns=int(value.get("retry_backoff_ns", 0)),
+            stream_consumption_ns=int(value.get("stream_consumption_ns", 0)),
+            stream_reduction_ns=int(value.get("stream_reduction_ns", 0)),
         )
 
 
@@ -108,6 +118,8 @@ class DirectOperatorExecution:
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
     started_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
     ended_at_ms: TimestampMs | None = None
+    streaming: bool = False
+    stream_chunk_count: int = 0
 
     @property
     def attempt_count(self) -> int:
@@ -143,6 +155,8 @@ class DirectOperatorExecution:
             "resource_usage": self.resource_usage.to_record(),
             "started_at_ms": self.started_at_ms,
             "ended_at_ms": self.ended_at_ms,
+            "streaming": self.streaming,
+            "stream_chunk_count": self.stream_chunk_count,
         }
 
     @classmethod
@@ -160,6 +174,8 @@ class DirectOperatorExecution:
             started_at_ms=coerce_timestamp_ms(record.get("started_at_ms"))
             or utc_timestamp_ms(),
             ended_at_ms=coerce_timestamp_ms(record.get("ended_at_ms")),
+            streaming=bool(record.get("streaming", False)),
+            stream_chunk_count=int(record.get("stream_chunk_count", 0)),
         )
 
 
@@ -180,6 +196,10 @@ class ParallelExecutionSummary:
     min_duration_ns: int | None = None
     max_duration_ns: int | None = None
     peak_parallelism: int = 0
+    streaming_call_count: int = 0
+    stream_chunk_count: int = 0
+    stream_consumption_ns: int = 0
+    stream_reduction_ns: int = 0
     failure_samples: tuple[dict[str, Any], ...] = ()
 
     def to_record(self) -> dict[str, Any]:
@@ -195,6 +215,10 @@ class ParallelExecutionSummary:
             "min_duration_ns": self.min_duration_ns,
             "max_duration_ns": self.max_duration_ns,
             "peak_parallelism": self.peak_parallelism,
+            "streaming_call_count": self.streaming_call_count,
+            "stream_chunk_count": self.stream_chunk_count,
+            "stream_consumption_ns": self.stream_consumption_ns,
+            "stream_reduction_ns": self.stream_reduction_ns,
             "failure_samples": [dict(value) for value in self.failure_samples],
         }
 
@@ -215,6 +239,16 @@ class ParallelExecutionSummary:
             min_duration_ns=value.get("min_duration_ns"),
             max_duration_ns=value.get("max_duration_ns"),
             peak_parallelism=int(value.get("peak_parallelism", 0)),
+            streaming_call_count=int(
+                value.get("streaming_call_count", 0)
+            ),
+            stream_chunk_count=int(value.get("stream_chunk_count", 0)),
+            stream_consumption_ns=int(
+                value.get("stream_consumption_ns", 0)
+            ),
+            stream_reduction_ns=int(
+                value.get("stream_reduction_ns", 0)
+            ),
             failure_samples=tuple(
                 dict(item) for item in value.get("failure_samples", [])
             ),

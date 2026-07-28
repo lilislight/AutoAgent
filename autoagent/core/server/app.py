@@ -405,6 +405,23 @@ class AutoAgentServer:
             )
 
         @router.get(
+            "/invocations/{invocation_id}/user-events",
+            dependencies=auth,
+        )
+        async def list_invocation_user_events(
+            invocation_id: UUID,
+            after_sequence: int = Query(default=0, ge=0),
+            limit: int = Query(default=200, ge=1, le=1_000),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.user_event_page(
+                    invocation_id,
+                    after_sequence=after_sequence,
+                    limit=limit,
+                )
+            )
+
+        @router.get(
             "/invocations/{invocation_id}/events/{sequence}",
             dependencies=auth,
         )
@@ -512,6 +529,70 @@ class AutoAgentServer:
                         yield ": heartbeat\n\n"
                         heartbeat_at = now
                     await asyncio.sleep(0.25)
+
+            await self._trace_call(self.trace.invocation_detail(invocation_id))
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        @router.get(
+            "/invocations/{invocation_id}/user-events/stream",
+            dependencies=auth,
+        )
+        async def stream_invocation_user_events(
+            request: Request,
+            invocation_id: UUID,
+            after_sequence: int = Query(default=0, ge=0),
+            last_event_id: str | None = Header(
+                default=None,
+                alias="Last-Event-ID",
+            ),
+        ) -> StreamingResponse:
+            if last_event_id is not None:
+                try:
+                    after_sequence = max(after_sequence, int(last_event_id))
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid Last-Event-ID.",
+                    ) from exc
+
+            async def generate() -> AsyncIterator[str]:
+                cursor = after_sequence
+                heartbeat_at = asyncio.get_running_loop().time()
+                while not await request.is_disconnected():
+                    page = await self.trace.user_event_page(
+                        invocation_id,
+                        after_sequence=cursor,
+                        limit=200,
+                    )
+                    for event in page["items"]:
+                        cursor = int(event["sequence"])
+                        yield (
+                            f"id: {cursor}\n"
+                            "event: user_event\n"
+                            f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                        )
+                    detail = await self.trace.invocation_detail(invocation_id)
+                    terminal = detail["state"] in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "interrupted",
+                    }
+                    if terminal and cursor >= int(page["live_sequence"]):
+                        yield "event: stream_end\ndata: {}\n\n"
+                        break
+                    now = asyncio.get_running_loop().time()
+                    if now - heartbeat_at >= 15:
+                        yield ": heartbeat\n\n"
+                        heartbeat_at = now
+                    await asyncio.sleep(0.1)
 
             await self._trace_call(self.trace.invocation_detail(invocation_id))
             return StreamingResponse(

@@ -6,11 +6,18 @@ import time
 import unittest
 from unittest.mock import patch
 
-from autoagent import AutoAgentApp
+from autoagent import (
+    AutoAgentApp,
+    StreamingResult,
+    UserEventMapping,
+    streaming_result,
+)
 from autoagent.core.executor.node_executor import _retry_delay_seconds
 from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
+    EdgePolicy,
+    MapPolicy,
     NodePolicy,
     ReplicationPolicy,
     ResourcePolicy,
@@ -19,6 +26,22 @@ from autoagent.core.workflow import (
     Workflow,
 )
 from tests.helpers import started_app
+
+
+class TextReducer:
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+
+    def add(self, chunk: str) -> None:
+        self.parts.append(chunk)
+
+    def finish(self) -> str:
+        return "".join(self.parts)
+
+
+class FailingReducer(TextReducer):
+    def add(self, chunk: str) -> None:
+        raise ValueError(f"cannot reduce {chunk}")
 
 
 class BackoffPolicyTests(unittest.TestCase):
@@ -88,6 +111,439 @@ class BackoffPolicyTests(unittest.TestCase):
 
 
 class ExecutorPolicyBoundaryTests(unittest.TestCase):
+    def test_stream_and_output_user_events_are_mode_independent(self) -> None:
+        def chunks():
+            yield "hello"
+            yield " world"
+
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(chunks(), reducer=TextReducer())
+
+        workflow = Workflow(id="stream_user_events")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            stream_user_event_mapping=UserEventMapping(
+                type="text_delta",
+                transform=lambda chunk: {"delta": chunk},
+            ),
+            user_event_mapping=UserEventMapping(
+                type="answer_completed",
+                transform=lambda output: {"answer": output},
+            ),
+        )
+
+        app = started_app()
+        invocation = app.invoke(workflow, event_mode="minimal")
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            [event.type for event in events],
+            ["text_delta", "text_delta", "answer_completed"],
+        )
+        self.assertEqual([event.sequence for event in events], [1, 2, 3])
+        self.assertEqual(events[0].data, {"delta": "hello"})
+        self.assertEqual(events[-1].data, {"answer": "hello world"})
+        self.assertEqual(events[0].node_execution_id, events[-1].node_execution_id)
+        self.assertIsNotNone(events[0].operator_call_id)
+        self.assertEqual(
+            events[0].operator_call_id,
+            events[-1].operator_call_id,
+        )
+        self.assertEqual(app.runtime_store.runtime_events[invocation.id], [])
+
+    def test_user_event_mapping_failure_does_not_fail_node(self) -> None:
+        def complete() -> str:
+            return "business output"
+
+        def fail_mapping(value: str) -> dict[str, str]:
+            raise ValueError(f"cannot map {value}")
+
+        workflow = Workflow(id="failed_user_event_mapping")
+        workflow.add_node(
+            complete,
+            node_id="complete",
+            user_event_mapping=UserEventMapping(
+                type="business_completed",
+                transform=fail_mapping,
+            ),
+        )
+
+        app = started_app()
+        invocation = app.invoke(workflow)
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(invocation.result, {"output": "business output"})
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].type, "user_event_mapping_failed")
+        self.assertEqual(events[0].data["mapping_type"], "business_completed")
+        self.assertEqual(events[0].data["source"], "output")
+
+    def test_user_event_serialization_failure_does_not_fail_node(self) -> None:
+        def complete() -> str:
+            return "business output"
+
+        workflow = Workflow(id="unserializable_user_event")
+        workflow.add_node(
+            complete,
+            node_id="complete",
+            user_event_mapping=UserEventMapping(
+                type="business_completed",
+                transform=lambda output: {"raw": b"not-json"},
+            ),
+        )
+
+        app = started_app()
+        invocation = app.invoke(workflow)
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(events[0].type, "user_event_mapping_failed")
+        self.assertEqual(events[0].data["source"], "serialization")
+
+    def test_message_stream_abort_is_emitted_without_persisting_chunks(
+        self,
+    ) -> None:
+        async def chunks():
+            yield "partial"
+            raise RuntimeError("provider disconnected")
+
+        async def stream() -> StreamingResult[str, str]:
+            return streaming_result(chunks(), reducer=TextReducer())
+
+        workflow = Workflow(id="aborted_message_stream")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            metadata={"_autoagent_user_event_stream": "message"},
+            stream_user_event_mapping=UserEventMapping(
+                type="message_delta",
+                transform=lambda chunk: {"delta": chunk},
+            ),
+        )
+
+        app = started_app()
+        invocation = app.invoke(workflow, event_mode="minimal")
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+
+        self.assertEqual(invocation.state, "failed")
+        self.assertEqual(
+            [event.type for event in events],
+            ["message_delta", "message_aborted", "agent_failed"],
+        )
+        self.assertEqual(
+            events[-2].data["error_type"],
+            "RuntimeError",
+        )
+
+    def test_output_user_event_requires_successful_output_binding(self) -> None:
+        def complete() -> str:
+            return "output"
+
+        def fail_binding(ctx) -> None:
+            raise ValueError("binding failed")
+
+        workflow = Workflow(id="binding_before_user_event")
+        workflow.add_node(
+            complete,
+            node_id="complete",
+            output_binding=fail_binding,
+            user_event_mapping=UserEventMapping(
+                type="business_completed",
+                transform=lambda output: {"output": output},
+            ),
+        )
+
+        app = started_app()
+        invocation = app.invoke(workflow)
+
+        self.assertEqual(invocation.state, "failed")
+        self.assertEqual(
+            app.runtime_store.list_user_events(invocation_id=invocation.id),
+            (),
+        )
+
+    def test_sync_streaming_result_reduces_to_normal_node_output(self) -> None:
+        def chunks():
+            yield "hello"
+            yield " "
+            yield "world"
+
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(chunks(), reducer=TextReducer())
+
+        workflow = Workflow(id="sync_stream")
+        workflow.add_node(stream, node_id="stream")
+
+        app = started_app()
+        invocation = app.invoke(workflow, event_mode="full")
+        execution = invocation.latest_node_execution("stream")
+        call = execution.operator_executions[0]
+        operator_event = next(
+            event
+            for event in app.runtime_store.runtime_events[invocation.id]
+            if event.event_name == "operator_call.completed"
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(invocation.result, {"output": "hello world"})
+        self.assertTrue(call.streaming)
+        self.assertEqual(call.stream_chunk_count, 3)
+        self.assertGreater(call.resource_usage.stream_consumption_ns, 0)
+        self.assertGreater(call.resource_usage.stream_reduction_ns, 0)
+        self.assertEqual(operator_event.output, "hello world")
+        self.assertEqual(operator_event.payload["stream_chunk_count"], 3)
+        self.assertNotIn("chunks", operator_event.payload)
+        self.assertGreater(operator_event.timing["stream_consumption_ns"], 0)
+        self.assertGreater(operator_event.timing["stream_reduction_ns"], 0)
+
+    def test_async_streaming_result_reduces_to_normal_node_output(self) -> None:
+        async def scenario() -> None:
+            async def chunks():
+                yield "async"
+                await asyncio.sleep(0)
+                yield " stream"
+
+            async def stream() -> StreamingResult[str, str]:
+                return streaming_result(chunks(), reducer=TextReducer())
+
+            workflow = Workflow(id="async_stream")
+            workflow.add_node(stream, node_id="stream")
+
+            invocation = await started_app().ainvoke(workflow)
+            call = invocation.latest_node_execution(
+                "stream"
+            ).operator_executions[0]
+
+            self.assertEqual(invocation.state, "completed")
+            self.assertEqual(
+                invocation.result,
+                {"output": "async stream"},
+            )
+            self.assertTrue(call.streaming)
+            self.assertEqual(call.stream_chunk_count, 2)
+
+        asyncio.run(scenario())
+
+    def test_raw_sync_generator_is_rejected_with_specific_error(self) -> None:
+        def stream():
+            yield "not wrapped"
+
+        workflow = Workflow(id="raw_sync_stream")
+        workflow.add_node(stream, node_id="stream")
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual(invocation.state, "failed")
+        self.assertEqual(invocation.error.code, "UNSUPPORTED_STREAM_RESULT")
+        self.assertIn("streaming_result", invocation.error.message)
+
+    def test_raw_async_generator_is_rejected_and_closed(self) -> None:
+        async def scenario() -> None:
+            async def stream():
+                yield "not wrapped"
+
+            workflow = Workflow(id="raw_async_stream")
+            workflow.add_node(stream, node_id="stream")
+
+            invocation = await started_app().ainvoke(workflow)
+
+            self.assertEqual(invocation.state, "failed")
+            self.assertEqual(
+                invocation.error.code,
+                "UNSUPPORTED_STREAM_RESULT",
+            )
+
+        asyncio.run(scenario())
+
+    def test_stream_reducer_failure_uses_specific_error(self) -> None:
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(["broken"], reducer=FailingReducer())
+
+        workflow = Workflow(id="stream_reducer_failure")
+        workflow.add_node(stream, node_id="stream")
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual(invocation.state, "failed")
+        self.assertEqual(invocation.error.code, "STREAM_REDUCTION_FAILED")
+
+    def test_stream_failure_is_retried_with_a_new_source(self) -> None:
+        calls = 0
+
+        def stream() -> StreamingResult[str, str]:
+            nonlocal calls
+            calls += 1
+            current = calls
+
+            def chunks():
+                yield f"attempt-{current}"
+                if current == 1:
+                    raise ValueError("stream disconnected")
+
+            return streaming_result(chunks(), reducer=TextReducer())
+
+        workflow = Workflow(id="stream_retry")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            policy=NodePolicy(retry=RetryPolicy(max_attempts=2)),
+        )
+
+        invocation = started_app().invoke(workflow)
+        attempts = invocation.latest_node_execution(
+            "stream"
+        ).operator_executions
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(invocation.result, {"output": "attempt-2"})
+        self.assertEqual(calls, 2)
+        self.assertEqual([call.reason for call in attempts], ["normal", "retry"])
+        self.assertEqual(
+            attempts[0].error.code,
+            "STREAM_CONSUMPTION_FAILED",
+        )
+        self.assertTrue(attempts[0].streaming)
+        self.assertEqual(attempts[0].stream_chunk_count, 1)
+        self.assertTrue(attempts[1].streaming)
+
+    def test_stream_failure_uses_fallback_operator(self) -> None:
+        app = started_app()
+
+        @app.capability("stream_text", operator_id="primary")
+        def primary() -> StreamingResult[str, str]:
+            def chunks():
+                yield "partial"
+                raise ValueError("primary stream failed")
+
+            return streaming_result(chunks(), reducer=TextReducer())
+
+        @app.operator("fallback", capability="stream_text")
+        def fallback() -> StreamingResult[str, str]:
+            return streaming_result(
+                iter(("fallback", " result")),
+                reducer=TextReducer(),
+            )
+
+        workflow = Workflow(id="stream_fallback")
+        workflow.add_node(
+            CapabilityRef(id="stream_text"),
+            node_id="stream",
+        )
+
+        invocation = app.invoke(workflow)
+        attempts = invocation.latest_node_execution(
+            "stream"
+        ).operator_executions
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            invocation.result,
+            {"output": "fallback result"},
+        )
+        self.assertEqual(
+            [attempt.reason for attempt in attempts],
+            ["normal", "fallback"],
+        )
+        self.assertEqual(
+            attempts[0].error.code,
+            "STREAM_CONSUMPTION_FAILED",
+        )
+        self.assertTrue(attempts[1].streaming)
+
+    def test_async_stream_timeout_closes_the_source(self) -> None:
+        async def scenario() -> None:
+            closed = asyncio.Event()
+
+            async def chunks():
+                try:
+                    yield "first"
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+            async def stream() -> StreamingResult[str, str]:
+                return streaming_result(chunks(), reducer=TextReducer())
+
+            workflow = Workflow(id="async_stream_timeout")
+            workflow.add_node(
+                stream,
+                node_id="stream",
+                policy=NodePolicy(timeout=TimeoutPolicy(timeout_ms=5)),
+            )
+
+            invocation = await started_app().ainvoke(workflow)
+
+            self.assertEqual(invocation.state, "failed")
+            self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
+            self.assertTrue(closed.is_set())
+            attempt = invocation.latest_node_execution(
+                "stream"
+            ).operator_executions[0]
+            self.assertTrue(attempt.streaming)
+            self.assertEqual(attempt.stream_chunk_count, 1)
+
+        asyncio.run(scenario())
+
+    def test_invocation_cancel_closes_async_stream(self) -> None:
+        async def scenario() -> None:
+            started = asyncio.Event()
+            closed = asyncio.Event()
+
+            async def chunks():
+                try:
+                    started.set()
+                    yield "first"
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+            async def stream() -> StreamingResult[str, str]:
+                return streaming_result(chunks(), reducer=TextReducer())
+
+            workflow = Workflow(id="cancel_async_stream")
+            workflow.add_node(
+                stream,
+                node_id="stream",
+                metadata={"_autoagent_user_event_stream": "message"},
+                stream_user_event_mapping=UserEventMapping(
+                    type="message_delta",
+                    transform=lambda chunk: {"delta": chunk},
+                ),
+            )
+            app = started_app()
+            task = asyncio.create_task(app.ainvoke(workflow))
+            await started.wait()
+
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            self.assertTrue(closed.is_set())
+            stored = next(iter(app.runtime_store.invocations.values()))
+            self.assertEqual(stored.state, "cancelled")
+            self.assertEqual(
+                [
+                    event.type
+                    for event in app.runtime_store.list_user_events(
+                        invocation_id=stored.id,
+                    )
+                ],
+                ["message_delta", "message_aborted"],
+            )
+
+        asyncio.run(scenario())
+
     def test_async_operator_timeout_is_retried_and_cancels_each_call(self) -> None:
         async def scenario() -> None:
             started = 0
@@ -217,6 +673,79 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             self.assertFalse(stored.execution_mailbox.has_pending())
 
         asyncio.run(scenario())
+
+    def test_replication_consumes_each_stream_before_aggregation(self) -> None:
+        def stream() -> StreamingResult[str, str]:
+            return streaming_result(
+                iter(("a", "b")),
+                reducer=TextReducer(),
+            )
+
+        workflow = Workflow(id="replicated_stream")
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            policy=NodePolicy(
+                replication=ReplicationPolicy(count=3),
+            ),
+        )
+
+        invocation = started_app().invoke(workflow)
+        execution = invocation.latest_node_execution("stream")
+        parallel_call = execution.operator_executions[0]
+        summary = parallel_call.summary
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            invocation.result,
+            {"output": ["ab", "ab", "ab"]},
+        )
+        self.assertEqual(parallel_call.kind, "replication")
+        self.assertEqual(summary.streaming_call_count, 3)
+        self.assertEqual(summary.stream_chunk_count, 6)
+        self.assertGreater(summary.stream_consumption_ns, 0)
+        self.assertGreater(summary.stream_reduction_ns, 0)
+
+    def test_map_consumes_each_stream_before_aggregation(self) -> None:
+        def stream(value: int) -> StreamingResult[str, str]:
+            return streaming_result(
+                iter((str(value), "!")),
+                reducer=TextReducer(),
+            )
+
+        workflow = Workflow(id="mapped_stream")
+        workflow.add_node(
+            lambda: [1, 2, 3],
+            node_id="source",
+        )
+        workflow.add_node(stream, node_id="stream")
+        workflow.add_edge(
+            "source",
+            "stream",
+            policy=EdgePolicy(
+                map=MapPolicy(
+                    item_selector=lambda ctx: [
+                        {"value": value} for value in ctx.input
+                    ],
+                    max_parallelism=2,
+                )
+            ),
+        )
+
+        invocation = started_app().invoke(workflow)
+        execution = invocation.latest_node_execution("stream")
+        parallel_call = execution.operator_executions[0]
+        summary = parallel_call.summary
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(
+            invocation.result,
+            {"output": ["1!", "2!", "3!"]},
+        )
+        self.assertEqual(parallel_call.kind, "map")
+        self.assertEqual(summary.streaming_call_count, 3)
+        self.assertEqual(summary.stream_chunk_count, 6)
+        self.assertLessEqual(summary.peak_parallelism, 2)
 
     def test_runtime_limit_accumulates_across_loop_executions(self) -> None:
         calls = 0

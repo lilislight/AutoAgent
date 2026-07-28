@@ -19,6 +19,7 @@ from autoagent.core.workflow.policy import (
     WorkflowPolicy,
 )
 from autoagent.core.workflow.workflow import Workflow
+from autoagent.core.workflow.user_event import UserEventMapping
 
 __all__ = [
     "BackoffPolicy",
@@ -45,5 +46,6 @@ __all__ = [
     "Workflow",
     "WorkflowPolicy",
     "WorkflowDiagram",
+    "UserEventMapping",
     "workflow_hook",
 ]

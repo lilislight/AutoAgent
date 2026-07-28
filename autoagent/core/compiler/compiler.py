@@ -333,6 +333,8 @@ class WorkflowCompiler:
                 output_contract=contract.output,
                 input_plan=node.input_mapping,
                 output_binding=node.output_binding,
+                stream_user_event_mapping=node.stream_user_event_mapping,
+                user_event_mapping=node.user_event_mapping,
                 policy=node.policy,
                 entry=bool(node.entry),
                 metadata=node.metadata,

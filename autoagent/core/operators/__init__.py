@@ -9,6 +9,11 @@ from autoagent.core.operators.operator import Operator
 from autoagent.core.operators.manifest import OperatorManifest
 from autoagent.core.operators.registry import CapabilityRegistry, OperatorRegistry
 from autoagent.core.operators.selector import OperatorResolutionError, OperatorResolver
+from autoagent.core.operators.streaming import (
+    StreamReducer,
+    StreamingResult,
+    streaming_result,
+)
 
 __all__ = [
     "Capability",
@@ -22,4 +27,7 @@ __all__ = [
     "OperatorResolver",
     "ParameterContract",
     "SchemaContract",
+    "StreamReducer",
+    "StreamingResult",
+    "streaming_result",
 ]

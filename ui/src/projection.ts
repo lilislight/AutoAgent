@@ -99,6 +99,8 @@ export function projectEvents(
           state: operatorStates[callId],
           error,
           summary,
+          streaming: Boolean(payload.streaming),
+          stream_chunk_count: Number(payload.stream_chunk_count ?? 0),
           occurred_at_ms: event.occurred_at_ms,
           elapsed_ns: event.elapsed_ns,
           timing: event.timing,
@@ -158,7 +160,7 @@ export function projectEvents(
     }
   }
   return {
-    schema_version: base?.schema_version ?? 3,
+    schema_version: base?.schema_version ?? 4,
     invocation_id: invocationId,
     through_sequence: appliedSequence,
     invocation_state: invocationState,
@@ -243,6 +245,8 @@ function nodeOperatorSummary(
   | "fallback_count"
   | "timeout_count"
   | "parallel_call_count"
+  | "streaming_call_count"
+  | "stream_chunk_count"
   | "latest_operator_kind"
 > {
   const calls = execution?.operator_calls ?? [];
@@ -255,6 +259,22 @@ function nodeOperatorSummary(
     parallel_call_count: calls
       .filter((call) => ["map", "replication"].includes(call.kind))
       .reduce((count, call) => count + Number(call.summary?.call_count ?? 0), 0),
+    streaming_call_count: calls.reduce(
+      (count, call) =>
+        count +
+        (["map", "replication"].includes(call.kind)
+          ? Number(call.summary?.streaming_call_count ?? 0)
+          : Number(call.streaming)),
+      0,
+    ),
+    stream_chunk_count: calls.reduce(
+      (count, call) =>
+        count +
+        (["map", "replication"].includes(call.kind)
+          ? Number(call.summary?.stream_chunk_count ?? 0)
+          : call.stream_chunk_count),
+      0,
+    ),
     latest_operator_kind: calls.at(-1)?.kind ?? null,
   };
 }

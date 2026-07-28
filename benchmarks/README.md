@@ -23,6 +23,35 @@ Absolute results vary by hardware and system load. Compare commits on the same
 host and configuration; the unittest smoke budgets are meant to catch hangs or
 order-of-magnitude regressions, not small timing changes.
 
+## UserEvent overhead
+
+To compare the same streaming Node with no UserEvent, one final UserEvent,
+per-chunk UserEvents, and both stream/final UserEvents, run:
+
+```bash
+python -m benchmarks.user_event_benchmark
+```
+
+The benchmark always uses the memory RuntimeStore and `minimal` Runtime Event
+mode so Runtime tracing and database persistence do not obscure UserEvent
+cost. It reports Invocation latency, throughput, UserEvents per Invocation,
+retained JSON bytes, Runtime Event count, and persistence-queue size.
+
+Use `--concurrency` to measure competing Invocations and `--output` to retain
+the complete machine-readable result:
+
+```bash
+python -m benchmarks.user_event_benchmark \
+  --invocations 100 --repeats 5 --concurrency 16 \
+  --chunks 64 --chunk-bytes 32 \
+  --output benchmarks/results/user-event.json
+```
+
+UserEvents are process-local in this implementation. The benchmark verifies
+that they add neither Runtime Events nor persistence-queue items; its byte
+measurement is the compact JSON representation retained for one Invocation,
+not Python object heap size.
+
 To measure queue growth when the database cannot consume events, run:
 
 ```bash

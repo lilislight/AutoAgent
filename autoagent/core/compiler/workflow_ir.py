@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from autoagent.core.workflow.user_event import UserEventMappings
 
 from autoagent.core.operators.contract import SchemaContract
 from autoagent.core.workflow.policy import (
@@ -146,6 +147,8 @@ class NodeIR(BaseModel):
         default=None,
         description="Compiled output binding. Exact type is defined later.",
     )
+    stream_user_event_mapping: UserEventMappings = None
+    user_event_mapping: UserEventMappings = None
     policy: NodePolicy | None = Field(
         default=None,
         description="Compiled node-level policy.",

@@ -62,7 +62,20 @@ def map_llm_call(ctx):
 Provider-specific model parameters belong only in
 `LLMRequest.provider_options`. `mode` controls which Provider method the
 Operator calls and is not sent to the model API. Both modes produce one final
-`LLMResponse`; intermediate stream delivery is a Runtime concern.
+`LLMResponse`. In stream mode, NodeExecutor consumes the Provider stream as a
+framework `StreamingResult`; chunks remain transient and are not copied into
+Runtime state or persistence.
+
+ReActWorkflow also emits a mode-independent, process-local UserEvent stream for
+Agent UIs. Standard types use lowercase `snake_case`:
+
+- `message_delta`, `reasoning_delta`, `message_completed`, and
+  `message_aborted`;
+- `tool_call_delta`, `tool_call_requested`, and `tool_call_rejected`;
+- `tool_result`, `agent_output`, and `agent_failed`.
+
+These mappings are installed by ReActWorkflow. Workflow authors do not inspect
+execution stages or manually translate LLM chunks.
 
 ## Structured output
 

@@ -9,6 +9,10 @@ from autoagent.core.operators.operator import Operator
 from autoagent.core.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.core.workflow.mapping import InputMapping, OutputBinding
 from autoagent.core.workflow.policy import NodePolicy
+from autoagent.core.workflow.user_event import (
+    UserEventMapping,
+    UserEventMappings,
+)
 
 if TYPE_CHECKING:
     from autoagent.core.workflow.workflow import Workflow
@@ -78,6 +82,20 @@ class Node(BaseModel):
         description=(
             "Optional post-completion hook. Runtime passes a restricted context "
             "that may mutate invocation data or session data only."
+        ),
+    )
+    stream_user_event_mapping: UserEventMappings = Field(
+        default=None,
+        description=(
+            "Optional type-and-transform mapping applied to each explicit "
+            "StreamingResult chunk. The framework owns lifecycle metadata."
+        ),
+    )
+    user_event_mapping: UserEventMappings = Field(
+        default=None,
+        description=(
+            "Optional type-and-transform mapping applied after Output Binding "
+            "and successful Node completion."
         ),
     )
     entry: bool | None = Field(

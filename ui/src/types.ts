@@ -187,6 +187,8 @@ export interface OperatorCallView {
   ended_at_ms: number | null;
   created_at_ms: number;
   updated_at_ms: number;
+  streaming?: boolean;
+  stream_chunk_count?: number;
 }
 
 export interface EdgeEvaluationView {
@@ -278,6 +280,26 @@ export interface RuntimeEvent {
   payload: Record<string, unknown>;
 }
 
+export interface UserEvent {
+  id: string;
+  invocation_id: string;
+  sequence: number;
+  schema_version: number;
+  type: string;
+  data: unknown;
+  node_id: string;
+  node_execution_id: string;
+  operator_call_id: string | null;
+  occurred_at_ms: number;
+}
+
+export interface UserEventPage {
+  items: UserEvent[];
+  last_sequence: number | null;
+  has_later: boolean;
+  live_sequence: number;
+}
+
 export interface ProjectedNodeExecution {
   execution_id: string;
   node_id: string;
@@ -312,6 +334,8 @@ export interface ProjectedOperatorCall {
   occurred_at_ms: number;
   elapsed_ns: number | null;
   timing: Record<string, number>;
+  streaming: boolean;
+  stream_chunk_count: number;
 }
 
 export interface ProjectedNode {
@@ -332,6 +356,8 @@ export interface ProjectedNode {
   fallback_count?: number;
   timeout_count?: number;
   parallel_call_count?: number;
+  streaming_call_count?: number;
+  stream_chunk_count?: number;
   latest_operator_kind?: string | null;
 }
 

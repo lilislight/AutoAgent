@@ -10,6 +10,7 @@ from uuid import UUID
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.event import RuntimeEvent
+from autoagent.core.runtime.user_event import UserEvent, UserEventSpec
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.persistence import (
     PersistenceCoordinator,
@@ -148,6 +149,9 @@ class RuntimeStore:
         self.invocations: dict[UUID, Invocation] = {}
         self.invocation_sessions: dict[UUID, UUID] = {}
         self.runtime_events: dict[UUID, list[RuntimeEvent]] = {}
+        # UserEvents are intentionally process-local in V1. They are neither
+        # persistence envelopes nor part of RuntimeEvent replay/recovery.
+        self.user_events: dict[UUID, list[UserEvent]] = {}
         self._replay_checkpoints: dict[
             tuple[UUID, int],
             ExecutionSnapshot,
@@ -863,6 +867,66 @@ class RuntimeStore:
             limit=limit,
         )
 
+    def record_user_event(
+        self,
+        *,
+        invocation_id: UUID,
+        spec: UserEventSpec,
+    ) -> UserEvent:
+        """Validate, detach, sequence, and retain one process-local UserEvent."""
+
+        with self._lock:
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            values = self.user_events.setdefault(invocation_id, [])
+            sequence = values[-1].sequence + 1 if values else 1
+            # User-facing transport data must be serializable even though the
+            # initial implementation does not persist it.
+            data = self.serializer.json_view(self.serializer.dumps(spec.data))
+            event = UserEvent(
+                invocation_id=invocation_id,
+                sequence=sequence,
+                type=spec.type,
+                data=data,
+                node_id=spec.node_id,
+                node_execution_id=spec.node_execution_id,
+                operator_call_id=spec.operator_call_id,
+                occurred_at_ms=spec.occurred_at_ms,
+            )
+            values.append(event)
+            return event.model_copy(deep=True)
+
+    def list_user_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> tuple[UserEvent, ...]:
+        if after_sequence < 0 or limit < 1:
+            raise ValueError("Invalid UserEvent page.")
+        with self._lock:
+            if (
+                invocation_id not in self.invocations
+                and invocation_id not in self.user_events
+            ):
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            values = [
+                event
+                for event in self.user_events.get(invocation_id, ())
+                if event.sequence > after_sequence
+            ][:limit]
+            return tuple(event.model_copy(deep=True) for event in values)
+
+    def latest_user_event_sequence(self, invocation_id: UUID) -> int:
+        with self._lock:
+            values = self.user_events.get(invocation_id, ())
+            if values:
+                return values[-1].sequence
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            return 0
+
     def persistence_status(self, invocation_id: UUID) -> str:
         if (
             invocation_id not in self.invocations
@@ -986,6 +1050,7 @@ class RuntimeStore:
                 if session.current_invocation_id == invocation_id:
                     session.current_invocation_id = None
         self.runtime_events.pop(invocation_id, None)
+        self.user_events.pop(invocation_id, None)
         self._reduced_states.pop(invocation_id, None)
         for key in [
             key

@@ -1,0 +1,15 @@
+schema_version = 1
+
+[project]
+name = "autoagent-authoring-samples"
+version = "1.0.0"
+description = "Three deterministic Workflows intended for Coding Agents."
+
+[[workflows]]
+entrypoint = "workflows.orchestration:workflow"
+
+[[workflows]]
+entrypoint = "workflows.wait_resume:workflow"
+
+[[workflows]]
+entrypoint = "workflows.react_assistant:workflow"

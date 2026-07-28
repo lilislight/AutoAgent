@@ -217,6 +217,7 @@ async def _invocation_command(
         project,
         app_settings=app_settings,
         environment=environment,
+        workflow_ids=(arguments.workflow_id,),
     )
     async with host:
         workflow = host.workflow(arguments.workflow_id)

@@ -41,6 +41,10 @@ Resume 的值叫 response，是因为它在回应一个未完成的 Wait，而�
 根目录 `.env.example` 包含全部 App、Server 和 OpenAI-compatible Provider
 环境配置。不使用 `llm_call` 的 Workflow 可以将 Provider 配置留空。
 
+面向 Coding Agent 的三个可运行 Workflow 位于
+[`examples/authoring`](examples/authoring/README.md)，分别覆盖条件编排、持久化
+Wait/Resume，以及 LLM/Tool/ReActWorkflow。
+
 `event_mode` 属于 Invocation，而不是 App。相同 App 和 Session 的不同
 Invocation 可以动态选择不同模式。`memory` 和 `database` 是 RuntimeStore
 后端类型，不是 Event 模式。

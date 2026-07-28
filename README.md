@@ -44,6 +44,10 @@ Configuration precedence is CLI override, process environment, project-root
 supported App, Server, and OpenAI-compatible Provider environment setting.
 Workflows that do not use `llm_call` may leave the Provider values empty.
 
+Three runnable Coding-Agent-oriented Workflows are documented in
+[`examples/authoring`](examples/authoring/README.md): conditional orchestration,
+durable Wait/Resume, and LLM/Tool/ReActWorkflow.
+
 ## Environment configuration
 
 Normal applications do not need to construct `AutoAgentSettings` or call an

@@ -1,6 +1,6 @@
 # Examples
 
-Run examples from the repository root through the uv environment.
+Install AutoAgent and run examples from the repository root.
 
 ## ReAct weather agent
 
@@ -21,8 +21,7 @@ For a different compatible provider, also change
 `AUTOAGENT_OPENAI_BASE_URL`. Start the server:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache uv run python \
-  -m examples.react_weather_agent
+python -m examples.react_weather_agent
 ```
 
 Open `http://127.0.0.1:8765`, select `mock_weather_chinese`, and inspect its
@@ -45,8 +44,7 @@ execution.
 Workflow, persists traces, and serves the embedded tracing UI:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache uv run python \
-  examples/incident_response_tracing_server.py
+python examples/incident_response_tracing_server.py
 ```
 
 ## Workflow validation preview
@@ -55,8 +53,7 @@ UV_CACHE_DIR=/tmp/autoagent-uv-cache uv run python \
 demonstrate compiler diagnostics and Mermaid preview generation:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache uv run python \
-  examples/workflow_validation_preview.py
+python examples/workflow_validation_preview.py
 ```
 
 The generated diagram is written to `workflow_validation_preview.mmd` beside

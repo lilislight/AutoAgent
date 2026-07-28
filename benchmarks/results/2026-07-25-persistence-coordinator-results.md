@@ -5,7 +5,7 @@ Recorded on 2026-07-25 on branch
 backpressure, durable cursors, and failure state out of `DatabaseBackend` into
 the sink-independent `PersistenceCoordinator`.
 
-- Python environment: repository-root `uv` environment
+- Python environment: repository-root virtual environment
 - Final full suite: 257 tests passed, 1 PostgreSQL integration test skipped
 - Final full-suite elapsed time: about 23.9 seconds
 - Before the last three edge cases were added, the 245-test suite also passed
@@ -19,8 +19,7 @@ Absolute timings depend on host load. The comparison baseline is
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.runtime_store_benchmark \
+python -m benchmarks.runtime_store_benchmark \
   --nodes 30 --invocations 50 --json
 ```
 
@@ -66,12 +65,10 @@ treated as run-to-run host noise rather than a coordinator cost.
 Commands:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --database-mode normal --invocations 20 --nodes 10 --payload-bytes 1024
 
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --database-mode blocked --invocations 20 --nodes 10 --payload-bytes 1024
 ```
 
@@ -107,8 +104,7 @@ active producers reach the hard bound, assuming this workload and no draining.
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.sqlite_write_benchmark \
+python -m benchmarks.sqlite_write_benchmark \
   --events 10000 --batch-size 256 --payload-bytes 1024 --runs 3
 ```
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from autoagent.ai import (
     LLM_CALL_CAPABILITY_ID,
@@ -21,13 +21,31 @@ class ProjectHost:
         *,
         app_settings: AutoAgentSettings,
         environment: Mapping[str, str],
+        workflow_ids: Iterable[str] | None = None,
     ) -> None:
         self.project = project
         self.environment = dict(environment)
         self._started = False
         self._closed = False
 
-        required_capabilities = _project_capability_ids(project)
+        selected_ids = None if workflow_ids is None else set(workflow_ids)
+        selected_workflows = tuple(
+            loaded
+            for loaded in project.workflows
+            if selected_ids is None or loaded.workflow.id in selected_ids
+        )
+        if selected_ids is not None:
+            missing = selected_ids - {
+                loaded.workflow.id for loaded in selected_workflows
+            }
+            if missing:
+                raise KeyError(
+                    f"Unknown Workflow: {', '.join(sorted(missing))}"
+                )
+
+        required_capabilities = _workflow_capability_ids(
+            loaded.workflow for loaded in selected_workflows
+        )
         llm_config = None
         if LLM_CALL_CAPABILITY_ID in required_capabilities:
             llm_config = OpenAICompatibleConfig.from_env(
@@ -39,7 +57,7 @@ class ProjectHost:
         try:
             if llm_config is not None:
                 register_openai_compatible_operator(self.app, llm_config)
-            for loaded in project.workflows:
+            for loaded in selected_workflows:
                 self.app.register_workflow(loaded.workflow)
         except BaseException:
             self.app.close()
@@ -72,7 +90,7 @@ class ProjectHost:
         await self.close()
 
 
-def _project_capability_ids(project: ProjectDefinition) -> set[str]:
+def _workflow_capability_ids(workflows: Iterable[Workflow]) -> set[str]:
     capability_ids: set[str] = set()
     visited: set[int] = set()
 
@@ -89,6 +107,6 @@ def _project_capability_ids(project: ProjectDefinition) -> set[str]:
             elif isinstance(capability, Workflow):
                 visit(capability)
 
-    for loaded in project.workflows:
-        visit(loaded.workflow)
+    for workflow in workflows:
+        visit(workflow)
     return capability_ids

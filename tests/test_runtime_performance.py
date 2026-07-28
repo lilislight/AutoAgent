@@ -87,7 +87,7 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
             elapsed,
             MEMORY_CHAIN_MAX_SECONDS,
             "Memory runtime exceeded its smoke budget. Run "
-            "`uv run python -m benchmarks.runtime_store_benchmark` to profile.",
+            "`python -m benchmarks.runtime_store_benchmark` to profile.",
         )
 
     def test_standard_events_do_not_copy_large_node_output(self) -> None:
@@ -152,13 +152,13 @@ class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
             invoke_elapsed,
             SQLITE_CHAIN_MAX_SECONDS,
             "SQLite-backed runtime exceeded its invoke smoke budget. Run "
-            "`uv run python -m benchmarks.runtime_store_benchmark` to profile.",
+            "`python -m benchmarks.runtime_store_benchmark` to profile.",
         )
         self.assertLess(
             flush_elapsed,
             SQLITE_CHAIN_MAX_SECONDS,
             "SQLite persistence exceeded its flush smoke budget. Run "
-            "`uv run python -m benchmarks.runtime_store_benchmark` to profile.",
+            "`python -m benchmarks.runtime_store_benchmark` to profile.",
         )
 
     async def test_concurrent_invocation_backlog_is_measured_and_blocks_admission(

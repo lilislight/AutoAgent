@@ -6,7 +6,7 @@ cross-loop request/response with one-way callback submission. Durability
 barriers still wait for the persistence worker.
 
 - Baseline commit: `7960d95`
-- Python environment: repository-root `uv` environment
+- Python environment: repository-root virtual environment
 - Full test suite: 226 tests passed, 1 PostgreSQL integration test skipped
 - Full test elapsed time: 29.903 seconds
 
@@ -19,8 +19,7 @@ the same host and commands as
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.runtime_store_benchmark \
+python -m benchmarks.runtime_store_benchmark \
   --nodes 30 --invocations 50 --json
 ```
 
@@ -68,8 +67,7 @@ when the last Invocation returns.
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --database-mode normal --invocations 20 --nodes 10 --payload-bytes 1024
 ```
 
@@ -135,8 +133,7 @@ the difference as a stable regression.
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --database-mode blocked --invocations 20 --nodes 10 --payload-bytes 1024
 ```
 

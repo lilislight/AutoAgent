@@ -1,0 +1,8 @@
+{
+  "wait_key": "release:42",
+  "wait_type": "human",
+  "payload": {
+    "change_id": "release-42",
+    "summary": "Approve the payments-api release"
+  }
+}

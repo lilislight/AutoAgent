@@ -274,6 +274,41 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertIn("AUTOAGENT_OPENAI_API_KEY is required", output)
 
+    def test_non_llm_invocation_ignores_unselected_llm_provider(self) -> None:
+        with self.project(
+            module_name="cli_mixed_workflows",
+            source="""
+                from autoagent import CapabilityRef, Workflow
+                from autoagent.ai import LLM_CALL_CAPABILITY_ID
+
+                def echo(value: str) -> str:
+                    return value
+
+                workflow = Workflow(id="echo")
+                workflow.add_node(echo, node_id="echo")
+
+                llm_workflow = Workflow(id="llm")
+                llm_workflow.add_node(
+                    CapabilityRef(id=LLM_CALL_CAPABILITY_ID),
+                    node_id="llm_call",
+                )
+            """,
+            entrypoints=("workflow", "llm_workflow"),
+        ) as root:
+            code, output = self.run_cli(
+                "--project",
+                str(root),
+                "--no-env-file",
+                "invocation",
+                "run",
+                "echo",
+                "--input-json",
+                '{"value":"hello"}',
+            )
+
+        self.assertEqual(0, code, output)
+        self.assertIn("STATE completed", output)
+
     def test_server_settings_validate_all_environment_values(self) -> None:
         settings = ServerSettings.from_env(
             env_file=None,
@@ -308,9 +343,15 @@ class AutoAgentCliTests(unittest.TestCase):
         *,
         module_name: str,
         source: str,
+        entrypoints: tuple[str, ...] = ("workflow",),
     ) -> Iterator[Path]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            workflow_entries = "\n\n".join(
+                "[[workflows]]\n"
+                f'entrypoint = "{module_name}:{entrypoint}"'
+                for entrypoint in entrypoints
+            )
             (root / "auto-agent.toml").write_text(
                 textwrap.dedent(
                     f"""
@@ -320,8 +361,7 @@ class AutoAgentCliTests(unittest.TestCase):
                     name = "cli-test"
                     version = "1"
 
-                    [[workflows]]
-                    entrypoint = "{module_name}:workflow"
+                    {workflow_entries}
                     """
                 ).strip()
                 + "\n",

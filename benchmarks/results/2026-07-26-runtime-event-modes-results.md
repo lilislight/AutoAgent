@@ -1,6 +1,6 @@
 # Runtime Event modes benchmark
 
-Environment: 4 logical CPUs, 8 GiB memory, repository `uv` Python
+Environment: 4 logical CPUs, 8 GiB memory, repository virtual-environment Python
 environment. The first measurements are the committed `b226516` baseline.
 
 ## Normal execution
@@ -91,12 +91,10 @@ copy-on-write implementation.
 ## Commands
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.runtime_store_benchmark \
+python -m benchmarks.runtime_store_benchmark \
   --nodes 30 --invocations 30 --backend both --event-mode all --json
 
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --invocations 20 --nodes 10 --payload-bytes 10240 \
   --event-mode full --database-mode blocked \
   --queue-high-bytes 67108864 --queue-hard-bytes 134217728

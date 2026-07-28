@@ -4,7 +4,7 @@ Recorded on 2026-07-23 before replacing per-Event cross-loop request/response
 with one-way persistence submission.
 
 - Git commit before recording: `2b1f95e`
-- Python environment: repository-root `uv` environment
+- Python environment: repository-root virtual environment
 - Full test suite: 225 tests passed, 1 PostgreSQL integration test skipped
 - Full test elapsed time: 29.506 seconds
 
@@ -16,8 +16,7 @@ results with the same commands on the same host.
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.runtime_store_benchmark \
+python -m benchmarks.runtime_store_benchmark \
   --nodes 30 --invocations 50 --json
 ```
 
@@ -51,8 +50,7 @@ UV_CACHE_DIR=/tmp/autoagent-uv-cache \
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --database-mode normal --invocations 20 --nodes 10 --payload-bytes 1024
 ```
 
@@ -137,8 +135,7 @@ UV_CACHE_DIR=/tmp/autoagent-uv-cache \
 Command:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --database-mode blocked --invocations 20 --nodes 10 --payload-bytes 1024
 ```
 

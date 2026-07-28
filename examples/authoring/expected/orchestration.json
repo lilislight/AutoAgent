@@ -1,0 +1,12 @@
+{
+  "output": {
+    "service": "payments-api",
+    "decision": "approved",
+    "review_rounds": 2,
+    "path": "specialist",
+    "notes": [
+      "Security controls verified.",
+      "Reliability checks verified."
+    ]
+  }
+}

@@ -239,14 +239,14 @@ Skill 不能教 Coding Agent 使用内部 Runtime、Scheduler、Executor 或数�
 
 ### 4.4 高质量 Sample
 
-第一批 Sample 应覆盖：
+MVP1 使用一个完整示例项目中的三个 Workflow：
 
-1. 基础线性 Workflow。
-2. Condition、并行分支和汇合。
-3. Loop、Map、Replication 和并发限制。
-4. Wait/Resume 和 Recovery。
-5. LLM、Tool 和 ReActWorkflow 子 Workflow。
-6. 包含上述能力的综合真实 Workflow。
+1. Condition、分支、Loop、并行执行和汇总。
+2. Wait/Resume 和跨进程恢复。
+3. LLM、Tool、结构化输出和 ReActWorkflow。
+
+三个 Workflow 共同覆盖主要 Authoring 能力，避免为了数量增加重复或低质量
+Sample。示例目录是可运行参考，不是用户项目必须遵守的目录模板。
 
 每个 Sample 包含：
 
@@ -332,7 +332,7 @@ UI 保留 Graph、Timeline、Replay 动画和 Inspector 交互；MVP1 CLI 只提
 
 - Coding Agent 只阅读 Skill、Sample 和公开 API。
 - Coding Agent 不导入框架内部模块。
-- Coding Agent 可以从需求创建六类代表性 Workflow。
+- Coding Agent 可以根据三个代表性 Sample 组合主要 Workflow 能力。
 - Compiler 错误可通过结构化 Diagnostic 修复。
 - CLI 可以检查、列出和运行 Workflow，也可以恢复持久化 Wait。
 - CLI 的 Text 输出和退出码稳定、确定。
@@ -449,11 +449,10 @@ Compare 和 Fork，不重新定义这些能力。
 MVP1.1  收口稳定公开 API 和唯一 Workflow 使用路径
 MVP1.2  设计标准 Workflow 模块/目录契约
 MVP1.3  改进 Compiler Diagnostic
-MVP1.4  编写 Authoring Skill
-MVP1.5  整理高质量 Sample
-MVP1.6  实现 Project Check、Workflow List/Check、Invocation Run/Resume 和 Serve CLI
-MVP1.7  下沉 CLI 所需的基础 Tracing 能力
-MVP1.8  完成 Agent Authoring 验收
+MVP1.4  实现 Project Check、Workflow List/Check、Invocation Run/Resume 和 Serve CLI
+MVP1.5  整理三个高质量 Sample
+MVP1.6  编写 Authoring Skill
+MVP1.7  完成 Agent Authoring 验收
 
 MVP2.1  Agent-friendly Trace Report
 MVP2.2  Node / Event / State 渐进查询
@@ -465,5 +464,5 @@ MVP2.6  完成 Agent Debugging 验收
 MVP3    Hosted Platform，暂不实施
 ```
 
-当前继续完成标准 Sample 和 Authoring Skill。历史 Invocation 的 Agent-friendly
-Report、渐进式 Event 查询和 Fork 属于 MVP2。
+当前下一步是编写 Authoring Skill。历史 Invocation 的 Agent-friendly Report、
+渐进式 Event 查询和 Fork 属于 MVP2。

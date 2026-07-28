@@ -16,9 +16,9 @@ Do not add current documentation to `docs-deprecated/`.
 
 ## Build, Test, and Development Commands
 
-Run Python commands through the repository-root uv environment:
+Run Python commands through the repository-root virtual environment:
 
-- `UV_CACHE_DIR=/tmp/autoagent-uv-cache uv run python -m unittest discover -v`
+- `python -m unittest discover -v`
 - `cd ui && npm run build`
 
 ## Coding Style & Naming Conventions

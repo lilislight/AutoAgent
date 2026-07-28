@@ -6,8 +6,7 @@ DELETE+FULL as a journal-mode comparison because that changes two variables.
 
 Usage::
 
-    UV_CACHE_DIR=/tmp/autoagent-uv-cache \\
-      uv run python -m benchmarks.sqlite_write_benchmark \\
+    python -m benchmarks.sqlite_write_benchmark \\
       --events 10000 --batch-size 256
 """
 

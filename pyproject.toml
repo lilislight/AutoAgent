@@ -19,8 +19,8 @@ dependencies = [
 autoagent = "autoagent.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.11.26,<0.12.0"]
-build-backend = "uv_build"
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
-[tool.uv.build-backend]
-module-root = ""
+[tool.setuptools.packages.find]
+include = ["autoagent*"]

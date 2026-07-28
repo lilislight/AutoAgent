@@ -4,8 +4,7 @@ The normal test suite contains generous smoke budgets and structural payload
 checks. Use this benchmark for actual latency and throughput measurements:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.runtime_store_benchmark
+python -m benchmarks.runtime_store_benchmark
 ```
 
 The default case executes ten 30-node chain Invocations against both the
@@ -16,8 +15,7 @@ events per Invocation.
 Use JSON output when recording comparable results from the same host:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.runtime_store_benchmark \
+python -m benchmarks.runtime_store_benchmark \
   --nodes 30 --invocations 50 --json
 ```
 
@@ -28,8 +26,7 @@ order-of-magnitude regressions, not small timing changes.
 To measure queue growth when the database cannot consume events, run:
 
 ```bash
-UV_CACHE_DIR=/tmp/autoagent-uv-cache \
-  uv run python -m benchmarks.persistence_backlog_benchmark \
+python -m benchmarks.persistence_backlog_benchmark \
   --invocations 20 --nodes 10 --payload-bytes 0
 ```
 

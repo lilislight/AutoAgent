@@ -3,29 +3,95 @@ from __future__ import annotations
 import asyncio
 import unittest
 from dataclasses import dataclass
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from typing import Any, Literal
+from unittest.mock import patch
 
 import httpx
+from openai import APIStatusError
 from pydantic import BaseModel, Field
 
 from autoagent import AutoAgentApp, JsonRuntimeSerializer
 from autoagent.ai import (
+    ChatCompletionsConfig,
+    ChatCompletionsProvider,
     LLM_CALL_CAPABILITY_ID,
     LLM_CALL_CONTRACT,
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
     LLMToolCall,
-    OpenAICompatibleConfig,
-    create_openai_compatible_operator,
+    create_llm_call_operator,
     get_tool_definition,
     react_workflow,
-    register_openai_compatible_operator,
+    register_llm_call_operator,
     tool,
 )
-from autoagent.ai.openai_compatible import _post_json
+from autoagent.ai.providers.deepseek import DeepSeekConfig, DeepSeekProvider
+from autoagent.ai.providers.factory import llm_provider_from_environment
 from tests.helpers import started_app
+
+
+class SDKModel:
+    def __init__(self, value: dict[str, Any]) -> None:
+        self.value = value
+
+    def model_dump(self, *, mode: str) -> dict[str, Any]:
+        assert mode == "python"
+        return self.value
+
+
+class FakeStream:
+    def __init__(self, chunks: list[dict[str, Any]]) -> None:
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield SDKModel(chunk)
+
+
+class FakeCompletions:
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **params):
+        self.calls.append(params)
+        result = await self.handler(params)
+        if isinstance(result, FakeStream):
+            return result
+        return SDKModel(result)
+
+
+class FakeSDKClient:
+    def __init__(self, handler) -> None:
+        self.chat = type("Chat", (), {})()
+        self.chat.completions = FakeCompletions(handler)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _create_test_operator(config, *, handler, provider_type=ChatCompletionsProvider):
+    return create_llm_call_operator(
+        provider_type(
+            config,
+            client=FakeSDKClient(handler),
+        ),
+        operator_id="chat_completions.test",
+    )
+
+
+def _register_test_operator(app, config, *, handler):
+    return register_llm_call_operator(
+        app,
+        ChatCompletionsProvider(
+            config,
+            client=FakeSDKClient(handler),
+        ),
+        operator_id="chat_completions.test",
+    )
 
 
 class Answer(BaseModel):
@@ -46,6 +112,13 @@ class LLMContractTests(unittest.TestCase):
         )
 
         self.assertIs(capability.contract, LLM_CALL_CONTRACT)
+        parameters = {
+            item.name: item
+            for item in LLM_CALL_CONTRACT.input.parameters
+        }
+        self.assertTrue(parameters["request"].required)
+        self.assertFalse(parameters["mode"].required)
+        self.assertEqual(parameters["mode"].default, "invoke")
 
     def test_response_format_accepts_dataclass_and_persists_as_schema(self) -> None:
         request = LLMRequest(
@@ -99,21 +172,117 @@ class ToolDecoratorTests(unittest.TestCase):
                 return value
 
 
-class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
-    def test_config_reads_structured_output_mode_from_env(self) -> None:
-        config = OpenAICompatibleConfig.from_env(
-            env_file=None,
-            environ={
-                "AUTOAGENT_OPENAI_API_KEY": "secret",
-                "AUTOAGENT_OPENAI_MODEL": "model",
-                "AUTOAGENT_OPENAI_STRUCTURED_OUTPUT_MODE": "json_object",
-            },
+class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_factory_builds_generic_provider_from_common_environment(
+        self,
+    ) -> None:
+        provider = llm_provider_from_environment(
+            {
+                "AUTOAGENT_LLM_API_KEY": "secret",
+                "AUTOAGENT_LLM_MODEL": "model",
+                "AUTOAGENT_LLM_STRUCTURED_OUTPUT_MODE": "json_object",
+            }
         )
 
-        self.assertEqual(config.structured_output_mode, "json_object")
+        try:
+            self.assertIsInstance(provider, ChatCompletionsProvider)
+            self.assertNotIsInstance(provider, DeepSeekProvider)
+            self.assertEqual(
+                provider.config.structured_output_mode,
+                "json_object",
+            )
+        finally:
+            await provider.aclose()
+
+    async def test_factory_builds_deepseek_from_provider_environment(
+        self,
+    ) -> None:
+        provider = llm_provider_from_environment(
+            {
+                "AUTOAGENT_LLM_PROVIDER": "deepseek",
+                "AUTOAGENT_LLM_MODEL": "deepseek-chat",
+                "AUTOAGENT_LLM_API_KEY": "secret",
+            }
+        )
+
+        try:
+            self.assertIsInstance(provider, DeepSeekProvider)
+            self.assertEqual(
+                provider.config.base_url,
+                "https://api.deepseek.com",
+            )
+            self.assertEqual(
+                provider.config.structured_output_mode,
+                "json_object",
+            )
+        finally:
+            await provider.aclose()
+
+    async def test_provider_operates_without_operator_and_preserves_injected_client(
+        self,
+    ) -> None:
+        async def handler(params):
+            return {
+                "model": "fake",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            }
+
+        client = FakeSDKClient(handler)
+        provider = ChatCompletionsProvider(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            client=client,
+        )
+
+        response = await provider.ainvoke(
+            LLMRequest(
+                messages=(LLMMessage(role="user", content="hello"),),
+            )
+        )
+        await provider.aclose()
+
+        self.assertEqual(response.message.content, "ok")
+        self.assertFalse(client.closed)
+
+    async def test_provider_owns_sdk_client_and_disables_hidden_retries(
+        self,
+    ) -> None:
+        async def handler(params):
+            raise AssertionError("No request expected.")
+
+        client = FakeSDKClient(handler)
+        with patch(
+            "autoagent.ai.providers.chat_completions.provider.AsyncOpenAI",
+            return_value=client,
+        ) as constructor:
+            provider = ChatCompletionsProvider(
+                ChatCompletionsConfig(
+                    api_key="secret",
+                    default_model="model",
+                    base_url="https://provider.example/v1",
+                    timeout_ms=2_500,
+                )
+            )
+            await provider.aclose()
+
+        constructor.assert_called_once_with(
+            api_key="secret",
+            base_url="https://provider.example/v1",
+            timeout=2.5,
+            max_retries=0,
+            default_headers=None,
+        )
+        self.assertTrue(client.closed)
 
     async def test_registration_helper_installs_capability_and_operator(self) -> None:
-        async def transport(url, headers, payload, timeout):
+        async def handler(params):
             return {
                 "model": "fake",
                 "choices": [
@@ -125,13 +294,13 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
             }
 
         app = AutoAgentApp()
-        operator = register_openai_compatible_operator(
+        operator = _register_test_operator(
             app,
-            OpenAICompatibleConfig(
+            ChatCompletionsConfig(
                 api_key="secret",
                 default_model="model",
             ),
-            transport=transport,
+            handler=handler,
         )
 
         self.assertTrue(app.capability_registry.contains(LLM_CALL_CAPABILITY_ID))
@@ -145,13 +314,8 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_operator_translates_chat_completion_request_and_response(self) -> None:
         captured: dict[str, Any] = {}
 
-        async def transport(url, headers, payload, timeout):
-            captured.update(
-                url=url,
-                headers=headers,
-                payload=payload,
-                timeout=timeout,
-            )
+        async def handler(params):
+            captured.update(params)
             return {
                 "id": "chatcmpl_1",
                 "model": "model-used",
@@ -181,31 +345,32 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
 
-        operator = create_openai_compatible_operator(
-            OpenAICompatibleConfig(
+        operator = _create_test_operator(
+            ChatCompletionsConfig(
                 api_key="secret",
                 default_model="default-model",
                 base_url="https://provider.example/v1/",
             ),
-            transport=transport,
+            handler=handler,
         )
         request = LLMRequest(
             messages=(LLMMessage(role="user", content="hello"),),
             response_format=Answer,
+            provider_options={"top_k": 12},
         )
 
         response = await operator.ainvoke({"request": request})
 
         self.assertEqual(
-            captured["url"],
-            "https://provider.example/v1/chat/completions",
+            captured["model"],
+            "default-model",
         )
-        self.assertEqual(captured["payload"]["model"], "default-model")
         self.assertEqual(
-            captured["payload"]["response_format"]["json_schema"]["name"],
+            captured["response_format"]["json_schema"]["name"],
             "Answer",
         )
-        self.assertNotIn("secret", repr(captured["payload"]))
+        self.assertNotIn("secret", repr(captured))
+        self.assertEqual(captured["extra_body"], {"top_k": 12})
         self.assertEqual(response.message.tool_calls[0].raw_arguments, '{"value":1}')
         self.assertEqual(response.usage.total_tokens, 13)
 
@@ -214,8 +379,8 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         captured: dict[str, Any] = {}
 
-        async def transport(url, headers, payload, timeout):
-            captured["payload"] = payload
+        async def handler(params):
+            captured["payload"] = params
             return {
                 "model": "deepseek-v4-flash",
                 "choices": [
@@ -229,13 +394,13 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
                 ],
             }
 
-        operator = create_openai_compatible_operator(
-            OpenAICompatibleConfig(
+        operator = _create_test_operator(
+            DeepSeekConfig(
                 api_key="secret",
                 default_model="deepseek-v4-flash",
-                base_url="https://api.deepseek.com",
             ),
-            transport=transport,
+            handler=handler,
+            provider_type=DeepSeekProvider,
         )
 
         await operator.ainvoke(
@@ -253,6 +418,138 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"value"', payload["messages"][0]["content"])
         self.assertEqual(payload["messages"][1]["content"], "answer")
 
+    async def test_deepseek_maps_tokens_reasoning_and_extended_usage(
+        self,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def handler(params):
+            captured.update(params)
+            return {
+                "id": "deepseek_1",
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "I should answer briefly.",
+                            "content": "done",
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 12,
+                    "total_tokens": 32,
+                    "prompt_cache_hit_tokens": 8,
+                    "prompt_cache_miss_tokens": 12,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 7,
+                    },
+                },
+            }
+
+        provider = DeepSeekProvider(
+            DeepSeekConfig(
+                api_key="secret",
+                default_model="deepseek-v4-pro",
+            ),
+            client=FakeSDKClient(handler),
+        )
+        response = await provider.ainvoke(
+            LLMRequest(
+                messages=(
+                    LLMMessage(role="user", content="continue"),
+                    LLMMessage(
+                        role="assistant",
+                        content=None,
+                        reasoning_content="Previous reasoning.",
+                        tool_calls=(
+                            LLMToolCall(
+                                id="call_1",
+                                name="lookup",
+                                raw_arguments="{}",
+                            ),
+                        ),
+                    ),
+                    LLMMessage(
+                        role="tool",
+                        content="result",
+                        tool_call_id="call_1",
+                    ),
+                ),
+                max_output_tokens=512,
+                provider_options={
+                    "thinking": {"type": "enabled"},
+                    "reasoning_effort": "high",
+                },
+            )
+        )
+
+        self.assertNotIn("max_completion_tokens", captured)
+        self.assertEqual(captured["max_tokens"], 512)
+        self.assertEqual(
+            captured["messages"][1]["reasoning_content"],
+            "Previous reasoning.",
+        )
+        self.assertEqual(
+            captured["extra_body"]["thinking"],
+            {"type": "enabled"},
+        )
+        self.assertEqual(captured["reasoning_effort"], "high")
+        self.assertNotIn("reasoning_effort", captured["extra_body"])
+        self.assertEqual(
+            response.message.reasoning_content,
+            "I should answer briefly.",
+        )
+        assert response.usage is not None
+        self.assertEqual(response.usage.prompt_cache_hit_tokens, 8)
+        self.assertEqual(response.usage.prompt_cache_miss_tokens, 12)
+        self.assertEqual(response.usage.reasoning_tokens, 7)
+
+    async def test_deepseek_omits_reasoning_from_non_tool_history(
+        self,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def handler(params):
+            captured.update(params)
+            return {
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "next",
+                        },
+                    }
+                ],
+            }
+
+        provider = DeepSeekProvider(
+            DeepSeekConfig(
+                api_key="secret",
+                default_model="deepseek-v4-pro",
+            ),
+            client=FakeSDKClient(handler),
+        )
+        await provider.ainvoke(
+            LLMRequest(
+                messages=(
+                    LLMMessage(
+                        role="assistant",
+                        content="previous",
+                        reasoning_content="Not required without a Tool call.",
+                    ),
+                    LLMMessage(role="user", content="next"),
+                ),
+            )
+        )
+
+        self.assertNotIn("reasoning_content", captured["messages"][0])
+
     async def test_json_object_mode_defers_provider_option_but_keeps_schema_prompt(
         self,
     ) -> None:
@@ -262,8 +559,8 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
         def lookup(value: int) -> int:
             return value
 
-        async def transport(url, headers, payload, timeout):
-            captured["payload"] = payload
+        async def handler(params):
+            captured["payload"] = params
             return {
                 "model": "deepseek-v4-flash",
                 "choices": [
@@ -287,13 +584,13 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
                 ],
             }
 
-        operator = create_openai_compatible_operator(
-            OpenAICompatibleConfig(
+        operator = _create_test_operator(
+            DeepSeekConfig(
                 api_key="secret",
                 default_model="deepseek-v4-flash",
-                base_url="https://api.deepseek.com",
             ),
-            transport=transport,
+            handler=handler,
+            provider_type=DeepSeekProvider,
         )
 
         await operator.ainvoke(
@@ -320,8 +617,8 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_prompt_mode_omits_provider_response_format(self) -> None:
         captured: dict[str, Any] = {}
 
-        async def transport(url, headers, payload, timeout):
-            captured["payload"] = payload
+        async def handler(params):
+            captured["payload"] = params
             return {
                 "model": "custom",
                 "choices": [
@@ -335,14 +632,14 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
                 ],
             }
 
-        operator = create_openai_compatible_operator(
-            OpenAICompatibleConfig(
+        operator = _create_test_operator(
+            ChatCompletionsConfig(
                 api_key="secret",
                 default_model="custom",
                 base_url="https://provider.example/v1",
                 structured_output_mode="prompt",
             ),
-            transport=transport,
+            handler=handler,
         )
 
         await operator.ainvoke(
@@ -360,7 +657,7 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
             captured["payload"]["messages"][0]["content"],
         )
 
-    async def test_http_error_includes_provider_body_and_request_id(self) -> None:
+    async def test_sdk_error_is_normalized_with_request_id(self) -> None:
         request = httpx.Request("POST", "https://provider.example/chat/completions")
         response = httpx.Response(
             400,
@@ -368,25 +665,251 @@ class OpenAICompatibleOperatorTests(unittest.IsolatedAsyncioTestCase):
             headers={"x-request-id": "req_123"},
             json={"error": {"message": "unsupported response_format"}},
         )
-        client = AsyncMock()
-        client.post.return_value = response
-        context = AsyncMock()
-        context.__aenter__.return_value = client
 
-        with patch(
-            "autoagent.ai.openai_compatible.httpx.AsyncClient",
-            return_value=context,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "req_123.*unsupported response_format",
-            ):
-                await _post_json(
-                    "https://provider.example/chat/completions",
-                    {},
-                    {},
-                    1,
+        async def handler(params):
+            raise APIStatusError(
+                "unsupported response_format",
+                response=response,
+                body={"error": {"message": "unsupported response_format"}},
+            )
+
+        provider = ChatCompletionsProvider(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            client=FakeSDKClient(handler),
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "unsupported response_format",
+        ) as raised:
+            await provider.ainvoke(
+                LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
                 )
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(raised.exception.request_id, "req_123")
+        self.assertFalse(raised.exception.retryable)
+
+    async def test_stream_normalizes_text_tools_and_final_response(self) -> None:
+        async def handler(params):
+            self.assertTrue(params["stream"])
+            return FakeStream(
+                [
+                    {
+                        "id": "chatcmpl_1",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {"content": "hel"},
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "chatcmpl_1",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": "lo",
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {
+                                                "name": "lookup",
+                                                "arguments": '{"value":',
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "chatcmpl_1",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {"arguments": "1}"},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ],
+                    },
+                ]
+            )
+
+        provider = ChatCompletionsProvider(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            client=FakeSDKClient(handler),
+        )
+
+        chunks = [
+            chunk
+            async for chunk in provider.astream(
+                LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                )
+            )
+        ]
+
+        self.assertTrue(all(isinstance(chunk, LLMStreamChunk) for chunk in chunks))
+        self.assertEqual(
+            [chunk.text_delta for chunk in chunks if chunk.type == "text_delta"],
+            ["hel", "lo"],
+        )
+        completed = chunks[-1]
+        self.assertEqual(completed.type, "completed")
+        assert completed.response is not None
+        self.assertEqual(completed.response.message.content, "hello")
+        self.assertEqual(
+            completed.response.message.tool_calls[0].raw_arguments,
+            '{"value":1}',
+        )
+
+    async def test_llm_call_operator_selects_stream_from_mapped_mode(
+        self,
+    ) -> None:
+        async def handler(params):
+            self.assertTrue(params["stream"])
+            return FakeStream(
+                [
+                    {
+                        "id": "chatcmpl_stream",
+                        "model": "model-used",
+                        "choices": [
+                            {
+                                "delta": {"content": "streamed"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                ]
+            )
+
+        operator = _create_test_operator(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            handler=handler,
+        )
+        response = await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                ),
+                "mode": "stream",
+            }
+        )
+
+        self.assertEqual(response.message.content, "streamed")
+
+    async def test_deepseek_streams_reasoning_and_preserves_usage(self) -> None:
+        async def handler(params):
+            self.assertTrue(params["stream"])
+            return FakeStream(
+                [
+                    {
+                        "id": "deepseek_1",
+                        "model": "deepseek-v4-pro",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": "First ",
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "deepseek_1",
+                        "model": "deepseek-v4-pro",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "reasoning_content": "think.",
+                                    "content": "answer",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "deepseek_1",
+                        "model": "deepseek-v4-pro",
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 6,
+                            "total_tokens": 16,
+                            "prompt_cache_hit_tokens": 4,
+                            "prompt_cache_miss_tokens": 6,
+                            "completion_tokens_details": {
+                                "reasoning_tokens": 5,
+                            },
+                        },
+                    },
+                ]
+            )
+
+        provider = DeepSeekProvider(
+            DeepSeekConfig(
+                api_key="secret",
+                default_model="deepseek-v4-pro",
+            ),
+            client=FakeSDKClient(handler),
+        )
+        chunks = [
+            chunk
+            async for chunk in provider.astream(
+                LLMRequest(
+                    messages=(LLMMessage(role="user", content="answer"),),
+                    provider_options={"thinking": {"type": "enabled"}},
+                )
+            )
+        ]
+
+        self.assertEqual(
+            [
+                chunk.reasoning_delta
+                for chunk in chunks
+                if chunk.type == "reasoning_delta"
+            ],
+            ["First ", "think."],
+        )
+        self.assertEqual(
+            [
+                chunk.text_delta
+                for chunk in chunks
+                if chunk.type == "text_delta"
+            ],
+            ["answer"],
+        )
+        completed = chunks[-1]
+        assert completed.response is not None
+        self.assertEqual(
+            completed.response.message.reasoning_content,
+            "First think.",
+        )
+        assert completed.response.usage is not None
+        self.assertEqual(completed.response.usage.prompt_cache_hit_tokens, 4)
+        self.assertEqual(completed.response.usage.reasoning_tokens, 5)
 
 
 class ReActWorkflowTests(unittest.TestCase):
@@ -401,11 +924,17 @@ class ReActWorkflowTests(unittest.TestCase):
         self,
         responses: list[LLMResponse],
         requests: list[LLMRequest],
+        modes: list[str] | None = None,
     ) -> AutoAgentApp:
         response_iterator = iter(responses)
 
-        async def fake_llm(request: LLMRequest) -> LLMResponse:
+        async def fake_llm(
+            request: LLMRequest,
+            mode: Literal["invoke", "stream"] = "invoke",
+        ) -> LLMResponse:
             requests.append(request)
+            if modes is not None:
+                modes.append(mode)
             return next(response_iterator)
 
         app = started_app()
@@ -440,6 +969,50 @@ class ReActWorkflowTests(unittest.TestCase):
         regions = tuple(result.workflow_ir.graph.loop_regions.values())
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0].header_node_id, "prepare_conversation")
+
+    def test_initial_input_propagates_provider_options_and_mode_across_loop(
+        self,
+    ) -> None:
+        @tool(id="echo", description="Echo one value.")
+        def echo(value: int) -> int:
+            return value
+
+        requests: list[LLMRequest] = []
+        modes: list[str] = []
+        app = self.app_with_responses(
+            [
+                _tool_response("call_1", "echo", '{"value":1}'),
+                _text_response("complete"),
+            ],
+            requests,
+            modes,
+        )
+        workflow = react_workflow(
+            id="input_options",
+            instructions="Use the tool.",
+            tools=[echo],
+        )
+
+        invocation = app.invoke(
+            workflow,
+            input={
+                "input": "echo one",
+                "provider_options": {
+                    "thinking": {"type": "enabled"},
+                },
+                "mode": "stream",
+            },
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual(modes, ["stream", "stream"])
+        self.assertEqual(
+            [request.provider_options for request in requests],
+            [
+                {"thinking": {"type": "enabled"}},
+                {"thinking": {"type": "enabled"}},
+            ],
+        )
 
     def test_tool_arguments_failure_returns_to_prepare_once(self) -> None:
         calls: list[tuple[int, int]] = []
@@ -519,7 +1092,12 @@ class ReActWorkflowTests(unittest.TestCase):
         requests: list[LLMRequest] = []
         app = self.app_with_responses(
             [
-                _tool_response("call_bad", "unstable", '{"value":-1}'),
+                _tool_response(
+                    "call_bad",
+                    "unstable",
+                    '{"value":-1}',
+                    reasoning_content="Try the unstable tool first.",
+                ),
                 _tool_response("call_good", "unstable", '{"value":3}'),
                 _text_response("recovered"),
             ],
@@ -541,6 +1119,10 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertIn("tool_execution_error", error_message)
         self.assertIn("RuntimeError", error_message)
         self.assertIn("negative values are unavailable", error_message)
+        self.assertEqual(
+            requests[1].messages[-2].reasoning_content,
+            "Try the unstable tool first.",
+        )
 
     def test_multiple_calls_to_one_tool_use_one_generated_map_node(self) -> None:
         calls: list[int] = []
@@ -675,10 +1257,13 @@ def _tool_response(
     call_id: str,
     name: str,
     arguments: str,
+    *,
+    reasoning_content: str | None = None,
 ) -> LLMResponse:
     return LLMResponse(
         message=LLMMessage(
             role="assistant",
+            reasoning_content=reasoning_content,
             tool_calls=(
                 LLMToolCall(
                     id=call_id,

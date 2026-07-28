@@ -7,6 +7,28 @@ from scripts import build_wheel
 
 
 class BuildWheelTests(TestCase):
+    def test_python_build_removes_stale_build_tree(self) -> None:
+        with (
+            patch.object(build_wheel.shutil, "rmtree") as rmtree,
+            patch.object(build_wheel.subprocess, "run") as run,
+        ):
+            build_wheel._build_wheel()
+
+        rmtree.assert_called_once_with(
+            build_wheel.PYTHON_BUILD_ROOT,
+            ignore_errors=True,
+        )
+        run.assert_called_once_with(
+            [
+                build_wheel.sys.executable,
+                "-m",
+                "build",
+                "--wheel",
+            ],
+            cwd=build_wheel.REPOSITORY_ROOT,
+            check=True,
+        )
+
     def test_windows_resolves_npm_cmd(self) -> None:
         def which(command: str) -> str | None:
             return "C:\\Program Files\\nodejs\\npm.cmd" if command == "npm.cmd" else None

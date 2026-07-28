@@ -1,7 +1,7 @@
 # AI Workflows
 
 This reference owns LLM, Tool, structured output, ReActWorkflow, and
-OpenAI-compatible Provider authoring. It does not define general graph or
+Chat Completions Provider authoring. It does not define general graph or
 Runtime policy.
 
 ## Contents
@@ -44,6 +44,25 @@ construct the App or register Provider credentials.
 - provider-specific `provider_options`.
 
 Do not put normalized reserved request fields inside `provider_options`.
+
+The `llm_call` Capability accepts an execution `mode` separately from the
+model request. An Input Mapping may select `invoke` or `stream`:
+
+```python
+def map_llm_call(ctx):
+    return {
+        "request": LLMRequest(
+            messages=(LLMMessage(role="user", content=ctx.input),),
+            provider_options={"provider_extension": "value"},
+        ),
+        "mode": "invoke",
+    }
+```
+
+Provider-specific model parameters belong only in
+`LLMRequest.provider_options`. `mode` controls which Provider method the
+Operator calls and is not sent to the model API. Both modes produce one final
+`LLMResponse`; intermediate stream delivery is a Runtime concern.
 
 ## Structured output
 
@@ -110,6 +129,21 @@ workflow = react_workflow(
 The returned value is a normal single-entry/single-exit Workflow and may be
 embedded as a child Workflow.
 
+Its first Node accepts an Invocation Mapping with `input` or `messages`.
+`provider_options` and `mode` are optional:
+
+```python
+{
+    "input": "What is the weather in Tokyo?",
+    "provider_options": {"provider_extension": "value"},
+    "mode": "stream",
+}
+```
+
+These settings are preserved across Tool and output-repair iterations. A
+downstream LLM Node does not inherit them; its own Input Mapping constructs its
+own `LLMRequest` and selects its own mode.
+
 Parameters:
 
 - `id` and non-empty `instructions`;
@@ -133,25 +167,28 @@ Never leave `max_steps` unbounded.
 
 ## Provider environment
 
-The built-in OpenAI-compatible Operator uses:
+The built-in Chat Completions Provider uses:
 
 ```text
-AUTOAGENT_OPENAI_BASE_URL
-AUTOAGENT_OPENAI_API_KEY
-AUTOAGENT_OPENAI_MODEL
-AUTOAGENT_OPENAI_TIMEOUT_MS
-AUTOAGENT_OPENAI_STRUCTURED_OUTPUT_MODE
+AUTOAGENT_LLM_PROVIDER
+AUTOAGENT_LLM_MODEL
+AUTOAGENT_LLM_TIMEOUT_MS
+AUTOAGENT_LLM_STRUCTURED_OUTPUT_MODE
+AUTOAGENT_LLM_BASE_URL
+AUTOAGENT_LLM_API_KEY
 ```
 
 Structured output modes are `auto`, `json_schema`, `json_object`, and `prompt`.
-`auto` selects a compatible strategy for known providers.
+Use `AUTOAGENT_LLM_PROVIDER=chat_completions`. The Base URL may point to OpenAI
+or another service implementing the OpenAI Chat Completions protocol. `auto`
+selects a structured-output strategy from the configured endpoint.
 
 Put placeholders and explanations in `.env.example`; never commit a real API
 key. Compilation and `workflow check` do not require Provider secrets.
 
 ## Test without a paid service
 
-Prefer a local OpenAI-compatible mock HTTP service. Point the CLI host at it
+Prefer a local Chat Completions mock HTTP service. Point the CLI host at it
 through environment variables so the Workflow continues to reference the
 abstract `llm_call` Capability exactly as production does.
 

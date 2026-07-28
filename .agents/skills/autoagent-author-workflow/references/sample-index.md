@@ -74,7 +74,7 @@ Files:
 
 ```text
 workflows/react_assistant.py
-mock_openai_provider.py
+mock_chat_completions_provider.py
 inputs/react-weather.json
 expected/react-weather.json
 tests/test_examples.py
@@ -86,7 +86,7 @@ Demonstrates:
 - one `react_workflow(...)` definition;
 - bounded Tool and output repair;
 - structured Pydantic output;
-- fake Operator and local OpenAI-compatible mock testing.
+- fake Operator and local Chat Completions mock testing.
 
 ## Selection rule
 

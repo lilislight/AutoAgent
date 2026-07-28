@@ -89,7 +89,7 @@ class AuthoringSkillTests(unittest.TestCase):
             re.findall(
                 r"^(?:workflows|inputs|expected|tests)/"
                 r"[A-Za-z0-9_./-]+\.(?:py|json|md)$|"
-                r"^mock_openai_provider\.py$",
+                r"^mock_chat_completions_provider\.py$",
                 text,
                 re.MULTILINE,
             )
@@ -150,7 +150,7 @@ class AuthoringSkillTests(unittest.TestCase):
             "project-contract.md": "Package availability and version",
             "workflow-design.md": "Invocation and Node data flow",
             "public-api.md": "Durable values",
-            "ai-workflows.md": "local OpenAI-compatible mock HTTP service",
+            "ai-workflows.md": "local Chat Completions mock HTTP service",
             "testing.md": "registration out of Workflow source",
         }
         for name, expected in required_text.items():

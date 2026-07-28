@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from typing import Literal
 
 from autoagent import AutoAgentApp
 from autoagent.ai import (
@@ -139,7 +140,10 @@ class AuthoringExamplesTests(unittest.TestCase):
         workflow = self.project.workflow_by_id("weather_assistant")
         requests: list[LLMRequest] = []
 
-        async def fake_llm(request: LLMRequest) -> LLMResponse:
+        async def fake_llm(
+            request: LLMRequest,
+            mode: Literal["invoke", "stream"] = "invoke",
+        ) -> LLMResponse:
             requests.append(request)
             if not any(message.role == "tool" for message in request.messages):
                 return LLMResponse(
@@ -224,9 +228,9 @@ class AuthoringExamplesTests(unittest.TestCase):
         )
 
     def test_mock_provider_returns_tool_and_final_turns(self) -> None:
-        module_path = PROJECT_ROOT / "mock_openai_provider.py"
+        module_path = PROJECT_ROOT / "mock_chat_completions_provider.py"
         spec = importlib.util.spec_from_file_location(
-            "authoring_mock_openai_provider",
+            "authoring_mock_chat_completions_provider",
             module_path,
         )
         assert spec is not None and spec.loader is not None

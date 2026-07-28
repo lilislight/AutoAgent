@@ -9,7 +9,7 @@ from unittest.mock import patch
 from dotenv import dotenv_values
 
 from autoagent import AutoAgentApp, AutoAgentSettings, DatabaseBackend
-from autoagent.ai import OPENAI_COMPATIBLE_ENV_KEYS
+from autoagent.ai.providers.factory import LLM_PROVIDER_ENV_KEYS
 from autoagent.core.app.settings import AUTOAGENT_ENV_KEYS
 from autoagent.core.server import SERVER_ENV_KEYS
 
@@ -165,15 +165,11 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
         example = dotenv_values(
             Path(__file__).parents[1] / ".env.example"
         )
-        documented = {
-            key
-            for key in example
-            if key.startswith("AUTOAGENT_")
-        }
+        documented = set(example)
 
         self.assertEqual(
             AUTOAGENT_ENV_KEYS
             | SERVER_ENV_KEYS
-            | OPENAI_COMPATIBLE_ENV_KEYS,
+            | LLM_PROVIDER_ENV_KEYS,
             documented,
         )

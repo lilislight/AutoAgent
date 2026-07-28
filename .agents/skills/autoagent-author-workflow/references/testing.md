@@ -107,7 +107,7 @@ Do not claim cross-process Resume from an in-memory or minimal-mode test.
 
 Default tests must not call a paid model or depend on model randomness.
 
-Prefer a local OpenAI-compatible mock Provider driven by deterministic
+Prefer a local Chat Completions mock Provider driven by deterministic
 responses. Configure the ordinary CLI host to use it, keeping Provider
 registration out of Workflow source.
 

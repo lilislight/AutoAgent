@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Literal
 
 from autoagent import AutoAgentApp, DatabaseBackend, RuntimeStore
 from autoagent.ai import (
@@ -12,9 +13,13 @@ from autoagent.ai import (
     LLMResponse,
     LLMMessage,
     LLMToolCall,
-    OpenAICompatibleConfig,
+    ChatCompletionsConfig,
 )
-from autoagent.ai.react import ConversationUpdate, ToolExecutionResult
+from autoagent.ai.models.react import (
+    ConversationUpdate,
+    PreparedLLMCall,
+    ToolExecutionResult,
+)
 from tests.fixtures.react_weather_agent import (
     CityProfile,
     WeatherAnswer,
@@ -36,7 +41,10 @@ class ReactWeatherFixtureTests(unittest.TestCase):
         self.assertEqual(weather.unit, "fahrenheit")
 
     def test_example_workflow_compiles_with_one_entry_and_exit(self) -> None:
-        async def fake_llm(request: LLMRequest) -> LLMResponse:
+        async def fake_llm(
+            request: LLMRequest,
+            mode: Literal["invoke", "stream"] = "invoke",
+        ) -> LLMResponse:
             return LLMResponse(
                 message=LLMMessage(
                     role="assistant",
@@ -108,9 +116,14 @@ class ReactWeatherFixtureTests(unittest.TestCase):
             ]
         )
         requests: list[LLMRequest] = []
+        modes: list[str] = []
 
-        async def fake_llm(request: LLMRequest) -> LLMResponse:
+        async def fake_llm(
+            request: LLMRequest,
+            mode: Literal["invoke", "stream"] = "invoke",
+        ) -> LLMResponse:
             requests.append(request)
+            modes.append(mode)
             return next(responses)
 
         app = AutoAgentApp()
@@ -130,7 +143,11 @@ class ReactWeatherFixtureTests(unittest.TestCase):
         try:
             invocation = app.invoke(
                 workflow,
-                input={"input": "What is the weather in Tokyo?"},
+                input={
+                    "input": "What is the weather in Tokyo?",
+                    "provider_options": {"custom_option": "fixture"},
+                    "mode": "stream",
+                },
                 event_mode="full",
             )
         finally:
@@ -142,12 +159,18 @@ class ReactWeatherFixtureTests(unittest.TestCase):
             {"output": "东京天气多云，气温为27摄氏度，建议穿轻便衣物。"},
         )
         self.assertEqual(len(requests), 2)
+        self.assertEqual(modes, ["stream", "invoke"])
+        self.assertEqual(
+            requests[0].provider_options,
+            {"custom_option": "fixture"},
+        )
+        self.assertEqual(requests[1].provider_options, {})
         self.assertIn('"city":"Tokyo"', requests[1].messages[-1].content)
         self.assertIn("Simplified Chinese", requests[1].messages[0].content)
 
     def test_react_child_remains_independently_compilable(self) -> None:
         app, _ = build_app(
-            OpenAICompatibleConfig(
+            ChatCompletionsConfig(
                 api_key="test-key",
                 default_model="test-model",
             )
@@ -160,7 +183,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
         self.assertTrue(result.ok, result.diagnostics)
 
     def test_fresh_app_deserializes_llm_and_react_runtime_models(self) -> None:
-        config = OpenAICompatibleConfig(
+        config = ChatCompletionsConfig(
             api_key="test-key",
             default_model="test-model",
         )
@@ -214,7 +237,10 @@ class ReactWeatherFixtureTests(unittest.TestCase):
         ) -> AutoAgentApp:
             response_iterator = iter(responses)
 
-            async def fake_llm(request: LLMRequest) -> LLMResponse:
+            async def fake_llm(
+                request: LLMRequest,
+                mode: Literal["invoke", "stream"] = "invoke",
+            ) -> LLMResponse:
                 return next(response_iterator)
 
             app = AutoAgentApp(
@@ -305,12 +331,11 @@ class ReactWeatherFixtureTests(unittest.TestCase):
             rebuilt.result,
             {"output": "东京天气多云，气温27摄氏度。"},
         )
-        self.assertIsInstance(
-            rebuilt.latest_node_execution(
-                "weather_agent/prepare_conversation"
-            ).output,
-            LLMRequest,
-        )
+        prepared_call = rebuilt.latest_node_execution(
+            "weather_agent/prepare_conversation"
+        ).output
+        self.assertIsInstance(prepared_call, PreparedLLMCall)
+        self.assertIsInstance(prepared_call.request, LLMRequest)
         self.assertIsInstance(
             rebuilt.latest_node_execution("translate_to_chinese").output,
             LLMResponse,
@@ -322,7 +347,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
 
     def test_example_app_registers_workflow_and_llm_operator(self) -> None:
         app, workflow = build_app(
-            OpenAICompatibleConfig(
+            ChatCompletionsConfig(
                 api_key="test-key",
                 default_model="test-model",
             )

@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import FastAPI
 
 
-app = FastAPI(title="AutoAgent deterministic OpenAI-compatible mock")
+app = FastAPI(title="AutoAgent deterministic Chat Completions mock")
 
 
 @app.post("/v1/chat/completions")

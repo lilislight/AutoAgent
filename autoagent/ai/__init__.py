@@ -1,59 +1,67 @@
-"""AI-specific Capabilities, Operators, Tools, and Workflow sugar."""
+"""AI-specific Capabilities, Models, Providers, Tools, and Workflow sugar."""
 
-from autoagent.ai.llm import (
+from autoagent.ai.capabilities import (
     LLM_CALL_CAPABILITY,
     LLM_CALL_CAPABILITY_ID,
     LLM_CALL_CONTRACT,
+)
+from autoagent.ai.models import (
     LLMMessage,
     LLMNamedToolChoice,
     LLMRequest,
     LLMResponse,
     LLMResponseFormat,
+    LLMStreamChunk,
     LLMToolCall,
     LLMToolChoice,
     LLMToolDefinition,
     LLMUsage,
     response_format_from_type,
 )
-from autoagent.ai.openai_compatible import (
-    OPENAI_COMPATIBLE_ENV_KEYS,
-    OpenAICompatibleConfig,
-    OpenAICompatibleError,
-    StructuredOutputMode,
-    create_openai_compatible_operator,
-    register_openai_compatible_operator,
+from autoagent.ai.operators import (
+    create_llm_call_operator,
+    register_llm_call_operator,
 )
-from autoagent.ai.react import (
+from autoagent.ai.providers import (
+    ChatCompletionsConfig,
+    ChatCompletionsProvider,
+    LLMProvider,
+    LLMProviderError,
+    StructuredOutputMode,
+)
+from autoagent.ai.tools import ToolDefinition, get_tool_definition, tool
+from autoagent.ai.workflows import (
     StructuredOutputRepairExhausted,
     ToolArgumentsRepairExhausted,
     react_workflow,
 )
-from autoagent.ai.tool import ToolDefinition, get_tool_definition, tool
 
 __all__ = [
+    "ChatCompletionsConfig",
+    "ChatCompletionsProvider",
     "LLM_CALL_CAPABILITY",
     "LLM_CALL_CAPABILITY_ID",
     "LLM_CALL_CONTRACT",
     "LLMMessage",
     "LLMNamedToolChoice",
+    "LLMProvider",
+    "LLMProviderError",
     "LLMRequest",
     "LLMResponse",
     "LLMResponseFormat",
+    "LLMStreamChunk",
     "LLMToolCall",
     "LLMToolChoice",
     "LLMToolDefinition",
     "LLMUsage",
-    "OpenAICompatibleConfig",
-    "OpenAICompatibleError",
-    "OPENAI_COMPATIBLE_ENV_KEYS",
     "StructuredOutputMode",
     "StructuredOutputRepairExhausted",
     "ToolArgumentsRepairExhausted",
     "ToolDefinition",
-    "create_openai_compatible_operator",
+    "create_llm_call_operator",
     "get_tool_definition",
     "react_workflow",
-    "register_openai_compatible_operator",
+    "register_llm_call_operator",
     "response_format_from_type",
     "tool",
 ]

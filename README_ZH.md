@@ -60,7 +60,7 @@ Workflow 代码只描述业务行为。宿主环境负责 App 生命周期、持
 ### AI 基础能力
 
 - Provider 无关的 `llm_call` Capability；
-- OpenAI-compatible Chat Completions Operator；
+- 适配到内置 `llm_call` Operator 的 Chat Completions Provider；
 - 从 Python 函数生成的类型化 Tool；
 - 结构化模型输出；
 - 支持 Tool 和 output 修复的有界 ReActWorkflow。

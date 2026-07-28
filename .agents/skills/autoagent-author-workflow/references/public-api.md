@@ -105,14 +105,16 @@ Read [policies.md](policies.md) for semantics and valid combinations.
 - `ToolArgumentsRepairExhausted`
 - `StructuredOutputRepairExhausted`
 
-### OpenAI-compatible Provider
+### Chat Completions Provider
 
-- `OpenAICompatibleConfig`
-- `OpenAICompatibleError`
+- `ChatCompletionsConfig`
+- `ChatCompletionsProvider`
+- `LLMProvider`
+- `LLMStreamChunk`
+- `LLMProviderError`
 - `StructuredOutputMode`
-- `OPENAI_COMPATIBLE_ENV_KEYS`
-- `create_openai_compatible_operator`
-- `register_openai_compatible_operator`
+- `create_llm_call_operator`
+- `register_llm_call_operator`
 
 Workflow modules normally use protocol types, `tool`, and `react_workflow`.
 CLI/host infrastructure configures the Provider. Do not create an App or

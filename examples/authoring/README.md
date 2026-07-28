@@ -132,11 +132,11 @@ flowchart LR
     llm --> output["WeatherAnswer"]
 ```
 
-The project includes a deterministic OpenAI-compatible HTTP mock. Start it in
+The project includes a deterministic Chat Completions HTTP mock. Start it in
 one terminal:
 
 ```bash
-uvicorn mock_openai_provider:app \
+uvicorn mock_chat_completions_provider:app \
   --app-dir . \
   --host 127.0.0.1 \
   --port 8899
@@ -145,10 +145,11 @@ uvicorn mock_openai_provider:app \
 Configure the built-in Provider in the terminal running AutoAgent:
 
 ```bash
-export AUTOAGENT_OPENAI_BASE_URL=http://127.0.0.1:8899/v1
-export AUTOAGENT_OPENAI_API_KEY=mock
-export AUTOAGENT_OPENAI_MODEL=mock-weather-model
-export AUTOAGENT_OPENAI_STRUCTURED_OUTPUT_MODE=json_schema
+export AUTOAGENT_LLM_PROVIDER=chat_completions
+export AUTOAGENT_LLM_BASE_URL=http://127.0.0.1:8899/v1
+export AUTOAGENT_LLM_API_KEY=mock
+export AUTOAGENT_LLM_MODEL=mock-weather-model
+export AUTOAGENT_LLM_STRUCTURED_OUTPUT_MODE=json_schema
 ```
 
 Run the ReAct Workflow:
@@ -174,7 +175,7 @@ Run the command from the example root, or pass the project directory explicitly:
 autoagent project check
 ```
 
-### OpenAI-compatible configuration is missing
+### Chat Completions configuration is missing
 
 `project check` never needs Provider secrets. Running `weather_assistant` does.
 Set the four variables shown above or configure another compatible endpoint.

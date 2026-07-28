@@ -12,6 +12,7 @@ UI_DIST = UI_ROOT / "dist"
 UI_STAGING = REPOSITORY_ROOT / "autoagent" / "core" / "server" / "ui"
 EXAMPLES_SOURCE = REPOSITORY_ROOT / "examples" / "authoring"
 EXAMPLES_STAGING = REPOSITORY_ROOT / "autoagent" / "examples" / "authoring"
+PYTHON_BUILD_ROOT = REPOSITORY_ROOT / "build"
 
 
 def _npm_executable() -> str:
@@ -68,6 +69,7 @@ def _stage_examples() -> None:
 
 
 def _build_wheel() -> None:
+    shutil.rmtree(PYTHON_BUILD_ROOT, ignore_errors=True)
     subprocess.run(
         [sys.executable, "-m", "build", "--wheel"],
         cwd=REPOSITORY_ROOT,

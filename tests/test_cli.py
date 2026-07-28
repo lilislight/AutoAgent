@@ -78,7 +78,7 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIsNone(settings.database_url)
         self.assertEqual(5, settings.executor_max_parallel_units)
 
-    def test_project_check_does_not_require_openai_secret(self) -> None:
+    def test_project_check_does_not_require_llm_provider_secret(self) -> None:
         with self.project(
             module_name="cli_llm_workflow",
             source="""
@@ -272,7 +272,7 @@ class AutoAgentCliTests(unittest.TestCase):
             )
 
         self.assertEqual(2, code)
-        self.assertIn("AUTOAGENT_OPENAI_API_KEY is required", output)
+        self.assertIn("AUTOAGENT_LLM_API_KEY is required", output)
 
     def test_non_llm_invocation_ignores_unselected_llm_provider(self) -> None:
         with self.project(

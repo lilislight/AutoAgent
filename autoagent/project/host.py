@@ -4,9 +4,10 @@ from collections.abc import Iterable, Mapping
 
 from autoagent.ai import (
     LLM_CALL_CAPABILITY_ID,
-    OpenAICompatibleConfig,
-    register_openai_compatible_operator,
+    LLMProvider,
+    register_llm_call_operator,
 )
+from autoagent.ai.providers.factory import llm_provider_from_environment
 from autoagent.core.app import AutoAgentApp, AutoAgentSettings
 from autoagent.core.workflow import CapabilityRef, Workflow
 from autoagent.project.loader import ProjectDefinition
@@ -27,6 +28,7 @@ class ProjectHost:
         self.environment = dict(environment)
         self._started = False
         self._closed = False
+        self._providers: list[LLMProvider] = []
 
         selected_ids = None if workflow_ids is None else set(workflow_ids)
         selected_workflows = tuple(
@@ -46,17 +48,16 @@ class ProjectHost:
         required_capabilities = _workflow_capability_ids(
             loaded.workflow for loaded in selected_workflows
         )
-        llm_config = None
-        if LLM_CALL_CAPABILITY_ID in required_capabilities:
-            llm_config = OpenAICompatibleConfig.from_env(
-                env_file=None,
-                environ=self.environment,
-            )
-
         self.app = AutoAgentApp(settings=app_settings)
         try:
-            if llm_config is not None:
-                register_openai_compatible_operator(self.app, llm_config)
+            if LLM_CALL_CAPABILITY_ID in required_capabilities:
+                provider = llm_provider_from_environment(self.environment)
+                register_llm_call_operator(
+                    self.app,
+                    provider,
+                    operator_id=f"{provider.provider_name}.default",
+                )
+                self._providers.append(provider)
             for loaded in selected_workflows:
                 self.app.register_workflow(loaded.workflow)
         except BaseException:
@@ -79,8 +80,12 @@ class ProjectHost:
 
     async def close(self) -> None:
         if not self._closed:
-            await self.app.aclose()
-            self._closed = True
+            try:
+                await self.app.aclose()
+            finally:
+                for provider in reversed(self._providers):
+                    await provider.aclose()
+                self._closed = True
 
     async def __aenter__(self) -> ProjectHost:
         await self.start()

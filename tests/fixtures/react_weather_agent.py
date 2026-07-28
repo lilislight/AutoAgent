@@ -19,15 +19,17 @@ from autoagent import (
     Workflow,
 )
 from autoagent.ai import (
+    ChatCompletionsConfig,
+    ChatCompletionsProvider,
     LLM_CALL_CAPABILITY_ID,
     LLMMessage,
     LLMRequest,
     LLMResponse,
-    OpenAICompatibleConfig,
     react_workflow,
-    register_openai_compatible_operator,
+    register_llm_call_operator,
     tool,
 )
+from autoagent.ai.providers.factory import llm_provider_from_environment
 
 
 class CityProfile(BaseModel):
@@ -217,13 +219,30 @@ def build_workflow() -> Workflow:
 
 
 def build_app(
-    config: OpenAICompatibleConfig | None = None,
+    config: ChatCompletionsConfig | None = None,
 ) -> tuple[AutoAgentApp, Workflow]:
     """Build the App served by the mocked-weather tracing example."""
 
-    resolved_config = config or OpenAICompatibleConfig.from_env()
+    provider = (
+        ChatCompletionsProvider(config)
+        if config is not None
+        else llm_provider_from_environment(
+            {
+                key: str(value)
+                for key, value in {
+                    **dotenv_values(Path.cwd() / ".env"),
+                    **os.environ,
+                }.items()
+                if value is not None
+            }
+        )
+    )
     app = AutoAgentApp()
-    register_openai_compatible_operator(app, resolved_config)
+    register_llm_call_operator(
+        app,
+        provider,
+        operator_id=f"{provider.provider_name}.default",
+    )
     workflow = build_workflow()
     app.register_workflow(workflow)
     return app, workflow
@@ -259,7 +278,10 @@ def main() -> None:
     print(f"Tracing API: {server_url}/api/v1")
     print(
         "Invoke from the UI by selecting the Workflow and clicking its entry "
-        'Node, using input such as: {"input":"What is the weather in Tokyo?"}. '
+        "Node. The input accepts `input` or `messages`, plus optional "
+        "`provider_options` and `mode` (`invoke` or `stream`). For example: "
+        '{"input":"What is the weather in Tokyo?",'
+        '"provider_options":{},"mode":"invoke"}. '
         "The ReAct child answer is translated into Chinese by the final LLM Node."
     )
     AutoAgentServer(app).run(host=host, port=port)

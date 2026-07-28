@@ -2,34 +2,16 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, TypeVar, overload
 
-from autoagent.ai.llm import LLMToolDefinition
-from autoagent.core.operators.contract import OperatorContract, callable_contract
+from autoagent.ai.tools.definition import (
+    TOOL_DEFINITION_ATTRIBUTE,
+    ToolDefinition,
+)
+from autoagent.core.operators.contract import callable_contract
 
 
 F = TypeVar("F", bound=Callable[..., Any])
-_TOOL_ATTRIBUTE = "__autoagent_tool_definition__"
-
-
-@dataclass(frozen=True, slots=True)
-class ToolDefinition:
-    """Framework metadata attached to one ordinary Python Tool function."""
-
-    id: str
-    name: str
-    description: str
-    contract: OperatorContract
-
-    def llm_definition(self) -> LLMToolDefinition:
-        return LLMToolDefinition(
-            id=self.id,
-            name=self.name,
-            description=self.description,
-            input_schema=self.contract.input.json_schema,
-            output_schema=self.contract.output.json_schema,
-        )
 
 
 @overload
@@ -55,14 +37,10 @@ def tool(
     name: str | None = None,
     description: str | None = None,
 ) -> F | Callable[[F], F]:
-    """Mark an ordinary typed function as a ReAct Tool.
-
-    The original function is returned unchanged. Types define schemas; the
-    docstring is used only as the default human-readable description.
-    """
+    """Mark an ordinary typed function as a ReAct Tool."""
 
     def decorate(function: F) -> F:
-        if hasattr(function, _TOOL_ATTRIBUTE):
+        if hasattr(function, TOOL_DEFINITION_ATTRIBUTE):
             raise ValueError(f"Function is already an AutoAgent Tool: {function}")
         contract, issues = callable_contract(function)
         errors = [issue.message for issue in issues if issue.severity == "error"]
@@ -79,7 +57,9 @@ def tool(
             or not contract.input.portable
             or not contract.output.portable
         ):
-            raise ValueError("Tool parameters and return value require type annotations.")
+            raise ValueError(
+                "Tool parameters and return value require type annotations."
+            )
 
         resolved_name = (name or getattr(function, "__name__", "")).strip()
         if not resolved_name:
@@ -105,18 +85,9 @@ def tool(
             description=resolved_description.split("\n\n", 1)[0],
             contract=contract,
         )
-        setattr(function, _TOOL_ATTRIBUTE, definition)
+        setattr(function, TOOL_DEFINITION_ATTRIBUTE, definition)
         return function
 
     if handler is not None:
         return decorate(handler)
     return decorate
-
-
-def get_tool_definition(handler: Callable[..., Any]) -> ToolDefinition:
-    definition = getattr(handler, _TOOL_ATTRIBUTE, None)
-    if not isinstance(definition, ToolDefinition):
-        raise TypeError(
-            f"ReAct tools must be functions decorated with @tool: {handler!r}"
-        )
-    return definition

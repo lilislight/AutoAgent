@@ -65,7 +65,7 @@ CLI, inside another service, or eventually on a hosted platform.
 ### AI building blocks
 
 - a provider-neutral `llm_call` Capability;
-- an OpenAI-compatible Chat Completions Operator;
+- a Chat Completions Provider adapted to the built-in `llm_call` Operator;
 - typed Tools generated from Python functions;
 - structured model output;
 - bounded ReAct Workflows with Tool and output repair.

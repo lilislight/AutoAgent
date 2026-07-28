@@ -13,11 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-from autoagent.core.operators import Capability, OperatorContract
-from autoagent.core.operators.contract import callable_contract
 
-
-LLM_CALL_CAPABILITY_ID = "llm_call"
 _NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 
 
@@ -38,9 +34,18 @@ class LLMMessage(BaseModel):
 
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None
+    reasoning_content: str | None = None
     tool_calls: tuple[LLMToolCall, ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
+
+    @model_validator(mode="after")
+    def validate_reasoning_content(self) -> LLMMessage:
+        if self.reasoning_content is not None and self.role != "assistant":
+            raise ValueError(
+                "reasoning_content is supported only on assistant messages."
+            )
+        return self
 
 
 class LLMToolDefinition(BaseModel):
@@ -90,16 +95,13 @@ class LLMUsage(BaseModel):
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 class LLMRequest(BaseModel):
-    """One provider-neutral model request.
-
-    ``response_format`` accepts a Pydantic model class, dataclass type, or any
-    other Python type understood by Pydantic ``TypeAdapter``. Serialization
-    compiles the type into ``LLMResponseFormat`` so Python class objects never
-    cross the persistence boundary.
-    """
+    """One provider-neutral model request."""
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -126,6 +128,9 @@ class LLMRequest(BaseModel):
             "response_format",
             "temperature",
             "max_completion_tokens",
+            "stream",
+            "stream_options",
+            "extra_body",
         }
         overlap = reserved.intersection(self.provider_options)
         if overlap:
@@ -170,6 +175,45 @@ class LLMResponse(BaseModel):
     provider_request_id: str | None = None
 
 
+class LLMStreamChunk(BaseModel):
+    """One normalized increment from a streaming LLM call."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal[
+        "text_delta",
+        "reasoning_delta",
+        "tool_call_delta",
+        "completed",
+    ]
+    text_delta: str | None = None
+    reasoning_delta: str | None = None
+    tool_call_index: int | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_arguments_delta: str | None = None
+    response: LLMResponse | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> LLMStreamChunk:
+        if self.type == "text_delta":
+            if self.text_delta is None:
+                raise ValueError("text_delta chunk requires text_delta.")
+        elif self.type == "reasoning_delta":
+            if self.reasoning_delta is None:
+                raise ValueError(
+                    "reasoning_delta chunk requires reasoning_delta."
+                )
+        elif self.type == "tool_call_delta":
+            if self.tool_call_index is None:
+                raise ValueError(
+                    "tool_call_delta chunk requires tool_call_index."
+                )
+        elif self.response is None:
+            raise ValueError("completed chunk requires response.")
+        return self
+
+
 def response_format_from_type(value: Any) -> LLMResponseFormat:
     if isinstance(value, LLMResponseFormat):
         return value
@@ -190,15 +234,3 @@ def _schema_name(value: str) -> str:
     if not normalized or not re.match(r"^[A-Za-z_]", normalized):
         normalized = f"response_{normalized}"[:64]
     return normalized
-
-
-def _llm_call_contract(request: LLMRequest) -> LLMResponse:
-    raise NotImplementedError
-
-
-LLM_CALL_CONTRACT: OperatorContract = callable_contract(_llm_call_contract)[0]
-LLM_CALL_CAPABILITY = Capability(
-    id=LLM_CALL_CAPABILITY_ID,
-    description="Perform one provider-neutral language model call.",
-    contract=LLM_CALL_CONTRACT,
-)

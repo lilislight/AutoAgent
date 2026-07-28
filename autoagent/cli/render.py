@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from autoagent.core.compiler import CompileResult
+from autoagent.core.runtime import Invocation, JsonRuntimeSerializer, RuntimeEvent
+from autoagent.project import ProjectDefinition, ProjectDiagnostic
+
+
+def render_project_diagnostics(
+    diagnostics: tuple[ProjectDiagnostic, ...] | list[ProjectDiagnostic],
+) -> str:
+    lines = ["PROJECT INVALID", ""]
+    for item in diagnostics:
+        lines.extend(
+            _problem_lines(
+                severity=item.severity,
+                code=item.code,
+                object_text=item.entrypoint or item.path,
+                field=item.field,
+                message=item.message,
+                hint=item.hint,
+            )
+        )
+    lines.append("RESULT failed")
+    return "\n".join(lines)
+
+
+def render_compile_result(result: CompileResult) -> str:
+    lines = [
+        f"WORKFLOW {result.workflow_id or '<unknown>'}",
+        f"VERSION {result.workflow_version}",
+    ]
+    if result.workflow_ir is not None:
+        workflow_ir = result.workflow_ir
+        lines.extend(
+            [
+                f"NODES {len(workflow_ir.nodes)}",
+                f"EDGES {len(workflow_ir.edges)}",
+                f"ENTRIES {', '.join(workflow_ir.entry_node_ids)}",
+                f"EXITS {', '.join(workflow_ir.exit_node_ids)}",
+                f"LOOPS {len(workflow_ir.graph.loop_regions)}",
+            ]
+        )
+    if result.diagnostics:
+        lines.append("")
+        for item in result.diagnostics:
+            object_text = (
+                f"{item.object_type}:{item.object_id}"
+                if item.object_type and item.object_id
+                else item.object_type
+            )
+            lines.extend(
+                _problem_lines(
+                    severity=item.severity,
+                    code=item.code,
+                    object_text=object_text,
+                    field=item.field,
+                    message=item.message,
+                    hint=item.hint,
+                )
+            )
+    lines.append(f"RESULT {'valid' if result.ok else 'failed'}")
+    return "\n".join(lines)
+
+
+def render_workflow_list(
+    project: ProjectDefinition,
+    results: dict[str, CompileResult],
+) -> str:
+    lines = [
+        f"PROJECT {project.metadata.name}",
+        f"VERSION {project.metadata.version}",
+        f"WORKFLOWS {len(project.workflows)}",
+        "",
+    ]
+    for loaded in project.workflows:
+        workflow = loaded.workflow
+        result = results[workflow.id]
+        lines.extend(
+            [
+                f"WORKFLOW {workflow.id}",
+                f"  VERSION {workflow.version if workflow.version is not None else 1}",
+                f"  ENTRYPOINT {loaded.locator.entrypoint}",
+                f"  NODES {len(workflow.nodes)}",
+                f"  EDGES {len(workflow.edges)}",
+                f"  STATUS {'valid' if result.ok else 'invalid'}",
+            ]
+        )
+    lines.append("RESULT listed")
+    return "\n".join(lines)
+
+
+def render_invocation(
+    invocation: Invocation,
+    *,
+    events: list[RuntimeEvent],
+    include_trace: bool,
+    serializer: JsonRuntimeSerializer,
+) -> str:
+    duration_ms = max(0, invocation.updated_at_ms - invocation.created_at_ms)
+    lines = [
+        f"INVOCATION {invocation.id}",
+        f"WORKFLOW {invocation.workflow_id}",
+        f"STATE {invocation.state}",
+        f"MODE {invocation.event_mode}",
+        f"ENTRY {invocation.entry_node_id}",
+        f"DURATION_MS {duration_ms}",
+    ]
+    if invocation.error is not None:
+        lines.extend(
+            [
+                "",
+                "FAILURE",
+                f"CODE {invocation.error.code}",
+                f"MESSAGE {invocation.error.message}",
+            ]
+        )
+    if invocation.result is not None:
+        lines.extend(
+            ["", "OUTPUT", _json_text(invocation.result, serializer)]
+        )
+
+    if include_trace or invocation.state in {"failed", "interrupted", "cancelled"}:
+        lines.extend(["", f"TRACE {len(events)}"])
+        for event in events:
+            elapsed = (
+                f" elapsed_ns={event.elapsed_ns}"
+                if event.elapsed_ns is not None
+                else ""
+            )
+            status = f" status={event.status}" if event.status else ""
+            lines.append(
+                f"{event.sequence} {event.event_name} "
+                f"{event.subject_type}:{event.subject_id}{status}{elapsed}"
+            )
+    lines.append(f"RESULT {invocation.state}")
+    return "\n".join(lines)
+
+
+def write_report(report: str, path: str | None) -> None:
+    print(report)
+    if path is not None:
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{report}\n", encoding="utf-8")
+
+
+def _problem_lines(
+    *,
+    severity: str,
+    code: str,
+    object_text: str | None,
+    field: str | None,
+    message: str,
+    hint: str | None,
+) -> list[str]:
+    lines = [f"{severity.upper()} {code}"]
+    if object_text:
+        lines.append(f"OBJECT {object_text}")
+    if field:
+        lines.append(f"FIELD {field}")
+    lines.append(f"MESSAGE {message}")
+    if hint:
+        lines.append(f"HINT {hint}")
+    lines.append("")
+    return lines
+
+
+def _json_text(value: Any, serializer: JsonRuntimeSerializer) -> str:
+    json_value = serializer.json_view(serializer.dumps_unchecked(value))
+    return json.dumps(
+        json_value,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )

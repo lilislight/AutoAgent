@@ -16,6 +16,31 @@ invocation = app.invoke(
 )
 ```
 
+## 项目 CLI
+
+对于标准项目，CLI 是统一宿主。Workflow 模块只导出 Workflow 对象，
+`auto-agent.toml` 列出这些对象，CLI 负责创建并启动 App：
+
+```bash
+autoagent project check
+autoagent workflow list
+autoagent workflow check weather
+autoagent invocation run weather --input-file request.json
+autoagent invocation resume weather \
+  --session customer-42 \
+  --wait-key approval \
+  --response-json '{"approved":true}'
+autoagent serve --host 127.0.0.1 --port 8765
+```
+
+Resume 的值叫 response，是因为它在回应一个未完成的 Wait，而不是 Workflow
+最终 output。`--report-file` 会写入与 stdout 完全相同的确定性文本，不会阻止
+终端输出。CLI 内部统一调用 App 的异步接口。
+
+配置优先级为：CLI 显式覆盖、进程环境变量、项目根目录 `.env`、框架默认值。
+根目录 `.env.example` 包含全部 App、Server 和 OpenAI-compatible Provider
+环境配置。不使用 `llm_call` 的 Workflow 可以将 Provider 配置留空。
+
 `event_mode` 属于 Invocation，而不是 App。相同 App 和 Session 的不同
 Invocation 可以动态选择不同模式。`memory` 和 `database` 是 RuntimeStore
 后端类型，不是 Event 模式。

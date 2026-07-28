@@ -11,6 +11,7 @@ from dotenv import dotenv_values
 from autoagent import AutoAgentApp, AutoAgentSettings, DatabaseBackend
 from autoagent.ai import OPENAI_COMPATIBLE_ENV_KEYS
 from autoagent.core.app.settings import AUTOAGENT_ENV_KEYS
+from autoagent.core.server import SERVER_ENV_KEYS
 
 
 class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
@@ -170,11 +171,9 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             if key.startswith("AUTOAGENT_")
         }
 
-        entrypoint_keys = {
-            "AUTOAGENT_SERVER_HOST",
-            "AUTOAGENT_SERVER_PORT",
-        }
         self.assertEqual(
-            AUTOAGENT_ENV_KEYS | OPENAI_COMPATIBLE_ENV_KEYS | entrypoint_keys,
+            AUTOAGENT_ENV_KEYS
+            | SERVER_ENV_KEYS
+            | OPENAI_COMPATIBLE_ENV_KEYS,
             documented,
         )

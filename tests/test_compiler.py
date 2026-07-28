@@ -1088,6 +1088,26 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual("duplicate", document["diagnostics"][0]["object_id"])
         self.assertNotIn("subject", document["diagnostics"][0])
 
+    def test_authoring_compiler_can_validate_capability_without_operator_binding(self):
+        from autoagent.ai import LLM_CALL_CAPABILITY
+        from autoagent.core.operators import CapabilityRegistry, OperatorRegistry
+
+        capability_registry = CapabilityRegistry()
+        capability_registry.register(LLM_CALL_CAPABILITY)
+        workflow = Workflow(id="authoring_capability")
+        workflow.add_node(
+            CapabilityRef(id=LLM_CALL_CAPABILITY.id),
+            node_id="llm_call",
+        )
+
+        result = WorkflowCompiler(
+            capability_registry=capability_registry,
+            operator_registry=OperatorRegistry(capability_registry),
+            require_operator_bindings=False,
+        ).compile(workflow)
+
+        self.assertTrue(result.ok, result.diagnostics)
+
 
 if __name__ == "__main__":
     unittest.main()

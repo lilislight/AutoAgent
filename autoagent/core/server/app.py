@@ -91,6 +91,7 @@ class AutoAgentServer:
         access_token: str | None = None,
         secure_cookies: bool = False,
         ui_directory: str | Path | None = None,
+        trace_cache_size: int = 128,
     ) -> None:
         if access_token is not None and not access_token:
             raise ValueError("access_token cannot be empty.")
@@ -107,7 +108,7 @@ class AutoAgentServer:
         self._invocation_tasks: dict[UUID, asyncio.Task[Any]] = {}
         self._invocation_failures: dict[UUID, BaseException] = {}
         self._started_at_ms = time.time_ns() // 1_000_000
-        self.trace = TraceService(app)
+        self.trace = TraceService(app, cache_size=trace_cache_size)
         self.router = self._build_router()
         self.api = self.create_app()
 

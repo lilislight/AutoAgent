@@ -229,8 +229,8 @@ Skill 规定固定工作循环：
 → 编写 Workflow
 → workflow check
 → 修复 Diagnostic
-→ workflow inspect
-→ 确认 Graph
+→ workflow list
+→ 确认项目导出的 Workflow
 → invocation run
 → 检查结果和 Trace
 ```
@@ -269,16 +269,11 @@ Workflow 文件本身不负责这些工作。
 #### 检查 Workflow
 
 ```bash
-autoagent workflow check <workflow-locator>
+autoagent workflow check refund
 ```
 
-支持指定 Workflow 和输出 JSON：
-
-```bash
-autoagent workflow check <workflow-locator> \
-  --workflow refund \
-  --format json
-```
+Workflow ID 由项目根目录的 `auto-agent.toml` 声明。使用全局
+`--project <directory-or-manifest>` 从其他目录选择项目。
 
 输出：
 
@@ -297,31 +292,11 @@ CLI 使用稳定退出码区分：
 - CLI 参数错误。
 - Runtime 执行失败。
 
-#### 查看编译结果
-
-```bash
-autoagent workflow inspect <workflow-locator> \
-  --workflow refund \
-  --format json
-```
-
-输出：
-
-- 编译后的 Graph。
-- 展开的子 Workflow。
-- Node、Edge、Contract 和 Policy。
-- Capability/Operator 绑定。
-- Entry、Exit 和 Loop。
-- Diagnostic。
-
-支持 text、JSON 和 Mermaid 等适合人或 Coding Agent 使用的格式。
-
 #### 运行 Workflow
 
 ```bash
-autoagent invocation run <workflow-locator> \
-  --workflow refund \
-  --input input.json \
+autoagent invocation run refund \
+  --input-file input.json \
   --event-mode full
 ```
 
@@ -349,8 +324,9 @@ CLI：
 - 指定 Event 查询。
 - Full 模式指定 sequence 的 Runtime State 重建。
 
-UI 保留 Graph、Timeline、Replay 动画和 Inspector 交互；CLI 输出结构化 Text、
-Markdown 或 JSON。两者读取同一 Runtime 事实，不各自定义执行语义。
+UI 保留 Graph、Timeline、Replay 动画和 Inspector 交互；MVP1 CLI 只提供一种
+确定性的结构化 Text。`--report-file` 写入相同内容，但不会阻止 stdout 输出。
+两者读取同一 Runtime 事实，不各自定义执行语义。
 
 ### 4.7 MVP1 验收
 
@@ -358,8 +334,8 @@ Markdown 或 JSON。两者读取同一 Runtime 事实，不各自定义执行语
 - Coding Agent 不导入框架内部模块。
 - Coding Agent 可以从需求创建六类代表性 Workflow。
 - Compiler 错误可通过结构化 Diagnostic 修复。
-- CLI 可以检查、Inspect 和运行 Workflow。
-- CLI 的 JSON 输出和退出码稳定、确定。
+- CLI 可以检查、列出和运行 Workflow，也可以恢复持久化 Wait。
+- CLI 的 Text 输出和退出码稳定、确定。
 - Workflow 代码不创建 App、Store、Database 或 Server。
 - 相同 Workflow 在 CLI、本地宿主和未来 Server 中使用同一注册、编译和执行路径。
 
@@ -475,7 +451,7 @@ MVP1.2  设计标准 Workflow 模块/目录契约
 MVP1.3  改进 Compiler Diagnostic
 MVP1.4  编写 Authoring Skill
 MVP1.5  整理高质量 Sample
-MVP1.6  实现 Workflow Check / Inspect / Run CLI
+MVP1.6  实现 Project Check、Workflow List/Check、Invocation Run/Resume 和 Serve CLI
 MVP1.7  下沉 CLI 所需的基础 Tracing 能力
 MVP1.8  完成 Agent Authoring 验收
 
@@ -489,5 +465,5 @@ MVP2.6  完成 Agent Debugging 验收
 MVP3    Hosted Platform，暂不实施
 ```
 
-当前下一步只讨论和实现 `MVP1.1`。在公开 API 和唯一使用路径确定之前，不开始 Skill
-或 CLI，避免让 Coding Agent 学习随后会被删除的接口。
+当前继续完成标准 Sample 和 Authoring Skill。历史 Invocation 的 Agent-friendly
+Report、渐进式 Event 查询和 Fork 属于 MVP2。

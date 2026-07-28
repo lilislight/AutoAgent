@@ -55,6 +55,7 @@ class WorkflowCompiler:
         *,
         capability_registry: CapabilityRegistry | None = None,
         operator_registry: OperatorRegistry | None = None,
+        require_operator_bindings: bool = True,
     ) -> None:
         """Create a compiler with optional application registry visibility.
 
@@ -65,6 +66,7 @@ class WorkflowCompiler:
 
         self.capability_registry = capability_registry
         self.operator_registry = operator_registry
+        self.require_operator_bindings = require_operator_bindings
 
     def compile(self, workflow: Workflow) -> CompileResult:
         diagnostics: list[Diagnostic] = []
@@ -395,7 +397,7 @@ class WorkflowCompiler:
                 if self.operator_registry is not None
                 else ()
             )
-            if not operators:
+            if not operators and self.require_operator_bindings:
                 diagnostics.append(
                     Diagnostic(
                         code="CAPABILITY_HAS_NO_OPERATOR",

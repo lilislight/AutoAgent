@@ -17,6 +17,33 @@ invocation = app.invoke(
 )
 ```
 
+## Project CLI
+
+For an authored project, the canonical host is the CLI. Workflow modules export
+only Workflow objects; `auto-agent.toml` lists them, while the CLI creates and
+starts the App:
+
+```bash
+autoagent project check
+autoagent workflow list
+autoagent workflow check weather
+autoagent invocation run weather --input-file request.json
+autoagent invocation resume weather \
+  --session customer-42 \
+  --wait-key approval \
+  --response-json '{"approved":true}'
+autoagent serve --host 127.0.0.1 --port 8765
+```
+
+The resume value is named a response because it answers a pending Wait; it is
+not the Workflow's final output. `--report-file` writes the same deterministic
+text printed to stdout. The CLI calls the asynchronous App APIs internally.
+
+Configuration precedence is CLI override, process environment, project-root
+`.env`, then framework default. The root `.env.example` contains every
+supported App, Server, and OpenAI-compatible Provider environment setting.
+Workflows that do not use `llm_call` may leave the Provider values empty.
+
 ## Environment configuration
 
 Normal applications do not need to construct `AutoAgentSettings` or call an

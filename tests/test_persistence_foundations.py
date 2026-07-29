@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from autoagent import AutoAgentApp
+from autoagent import AutoAgentApp, AutoAgentSettings
 from autoagent.core.compiler import WorkflowCompiler
 from autoagent.core.operators import Operator
 from autoagent.core.runtime import (
@@ -203,7 +203,7 @@ class PersistenceIdentityTests(unittest.TestCase):
         )
 
     def test_snapshot_records_fixed_operator_identity_and_contracts(self) -> None:
-        app = AutoAgentApp()
+        app = AutoAgentApp(settings=AutoAgentSettings())
 
         @app.operator("echo_v2", version=2)
         def registered(value: str) -> str:
@@ -235,7 +235,8 @@ class PersistenceIdentityTests(unittest.TestCase):
     def test_app_persists_definition_hash_on_invocation(self) -> None:
         workflow = Workflow(id="persisted_identity")
         workflow.add_node(echo, node_id="echo")
-        app = AutoAgentApp()
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        self.addCleanup(app.close)
         app.start()
 
         invocation = app.invoke(workflow, input={"value": "hello"}, session_id="s1")
@@ -255,7 +256,8 @@ class PersistenceIdentityTests(unittest.TestCase):
         )
 
     def test_late_bound_capability_operator_does_not_change_revision(self) -> None:
-        app = AutoAgentApp()
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        self.addCleanup(app.close)
 
         @app.capability("search", operator_id="search_primary")
         def primary(query: str) -> str:
@@ -291,7 +293,8 @@ class PersistenceIdentityTests(unittest.TestCase):
 
         workflow = Workflow(id="mutable_workflow_source")
         workflow.add_node(echo, node_id="echo")
-        app = AutoAgentApp()
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        self.addCleanup(app.close)
         app.start()
 
         first = app.invoke(workflow, input={"value": "one"}, session_id="first")

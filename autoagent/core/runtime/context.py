@@ -286,6 +286,7 @@ class InputMappingContext:
     session_context: ContextSnapshot
     outputs: OutputView
     node_id: str
+    workflow_path: tuple[str, ...] = ()
     incoming: tuple[IncomingOutput, ...] = ()
 
     @classmethod
@@ -297,6 +298,7 @@ class InputMappingContext:
         session_context: SessionContext,
         outputs: OutputView,
         node_id: str,
+        workflow_path: tuple[str, ...] = (),
         incoming: tuple[IncomingOutput, ...] = (),
     ) -> InputMappingContext:
         common = capture_hook_context(
@@ -311,6 +313,7 @@ class InputMappingContext:
             session_context=common.session_context,
             outputs=common.outputs,
             node_id=node_id,
+            workflow_path=tuple(workflow_path),
             incoming=tuple(
                 IncomingOutput(
                     edge_id=item.edge_id,
@@ -413,6 +416,7 @@ class OutputBindingContext:
     outputs: OutputView
     node_id: str
     output: Any
+    workflow_path: tuple[str, ...] = ()
 
     @classmethod
     def create(
@@ -424,6 +428,7 @@ class OutputBindingContext:
         outputs: OutputView,
         node_id: str,
         output: Any,
+        workflow_path: tuple[str, ...] = (),
     ) -> OutputBindingContext:
         return cls(
             invocation_input=MappingProxyType(deepcopy(dict(invocation_input))),
@@ -432,4 +437,5 @@ class OutputBindingContext:
             outputs=outputs,
             node_id=node_id,
             output=deepcopy(output),
+            workflow_path=tuple(workflow_path),
         )

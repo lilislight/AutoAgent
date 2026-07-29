@@ -143,20 +143,6 @@ export async function listRegisteredWorkflows(
   );
 }
 
-export function subscribeToWorkflowDirectory(
-  onChange: () => void,
-  onConnectionChange: (connected: boolean) => void,
-): () => void {
-  const source = new EventSource(`${API}/workflows/stream`);
-  source.addEventListener("workflow_catalog_changed", onChange);
-  source.onopen = () => onConnectionChange(true);
-  source.onerror = () => onConnectionChange(false);
-  return () => {
-    source.close();
-    onConnectionChange(false);
-  };
-}
-
 async function listAllWorkflowPages(
   path: string,
   refreshDatabase: boolean,
@@ -192,14 +178,19 @@ export function getRuntimeStatus(): Promise<RuntimeStatus> {
   return requestJson(`${API}/runtime/status`);
 }
 
-export function subscribeToRuntimeStatus(
+export function subscribeToSystemUpdates(
   onStatus: (status: RuntimeStatus) => void,
+  onWorkflowDirectoryChange: () => void,
   onConnectionChange: (connected: boolean) => void,
 ): () => void {
-  const source = new EventSource(`${API}/runtime/stream`);
+  const source = new EventSource(`${API}/system/stream`);
   source.addEventListener("runtime_status", ((message: MessageEvent<string>) => {
     onStatus(JSON.parse(message.data) as RuntimeStatus);
   }) as EventListener);
+  source.addEventListener(
+    "workflow_catalog_changed",
+    onWorkflowDirectoryChange,
+  );
   source.onopen = () => onConnectionChange(true);
   source.onerror = () => onConnectionChange(false);
   return () => {

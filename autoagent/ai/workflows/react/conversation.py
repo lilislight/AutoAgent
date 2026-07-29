@@ -52,12 +52,14 @@ class ConversationPlan:
     def start(
         self,
         initial_messages: tuple[LLMMessage, ...],
+        history_messages: tuple[LLMMessage, ...] = (),
         provider_options: dict[str, Any] | None = None,
         mode: Literal["invoke", "stream"] = "invoke",
     ) -> ConversationUpdate:
         return ConversationUpdate(
             kind="initial",
             messages=initial_messages,
+            history_messages=history_messages,
             provider_options=dict(provider_options or {}),
             mode=mode,
         )
@@ -75,6 +77,7 @@ class ConversationPlan:
             messages.append(
                 LLMMessage(role="system", content=self.instructions)
             )
+            messages.extend(update.history_messages)
         messages.extend(update.messages)
         return PreparedLLMCall(
             request=LLMRequest(

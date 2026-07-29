@@ -1555,6 +1555,252 @@ class ReActWorkflowTests(unittest.TestCase):
             ],
         )
 
+    def test_same_session_carries_messages_into_the_next_invocation(self) -> None:
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [_text_response("first answer"), _text_response("second answer")],
+            requests,
+        )
+        workflow = react_workflow(
+            id="session_history",
+            instructions="Answer with remembered context.",
+        )
+
+        first = app.invoke(
+            workflow,
+            input={"input": "first question"},
+            session_id="conversation",
+        )
+        second = app.invoke(
+            workflow,
+            input={"input": "second question"},
+            session_id="conversation",
+        )
+
+        self.assertEqual(first.state, "completed")
+        self.assertEqual(second.state, "completed")
+        self.assertEqual(
+            [(message.role, message.content) for message in requests[1].messages],
+            [
+                ("system", "Answer with remembered context."),
+                ("user", "first question"),
+                ("assistant", "first answer"),
+                ("user", "second question"),
+            ],
+        )
+        session = next(iter(app.runtime_store.sessions.values()))
+        messages = session.context.data["__autoagent_react_messages__"]["$"]
+        self.assertEqual(
+            [(message.role, message.content) for message in messages],
+            [
+                ("user", "first question"),
+                ("assistant", "first answer"),
+                ("user", "second question"),
+                ("assistant", "second answer"),
+            ],
+        )
+        self.assertTrue(all(isinstance(message, LLMMessage) for message in messages))
+
+    def test_new_session_starts_without_react_history(self) -> None:
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [_text_response("one"), _text_response("two")],
+            requests,
+        )
+        workflow = react_workflow(
+            id="isolated_sessions",
+            instructions="Answer.",
+        )
+
+        app.invoke(
+            workflow,
+            input={"input": "session one"},
+            session_id="one",
+        )
+        app.invoke(
+            workflow,
+            input={"input": "session two"},
+            session_id="two",
+        )
+
+        self.assertEqual(
+            [(message.role, message.content) for message in requests[1].messages],
+            [("system", "Answer."), ("user", "session two")],
+        )
+
+    def test_tool_exchange_is_stored_in_protocol_order(self) -> None:
+        @tool(id="echo", description="Echo one value.")
+        def echo(value: int) -> int:
+            return value
+
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [
+                _tool_response("call_1", "echo", '{"value":1}'),
+                _text_response("tool complete"),
+                _text_response("follow-up complete"),
+            ],
+            requests,
+        )
+        workflow = react_workflow(
+            id="tool_session_history",
+            instructions="Use tools when needed.",
+            tools=[echo],
+        )
+
+        app.invoke(
+            workflow,
+            input={"input": "echo one"},
+            session_id="conversation",
+        )
+        app.invoke(
+            workflow,
+            input={"input": "what happened?"},
+            session_id="conversation",
+        )
+
+        follow_up = requests[2].messages
+        self.assertEqual(
+            [message.role for message in follow_up],
+            ["system", "user", "assistant", "tool", "assistant", "user"],
+        )
+        self.assertEqual(follow_up[2].tool_calls[0].id, "call_1")
+        self.assertEqual(follow_up[3].tool_call_id, "call_1")
+        self.assertEqual(follow_up[4].content, "tool complete")
+        self.assertEqual(follow_up[5].content, "what happened?")
+
+    def test_invalid_structured_attempt_is_not_added_to_session_history(
+        self,
+    ) -> None:
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [
+                _text_response('{"wrong":1}'),
+                _text_response('{"value":7}'),
+                _text_response('{"value":8}'),
+            ],
+            requests,
+        )
+        workflow = react_workflow(
+            id="validated_session_history",
+            instructions="Return an answer.",
+            response_format=Answer,
+        )
+
+        app.invoke(
+            workflow,
+            input={"input": "first"},
+            session_id="conversation",
+        )
+        app.invoke(
+            workflow,
+            input={"input": "second"},
+            session_id="conversation",
+        )
+
+        follow_up = requests[2].messages
+        self.assertEqual(
+            [(message.role, message.content) for message in follow_up],
+            [
+                ("system", "Return an answer."),
+                ("user", "first"),
+                ("assistant", '{"value":7}'),
+                ("user", "second"),
+            ],
+        )
+
+    def test_child_react_histories_are_isolated_by_workflow_path(self) -> None:
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [
+                _text_response("first child one"),
+                _text_response("first child two"),
+                _text_response("second child one"),
+                _text_response("second child two"),
+            ],
+            requests,
+        )
+        first_child = react_workflow(
+            id="first_child",
+            instructions="First child.",
+        )
+        second_child = react_workflow(
+            id="second_child",
+            instructions="Second child.",
+        )
+        parent = Workflow(id="two_children")
+        parent.add_node(first_child, node_id="first", entry=True)
+        parent.add_node(second_child, node_id="second")
+        parent.add_edge("first", "second")
+
+        app.invoke(
+            parent,
+            input={"input": "first turn"},
+            session_id="conversation",
+        )
+        app.invoke(
+            parent,
+            input={"input": "second turn"},
+            session_id="conversation",
+        )
+
+        self.assertEqual(
+            [(message.role, message.content) for message in requests[1].messages],
+            [
+                ("system", "Second child."),
+                ("user", "first child one"),
+            ],
+        )
+        self.assertEqual(
+            [(message.role, message.content) for message in requests[2].messages],
+            [
+                ("system", "First child."),
+                ("user", "first turn"),
+                ("assistant", "first child one"),
+                ("user", "second turn"),
+            ],
+        )
+        self.assertEqual(
+            [(message.role, message.content) for message in requests[3].messages],
+            [
+                ("system", "Second child."),
+                ("user", "first child one"),
+                ("assistant", "first child two"),
+                ("user", "second child one"),
+            ],
+        )
+        session = next(iter(app.runtime_store.sessions.values()))
+        self.assertEqual(
+            set(session.context.data["__autoagent_react_messages__"]),
+            {"first", "second"},
+        )
+
+    def test_react_session_messages_round_trip_as_llm_messages(self) -> None:
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses([_text_response("answer")], requests)
+        workflow = react_workflow(
+            id="serialized_session_history",
+            instructions="Answer.",
+        )
+        app.invoke(
+            workflow,
+            input={"input": "question"},
+            session_id="conversation",
+        )
+        session = next(iter(app.runtime_store.sessions.values()))
+        payload = app.runtime_serializer.dumps(session.context.to_record())
+
+        restored_app = self.app_with_responses([], [])
+        restored_app.register_workflow(workflow)
+        restored = restored_app.runtime_serializer.loads(payload)
+        messages = restored["data"]["__autoagent_react_messages__"]["$"]
+
+        self.assertEqual(
+            [(message.role, message.content) for message in messages],
+            [("user", "question"), ("assistant", "answer")],
+        )
+        self.assertTrue(all(isinstance(message, LLMMessage) for message in messages))
+
     def test_react_stream_emits_message_reasoning_and_final_user_events(
         self,
     ) -> None:

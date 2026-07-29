@@ -1595,6 +1595,7 @@ class WorkflowExecutor:
                     session_context=session.context,
                     outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
                     node_id=node_ir.local_id or node_ir.id,
+                    workflow_path=node_ir.workflow_path,
                     incoming=scoped_incoming,
                 ),
             )
@@ -1689,6 +1690,7 @@ class WorkflowExecutor:
                 outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
                 node_id=node_ir.local_id or node_ir.id,
                 output=output,
+                workflow_path=node_ir.workflow_path,
             ),
         )
         candidate_invocation_context = deepcopy(invocation.context)

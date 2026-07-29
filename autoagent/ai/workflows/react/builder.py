@@ -16,6 +16,8 @@ from autoagent.ai.models.user_event import (
 )
 from autoagent.ai.nodes import llm_call_node
 from autoagent.ai.models.react import (
+    ConversationUpdate,
+    OutputValidationResult,
     PreparedLLMCall,
     ToolCallBatch,
     ToolExecutionBatch,
@@ -126,6 +128,10 @@ def react_workflow(
         source_request = source if isinstance(source, LLMRequest) else None
         return {
             "initial_messages": initial_messages_from_value(source),
+            "history_messages": _session_messages(
+                ctx.session_context.data,
+                ctx.workflow_path,
+            ),
             "provider_options": (
                 source_request.provider_options
                 if source_request is not None
@@ -133,6 +139,36 @@ def react_workflow(
             ),
             "mode": source_options.get("mode", "invoke"),
         }
+
+    def bind_initial_messages(ctx: Any) -> None:
+        update = ctx.output
+        if not isinstance(update, ConversationUpdate):
+            raise TypeError("start must produce ConversationUpdate.")
+        _append_session_messages(
+            ctx.session_context.data,
+            ctx.workflow_path,
+            update.messages,
+        )
+
+    def bind_tool_messages(ctx: Any) -> None:
+        update = ctx.output
+        if not isinstance(update, ConversationUpdate):
+            raise TypeError("collect_tool_results must produce ConversationUpdate.")
+        _append_session_messages(
+            ctx.session_context.data,
+            ctx.workflow_path,
+            update.messages,
+        )
+
+    def bind_final_message(ctx: Any) -> None:
+        result = ctx.outputs.latest("validate_output")
+        if not isinstance(result, OutputValidationResult) or not result.valid:
+            raise TypeError("finish requires a valid OutputValidationResult.")
+        _append_session_messages(
+            ctx.session_context.data,
+            ctx.workflow_path,
+            (result.response.message,),
+        )
 
     def map_prepare(ctx: Any) -> dict[str, Any]:
         return {
@@ -198,6 +234,7 @@ def react_workflow(
         node_id="start",
         entry=True,
         input_mapping=map_start,
+        output_binding=bind_initial_messages,
     )
     workflow.add_node(
         _internal_operator(
@@ -249,6 +286,7 @@ def react_workflow(
         ),
         node_id="collect_tool_results",
         input_mapping=map_collect,
+        output_binding=bind_tool_messages,
     )
     workflow.add_node(
         _internal_operator(
@@ -274,6 +312,7 @@ def react_workflow(
         _internal_operator(id, "finish", semantic_version, output_validator.finish),
         node_id="finish",
         input_mapping=map_validation_result,
+        output_binding=bind_final_message,
         user_event_mapping=UserEventMapping(
             type="agent_output",
             transform=agent_output,
@@ -436,3 +475,45 @@ def _semantic_version(value: Any) -> str:
 
 def _node_token(value: str) -> str:
     return "".join(character if character.isalnum() else "_" for character in value)
+
+
+_REACT_SESSION_MESSAGES_KEY = "__autoagent_react_messages__"
+_ROOT_WORKFLOW_PATH = "$"
+
+
+def _session_messages(
+    session_data: Mapping[str, Any],
+    workflow_path: tuple[str, ...],
+) -> tuple[LLMMessage, ...]:
+    histories = session_data.get(_REACT_SESSION_MESSAGES_KEY, {})
+    if not isinstance(histories, Mapping):
+        raise TypeError(
+            f"Session Context {_REACT_SESSION_MESSAGES_KEY!r} must be a mapping."
+        )
+    raw_messages = histories.get(_workflow_path_key(workflow_path), ())
+    if not isinstance(raw_messages, (list, tuple)):
+        raise TypeError("ReAct Session messages must be a list.")
+    return tuple(
+        item if isinstance(item, LLMMessage) else LLMMessage.model_validate(item)
+        for item in raw_messages
+    )
+
+
+def _append_session_messages(
+    session_data: dict[str, Any],
+    workflow_path: tuple[str, ...],
+    messages: tuple[LLMMessage, ...],
+) -> None:
+    histories = session_data.setdefault(_REACT_SESSION_MESSAGES_KEY, {})
+    if not isinstance(histories, dict):
+        raise TypeError(
+            f"Session Context {_REACT_SESSION_MESSAGES_KEY!r} must be a mapping."
+        )
+    history = histories.setdefault(_workflow_path_key(workflow_path), [])
+    if not isinstance(history, list):
+        raise TypeError("ReAct Session messages must be a list.")
+    history.extend(messages)
+
+
+def _workflow_path_key(workflow_path: tuple[str, ...]) -> str:
+    return "/".join(workflow_path) if workflow_path else _ROOT_WORKFLOW_PATH

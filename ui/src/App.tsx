@@ -19,9 +19,8 @@ import {
   listWorkflows,
   resumeInvocation,
   subscribeToInvocation,
-  subscribeToRuntimeStatus,
   subscribeToSessionUserEventChanges,
-  subscribeToWorkflowDirectory,
+  subscribeToSystemUpdates,
   submitInvocation,
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
@@ -129,13 +128,6 @@ export default function App() {
     refetchIntervalInBackground: false,
   });
   useEffect(() => {
-    if (!authenticated) return;
-    return subscribeToRuntimeStatus(
-      (status) => queryClient.setQueryData<RuntimeStatus>(["runtime-status"], status),
-      setRuntimeStreamConnected,
-    );
-  }, [authenticated, queryClient]);
-  useEffect(() => {
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible" && authenticated) {
         void runtimeStatusQuery.refetch();
@@ -158,7 +150,8 @@ export default function App() {
   const workflows = workflowQuery.data ?? [];
   useEffect(() => {
     if (!authenticated) return;
-    return subscribeToWorkflowDirectory(
+    return subscribeToSystemUpdates(
+      (status) => queryClient.setQueryData<RuntimeStatus>(["runtime-status"], status),
       () => {
         void Promise.all([
           queryClient.invalidateQueries({ queryKey: ["workflows"] }),
@@ -167,7 +160,7 @@ export default function App() {
           }),
         ]);
       },
-      () => undefined,
+      setRuntimeStreamConnected,
     );
   }, [authenticated, queryClient]);
   const invokeWorkflow =
@@ -922,7 +915,7 @@ export default function App() {
     registeredWorkflowQuery.isLoading ||
     (viewQuery.isLoading && !liveDraftGraph) ||
     (Boolean(ui.sessionId && ui.invocationId) && !view && !liveDraftGraph);
-  const error =
+  const latestQueryError =
     healthQuery.error ||
     runtimeStatusQuery.error ||
     workflowQuery.error ||
@@ -931,6 +924,32 @@ export default function App() {
     invocationQuery.error ||
     viewQuery.error ||
     selectedGraphQuery.error;
+  const blockingError =
+    (!healthQuery.data && healthQuery.error) ||
+    (!workflowQuery.data && workflowQuery.error) ||
+    (!registeredWorkflowQuery.data && registeredWorkflowQuery.error) ||
+    (
+      Boolean(ui.workflowRevisionId) &&
+      !sessionQuery.data &&
+      sessionQuery.error
+    ) ||
+    (
+      Boolean(ui.sessionId) &&
+      !invocationQuery.data &&
+      invocationQuery.error
+    ) ||
+    (
+      Boolean(ui.invocationId) &&
+      !view &&
+      !liveDraftGraph &&
+      viewQuery.error
+    ) ||
+    (
+      Boolean(selectedDirectoryWorkflow) &&
+      !selectedGraph &&
+      selectedGraphQuery.error
+    );
+  const transientError = !blockingError ? latestQueryError : null;
 
   if (healthQuery.isLoading) {
     return (
@@ -1027,6 +1046,28 @@ export default function App() {
         }}
         onToggleTheme={() => setDarkMode((value) => !value)}
       />
+      {transientError && (
+        <div className="transient-error-banner" role="status">
+          <AlertTriangle size={15} />
+          <span>
+            Live refresh was interrupted. Existing trace data remains available.
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              void healthQuery.refetch();
+              void runtimeStatusQuery.refetch();
+              void workflowQuery.refetch();
+              void registeredWorkflowQuery.refetch();
+              if (ui.workflowRevisionId) void sessionQuery.refetch();
+              if (ui.sessionId) void invocationQuery.refetch();
+              if (ui.invocationId) void viewQuery.refetch();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
       <AgentPanel
         open={agentOpen}
         sessionId={ui.sessionId}
@@ -1109,11 +1150,15 @@ export default function App() {
           }}
         />
       )}
-      {error ? (
+      {blockingError ? (
         <StatusScreen
           icon={<AlertTriangle size={28} />}
           title="Trace data could not be loaded"
-          detail={error instanceof Error ? error.message : String(error)}
+          detail={
+            blockingError instanceof Error
+              ? blockingError.message
+              : String(blockingError)
+          }
           action={{
             label: "Retry connection",
             onClick: () => {

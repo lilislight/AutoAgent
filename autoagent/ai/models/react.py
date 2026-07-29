@@ -17,6 +17,7 @@ class ConversationUpdate(BaseModel):
 
     kind: Literal["initial", "tool_results", "output_repair"]
     messages: tuple[LLMMessage, ...]
+    history_messages: tuple[LLMMessage, ...] = ()
     provider_options: dict[str, Any] = Field(default_factory=dict)
     mode: Literal["invoke", "stream"] = "invoke"
 

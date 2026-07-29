@@ -247,24 +247,61 @@ class AutoAgentServer:
         async def runtime_status() -> dict[str, Any]:
             return self._runtime_status()
 
-        @router.get("/runtime/stream", dependencies=auth)
-        async def stream_runtime_status(request: Request) -> StreamingResponse:
+        @router.get("/system/stream", dependencies=auth)
+        async def stream_system_updates(request: Request) -> StreamingResponse:
+            """Multiplex low-volume App status and Workflow directory changes."""
+
             async def generate() -> AsyncIterator[str]:
-                previous: str | None = None
-                heartbeat_at = asyncio.get_running_loop().time()
-                while not await request.is_disconnected():
-                    payload = json.dumps(
-                        self._runtime_status(),
-                        separators=(",", ":"),
+                loop = asyncio.get_running_loop()
+                workflow_changed = asyncio.Event()
+                previous_status: str | None = None
+                heartbeat_at = loop.time()
+
+                def notify_workflow_changed() -> None:
+                    loop.call_soon_threadsafe(workflow_changed.set)
+
+                unsubscribe = (
+                    self.agent.runtime_store.subscribe_workflow_changes(
+                        notify_workflow_changed
                     )
-                    if payload != previous:
-                        previous = payload
-                        yield f"event: runtime_status\ndata: {payload}\n\n"
-                    now = asyncio.get_running_loop().time()
-                    if now - heartbeat_at >= 15:
-                        yield ": heartbeat\n\n"
-                        heartbeat_at = now
-                    await asyncio.sleep(0.5)
+                )
+                try:
+                    # Reconnecting is a synchronization boundary for both
+                    # channels. The client refreshes the durable Workflow
+                    # directory and receives the current Runtime status.
+                    workflow_changed.set()
+                    while not await request.is_disconnected():
+                        chunks: list[str] = []
+                        payload = json.dumps(
+                            self._runtime_status(),
+                            separators=(",", ":"),
+                        )
+                        if payload != previous_status:
+                            previous_status = payload
+                            chunks.append(
+                                f"event: runtime_status\ndata: {payload}\n\n"
+                            )
+                        if workflow_changed.is_set():
+                            workflow_changed.clear()
+                            chunks.append(
+                                "event: workflow_catalog_changed\n"
+                                "data: {}\n\n"
+                            )
+                        if chunks:
+                            yield "".join(chunks)
+                        now = loop.time()
+                        if now - heartbeat_at >= 15:
+                            yield ": heartbeat\n\n"
+                            heartbeat_at = now
+                        try:
+                            await asyncio.wait_for(
+                                workflow_changed.wait(),
+                                timeout=0.5,
+                            )
+                        except TimeoutError:
+                            pass
+                finally:
+                    unsubscribe()
 
             return StreamingResponse(
                 generate(),
@@ -326,54 +363,6 @@ class AutoAgentServer:
                     registered_only=True,
                     refresh_database=refresh_database,
                 )
-            )
-
-        @router.get("/workflows/stream", dependencies=auth)
-        async def stream_workflow_directory(
-            request: Request,
-        ) -> StreamingResponse:
-            async def generate() -> AsyncIterator[str]:
-                loop = asyncio.get_running_loop()
-                changed = asyncio.Event()
-
-                def notify() -> None:
-                    loop.call_soon_threadsafe(changed.set)
-
-                unsubscribe = self.agent.runtime_store.subscribe_workflow_changes(
-                    notify
-                )
-                try:
-                    # A reconnect is also a synchronization boundary. The UI
-                    # refreshes the durable directory so changes made while
-                    # this connection was down are not missed.
-                    yield (
-                        "event: workflow_catalog_changed\n"
-                        "data: {}\n\n"
-                    )
-                    while not await request.is_disconnected():
-                        try:
-                            await asyncio.wait_for(
-                                changed.wait(),
-                                timeout=15,
-                            )
-                        except TimeoutError:
-                            yield ": heartbeat\n\n"
-                            continue
-                        changed.clear()
-                        yield (
-                            "event: workflow_catalog_changed\n"
-                            "data: {}\n\n"
-                        )
-                finally:
-                    unsubscribe()
-
-            return StreamingResponse(
-                generate(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
             )
 
         @router.get("/workflows/{workflow_id}/revisions", dependencies=auth)

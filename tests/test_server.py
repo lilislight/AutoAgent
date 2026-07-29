@@ -291,7 +291,6 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_exposes_embeddable_v1_router(self) -> None:
         paths = {route.path for route in self.server.router.routes}
         self.assertIn("/api/v1/workflows", paths)
-        self.assertIn("/api/v1/workflows/stream", paths)
         self.assertIn(
             "/api/v1/workflow-revisions/{workflow_revision_id}/sessions",
             paths,
@@ -320,9 +319,29 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             paths,
         )
         self.assertIn("/api/v1/runtime/status", paths)
-        self.assertIn("/api/v1/runtime/stream", paths)
+        self.assertIn("/api/v1/system/stream", paths)
         self.assertIn("/api/v1/health/live", paths)
         self.assertIn("/api/v1/health/ready", paths)
+
+    async def test_system_stream_multiplexes_runtime_and_workflow_updates(
+        self,
+    ) -> None:
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "stream_system_updates"
+        )
+
+        class ConnectedRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        response = await endpoint(ConnectedRequest())
+        first = await anext(response.body_iterator)
+        await response.body_iterator.aclose()
+
+        self.assertIn("event: runtime_status", first)
+        self.assertIn("event: workflow_catalog_changed", first)
 
     async def test_user_event_page_is_independent_from_runtime_events(
         self,
@@ -568,13 +587,13 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             timeout_graceful_shutdown=5.0,
         )
 
-    async def test_runtime_status_stream_stops_after_client_disconnect(
+    async def test_system_stream_stops_after_client_disconnect(
         self,
     ) -> None:
         endpoint = next(
             route.endpoint
             for route in self.server.router.routes
-            if getattr(route, "name", "") == "stream_runtime_status"
+            if getattr(route, "name", "") == "stream_system_updates"
         )
 
         class DisconnectingRequest:

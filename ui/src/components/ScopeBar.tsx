@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   ChevronDown,
@@ -22,12 +21,12 @@ import type {
   SessionSummary,
   WorkflowSummary,
 } from "../types";
-import { listInvocations, listSessions } from "../api";
 
 type ScopeColumn = "workflow" | "session" | "invocation";
 
 interface ScopeBarProps {
   workflows: WorkflowSummary[];
+  sessions: SessionSummary[];
   invocations: InvocationSummary[];
   workflowRevisionId: string | null;
   sessionId: string | null;
@@ -40,20 +39,22 @@ interface ScopeBarProps {
   cancellingInvocation: boolean;
   agentOpen: boolean;
   agentUnreadCount: number;
+  workflowsLoading: boolean;
+  sessionsLoading: boolean;
+  invocationsLoading: boolean;
   onRefreshInvocation: () => void;
   onCancelInvocation: () => void;
   onInspectInvocation: () => void;
   onToggleAgent: () => void;
-  onScopeChange: (
-    workflowRevisionId: string,
-    sessionId: string,
-    invocationId: string,
-  ) => void;
+  onWorkflowChange: (workflowRevisionId: string) => void;
+  onSessionChange: (sessionId: string) => void;
+  onInvocationChange: (invocationId: string) => void;
   onToggleTheme: () => void;
 }
 
 export function ScopeBar({
   workflows,
+  sessions,
   invocations,
   workflowRevisionId,
   sessionId,
@@ -66,11 +67,16 @@ export function ScopeBar({
   cancellingInvocation,
   agentOpen,
   agentUnreadCount,
+  workflowsLoading,
+  sessionsLoading,
+  invocationsLoading,
   onRefreshInvocation,
   onCancelInvocation,
   onInspectInvocation,
   onToggleAgent,
-  onScopeChange,
+  onWorkflowChange,
+  onSessionChange,
+  onInvocationChange,
   onToggleTheme,
 }: ScopeBarProps) {
   const selectedInvocation = invocations.find((value) => value.id === invocationId);
@@ -82,14 +88,21 @@ export function ScopeBar({
         <span>AutoAgent</span>
         <strong>Trace</strong>
       </div>
-      <ScopeNavigator
-        workflows={workflows}
-        workflowRevisionId={workflowRevisionId}
-        sessionId={sessionId}
-        invocationId={invocationId}
-        onScopeChange={onScopeChange}
-      />
-      <div className="scope-actions">
+      <div className="scope-primary">
+        <ScopeNavigator
+          workflows={workflows}
+          sessions={sessions}
+          invocations={invocations}
+          workflowRevisionId={workflowRevisionId}
+          sessionId={sessionId}
+          invocationId={invocationId}
+          workflowsLoading={workflowsLoading}
+          sessionsLoading={sessionsLoading}
+          invocationsLoading={invocationsLoading}
+          onWorkflowChange={onWorkflowChange}
+          onSessionChange={onSessionChange}
+          onInvocationChange={onInvocationChange}
+        />
         {sessionId && (
           <button
             className={`icon-button agent-trigger ${agentOpen ? "is-active" : ""}`}
@@ -107,6 +120,8 @@ export function ScopeBar({
             )}
           </button>
         )}
+      </div>
+      <div className="scope-actions">
         {selectedInvocation && (
           <button
             className="icon-button"
@@ -291,17 +306,31 @@ function formatBytes(value: number): string {
 
 function ScopeNavigator({
   workflows,
+  sessions,
+  invocations,
   workflowRevisionId,
   sessionId,
   invocationId,
-  onScopeChange,
+  workflowsLoading,
+  sessionsLoading,
+  invocationsLoading,
+  onWorkflowChange,
+  onSessionChange,
+  onInvocationChange,
 }: Pick<
   ScopeBarProps,
   | "workflows"
+  | "sessions"
+  | "invocations"
   | "workflowRevisionId"
   | "sessionId"
   | "invocationId"
-  | "onScopeChange"
+  | "workflowsLoading"
+  | "sessionsLoading"
+  | "invocationsLoading"
+  | "onWorkflowChange"
+  | "onSessionChange"
+  | "onInvocationChange"
 >) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -319,20 +348,8 @@ function ScopeNavigator({
   const selectedWorkflow = workflows.find(
     (value) => value.revision_id === draftScope.workflowRevisionId,
   );
-  const sessionQuery = useQuery({
-    queryKey: ["sessions", draftScope.workflowRevisionId],
-    queryFn: () => listSessions(draftScope.workflowRevisionId!),
-    enabled: Boolean(draftScope.workflowRevisionId),
-  });
-  const stagedSessions = sessionQuery.data ?? [];
-  const selectedSession = stagedSessions.find((value) => value.id === draftScope.sessionId);
-  const invocationQuery = useQuery({
-    queryKey: ["invocations", draftScope.sessionId],
-    queryFn: () => listInvocations(draftScope.sessionId!),
-    enabled: Boolean(draftScope.sessionId),
-  });
-  const stagedInvocations = invocationQuery.data ?? [];
-  const selectedInvocation = stagedInvocations.find((value) => value.id === draftScope.invocationId);
+  const selectedSession = sessions.find((value) => value.id === draftScope.sessionId);
+  const selectedInvocation = invocations.find((value) => value.id === draftScope.invocationId);
   const sortedWorkflows = useMemo(
     () => [...workflows].sort((left, right) => {
       const sourceOrder =
@@ -347,12 +364,12 @@ function ScopeNavigator({
     [workflows],
   );
   const sortedSessions = useMemo(
-    () => [...stagedSessions].sort((left, right) => right.updated_at_ms - left.updated_at_ms),
-    [stagedSessions],
+    () => [...sessions].sort((left, right) => right.updated_at_ms - left.updated_at_ms),
+    [sessions],
   );
   const sortedInvocations = useMemo(
-    () => [...stagedInvocations].sort((left, right) => right.created_at_ms - left.created_at_ms),
-    [stagedInvocations],
+    () => [...invocations].sort((left, right) => right.created_at_ms - left.created_at_ms),
+    [invocations],
   );
 
   useEffect(() => {
@@ -386,16 +403,18 @@ function ScopeNavigator({
     });
     setActiveColumn("session");
     setQuery("session", "");
+    onWorkflowChange(id);
   };
   const chooseSession = (id: string) => {
     setDraftScope((current) => ({ ...current, sessionId: id, invocationId: null }));
     setActiveColumn("invocation");
     setQuery("invocation", "");
+    onSessionChange(id);
   };
   const chooseInvocation = (id: string) => {
     if (!draftScope.workflowRevisionId || !draftScope.sessionId) return;
     setDraftScope((current) => ({ ...current, invocationId: id }));
-    onScopeChange(draftScope.workflowRevisionId, draftScope.sessionId, id);
+    onInvocationChange(id);
     setOpen(false);
   };
 
@@ -434,6 +453,7 @@ function ScopeNavigator({
             active={activeColumn === "workflow"}
             column="workflow"
             count={sortedWorkflows.length}
+            loading={workflowsLoading}
             emptyLabel="No workflow history is available."
             query={queries.workflow}
             onQueryChange={(value) => setQuery("workflow", value)}
@@ -468,8 +488,7 @@ function ScopeNavigator({
             column="session"
             count={sortedSessions.length}
             disabled={!draftScope.workflowRevisionId}
-            loading={sessionQuery.isLoading || sessionQuery.isFetching}
-            error={sessionQuery.error}
+            loading={sessionsLoading}
             emptyLabel={
               draftScope.workflowRevisionId
                 ? "No sessions for this revision."
@@ -499,8 +518,7 @@ function ScopeNavigator({
             column="invocation"
             count={sortedInvocations.length}
             disabled={!draftScope.sessionId}
-            loading={invocationQuery.isLoading || invocationQuery.isFetching}
-            error={invocationQuery.error}
+            loading={invocationsLoading}
             emptyLabel={draftScope.sessionId ? "No invocations in this session." : "Select a session first."}
             query={queries.invocation}
             onQueryChange={(value) => setQuery("invocation", value)}
@@ -628,12 +646,11 @@ function workflowSearchText(workflow: WorkflowSummary): string {
     workflow.name,
     workflow.workflow_version,
     workflow.definition_hash,
-    workflow.operator_manifest_hash,
   ].filter(Boolean).join(" ");
 }
 
 function sessionSearchText(session: SessionSummary): string {
-  return [session.id, session.session_key, session.namespace].filter(Boolean).join(" ");
+  return [session.id, session.session_key].filter(Boolean).join(" ");
 }
 
 function invocationSearchText(invocation: InvocationSummary): string {

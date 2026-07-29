@@ -199,7 +199,7 @@ Running either non-LLM Workflow does not require Provider configuration.
 
 ### Resume reports an unknown Wait key
 
-The `--session`, `--wait-key`, namespace, database, and Workflow must match the
+The `--session`, `--wait-key`, database, and Workflow must match the
 waiting Invocation. The sample Wait key is `release:42`.
 
 ### Resume cannot find state after restart

@@ -158,36 +158,51 @@ class PersistenceIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "string or integer"):
             workflow_hook(version=True)
 
-    def test_operator_manifest_uses_declared_contract_not_source_body(self) -> None:
+    def test_operator_version_does_not_create_a_second_workflow_revision(
+        self,
+    ) -> None:
         def first(value: str) -> str:
             return value.upper()
 
         def second(value: str) -> str:
             return value.lower()
 
-        first_operator = Operator(
-            id="normalize",
-            version="1",
-            handler=first,
+        first_workflow = Workflow(
+            id="operator_version",
+            nodes=[
+                Node(
+                    id="normalize",
+                    capability=Operator(
+                        id="normalize",
+                        version="1",
+                        handler=first,
+                    ),
+                )
+            ],
         )
-        second_operator = Operator(
-            id="normalize",
-            version="1",
-            handler=second,
-        )
-        upgraded_operator = Operator(
-            id="normalize",
-            version="2",
-            handler=second,
+        second_workflow = Workflow(
+            id="operator_version",
+            nodes=[
+                Node(
+                    id="normalize",
+                    capability=Operator(
+                        id="normalize",
+                        version="2",
+                        handler=second,
+                    ),
+                )
+            ],
         )
 
-        self.assertEqual(first_operator.manifest, second_operator.manifest)
-        self.assertNotEqual(
-            first_operator.manifest.manifest_hash,
-            upgraded_operator.manifest.manifest_hash,
+        _, first_snapshot = self.compile(first_workflow)
+        _, second_snapshot = self.compile(second_workflow)
+
+        self.assertEqual(
+            first_snapshot.definition_hash,
+            second_snapshot.definition_hash,
         )
 
-    def test_snapshot_collects_registered_operator_manifest(self) -> None:
+    def test_snapshot_records_fixed_operator_identity_and_contracts(self) -> None:
         app = AutoAgentApp()
 
         @app.operator("echo_v2", version=2)
@@ -202,11 +217,19 @@ class PersistenceIdentityTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         assert result.workflow_snapshot is not None
-        manifests = {
-            manifest.operator_id: manifest
-            for manifest in result.workflow_snapshot.operator_manifests
-        }
-        self.assertEqual(2, manifests["echo_v2"].version)
+        node = result.workflow_snapshot.definition["nodes"][0]
+        self.assertEqual(
+            {"kind": "operator", "id": "echo_v2"},
+            node["capability"],
+        )
+        self.assertEqual(
+            "string",
+            node["input_contract"]["json_schema"]["properties"]["value"]["type"],
+        )
+        self.assertEqual(
+            "string",
+            node["operator_output_contract"]["json_schema"]["type"],
+        )
         json.dumps(result.workflow_snapshot.model_dump(mode="json"))
 
     def test_app_persists_definition_hash_on_invocation(self) -> None:
@@ -217,7 +240,6 @@ class PersistenceIdentityTests(unittest.TestCase):
 
         invocation = app.invoke(workflow, input={"value": "hello"}, session_id="s1")
         session = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=invocation.workflow_revision_id,
             session_key="s1",
         )
@@ -231,12 +253,8 @@ class PersistenceIdentityTests(unittest.TestCase):
             entry.workflow_ir.definition_hash,
             loaded.workflow_definition_hash,
         )
-        self.assertEqual(
-            entry.workflow_snapshot.operator_manifest_hash,
-            loaded.workflow_operator_manifest_hash,
-        )
 
-    def test_cached_ir_refreshes_late_bound_operator_manifest_environment(self) -> None:
+    def test_late_bound_capability_operator_does_not_change_revision(self) -> None:
         app = AutoAgentApp()
 
         @app.capability("search", operator_id="search_primary")
@@ -247,6 +265,7 @@ class PersistenceIdentityTests(unittest.TestCase):
             id="late_bound_manifest",
             nodes=[Node(id="search", capability=CapabilityRef(id="search"))],
         )
+        app.register_workflow(workflow)
         app.start()
         first = app.invoke(workflow, input={"query": "first"}, session_id="one")
 
@@ -260,11 +279,11 @@ class PersistenceIdentityTests(unittest.TestCase):
             first.workflow_definition_hash,
             second.workflow_definition_hash,
         )
-        self.assertNotEqual(
-            first.workflow_operator_manifest_hash,
-            second.workflow_operator_manifest_hash,
+        self.assertEqual(
+            first.workflow_revision_id,
+            second.workflow_revision_id,
         )
-        self.assertEqual(2, len(app.runtime_store.workflow_versions))
+        self.assertEqual(1, len(app.runtime_store.workflow_versions))
 
     def test_registered_workflow_uses_fixed_ir_without_recompiling(self) -> None:
         def finish(value: str) -> str:

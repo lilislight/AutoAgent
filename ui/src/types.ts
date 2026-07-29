@@ -80,7 +80,6 @@ export interface WorkflowSummary {
   workflow_version: string | number | null;
   revision_id: string;
   definition_hash: string;
-  operator_manifest_hash: string;
   name: string | null;
   description: string | null;
   registered?: boolean;
@@ -123,6 +122,8 @@ export interface WorkflowGroupView {
   workflow_path: string[];
   node_ids: string[];
   direct_node_ids: string[];
+  edge_ids?: string[];
+  direct_edge_ids?: string[];
   entry_node_ids: string[];
   exit_node_ids: string[];
 }
@@ -131,7 +132,6 @@ export interface WorkflowGraphView extends WorkflowSummary {
   nodes: WorkflowNodeView[];
   edges: WorkflowEdgeView[];
   groups: WorkflowGroupView[];
-  operator_manifests: Record<string, unknown>[];
   entry_node_ids: string[];
   exit_node_ids: string[];
   loop_regions: Record<string, unknown>[];
@@ -139,7 +139,6 @@ export interface WorkflowGraphView extends WorkflowSummary {
 
 export interface SessionSummary {
   id: string;
-  namespace: string;
   workflow_id: string;
   workflow_revision_id: string;
   session_key: string | null;
@@ -157,7 +156,6 @@ export interface InvocationSummary {
   workflow_revision_id: string;
   workflow_version: string | number | null;
   definition_hash: string | null;
-  operator_manifest_hash: string | null;
   entry_node_id: string;
   state: RuntimeState;
   execution_mode?: string;
@@ -294,6 +292,7 @@ export interface UserEvent {
   type: string;
   data: unknown;
   node_id: string;
+  workflow_path: string[];
   node_execution_id: string;
   operator_call_id: string | null;
   occurred_at_ms: number;

@@ -18,6 +18,7 @@ class UserEventSpec:
     data: Any
     node_id: str
     node_execution_id: UUID
+    workflow_path: tuple[str, ...] = ()
     operator_call_id: UUID | None = None
     occurred_at_ms: TimestampMs = 0
 
@@ -39,10 +40,11 @@ class UserEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     invocation_id: UUID
     sequence: int = Field(ge=1)
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=2, ge=1)
     type: str
     data: Any
     node_id: str
+    workflow_path: tuple[str, ...] = ()
     node_execution_id: UUID
     operator_call_id: UUID | None = None
     occurred_at_ms: TimestampMs

@@ -103,7 +103,7 @@ autoagent invocation resume <workflow-id> \
   [--report-file report.txt]
 ```
 
-Cross-process Resume requires the same namespace, Workflow, Session, wait key,
+Cross-process Resume requires the same Workflow, Session, wait key,
 and database as the waiting Invocation. It also requires `standard` or `full`
 mode on the original Invocation.
 
@@ -112,7 +112,6 @@ mode on the original Invocation.
 `invocation run`, `invocation resume`, and `serve` accept:
 
 ```text
---namespace
 --store auto|memory|database
 --max-thread-workers
 --max-parallel-units

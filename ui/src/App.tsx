@@ -20,6 +20,8 @@ import {
   resumeInvocation,
   subscribeToInvocation,
   subscribeToRuntimeStatus,
+  subscribeToSessionUserEventChanges,
+  subscribeToWorkflowDirectory,
   submitInvocation,
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
@@ -144,16 +146,30 @@ export default function App() {
   }, [authenticated, runtimeStatusQuery.refetch]);
   const workflowQuery = useQuery({
     queryKey: ["workflows"],
-    queryFn: listWorkflows,
+    queryFn: () => listWorkflows(true),
     enabled: authenticated,
   });
   const registeredWorkflowQuery = useQuery({
     queryKey: ["registered-workflows"],
-    queryFn: listRegisteredWorkflows,
+    queryFn: () => listRegisteredWorkflows(true),
     enabled: authenticated,
   });
   const registeredWorkflows = registeredWorkflowQuery.data ?? [];
   const workflows = workflowQuery.data ?? [];
+  useEffect(() => {
+    if (!authenticated) return;
+    return subscribeToWorkflowDirectory(
+      () => {
+        void Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["workflows"] }),
+          queryClient.invalidateQueries({
+            queryKey: ["registered-workflows"],
+          }),
+        ]);
+      },
+      () => undefined,
+    );
+  }, [authenticated, queryClient]);
   const invokeWorkflow =
     registeredWorkflows.find(
       (value) =>
@@ -167,7 +183,6 @@ export default function App() {
       "workflow-graph",
       invokeWorkflow?.workflow_id,
       invokeWorkflow?.definition_hash,
-      invokeWorkflow?.operator_manifest_hash,
     ],
     queryFn: () => getWorkflowGraph(invokeWorkflow!),
     enabled: invokeOpen && Boolean(invokeWorkflow),
@@ -226,6 +241,18 @@ export default function App() {
     enabled: Boolean(ui.sessionId),
   });
   const invocations = invocationQuery.data ?? [];
+  useEffect(() => {
+    if (!ui.sessionId) return;
+    return subscribeToSessionUserEventChanges(
+      ui.sessionId,
+      () => {
+        void queryClient.invalidateQueries({
+          queryKey: ["invocations", ui.sessionId],
+        });
+      },
+      () => undefined,
+    );
+  }, [queryClient, ui.sessionId]);
   useEffect(() => {
     if (pendingScope) return;
     if (!invocationQuery.isSuccess) return;
@@ -496,8 +523,7 @@ export default function App() {
     viewedWorkflow && registeredWorkflows.some(
       (workflow) =>
         workflow.workflow_id === viewedWorkflow.workflow_id &&
-        workflow.definition_hash === viewedWorkflow.definition_hash &&
-        workflow.operator_manifest_hash === viewedWorkflow.operator_manifest_hash,
+        workflow.definition_hash === viewedWorkflow.definition_hash,
     ),
   );
   const selectedDirectoryWorkflow =
@@ -509,7 +535,6 @@ export default function App() {
       "workflow-graph",
       selectedDirectoryWorkflow?.workflow_id,
       selectedDirectoryWorkflow?.definition_hash,
-      selectedDirectoryWorkflow?.operator_manifest_hash,
     ],
     queryFn: () => getWorkflowGraph(selectedDirectoryWorkflow!),
     enabled: Boolean(selectedDirectoryWorkflow && !activeGraph && !invokeOpen),
@@ -856,6 +881,26 @@ export default function App() {
     setEventBuffer([]);
   };
 
+  const clearInvocationView = () => {
+    const currentOwner = eventOwnerRef.current;
+    if (currentOwner) {
+      cacheEventHistory(eventHistoryCacheRef.current, currentOwner, {
+        events,
+        historyLoaded,
+      });
+    }
+    clearLiveDraft();
+    setPendingNodeAction(null);
+    setInvokeOpen(false);
+    setResumeOpen(false);
+    setEvents([]);
+    setEventBuffer([]);
+    setHistoryLoaded(false);
+    setHistoryLoading(false);
+    setHistoryError(null);
+    eventOwnerRef.current = null;
+  };
+
   useEffect(() => {
     if (
       activeInvocationDetail &&
@@ -875,8 +920,6 @@ export default function App() {
     runtimeStatusQuery.isLoading ||
     workflowQuery.isLoading ||
     registeredWorkflowQuery.isLoading ||
-    sessionQuery.isLoading ||
-    invocationQuery.isLoading ||
     (viewQuery.isLoading && !liveDraftGraph) ||
     (Boolean(ui.sessionId && ui.invocationId) && !view && !liveDraftGraph);
   const error =
@@ -933,6 +976,7 @@ export default function App() {
     <div className="app-shell">
       <ScopeBar
         workflows={workflows}
+        sessions={sessions}
         invocations={invocations}
         workflowRevisionId={ui.workflowRevisionId}
         sessionId={ui.sessionId}
@@ -948,6 +992,14 @@ export default function App() {
         cancellingInvocation={cancelSubmitting}
         agentOpen={agentOpen}
         agentUnreadCount={agentUnreadCount}
+        workflowsLoading={
+          workflowQuery.isFetching ||
+          registeredWorkflowQuery.isFetching
+        }
+        sessionsLoading={sessionQuery.isLoading || sessionQuery.isFetching}
+        invocationsLoading={
+          invocationQuery.isLoading || invocationQuery.isFetching
+        }
         onRefreshInvocation={() => void refreshLatestInvocation()}
         onCancelInvocation={() => void cancelActiveInvocation()}
         onInspectInvocation={() => {
@@ -958,16 +1010,20 @@ export default function App() {
           });
         }}
         onToggleAgent={() => setAgentOpen((value) => !value)}
-        onScopeChange={(workflowRevisionId, sessionId, invocationId) => {
-          clearLiveDraft();
-          setPendingNodeAction(null);
-          setInvokeOpen(false);
-          setResumeOpen(false);
-          ui.setInvocationScope(
-            workflowRevisionId,
-            sessionId,
-            invocationId,
-          );
+        onWorkflowChange={(workflowRevisionId) => {
+          clearInvocationView();
+          setAgentOpen(false);
+          setAgentUnreadCount(0);
+          ui.setWorkflowRevision(workflowRevisionId);
+        }}
+        onSessionChange={(sessionId) => {
+          clearInvocationView();
+          setAgentUnreadCount(0);
+          ui.setSession(sessionId);
+        }}
+        onInvocationChange={(invocationId) => {
+          clearInvocationView();
+          ui.setInvocation(invocationId);
         }}
         onToggleTheme={() => setDarkMode((value) => !value)}
       />
@@ -976,6 +1032,9 @@ export default function App() {
         sessionId={ui.sessionId}
         invocationId={ui.invocationId}
         invocations={invocations}
+        invocationsLoading={
+          invocationQuery.isLoading || invocationQuery.isFetching
+        }
         onClose={() => setAgentOpen(false)}
         onUnreadCountChange={setAgentUnreadCount}
       />
@@ -1145,6 +1204,7 @@ export default function App() {
             graph={selectedGraph}
             invocation={selectedGraphInvocation}
             projection={selectedGraphProjection}
+            preview
             followLive={false}
             selection={null}
             canInvoke={Boolean(
@@ -1605,7 +1665,6 @@ function upsertSubmittedScope(
       const existing = current ?? [];
       const nextSession: SessionSummary = {
         id: value.sessionId,
-        namespace: "default",
         workflow_id: value.workflowId,
         workflow_revision_id: value.workflowRevisionId,
         session_key: value.sessionKey,
@@ -1639,7 +1698,6 @@ function upsertSubmittedScope(
         workflow_revision_id: value.workflowRevisionId,
         workflow_version: null,
         definition_hash: null,
-        operator_manifest_hash: null,
         entry_node_id: value.entryNodeId,
         state: value.state,
         event_mode: value.eventMode,
@@ -1690,7 +1748,6 @@ function createDraftInvocation(graph: WorkflowGraphView): InvocationDetail {
     workflow_revision_id: graph.revision_id,
     workflow_version: graph.workflow_version,
     definition_hash: graph.definition_hash,
-    operator_manifest_hash: graph.operator_manifest_hash,
     entry_node_id: graph.entry_node_ids[0] ?? "",
     state: "created",
     created_at_ms: Date.now(),
@@ -1717,7 +1774,6 @@ function createLiveDraftInvocation(
     workflow_revision_id: graph.revision_id,
     workflow_version: graph.workflow_version,
     definition_hash: graph.definition_hash,
-    operator_manifest_hash: graph.operator_manifest_hash,
     entry_node_id: entryNodeId,
     state,
     created_at_ms: now,

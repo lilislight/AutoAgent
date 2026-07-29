@@ -26,7 +26,6 @@ def _envelope(
     invocation_id = invocation_id or uuid4()
     return PersistenceEnvelope(
         kind="event",
-        namespace="default",
         session_id=session_id or uuid4(),
         session_updated_at_ms=10,
         invocation_id=invocation_id,
@@ -79,7 +78,6 @@ class PersistenceEnvelopeTests(unittest.TestCase):
         )
 
         envelope = freeze_event_envelope(
-            namespace="default",
             session_id=uuid4(),
             session_updated_at_ms=10,
             invocation_id=invocation_id,
@@ -321,7 +319,6 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             session_id=session_id,
         )
         user_batch = freeze_user_event_batch_envelope(
-            namespace="default",
             session_id=session_id,
             invocation_id=invocation_id,
             events=(
@@ -371,7 +368,6 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.remember_admission_durable(invocation_id)
         self.coordinator.remember_durable(invocation_id, 3)
         batch = freeze_user_event_batch_envelope(
-            namespace="default",
             session_id=session_id,
             invocation_id=invocation_id,
             events=(

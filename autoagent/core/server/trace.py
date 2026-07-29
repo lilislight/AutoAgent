@@ -393,16 +393,15 @@ class TraceService:
         cursor: str | None,
         limit: int,
         registered_only: bool = False,
+        refresh_database: bool = False,
     ) -> dict[str, Any]:
-        versions = await self._workflow_versions()
+        versions = await self._workflow_versions(
+            refresh_database=refresh_database,
+        )
         values: list[dict[str, Any]] = []
         registered = self._registered_workflow_identities()
         for revision_id, snapshot, created_at_ms in versions:
-            identity = (
-                snapshot.workflow_id,
-                snapshot.definition_hash,
-                snapshot.operator_manifest_hash,
-            )
+            identity = (snapshot.workflow_id, snapshot.definition_hash)
             if registered_only and identity not in registered:
                 continue
             value = {
@@ -410,7 +409,6 @@ class TraceService:
                 "workflow_version": snapshot.workflow_version,
                 "revision_id": revision_id,
                 "definition_hash": snapshot.definition_hash,
-                "operator_manifest_hash": snapshot.operator_manifest_hash,
                 "name": snapshot.definition.get("name"),
                 "description": snapshot.definition.get("description"),
                 "registered": identity in registered,
@@ -443,13 +441,11 @@ class TraceService:
                 "workflow_version": snapshot.workflow_version,
                 "revision_id": revision_id,
                 "definition_hash": snapshot.definition_hash,
-                "operator_manifest_hash": snapshot.operator_manifest_hash,
                 "name": snapshot.definition.get("name"),
                 "description": snapshot.definition.get("description"),
                 "registered": (
                     snapshot.workflow_id,
                     snapshot.definition_hash,
-                    snapshot.operator_manifest_hash,
                 ) in registered,
                 "created_at_ms": created_at_ms,
                 "updated_at_ms": created_at_ms,
@@ -491,13 +487,11 @@ class TraceService:
         memory_sessions = [
             session
             for session in self.store.sessions.values()
-            if session.namespace == self.agent.namespace
-            and session.workflow_revision_id == workflow_revision_id
+            if session.workflow_revision_id == workflow_revision_id
         ]
         backend_loader = getattr(self.store.backend, "alist_trace_sessions", None)
         if backend_loader is not None:
             for record in await backend_loader(
-                namespace=self.agent.namespace,
                 workflow_revision_id=workflow_revision_id,
                 limit=limit + len(memory_sessions) + 1,
                 before=_decode_cursor(cursor),
@@ -921,6 +915,7 @@ class TraceService:
             "type": event.type,
             "data": deepcopy(event.data),
             "node_id": event.node_id,
+            "workflow_path": list(event.workflow_path),
             "node_execution_id": str(event.node_execution_id),
             "operator_call_id": (
                 str(event.operator_call_id)
@@ -1023,7 +1018,6 @@ class TraceService:
         current = session.get_current_invocation()
         return {
             "id": str(session.id),
-            "namespace": session.namespace,
             "workflow_id": session.workflow_id,
             "workflow_revision_id": session.workflow_revision_id,
             "session_key": session.session_key,
@@ -1052,9 +1046,6 @@ class TraceService:
             "workflow_revision_id": invocation.workflow_revision_id,
             "workflow_version": invocation.workflow_version,
             "definition_hash": invocation.workflow_definition_hash,
-            "operator_manifest_hash": (
-                invocation.workflow_operator_manifest_hash
-            ),
             "entry_node_id": invocation.entry_node_id,
             "state": invocation.state,
             "execution_mode": invocation.execution_mode,
@@ -1078,7 +1069,7 @@ class TraceService:
         refresh_database: bool = False,
     ) -> list[tuple[str, WorkflowVersionSnapshot, int]]:
         values: dict[
-            tuple[str, str, str],
+            tuple[str, str],
             tuple[str, WorkflowVersionSnapshot, int],
         ] = {}
         backend_loader = getattr(
@@ -1099,7 +1090,6 @@ class TraceService:
             before: tuple[int, str] | None = None
             while True:
                 page = list(await backend_loader(
-                    namespace=self.agent.namespace,
                     limit=500,
                     before=before,
                 ))
@@ -1112,48 +1102,39 @@ class TraceService:
         for revision_id, snapshot, created_at_ms in (
             self._database_workflow_versions or ()
         ):
-            values[
-                (
-                    snapshot.workflow_id,
-                    snapshot.definition_hash,
-                    snapshot.operator_manifest_hash,
-                )
-            ] = (revision_id, snapshot, created_at_ms)
-        for key, snapshot in self.store.workflow_versions.items():
-            if key[0] != self.agent.namespace:
-                continue
-            identity = (
+            identity = (snapshot.workflow_id, snapshot.definition_hash)
+            canonical_revision_id = workflow_revision_id(
                 snapshot.workflow_id,
                 snapshot.definition_hash,
-                snapshot.operator_manifest_hash,
             )
+            current = values.get(identity)
+            if current is None or created_at_ms > current[2]:
+                values[identity] = (
+                    canonical_revision_id,
+                    snapshot,
+                    created_at_ms,
+                )
+        for key, snapshot in self.store.workflow_versions.items():
+            identity = (snapshot.workflow_id, snapshot.definition_hash)
             if identity in values:
                 continue
             values[identity] = (
                 workflow_revision_id(
-                    self.agent.namespace,
                     snapshot.workflow_id,
                     snapshot.definition_hash,
-                    snapshot.operator_manifest_hash,
                 ),
                 snapshot,
                 0,
             )
         for entry in self.agent.workflow_registry.values():
             snapshot = entry.workflow_snapshot
-            identity = (
-                snapshot.workflow_id,
-                snapshot.definition_hash,
-                snapshot.operator_manifest_hash,
-            )
+            identity = (snapshot.workflow_id, snapshot.definition_hash)
             values.setdefault(
                 identity,
                 (
                     workflow_revision_id(
-                        self.agent.namespace,
                         snapshot.workflow_id,
                         snapshot.definition_hash,
-                        snapshot.operator_manifest_hash,
                     ),
                     snapshot,
                     0,
@@ -1163,12 +1144,11 @@ class TraceService:
 
     def _registered_workflow_identities(
         self,
-    ) -> set[tuple[str, str, str]]:
+    ) -> set[tuple[str, str]]:
         return {
             (
                 entry.workflow_snapshot.workflow_id,
                 entry.workflow_snapshot.definition_hash,
-                entry.workflow_snapshot.operator_manifest_hash,
             )
             for entry in self.agent.workflow_registry.values()
         }
@@ -1186,16 +1166,11 @@ def _graph_view(
         "workflow_version": snapshot.workflow_version,
         "revision_id": revision_id,
         "definition_hash": snapshot.definition_hash,
-        "operator_manifest_hash": snapshot.operator_manifest_hash,
         "name": definition.get("name"),
         "description": definition.get("description"),
         "nodes": nodes,
         "edges": edges,
-        "groups": _workflow_groups(nodes),
-        "operator_manifests": [
-            value.model_dump(mode="python")
-            for value in snapshot.operator_manifests
-        ],
+        "groups": _workflow_groups(nodes, edges),
         "entry_node_ids": list(definition.get("entry_node_ids", ())),
         "exit_node_ids": list(definition.get("exit_node_ids", ())),
         "loop_regions": list(definition.get("loop_regions", ())),
@@ -1203,12 +1178,14 @@ def _graph_view(
     }
 
 
-def _workflow_groups(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    paths = {
-        tuple(str(value) for value in node.get("workflow_path", ()))
-        for node in nodes
-        if node.get("workflow_path")
-    }
+def _workflow_groups(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    paths: set[tuple[str, ...]] = set()
+    for node in nodes:
+        path = tuple(str(value) for value in node.get("workflow_path", ()))
+        paths.update(path[:depth] for depth in range(1, len(path) + 1))
     groups: list[dict[str, Any]] = []
     for path in sorted(paths, key=lambda value: (len(value), value)):
         group_id = "/".join(path)
@@ -1222,6 +1199,41 @@ def _workflow_groups(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for node in nodes
             if tuple(node.get("workflow_path", ()))[: len(path)] == path
         ]
+        descendant_set = set(descendants)
+        direct_edges = [
+            str(edge["id"])
+            for edge in edges
+            if tuple(edge.get("workflow_path", ())) == path
+        ]
+        descendant_edges = [
+            str(edge["id"])
+            for edge in edges
+            if tuple(edge.get("workflow_path", ()))[: len(path)] == path
+        ]
+        incoming_inside = {
+            str(edge["to_node"])
+            for edge in edges
+            if str(edge["from_node"]) in descendant_set
+            and str(edge["to_node"]) in descendant_set
+        }
+        outgoing_inside = {
+            str(edge["from_node"])
+            for edge in edges
+            if str(edge["from_node"]) in descendant_set
+            and str(edge["to_node"]) in descendant_set
+        }
+        boundary_entries = {
+            str(edge["to_node"])
+            for edge in edges
+            if str(edge["from_node"]) not in descendant_set
+            and str(edge["to_node"]) in descendant_set
+        }
+        boundary_exits = {
+            str(edge["from_node"])
+            for edge in edges
+            if str(edge["from_node"]) in descendant_set
+            and str(edge["to_node"]) not in descendant_set
+        }
         groups.append(
             {
                 "id": group_id,
@@ -1232,16 +1244,16 @@ def _workflow_groups(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "workflow_path": list(path),
                 "node_ids": descendants,
                 "direct_node_ids": direct,
-                "entry_node_ids": [
-                    str(node["id"])
-                    for node in nodes
-                    if str(node["id"]) in descendants and node.get("entry")
-                ],
-                "exit_node_ids": [
-                    str(node["id"])
-                    for node in nodes
-                    if str(node["id"]) in descendants and node.get("exit")
-                ],
+                "edge_ids": descendant_edges,
+                "direct_edge_ids": direct_edges,
+                "entry_node_ids": sorted(
+                    boundary_entries
+                    | (descendant_set - incoming_inside)
+                ),
+                "exit_node_ids": sorted(
+                    boundary_exits
+                    | (descendant_set - outgoing_inside)
+                ),
             }
         )
     return groups

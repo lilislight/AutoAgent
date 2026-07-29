@@ -88,7 +88,6 @@ class DurableBackend(Protocol):
     async def afind_session(
         self,
         *,
-        namespace: str,
         workflow_revision_id: str,
         session_key: str,
     ) -> Session | None: ...
@@ -96,7 +95,6 @@ class DurableBackend(Protocol):
     async def alist_recoverable_invocation_ids(
         self,
         *,
-        namespace: str,
         workflow_revision_ids: tuple[str, ...],
     ) -> tuple[UUID, ...]: ...
 
@@ -177,11 +175,11 @@ class RuntimeStore:
         )
         self._lock = RLock()
         self.workflow_versions: dict[
-            tuple[str, str, str, str],
+            tuple[str, str],
             WorkflowVersionSnapshot,
         ] = {}
         self.sessions: dict[UUID, Session] = {}
-        self.session_keys: dict[tuple[str, str, str | None], UUID] = {}
+        self.session_keys: dict[tuple[str, str | None], UUID] = {}
         self.invocations: dict[UUID, Invocation] = {}
         self.invocation_sessions: dict[UUID, UUID] = {}
         self.runtime_events: dict[UUID, list[RuntimeEvent]] = {}
@@ -194,6 +192,12 @@ class RuntimeStore:
             UUID,
             set[Callable[[], None]],
         ] = {}
+        self._session_user_event_change_listeners: dict[
+            UUID,
+            set[Callable[[], None]],
+        ] = {}
+        self._session_notified_invocations: dict[UUID, UUID] = {}
+        self._workflow_change_listeners: set[Callable[[], None]] = set()
         self._replay_checkpoints: dict[
             tuple[UUID, int],
             ExecutionSnapshot,
@@ -228,7 +232,6 @@ class RuntimeStore:
     async def alist_recoverable_invocation_ids(
         self,
         *,
-        namespace: str,
         workflow_revision_ids: tuple[str, ...],
     ) -> tuple[UUID, ...]:
         """List active durable Invocations eligible for startup recovery."""
@@ -240,8 +243,7 @@ class RuntimeStore:
             invocation_ids = [
                 invocation.id
                 for session in self.sessions.values()
-                if session.namespace == namespace
-                and session.workflow_revision_id in revision_id_set
+                if session.workflow_revision_id in revision_id_set
                 for invocation in [session.get_current_invocation()]
                 if invocation is not None
                 and invocation.event_mode != "minimal"
@@ -249,7 +251,6 @@ class RuntimeStore:
             ]
         if self.backend is not None:
             persisted = await self.backend.alist_recoverable_invocation_ids(
-                namespace=namespace,
                 workflow_revision_ids=workflow_revision_ids,
             )
             invocation_ids.extend(persisted)
@@ -267,62 +268,75 @@ class RuntimeStore:
 
     def save_workflow_snapshot(
         self,
-        namespace: str,
         snapshot: WorkflowVersionSnapshot,
     ) -> bool:
         key = (
-            namespace,
             snapshot.workflow_id,
             snapshot.definition_hash,
-            snapshot.operator_manifest_hash,
         )
         with self._lock:
             existed = key in self.workflow_versions
             self.workflow_versions[key] = snapshot
-        return not existed
+        created = not existed
+        if created:
+            self._notify_workflow_change()
+            if self.persistence is not None:
+                try:
+                    envelope = freeze_workflow_envelope(
+                        snapshot=snapshot,
+                    )
+                except Exception as exc:
+                    self.persistence.mark_unavailable(exc)
+                    logger.exception(
+                        "Workflow metadata could not be copied for "
+                        "persistence; execution remains available: "
+                        "workflow_id=%s",
+                        snapshot.workflow_id,
+                    )
+                else:
+                    self._publish_persistence(envelope)
+        return created
+
+    def subscribe_workflow_changes(
+        self,
+        listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        """Notify a lightweight listener when a local Workflow is registered."""
+
+        with self._lock:
+            self._workflow_change_listeners.add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                self._workflow_change_listeners.discard(listener)
+
+        return unsubscribe
+
+    def _notify_workflow_change(self) -> None:
+        with self._lock:
+            listeners = tuple(self._workflow_change_listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception("Workflow change listener failed.")
 
     async def asave_workflow_snapshot(
         self,
-        namespace: str,
         snapshot: WorkflowVersionSnapshot,
     ) -> None:
-        created = self.save_workflow_snapshot(namespace, snapshot)
-        if created and self.persistence is not None:
-            try:
-                envelope = freeze_workflow_envelope(
-                    namespace=namespace,
-                    snapshot=snapshot,
-                )
-            except Exception as exc:
-                self.persistence.mark_unavailable(exc)
-                logger.exception(
-                    "Workflow metadata could not be copied for persistence; "
-                    "execution remains available: workflow_id=%s",
-                    snapshot.workflow_id,
-                )
-            else:
-                self._publish_persistence(envelope)
+        self.save_workflow_snapshot(snapshot)
 
     def load_workflow_snapshot(
         self,
         *,
-        namespace: str,
         workflow_id: str,
         definition_hash: str,
-        operator_manifest_hash: str | None = None,
     ) -> WorkflowVersionSnapshot | None:
         with self._lock:
-            matches = [
-                snapshot
-                for key, snapshot in self.workflow_versions.items()
-                if key[0] == namespace
-                and key[1] == workflow_id
-                and key[2] == definition_hash
-                and (operator_manifest_hash is None or key[3] == operator_manifest_hash)
-            ]
-        if len(matches) > 1 and operator_manifest_hash is None:
-            raise ValueError("operator_manifest_hash is required for this version.")
-        return matches[0] if matches else None
+            return self.workflow_versions.get(
+                (workflow_id, definition_hash)
+            )
 
     async def aload_workflow_snapshot(self, **kwargs: Any) -> WorkflowVersionSnapshot | None:
         return self.load_workflow_snapshot(**kwargs)
@@ -330,18 +344,16 @@ class RuntimeStore:
     def get_or_create_session(
         self,
         *,
-        namespace: str,
         workflow_id: str,
         workflow_revision_id: str,
         session_key: str | None,
     ) -> Session:
-        key = (namespace, workflow_revision_id, session_key)
+        key = (workflow_revision_id, session_key)
         with self._lock:
             session_id = self.session_keys.get(key)
             if session_id is not None:
                 return self.sessions[session_id]
             session = Session(
-                namespace=namespace,
                 workflow_id=workflow_id,
                 workflow_revision_id=workflow_revision_id,
                 session_key=session_key,
@@ -352,14 +364,12 @@ class RuntimeStore:
     async def aget_or_create_session(
         self,
         *,
-        namespace: str,
         workflow_id: str,
         workflow_revision_id: str,
         session_key: str | None,
     ) -> Session:
         if session_key is not None:
             existing = await self.afind_session(
-                namespace=namespace,
                 workflow_revision_id=workflow_revision_id,
                 session_key=session_key,
             )
@@ -370,7 +380,6 @@ class RuntimeStore:
                     )
                 return existing
         return self.get_or_create_session(
-            namespace=namespace,
             workflow_id=workflow_id,
             workflow_revision_id=workflow_revision_id,
             session_key=session_key,
@@ -379,32 +388,28 @@ class RuntimeStore:
     def find_session(
         self,
         *,
-        namespace: str,
         workflow_revision_id: str,
         session_key: str,
     ) -> Session | None:
         with self._lock:
             session_id = self.session_keys.get(
-                (namespace, workflow_revision_id, session_key)
+                (workflow_revision_id, session_key)
             )
             return self.sessions.get(session_id) if session_id is not None else None
 
     async def afind_session(
         self,
         *,
-        namespace: str,
         workflow_revision_id: str,
         session_key: str,
     ) -> Session | None:
         value = self.find_session(
-            namespace=namespace,
             workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
         if value is not None or self.backend is None:
             return value
         value = await self.backend.afind_session(
-            namespace=namespace,
             workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
@@ -445,7 +450,6 @@ class RuntimeStore:
                         key: deepcopy(session_record[key])
                         for key in (
                             "id",
-                            "namespace",
                             "workflow_id",
                             "workflow_revision_id",
                             "session_key",
@@ -511,14 +515,11 @@ class RuntimeStore:
         if self.persistence is not None:
             try:
                 envelope = freeze_admission_envelope(
-                    namespace=session.namespace,
                     session_id=session.id,
                     invocation_id=invocation.id,
                     workflow_key=(
-                        session.namespace,
                         session.workflow_id,
                         invocation.workflow_definition_hash or "",
-                        invocation.workflow_operator_manifest_hash or "",
                     ),
                     snapshot=snapshot,
                 )
@@ -548,15 +549,12 @@ class RuntimeStore:
     async def aclaim_waiting_session(
         self,
         *,
-        namespace: str,
         workflow_revision_id: str,
         session_key: str,
         wait_key: str,
         workflow_definition_hash: str | None = None,
-        workflow_operator_manifest_hash: str | None = None,
     ) -> Session:
         session = await self.afind_session(
-            namespace=namespace,
             workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
@@ -574,12 +572,6 @@ class RuntimeStore:
             and invocation.workflow_definition_hash != workflow_definition_hash
         ):
             raise ValueError("Waiting Invocation uses another Workflow definition.")
-        if (
-            workflow_operator_manifest_hash is not None
-            and invocation.workflow_operator_manifest_hash
-            != workflow_operator_manifest_hash
-        ):
-            raise ValueError("Waiting Invocation uses another Operator environment.")
         if wait_key not in invocation.scheduler.waiting_executions:
             raise KeyError(f"Unknown wait key: {wait_key}")
         return session
@@ -642,7 +634,6 @@ class RuntimeStore:
                     else None
                 )
                 envelope = freeze_event_envelope(
-                    namespace=session.namespace,
                     session_id=session.id,
                     session_updated_at_ms=session.updated_at_ms,
                     invocation_id=invocation.id,
@@ -691,7 +682,6 @@ class RuntimeStore:
             return
         try:
             envelope = freeze_invocation_state_envelope(
-                namespace=session.namespace,
                 session_id=session.id,
                 invocation_id=invocation.id,
                 session_record=session.to_record(),
@@ -1077,10 +1067,11 @@ class RuntimeStore:
                     id=uuid4(),
                     invocation_id=invocation_id,
                     sequence=first_sequence + index,
-                    schema_version=1,
+                    schema_version=2,
                     type=spec.type,
                     data=data,
                     node_id=spec.node_id,
+                    workflow_path=spec.workflow_path,
                     node_execution_id=spec.node_execution_id,
                     operator_call_id=spec.operator_call_id,
                     occurred_at_ms=spec.occurred_at_ms,
@@ -1114,7 +1105,6 @@ class RuntimeStore:
             session_id = self.invocation_sessions[invocation_id]
             session = self.sessions[session_id]
         envelope = freeze_user_event_batch_envelope(
-            namespace=session.namespace,
             session_id=session_id,
             invocation_id=invocation_id,
             events=durable_events,
@@ -1172,6 +1162,35 @@ class RuntimeStore:
 
         return unsubscribe
 
+    def subscribe_session_user_event_changes(
+        self,
+        session_id: UUID,
+        listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        """Notify when any Invocation in one Session changes UserEvents."""
+
+        with self._lock:
+            self._session_user_event_change_listeners.setdefault(
+                session_id,
+                set(),
+            ).add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                listeners = self._session_user_event_change_listeners.get(
+                    session_id
+                )
+                if listeners is None:
+                    return
+                listeners.discard(listener)
+                if not listeners:
+                    self._session_user_event_change_listeners.pop(
+                        session_id,
+                        None,
+                    )
+
+        return unsubscribe
+
     def notify_user_event_execution_settled(
         self,
         invocation_id: UUID,
@@ -1186,19 +1205,56 @@ class RuntimeStore:
                 in {"completed", "failed", "cancelled", "interrupted"}
             )
         if terminal:
-            self._notify_user_event_change(invocation_id)
+            self._notify_user_event_change(
+                invocation_id,
+                session_directory_change=True,
+            )
 
-    def _notify_user_event_change(self, invocation_id: UUID) -> None:
+    def _notify_user_event_change(
+        self,
+        invocation_id: UUID,
+        *,
+        session_directory_change: bool = False,
+    ) -> None:
         with self._lock:
             listeners = tuple(
                 self._user_event_change_listeners.get(invocation_id, ())
             )
+            session_id = self.invocation_sessions.get(invocation_id)
+            notify_session = (
+                session_id is not None
+                and (
+                    session_directory_change
+                    or self._session_notified_invocations.get(session_id)
+                    != invocation_id
+                )
+            )
+            if notify_session:
+                self._session_notified_invocations[session_id] = invocation_id
+                session_listeners = tuple(
+                    self._session_user_event_change_listeners.get(
+                        session_id,
+                        (),
+                    )
+                )
+            else:
+                session_listeners = ()
         for listener in listeners:
             try:
                 listener()
             except Exception:
                 logger.exception(
                     "UserEvent change listener failed: invocation_id=%s",
+                    invocation_id,
+                )
+        for listener in session_listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception(
+                    "Session UserEvent change listener failed: "
+                    "session_id=%s invocation_id=%s",
+                    session_id,
                     invocation_id,
                 )
 
@@ -1375,7 +1431,6 @@ class RuntimeStore:
         self.sessions[session.id] = session
         self.session_keys[
             (
-                session.namespace,
                 session.workflow_revision_id,
                 session.session_key,
             )

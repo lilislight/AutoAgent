@@ -1,6 +1,7 @@
 import ELKModule from "elkjs/lib/elk.bundled.js";
 
 import {
+  computeFlatWorkflowLayout,
   computeWorkflowLayout,
   type ElkLayoutEngine,
 } from "./layoutEngine.js";
@@ -15,4 +16,10 @@ export function computeWorkflowLayoutOnMainThread(
   graph: WorkflowGraphView,
 ): Promise<WorkflowLayout> {
   return computeWorkflowLayout(graph, new ELK());
+}
+
+export function computeFlatWorkflowLayoutOnMainThread(
+  graph: WorkflowGraphView,
+): Promise<WorkflowLayout> {
+  return computeFlatWorkflowLayout(graph, new ELK());
 }

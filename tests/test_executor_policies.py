@@ -32,10 +32,8 @@ from tests.helpers import started_app
 def registered_revision_id(app: AutoAgentApp, workflow: Workflow) -> str:
     snapshot = app.register_workflow(workflow).workflow_snapshot
     return workflow_revision_id(
-        app.namespace,
         snapshot.workflow_id,
         snapshot.definition_hash,
-        snapshot.operator_manifest_hash,
     )
 
 
@@ -774,7 +772,6 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         self.assertTrue(finished.wait(timeout=1))
         time.sleep(0.01)
         stored = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=invocation.workflow_revision_id,
             session_key="session",
         ).get_current_invocation()
@@ -817,7 +814,6 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
                 await asyncio.sleep(0.001)
             await asyncio.sleep(0.01)
             stored = app.runtime_store.find_session(
-                namespace=app.namespace,
                 workflow_revision_id=registered_revision_id(app, workflow),
                 session_key="session",
             ).get_current_invocation()

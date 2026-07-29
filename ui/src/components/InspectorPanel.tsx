@@ -1449,9 +1449,6 @@ function inspectSelection(
             input_contract: node.input_contract,
             operator_output_contract: node.operator_output_contract,
             output_contract: node.output_contract,
-            operator_manifests: graph.operator_manifests.filter(
-              (manifest) => String(manifest.operator_id ?? manifest.id ?? "") === String(node.capability.id ?? ""),
-            ),
           }
         : {},
       policies: node
@@ -1532,7 +1529,6 @@ function baseInvocation(
       workflow_version: invocation.workflow_version,
       workflow_revision_id: invocation.workflow_revision_id,
       definition_hash: invocation.definition_hash,
-      operator_manifest_hash: invocation.operator_manifest_hash,
       entry_node_id: invocation.entry_node_id,
       event_cursor: projection.through_sequence,
       event_mode: invocation.event_mode,

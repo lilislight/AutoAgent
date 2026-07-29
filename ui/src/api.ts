@@ -128,25 +128,54 @@ interface ServerTraceBootstrap {
   event_page: ServerEventPage;
 }
 
-export async function listWorkflows(): Promise<WorkflowSummary[]> {
-  return listAllWorkflowPages(`${API}/workflows`);
+export async function listWorkflows(
+  refreshDatabase = false,
+): Promise<WorkflowSummary[]> {
+  return listAllWorkflowPages(`${API}/workflows`, refreshDatabase);
 }
 
-export async function listRegisteredWorkflows(): Promise<WorkflowSummary[]> {
-  return listAllWorkflowPages(`${API}/registered-workflows`);
+export async function listRegisteredWorkflows(
+  refreshDatabase = false,
+): Promise<WorkflowSummary[]> {
+  return listAllWorkflowPages(
+    `${API}/registered-workflows`,
+    refreshDatabase,
+  );
 }
 
-async function listAllWorkflowPages(path: string): Promise<WorkflowSummary[]> {
+export function subscribeToWorkflowDirectory(
+  onChange: () => void,
+  onConnectionChange: (connected: boolean) => void,
+): () => void {
+  const source = new EventSource(`${API}/workflows/stream`);
+  source.addEventListener("workflow_catalog_changed", onChange);
+  source.onopen = () => onConnectionChange(true);
+  source.onerror = () => onConnectionChange(false);
+  return () => {
+    source.close();
+    onConnectionChange(false);
+  };
+}
+
+async function listAllWorkflowPages(
+  path: string,
+  refreshDatabase: boolean,
+): Promise<WorkflowSummary[]> {
   const values: WorkflowSummary[] = [];
   let cursor: string | null = null;
+  let firstPage = true;
   do {
     const query = new URLSearchParams({ limit: "200" });
     if (cursor) query.set("cursor", cursor);
+    if (firstPage && refreshDatabase) {
+      query.set("refresh_database", "true");
+    }
     const page = await requestJson<Page<WorkflowSummary>>(
       `${path}?${query.toString()}`,
     );
     values.push(...page.items);
     cursor = page.has_more ? page.next_cursor : null;
+    firstPage = false;
   } while (cursor);
   return values;
 }
@@ -405,6 +434,23 @@ export function subscribeToUserEvents(
     source.close();
     onConnectionChange(false);
   }) as EventListener);
+  source.onopen = () => onConnectionChange(true);
+  source.onerror = () => onConnectionChange(false);
+  return () => {
+    source.close();
+    onConnectionChange(false);
+  };
+}
+
+export function subscribeToSessionUserEventChanges(
+  sessionId: string,
+  onChange: () => void,
+  onConnectionChange: (connected: boolean) => void,
+): () => void {
+  const source = new EventSource(
+    `${API}/sessions/${sessionId}/user-events/stream`,
+  );
+  source.addEventListener("session_user_events_changed", onChange);
   source.onopen = () => onConnectionChange(true);
   source.onerror = () => onConnectionChange(false);
   return () => {

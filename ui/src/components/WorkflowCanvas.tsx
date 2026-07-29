@@ -32,10 +32,14 @@ import {
   GRAPH_NODE_HEIGHT,
   GRAPH_NODE_WIDTH,
   routeEdgesAroundNodes,
+  type GraphRect,
 } from "../graphRouting";
 import {
+  calculateGroupBounds,
   layoutWorkflow,
+  loadAutomaticLayout,
   loadSavedLayout,
+  saveAutomaticLayout,
   saveLayout,
   type EdgeRoute,
 } from "../layout";
@@ -48,7 +52,6 @@ import type {
   TraceSelection,
   WorkflowGraphView,
   WorkflowGroupView,
-  WorkflowNodeView,
 } from "../types";
 
 type TraceNodeData = {
@@ -62,6 +65,7 @@ type TraceNodeData = {
   latestOccurrenceState: RuntimeState | null;
   operatorSummary: string | null;
   issue: NodeIssue | null;
+  preview: boolean;
 };
 
 type GroupNodeData = {
@@ -97,6 +101,7 @@ interface WorkflowCanvasProps {
   selection: TraceSelection;
   canInvoke: boolean;
   canResume?: boolean;
+  preview?: boolean;
   onInspect: (selection: TraceSelection) => void;
   onInvoke?: (entryNodeId: string) => void;
   onResume?: (nodeId: string) => void;
@@ -110,12 +115,14 @@ export function WorkflowCanvas({
   selection,
   canInvoke,
   canResume = false,
+  preview = false,
   onInspect,
   onInvoke,
   onResume,
 }: WorkflowCanvasProps) {
   const [nodes, setNodes] = useNodesState<TraceFlowNode>([]);
   const [edgeRoutes, setEdgeRoutes] = useState<Record<string, EdgeRoute>>({});
+  const [layoutPending, setLayoutPending] = useState(false);
   const edgeRoutesRef = useRef<Record<string, EdgeRoute>>({});
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const flow = useRef<ReactFlowInstance<TraceFlowNode, FlowEdge> | null>(null);
@@ -130,12 +137,26 @@ export function WorkflowCanvas({
   const buildLayout = useCallback(
     async (force = false) => {
       const request = ++layoutRequestRef.current;
-      const saved = force ? null : loadSavedLayout(graph.definition_hash);
-      const layout = saved ?? (await layoutWorkflow(graph));
-      if (request !== layoutRequestRef.current) return;
-      if (saved === null) {
+      if (force) setLayoutPending(true);
+      const saved = force
+        ? loadAutomaticLayout(graph.definition_hash)
+        : loadSavedLayout(graph.definition_hash);
+      let layout = saved;
+      try {
+        if (layout === null) {
+          layout = await layoutWorkflow(graph);
+        }
+        if (request !== layoutRequestRef.current) return;
+        if (saved === null) {
+          saveAutomaticLayout(graph.definition_hash, layout);
+        }
         saveLayout(graph.definition_hash, layout);
+      } finally {
+        if (request === layoutRequestRef.current) {
+          setLayoutPending(false);
+        }
       }
+      if (request !== layoutRequestRef.current || layout === null) return;
       const positions = layout.positions;
       edgeRoutesRef.current = layout.edgeRoutes;
       setEdgeRoutes(layout.edgeRoutes);
@@ -144,9 +165,8 @@ export function WorkflowCanvas({
       const currentSelection = selectionRef.current;
       const groupNodes = buildGroupNodes(
         graph.groups ?? [],
-        graph.nodes,
         currentProjection,
-        positions,
+        layout.groupBounds,
         currentSelection,
       );
       const traceNodes: TraceFlowNode[] = graph.nodes
@@ -176,6 +196,7 @@ export function WorkflowCanvas({
                 projected?.latest_occurrence_state ?? null,
               operatorSummary: nodeOperatorSummary(projected),
               issue: nodeIssue(latestExecution),
+              preview,
             },
             selected:
               currentSelection?.type === "node" &&
@@ -189,7 +210,7 @@ export function WorkflowCanvas({
         });
       setNodes([...groupNodes, ...traceNodes]);
       requestAnimationFrame(() => flow.current?.fitView({ padding: 0.2, duration: 320 }));
-    }, [graph, invocation.node_executions, projection, selection, setNodes]);
+    }, [graph, invocation.node_executions, preview, projection, selection, setNodes]);
 
   useEffect(() => {
     void buildLayout(false);
@@ -232,11 +253,12 @@ export function WorkflowCanvas({
               projected?.latest_occurrence_state ?? null,
             operatorSummary: nodeOperatorSummary(projected),
             issue: nodeIssue(latestExecution),
+            preview,
           },
         };
       }),
     );
-  }, [graph.groups, invocation.node_executions, projection, selection, setNodes]);
+  }, [graph.groups, invocation.node_executions, preview, projection, selection, setNodes]);
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<TraceFlowNode>[]) => {
@@ -249,6 +271,7 @@ export function WorkflowCanvas({
           changed,
           graph.groups ?? [],
           graph.nodes,
+          edgeRoutesRef.current,
           projectionRef.current,
           selectionRef.current,
         );
@@ -356,12 +379,19 @@ export function WorkflowCanvas({
           saveLayout(graph.definition_hash, {
             positions,
             edgeRoutes: nextRoutes,
+            groupBounds: calculateGroupBounds(
+              graph.groups ?? [],
+              graph.nodes,
+              positions,
+              nextRoutes,
+            ),
           });
           setNodes((existing) =>
             resizeGroupNodes(
               existing,
               graph.groups ?? [],
               graph.nodes,
+              nextRoutes,
               projectionRef.current,
               selectionRef.current,
             ),
@@ -429,13 +459,15 @@ export function WorkflowCanvas({
         />
         <Panel position="top-right">
           <button
-            className="canvas-action"
+            className={`canvas-action ${layoutPending ? "is-pending" : ""}`}
             type="button"
             onClick={() => void buildLayout(true)}
             title="Restore automatic layout"
+            aria-busy={layoutPending}
+            disabled={layoutPending}
           >
             <RotateCcw size={14} />
-            Auto layout
+            {layoutPending ? "Laying out…" : "Auto layout"}
           </button>
         </Panel>
       </ReactFlow>
@@ -462,7 +494,11 @@ function WorkflowGroupNode({ data, selected }: NodeProps<FlowNode<GroupNodeData,
 function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
   const traceData = data as TraceNodeData;
   return (
-    <div className={`trace-node state-${stateClass(traceData.state)} ${selected ? "selected" : ""}`}>
+    <div
+      className={`trace-node state-${stateClass(traceData.state)} ${
+        traceData.preview ? "is-preview" : ""
+      } ${selected ? "selected" : ""}`}
+    >
       <Handle type="target" position={Position.Left} />
       <div className="trace-node-heading">
         <span className="state-indicator" />
@@ -490,7 +526,7 @@ function TraceNode({ data, selected }: NodeProps<TraceFlowNode>) {
         </div>
       )}
       <div className="trace-node-footer">
-        <span>{traceData.state}</span>
+        {!traceData.preview && <span>{traceData.state}</span>}
         <span className="node-flags">
           {traceData.issue && (
             <span
@@ -703,19 +739,18 @@ function errorMessage(error: Record<string, unknown> | null): string {
 
 function buildGroupNodes(
   groups: WorkflowGroupView[],
-  graphNodes: WorkflowNodeView[],
   projection: RuntimeProjection,
-  positions: Record<string, { x: number; y: number }>,
+  boundsByGroup: Record<string, GraphRect>,
   selection: TraceSelection,
 ): TraceFlowNode[] {
   const result: TraceFlowNode[] = [];
   for (const group of [...groups].sort((left, right) => left.workflow_path.length - right.workflow_path.length)) {
-    const bounds = groupBounds(group, graphNodes, positions);
+    const bounds = boundsByGroup[group.id];
     if (!bounds) continue;
     result.push({
       id: group.id,
       type: "workflowGroup",
-      position: { x: bounds.x, y: bounds.y },
+      position: { x: bounds.left, y: bounds.top },
       selectable: true,
       draggable: false,
       className: "workflow-group-flow-node is-expanded",
@@ -723,15 +758,15 @@ function buildGroupNodes(
         label: group.label,
         nodeCount: group.node_ids.length,
         state: groupState(group, projection),
-        width: bounds.width,
-        height: bounds.height,
+        width: bounds.right - bounds.left,
+        height: bounds.bottom - bounds.top,
       },
       style: {
-        width: bounds.width,
-        height: bounds.height,
+        width: bounds.right - bounds.left,
+        height: bounds.bottom - bounds.top,
       },
       selected: selection?.type === "group" && selection.id === group.id,
-      zIndex: -10,
+      zIndex: -100 + group.workflow_path.length,
     });
   }
   return result;
@@ -750,47 +785,27 @@ function traceNodePositions(
 function resizeGroupNodes(
   nodes: TraceFlowNode[],
   groups: WorkflowGroupView[],
-  graphNodes: WorkflowNodeView[],
+  graphNodes: WorkflowGraphView["nodes"],
+  edgeRoutes: Record<string, EdgeRoute>,
   projection: RuntimeProjection,
   selection: TraceSelection,
 ): TraceFlowNode[] {
   const traceNodes = nodes.filter((node) => node.type !== "workflowGroup");
+  const boundsByGroup = calculateGroupBounds(
+    groups,
+    graphNodes,
+    traceNodePositions(traceNodes),
+    edgeRoutes,
+  );
   return [
     ...buildGroupNodes(
       groups,
-      graphNodes,
       projection,
-      traceNodePositions(traceNodes),
+      boundsByGroup,
       selection,
     ),
     ...traceNodes,
   ];
-}
-
-function groupBounds(
-  group: WorkflowGroupView,
-  nodes: WorkflowNodeView[],
-  positions: Record<string, { x: number; y: number }>,
-): { x: number; y: number; width: number; height: number } | null {
-  const values = nodes
-    .filter((node) => group.node_ids.includes(node.id))
-    .map((node) => positions[node.id])
-    .filter(Boolean);
-  if (values.length === 0) return null;
-  const minX = Math.min(...values.map((value) => value.x));
-  const minY = Math.min(...values.map((value) => value.y));
-  const maxX = Math.max(
-    ...values.map((value) => value.x + GRAPH_NODE_WIDTH),
-  );
-  const maxY = Math.max(
-    ...values.map((value) => value.y + GRAPH_NODE_HEIGHT),
-  );
-  return {
-    x: minX - 26,
-    y: minY - 38,
-    width: maxX - minX + 52,
-    height: maxY - minY + 72,
-  };
 }
 
 function groupState(

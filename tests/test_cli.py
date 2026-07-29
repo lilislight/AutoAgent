@@ -44,7 +44,6 @@ class AutoAgentCliTests(unittest.TestCase):
             (root / ".env").write_text(
                 "\n".join(
                     (
-                        "AUTOAGENT_NAMESPACE=from-file",
                         "AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///from-file.db",
                         "AUTOAGENT_EXECUTOR_MAX_PARALLEL_UNITS=3",
                     )
@@ -55,7 +54,6 @@ class AutoAgentCliTests(unittest.TestCase):
             environment = load_project_environment(
                 root,
                 environ={
-                    "AUTOAGENT_NAMESPACE": "from-process",
                     "AUTOAGENT_EXECUTOR_MAX_PARALLEL_UNITS": "4",
                 },
             )
@@ -64,8 +62,6 @@ class AutoAgentCliTests(unittest.TestCase):
                     "invocation",
                     "run",
                     "echo",
-                    "--namespace",
-                    "from-cli",
                     "--store",
                     "memory",
                     "--max-parallel-units",
@@ -74,7 +70,6 @@ class AutoAgentCliTests(unittest.TestCase):
             )
             settings = app_settings_from_arguments(arguments, environment)
 
-        self.assertEqual("from-cli", settings.namespace)
         self.assertIsNone(settings.database_url)
         self.assertEqual(5, settings.executor_max_parallel_units)
 

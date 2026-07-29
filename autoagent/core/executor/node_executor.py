@@ -155,6 +155,7 @@ class _StreamUserEventBatcher:
                     data=deepcopy(data),
                     node_id=self._job.node_ir.id,
                     node_execution_id=self._job.node_execution.id,
+                    workflow_path=self._job.node_ir.workflow_path,
                     operator_call_id=self._operator_call_id,
                 )
             except Exception as exc:
@@ -168,6 +169,7 @@ class _StreamUserEventBatcher:
                     },
                     node_id=self._job.node_ir.id,
                     node_execution_id=self._job.node_execution.id,
+                    workflow_path=self._job.node_ir.workflow_path,
                     operator_call_id=self._operator_call_id,
                 )
             self._append(spec)
@@ -1529,6 +1531,7 @@ def _publish_stream_aborted_user_event(
                     },
                     node_id=job.node_ir.id,
                     node_execution_id=job.node_execution.id,
+                    workflow_path=job.node_ir.workflow_path,
                     operator_call_id=operator_call_id,
                 ),
             ),

@@ -13,7 +13,13 @@ import {
   type RoutableNode,
 } from "../src/graphRouting.js";
 import { computeWorkflowLayoutOnMainThread as computeWorkflowLayout } from "../src/layoutFallback.js";
-import { loadSavedLayout, saveLayout } from "../src/layout.js";
+import {
+  calculateGroupBounds,
+  loadAutomaticLayout,
+  loadSavedLayout,
+  saveAutomaticLayout,
+  saveLayout,
+} from "../src/layout.js";
 import type { WorkflowGraphView } from "../src/types.js";
 
 type TestCase = {
@@ -157,6 +163,163 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "compound layout contains sibling and nested Workflow members",
+    run: async () => {
+      const graph = groupedWorkflowGraph();
+      const layout = await computeWorkflowLayout(graph);
+      const first = layout.groupBounds.first;
+      const inner = layout.groupBounds["first/inner"];
+      const second = layout.groupBounds.second;
+      assert(first && inner && second, "every Workflow group needs bounds");
+      assert(rectContainsRect(first, inner), "parent must contain nested group");
+      assert(
+        first.right < second.left || second.right < first.left,
+        "sibling Workflow groups must not overlap in automatic layout",
+      );
+      for (const group of graph.groups) {
+        const bounds = layout.groupBounds[group.id];
+        for (const nodeId of group.node_ids) {
+          assert(
+            rectContainsNode(bounds, layout.positions[nodeId]),
+            `${group.id} must contain ${nodeId}`,
+          );
+        }
+        for (const edgeId of group.edge_ids ?? []) {
+          assert(
+            layout.edgeRoutes[edgeId].points.every((point) =>
+              rectContainsPoint(bounds, point)
+            ),
+            `${group.id} must contain internal Edge ${edgeId}`,
+          );
+        }
+      }
+      for (const externalNodeId of ["start", "end"]) {
+        for (const [groupId, bounds] of Object.entries(layout.groupBounds)) {
+          assert(
+            !rectContainsNode(bounds, layout.positions[externalNodeId]),
+            `automatic layout must keep ${externalNodeId} outside ${groupId}`,
+          );
+        }
+      }
+    },
+  },
+  {
+    name: "drag bounds follow internal members and ignore external Nodes",
+    run: async () => {
+      const graph = groupedWorkflowGraph();
+      const layout = await computeWorkflowLayout(graph);
+      const moved = {
+        ...layout.positions,
+        "first/inner/a": { x: 900, y: 420 },
+        start: { x: 900, y: 420 },
+      };
+      const bounds = calculateGroupBounds(
+        graph.groups,
+        graph.nodes,
+        moved,
+        layout.edgeRoutes,
+      );
+      assert(
+        rectContainsNode(bounds["first/inner"], moved["first/inner/a"]),
+        "dragged internal Node must remain inside its direct group",
+      );
+      assert(
+        rectContainsRect(bounds.first, bounds["first/inner"]),
+        "dragged internal Node must expand every ancestor group",
+      );
+
+      const externalMovedAgain = {
+        ...moved,
+        start: { x: -10_000, y: -10_000 },
+      };
+      equal(
+        calculateGroupBounds(
+          graph.groups,
+          graph.nodes,
+          externalMovedAgain,
+          layout.edgeRoutes,
+        ),
+        bounds,
+      );
+    },
+  },
+  {
+    name: "compound layout handles a ReAct-style internal cycle",
+    run: async () => {
+      const graph = reactLikeWorkflowGraph();
+      const layout = await computeWorkflowLayout(graph);
+      assert(
+        Object.keys(layout.positions).length === graph.nodes.length,
+        "cyclic child Workflow layout must retain every Node",
+      );
+      assert(
+        Object.keys(layout.edgeRoutes).length === graph.edges.length,
+        "cyclic child Workflow layout must retain every Edge",
+      );
+      const bounds = layout.groupBounds.agent;
+      for (const nodeId of graph.groups[0].node_ids) {
+        assert(
+          rectContainsNode(bounds, layout.positions[nodeId]),
+          `ReAct group must contain ${nodeId}`,
+        );
+      }
+      for (const edgeId of graph.groups[0].edge_ids ?? []) {
+        assert(
+          layout.edgeRoutes[edgeId].points.every((point) =>
+            rectContainsPoint(bounds, point)
+          ),
+          `ReAct group must contain ${edgeId}`,
+        );
+      }
+    },
+  },
+  {
+    name: "compound layout derives Edge ownership from older Group payloads",
+    run: async () => {
+      const graph = reactLikeWorkflowGraph();
+      graph.groups = graph.groups.map((group) => ({
+        ...group,
+        edge_ids: undefined,
+        direct_edge_ids: undefined,
+      }));
+      const layout = await computeWorkflowLayout(graph);
+      assert(
+        Object.keys(layout.edgeRoutes).length === graph.edges.length,
+        "missing derived Group Edge fields must not blank the graph",
+      );
+    },
+  },
+  {
+    name: "automatic layout is stored independently from dragged layout",
+    run: () => {
+      const values = new Map<string, string>();
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        value: {
+          getItem: (key: string) => values.get(key) ?? null,
+          setItem: (key: string, value: string) => {
+            values.set(key, value);
+          },
+        },
+      });
+      const automatic = {
+        positions: { node: { x: 10, y: 20 } },
+        edgeRoutes: {},
+        groupBounds: {},
+      };
+      const dragged = {
+        positions: { node: { x: 200, y: 300 } },
+        edgeRoutes: {},
+        groupBounds: {},
+      };
+      assert(saveAutomaticLayout("revision", automatic), "automatic layout should save");
+      assert(saveLayout("revision", dragged), "dragged layout should save");
+      equal(loadAutomaticLayout("revision"), automatic);
+      equal(loadSavedLayout("revision"), dragged);
+      Reflect.deleteProperty(globalThis, "localStorage");
+    },
+  },
+  {
     name: "layout storage failures never block graph rendering",
     run: () => {
       Object.defineProperty(globalThis, "localStorage", {
@@ -178,6 +341,7 @@ const tests: TestCase[] = [
         saveLayout("blocked", {
           positions: {},
           edgeRoutes: {},
+          groupBounds: {},
         }) === false,
         "failed storage should be reported without throwing",
       );
@@ -275,31 +439,16 @@ function nearlyEqual(left: number, right: number): boolean {
 }
 
 function workflowGraph(): WorkflowGraphView {
-  const node = (id: string, entry: boolean, exit: boolean) => ({
-    id,
-    name: id,
-    description: null,
-    capability: {},
-    entry,
-    exit,
-    policy: null,
-    input_plan: null,
-    output_binding: null,
-    input_contract: {},
-    operator_output_contract: {},
-    output_contract: {},
-  });
   return {
     workflow_id: "workflow",
     workflow_version: "1",
     revision_id: "revision",
     definition_hash: "hash",
-    operator_manifest_hash: "manifest",
     name: "test",
     description: null,
     nodes: [
-      node("source", true, false),
-      node("target", false, true),
+      workflowNode("source", true, false),
+      workflowNode("target", false, true),
     ],
     edges: [
       {
@@ -312,9 +461,211 @@ function workflowGraph(): WorkflowGraphView {
       },
     ],
     groups: [],
-    operator_manifests: [],
     entry_node_ids: ["source"],
     exit_node_ids: ["target"],
     loop_regions: [],
   };
+}
+
+function groupedWorkflowGraph(): WorkflowGraphView {
+  const graph = workflowGraph();
+  const nodes = [
+    workflowNode("start", true, false),
+    {
+      ...workflowNode("first/inner/a", false, false),
+      workflow_path: ["first", "inner"],
+    },
+    {
+      ...workflowNode("first/inner/b", false, false),
+      workflow_path: ["first", "inner"],
+    },
+    {
+      ...workflowNode("second/c", false, false),
+      workflow_path: ["second"],
+    },
+    {
+      ...workflowNode("second/d", false, false),
+      workflow_path: ["second"],
+    },
+    workflowNode("end", false, true),
+  ];
+  return {
+    ...graph,
+    nodes,
+    edges: [
+      {
+        ...workflowEdge("enter-first", "start", "first/inner/a", 0),
+        workflow_path: [],
+      },
+      {
+        ...workflowEdge("first-inside", "first/inner/a", "first/inner/b", 1),
+        workflow_path: ["first", "inner"],
+      },
+      {
+        ...workflowEdge("between", "first/inner/b", "second/c", 2),
+        workflow_path: [],
+      },
+      {
+        ...workflowEdge("second-inside", "second/c", "second/d", 3),
+        workflow_path: ["second"],
+      },
+      {
+        ...workflowEdge("leave-second", "second/d", "end", 4),
+        workflow_path: [],
+      },
+    ],
+    groups: [
+      {
+        id: "first",
+        parent_group_id: null,
+        label: "first",
+        workflow_path: ["first"],
+        node_ids: ["first/inner/a", "first/inner/b"],
+        direct_node_ids: [],
+        edge_ids: ["first-inside"],
+        direct_edge_ids: [],
+        entry_node_ids: ["first/inner/a"],
+        exit_node_ids: ["first/inner/b"],
+      },
+      {
+        id: "first/inner",
+        parent_group_id: "first",
+        label: "inner",
+        workflow_path: ["first", "inner"],
+        node_ids: ["first/inner/a", "first/inner/b"],
+        direct_node_ids: ["first/inner/a", "first/inner/b"],
+        edge_ids: ["first-inside"],
+        direct_edge_ids: ["first-inside"],
+        entry_node_ids: ["first/inner/a"],
+        exit_node_ids: ["first/inner/b"],
+      },
+      {
+        id: "second",
+        parent_group_id: null,
+        label: "second",
+        workflow_path: ["second"],
+        node_ids: ["second/c", "second/d"],
+        direct_node_ids: ["second/c", "second/d"],
+        edge_ids: ["second-inside"],
+        direct_edge_ids: ["second-inside"],
+        entry_node_ids: ["second/c"],
+        exit_node_ids: ["second/d"],
+      },
+    ],
+    entry_node_ids: ["start"],
+    exit_node_ids: ["end"],
+  };
+}
+
+function reactLikeWorkflowGraph(): WorkflowGraphView {
+  const internalIds = [
+    "agent/start",
+    "agent/prepare",
+    "agent/llm",
+    "agent/classify",
+    "agent/tool",
+    "agent/collect",
+    "agent/finish",
+  ];
+  const internalEdges = [
+    workflowEdge("agent/start_prepare", "agent/start", "agent/prepare", 0),
+    workflowEdge("agent/prepare_llm", "agent/prepare", "agent/llm", 1),
+    workflowEdge("agent/llm_classify", "agent/llm", "agent/classify", 2),
+    workflowEdge("agent/classify_tool", "agent/classify", "agent/tool", 3),
+    workflowEdge("agent/tool_collect", "agent/tool", "agent/collect", 4),
+    workflowEdge("agent/collect_prepare", "agent/collect", "agent/prepare", 5),
+    workflowEdge("agent/classify_finish", "agent/classify", "agent/finish", 6),
+  ].map((value) => ({ ...value, workflow_path: ["agent"] }));
+  return {
+    ...workflowGraph(),
+    nodes: [
+      ...internalIds.map((id) => ({
+        ...workflowNode(id, id === "agent/start", id === "agent/finish"),
+        workflow_path: ["agent"],
+      })),
+      workflowNode("translate", false, true),
+    ],
+    edges: [
+      ...internalEdges,
+      {
+        ...workflowEdge("agent_translate", "agent/finish", "translate", 7),
+        workflow_path: [],
+      },
+    ],
+    groups: [
+      {
+        id: "agent",
+        parent_group_id: null,
+        label: "agent",
+        workflow_path: ["agent"],
+        node_ids: internalIds,
+        direct_node_ids: internalIds,
+        edge_ids: internalEdges.map((edge) => edge.id),
+        direct_edge_ids: internalEdges.map((edge) => edge.id),
+        entry_node_ids: ["agent/start"],
+        exit_node_ids: ["agent/finish"],
+      },
+    ],
+    entry_node_ids: ["agent/start"],
+    exit_node_ids: ["translate"],
+  };
+}
+
+function workflowNode(id: string, entry: boolean, exit: boolean) {
+  return {
+    id,
+    name: id,
+    description: null,
+    capability: {},
+    entry,
+    exit,
+    policy: null,
+    input_plan: null,
+    output_binding: null,
+    input_contract: {},
+    operator_output_contract: {},
+    output_contract: {},
+  };
+}
+
+function workflowEdge(
+  id: string,
+  fromNode: string,
+  toNode: string,
+  order: number,
+) {
+  return {
+    id,
+    from_node: fromNode,
+    to_node: toNode,
+    order,
+    condition: null,
+    policy: null,
+  };
+}
+
+function rectContainsPoint(rect: GraphRect, point: GraphPoint): boolean {
+  return (
+    point.x >= rect.left &&
+    point.x <= rect.right &&
+    point.y >= rect.top &&
+    point.y <= rect.bottom
+  );
+}
+
+function rectContainsNode(rect: GraphRect, position: GraphPoint): boolean {
+  return (
+    rectContainsPoint(rect, position) &&
+    rectContainsPoint(rect, {
+      x: position.x + GRAPH_NODE_WIDTH,
+      y: position.y + GRAPH_NODE_HEIGHT,
+    })
+  );
+}
+
+function rectContainsRect(parent: GraphRect, child: GraphRect): boolean {
+  return (
+    rectContainsPoint(parent, { x: child.left, y: child.top }) &&
+    rectContainsPoint(parent, { x: child.right, y: child.bottom })
+  );
 }

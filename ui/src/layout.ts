@@ -2,6 +2,8 @@ import ELK from "elkjs/lib/elk-api.js";
 import ELKWorker from "elkjs/lib/elk-worker.min.js?worker";
 
 import {
+  calculateGroupBounds,
+  computeEmergencyWorkflowLayout,
   computeWorkflowLayout,
   type ElkLayoutEngine,
 } from "./layoutEngine.js";
@@ -13,6 +15,7 @@ export type {
   NodePosition,
   WorkflowLayout,
 } from "./layoutTypes.js";
+export { calculateGroupBounds };
 
 const LAYOUT_TIMEOUT_MS = 15_000;
 
@@ -27,7 +30,7 @@ export async function layoutWorkflow(
   });
   try {
     return await withTimeout(
-      computeWorkflowLayout(graph, elk as ElkLayoutEngine),
+      computeWorkflowLayout(graph, elk as unknown as ElkLayoutEngine),
       LAYOUT_TIMEOUT_MS,
     );
   } catch {
@@ -42,9 +45,19 @@ export async function layoutWorkflow(
 export function loadSavedLayout(
   definitionHash: string,
 ): WorkflowLayout | null {
+  return loadLayout(layoutKey(definitionHash));
+}
+
+export function loadAutomaticLayout(
+  definitionHash: string,
+): WorkflowLayout | null {
+  return loadLayout(automaticLayoutKey(definitionHash));
+}
+
+function loadLayout(key: string): WorkflowLayout | null {
   try {
     if (typeof localStorage === "undefined") return null;
-    const raw = localStorage.getItem(layoutKey(definitionHash));
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     const value = JSON.parse(raw) as WorkflowLayout;
     if (!isWorkflowLayout(value)) return null;
@@ -58,9 +71,23 @@ export function saveLayout(
   definitionHash: string,
   layout: WorkflowLayout,
 ): boolean {
+  return saveLayoutAtKey(layoutKey(definitionHash), layout);
+}
+
+export function saveAutomaticLayout(
+  definitionHash: string,
+  layout: WorkflowLayout,
+): boolean {
+  return saveLayoutAtKey(automaticLayoutKey(definitionHash), layout);
+}
+
+function saveLayoutAtKey(
+  key: string,
+  layout: WorkflowLayout,
+): boolean {
   try {
     if (typeof localStorage === "undefined") return false;
-    localStorage.setItem(layoutKey(definitionHash), JSON.stringify(layout));
+    localStorage.setItem(key, JSON.stringify(layout));
     return true;
   } catch {
     // Layout persistence is optional. Quota, privacy mode, or an embedded
@@ -72,10 +99,29 @@ export function saveLayout(
 async function computeWithoutWorker(
   graph: WorkflowGraphView,
 ): Promise<WorkflowLayout> {
-  const { computeWorkflowLayoutOnMainThread } = await import(
+  const {
+    computeFlatWorkflowLayoutOnMainThread,
+    computeWorkflowLayoutOnMainThread,
+  } = await import(
     "./layoutFallback.js"
   );
-  return computeWorkflowLayoutOnMainThread(graph);
+  try {
+    return await computeWorkflowLayoutOnMainThread(graph);
+  } catch (error) {
+    console.error(
+      "Compound Workflow layout failed; using the flat ELK fallback.",
+      error,
+    );
+    try {
+      return await computeFlatWorkflowLayoutOnMainThread(graph);
+    } catch (fallbackError) {
+      console.error(
+        "Flat ELK layout failed; using the deterministic emergency layout.",
+        fallbackError,
+      );
+      return computeEmergencyWorkflowLayout(graph);
+    }
+  }
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -97,7 +143,11 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 }
 
 function layoutKey(definitionHash: string): string {
-  return `autoagent:layout:v7:${definitionHash}`;
+  return `autoagent:layout:v9:${definitionHash}`;
+}
+
+function automaticLayoutKey(definitionHash: string): string {
+  return `autoagent:automatic-layout:v1:${definitionHash}`;
 }
 
 function isWorkflowLayout(value: unknown): value is WorkflowLayout {
@@ -106,6 +156,7 @@ function isWorkflowLayout(value: unknown): value is WorkflowLayout {
   return (
     isRecord(candidate.positions) &&
     isRecord(candidate.edgeRoutes) &&
+    isRecord(candidate.groupBounds) &&
     Object.values(candidate.positions).every(isPoint) &&
     Object.values(candidate.edgeRoutes).every(
       (route) =>
@@ -114,7 +165,21 @@ function isWorkflowLayout(value: unknown): value is WorkflowLayout {
         route.points.length >= 2 &&
         route.points.every(isPoint) &&
         isPoint(route.label),
-    )
+    ) &&
+    Object.values(candidate.groupBounds).every(isRect)
+  );
+}
+
+function isRect(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const rect = value as Record<string, unknown>;
+  return (
+    typeof rect.left === "number" &&
+    typeof rect.top === "number" &&
+    typeof rect.right === "number" &&
+    typeof rect.bottom === "number" &&
+    rect.right >= rect.left &&
+    rect.bottom >= rect.top
   );
 }
 

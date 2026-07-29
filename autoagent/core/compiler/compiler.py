@@ -21,7 +21,7 @@ from autoagent.core.operators.contract import (
     callable_contract,
     value_contract,
 )
-from autoagent.core.operators.manifest import callable_operator_id
+from autoagent.core.operators import callable_operator_id
 from autoagent.core.workflow import (
     CapabilityRef,
     Edge,
@@ -139,10 +139,7 @@ class WorkflowCompiler:
             exit_node_ids=exit_node_ids,
             metadata=workflow.metadata,
         )
-        snapshot = WorkflowVersionSnapshot.from_workflow_ir(
-            workflow_ir,
-            operator_registry=self.operator_registry,
-        )
+        snapshot = WorkflowVersionSnapshot.from_workflow_ir(workflow_ir)
         workflow_ir.definition_hash = snapshot.definition_hash
         return CompileResult(
             workflow_id=workflow_id,

@@ -119,13 +119,12 @@ class PersistenceEnvelope:
     """An immutable-by-ownership record handed to persistence."""
 
     kind: PersistenceKind
-    namespace: str
     session_id: UUID | None
     invocation_id: UUID | None
     estimated_bytes: int
     workflow_snapshot: WorkflowVersionSnapshot | None = None
     execution_snapshot: ExecutionSnapshot | None = None
-    workflow_key: tuple[str, str, str, str] | None = None
+    workflow_key: tuple[str, str] | None = None
     session_updated_at_ms: int | None = None
     invocation_state: str | None = None
     execution_mode: str | None = None
@@ -150,13 +149,11 @@ class PersistenceReservation:
 
 def freeze_workflow_envelope(
     *,
-    namespace: str,
     snapshot: WorkflowVersionSnapshot,
 ) -> PersistenceEnvelope:
     frozen = snapshot.model_copy(deep=True)
     return PersistenceEnvelope(
         kind="workflow_version",
-        namespace=namespace,
         session_id=None,
         invocation_id=None,
         estimated_bytes=512 + _estimate_runtime_bytes(
@@ -168,16 +165,14 @@ def freeze_workflow_envelope(
 
 def freeze_admission_envelope(
     *,
-    namespace: str,
     session_id: UUID,
     invocation_id: UUID,
-    workflow_key: tuple[str, str, str, str],
+    workflow_key: tuple[str, str],
     snapshot: ExecutionSnapshot,
 ) -> PersistenceEnvelope:
     frozen = snapshot.model_copy(deep=True)
     return PersistenceEnvelope(
         kind="admission",
-        namespace=namespace,
         session_id=session_id,
         invocation_id=invocation_id,
         estimated_bytes=1024 + _estimate_runtime_bytes(frozen.state),
@@ -188,7 +183,6 @@ def freeze_admission_envelope(
 
 def freeze_event_envelope(
     *,
-    namespace: str,
     session_id: UUID,
     session_updated_at_ms: int,
     invocation_id: UUID,
@@ -233,7 +227,6 @@ def freeze_event_envelope(
     )
     return PersistenceEnvelope(
         kind="event",
-        namespace=namespace,
         session_id=session_id,
         invocation_id=invocation_id,
         estimated_bytes=estimated_bytes,
@@ -251,7 +244,6 @@ def freeze_event_envelope(
 
 def freeze_invocation_state_envelope(
     *,
-    namespace: str,
     session_id: UUID,
     invocation_id: UUID,
     session_record: dict[str, Any],
@@ -265,7 +257,6 @@ def freeze_invocation_state_envelope(
         if key
         in {
             "id",
-            "namespace",
             "workflow_id",
             "session_key",
             "current_invocation_id",
@@ -291,7 +282,6 @@ def freeze_invocation_state_envelope(
     }
     return PersistenceEnvelope(
         kind="invocation_state",
-        namespace=namespace,
         session_id=session_id,
         invocation_id=invocation_id,
         estimated_bytes=512 + _estimate_runtime_bytes(frozen_invocation),
@@ -302,7 +292,6 @@ def freeze_invocation_state_envelope(
 
 def freeze_user_event_batch_envelope(
     *,
-    namespace: str,
     session_id: UUID,
     invocation_id: UUID,
     events: tuple[UserEvent, ...],
@@ -314,7 +303,6 @@ def freeze_user_event_batch_envelope(
     frozen_events = tuple(event.model_copy(deep=True) for event in events)
     return PersistenceEnvelope(
         kind="user_event_batch",
-        namespace=namespace,
         session_id=session_id,
         invocation_id=invocation_id,
         estimated_bytes=256 + _estimate_runtime_bytes(

@@ -33,10 +33,6 @@ class Invocation:
         Canonical compiled graph identity. Durable recovery compares it with the
         currently registered Workflow before replaying or resuming any work.
 
-    workflow_operator_manifest_hash:
-        Exact Operator compatibility environment captured at compilation. It is
-        checked separately because Operator upgrades do not change graph identity.
-
     entry_node_id:
         The selected entry node for this invocation. __init__ enqueues one
         NodeExecutionRequest for it unless the invocation is being restored.
@@ -68,7 +64,6 @@ class Invocation:
         input: dict[str, Any] | None = None,
         *,
         workflow_definition_hash: str | None = None,
-        workflow_operator_manifest_hash: str | None = None,
         id: UUID | None = None,
         state: InvocationStateValue = "created",
         context: InvocationContext | None = None,
@@ -93,7 +88,6 @@ class Invocation:
         self.workflow_revision_id = workflow_revision_id
         self.workflow_version = workflow_version
         self.workflow_definition_hash = workflow_definition_hash
-        self.workflow_operator_manifest_hash = workflow_operator_manifest_hash
         self.entry_node_id = entry_node_id
         self.state: InvocationStateValue = state
         self.input: dict[str, Any] = dict(input or {})
@@ -426,7 +420,6 @@ class Invocation:
             "workflow_revision_id": self.workflow_revision_id,
             "workflow_version": self.workflow_version,
             "workflow_definition_hash": self.workflow_definition_hash,
-            "workflow_operator_manifest_hash": self.workflow_operator_manifest_hash,
             "entry_node_id": self.entry_node_id,
             "state": self.state,
             "execution_mode": self.execution_mode,
@@ -460,9 +453,6 @@ class Invocation:
             workflow_revision_id=str(record["workflow_revision_id"]),
             workflow_version=record.get("workflow_version"),
             workflow_definition_hash=record.get("workflow_definition_hash"),
-            workflow_operator_manifest_hash=record.get(
-                "workflow_operator_manifest_hash"
-            ),
             entry_node_id=str(record["entry_node_id"]),
             state=record["state"],
             execution_mode=record.get("execution_mode", "normal"),

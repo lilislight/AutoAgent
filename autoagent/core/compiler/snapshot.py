@@ -11,9 +11,8 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.core.compiler.workflow_ir import WorkflowIR
-from autoagent.core.operators import Operator, OperatorManifest, OperatorRegistry
+from autoagent.core.operators import Operator, callable_operator_id
 from autoagent.core.operators.contract import SchemaContract
-from autoagent.core.operators.manifest import callable_operator_id
 from autoagent.core.workflow import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.core.workflow.hooks import get_workflow_hook_version
 
@@ -22,16 +21,12 @@ _WORKFLOW_REVISION_NAMESPACE = UUID("fe569b0d-f5dd-4de8-aa91-fc77bb4ddd21")
 
 
 def workflow_revision_id(
-    namespace: str,
     workflow_id: str,
     definition_hash: str,
-    operator_manifest_hash: str,
 ) -> str:
-    """Return the stable identity of one executable Workflow revision."""
+    """Return the stable identity of one compiled Workflow definition."""
 
-    identity = "\0".join(
-        (namespace, workflow_id, definition_hash, operator_manifest_hash)
-    )
+    identity = "\0".join((workflow_id, definition_hash))
     return str(uuid5(_WORKFLOW_REVISION_NAMESPACE, identity))
 
 
@@ -44,9 +39,10 @@ class WorkflowVersionSnapshot(BaseModel):
     Python hooks by itself. Recovery still requires the application to register
     the current Workflow and Operators and pass compatibility checks.
 
-    Operator manifests are recorded beside the graph but are excluded from the
-    definition hash. This preserves late-bound Capability selection while still
-    giving recovery enough information to validate the concrete OperatorExecution.
+    Fixed Operator identity and its compiled input/output contracts are part of
+    ``definition`` and therefore ``definition_hash``. Capability
+    implementations are selected by the deployment environment and do not
+    participate in Workflow revision identity.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -56,26 +52,14 @@ class WorkflowVersionSnapshot(BaseModel):
     ir_version: str
     compiler_version: str
     definition_hash: str
-    operator_manifest_hash: str = Field(
-        description=(
-            "Hash of the exact Operator manifest set available when this "
-            "Workflow was compiled. It is separate from structural identity."
-        )
-    )
     definition: dict[str, Any] = Field(
         description="JSON-compatible graph and execution-semantic snapshot."
-    )
-    operator_manifests: tuple[OperatorManifest, ...] = Field(
-        default_factory=tuple,
-        description="Known concrete Operators usable by this compiled Workflow.",
     )
 
     @classmethod
     def from_workflow_ir(
         cls,
         workflow_ir: WorkflowIR,
-        *,
-        operator_registry: OperatorRegistry | None = None,
     ) -> WorkflowVersionSnapshot:
         semantic = _semantic_definition(workflow_ir)
         definition = {
@@ -91,21 +75,13 @@ class WorkflowVersionSnapshot(BaseModel):
                 for node in semantic["nodes"]
             ],
         }
-        manifests = _operator_manifests(
-            workflow_ir,
-            operator_registry=operator_registry,
-        )
         return cls(
             workflow_id=workflow_ir.workflow_id,
             workflow_version=workflow_ir.workflow_version,
             ir_version=workflow_ir.ir_version,
             compiler_version=workflow_ir.compiler_version,
             definition_hash=_hash_json(semantic),
-            operator_manifest_hash=_hash_json(
-                [manifest.model_dump(mode="python") for manifest in manifests]
-            ),
             definition=definition,
-            operator_manifests=manifests,
         )
 
 
@@ -173,37 +149,6 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
         "exit_node_ids": list(workflow_ir.exit_node_ids),
         "loop_regions": loop_regions,
     }
-
-
-def _operator_manifests(
-    workflow_ir: WorkflowIR,
-    *,
-    operator_registry: OperatorRegistry | None,
-) -> tuple[OperatorManifest, ...]:
-    manifests: dict[str, OperatorManifest] = {}
-    for node in workflow_ir.nodes.values():
-        binding = node.capability
-        if isinstance(binding, Operator):
-            manifests[binding.id] = binding.manifest
-            continue
-        if callable(binding):
-            operator = Operator.from_callable(binding)
-            manifests[operator.id] = operator.manifest
-            continue
-        if operator_registry is None:
-            continue
-        if isinstance(binding, OperatorRef):
-            operator = operator_registry.get(binding.id)
-            if operator is not None:
-                manifests[operator.id] = operator.manifest
-            continue
-        if isinstance(binding, CapabilityRef):
-            for operator in operator_registry.for_capability(
-                binding.id,
-                include_disabled=True,
-            ):
-                manifests[operator.id] = operator.manifest
-    return tuple(manifests[key] for key in sorted(manifests))
 
 
 def _binding_definition(binding: Any) -> dict[str, Any]:

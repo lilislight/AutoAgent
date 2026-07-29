@@ -97,7 +97,7 @@ For durable behavior:
 1. configure a temporary SQLite database;
 2. run until waiting in `standard` or `full` mode;
 3. close the first host;
-4. create a new host with the same namespace and Workflow;
+4. create a new host with the same Workflow;
 5. resume with the same Session and wait key;
 6. assert the terminal result.
 

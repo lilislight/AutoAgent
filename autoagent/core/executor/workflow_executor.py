@@ -263,19 +263,6 @@ class WorkflowExecutor:
                 message="Current Workflow definition does not match interrupted work.",
             )
             return invocation
-        if (
-            invocation.workflow_operator_manifest_hash
-            != workflow_snapshot.operator_manifest_hash
-        ):
-            await self._interrupt_recovery(
-                session,
-                invocation,
-                code="OPERATOR_ENVIRONMENT_CHANGED",
-                message=(
-                    "Current Operator environment does not match interrupted work."
-                ),
-            )
-            return invocation
         invocation.execution_mode = "recovery"
         if invocation.state == "created":
             return await self.ainvoke(
@@ -1365,6 +1352,7 @@ class WorkflowExecutor:
                     data=data,
                     node_id=node_ir.id,
                     node_execution_id=node_execution.id,
+                    workflow_path=node_ir.workflow_path,
                     operator_call_id=operator_call_id,
                 )
             except Exception as exc:
@@ -1378,6 +1366,7 @@ class WorkflowExecutor:
                     },
                     node_id=node_ir.id,
                     node_execution_id=node_execution.id,
+                    workflow_path=node_ir.workflow_path,
                     operator_call_id=operator_call_id,
                 )
             specs.append(spec)
@@ -1424,6 +1413,7 @@ class WorkflowExecutor:
                             },
                             node_id=spec.node_id,
                             node_execution_id=spec.node_execution_id,
+                            workflow_path=spec.workflow_path,
                             operator_call_id=spec.operator_call_id,
                         ),
                     ),
@@ -1460,6 +1450,9 @@ class WorkflowExecutor:
                 data=error.to_record(),
                 node_id=llm_execution.node_id,
                 node_execution_id=llm_execution.id,
+                workflow_path=workflow_ir.nodes[
+                    llm_execution.node_id
+                ].workflow_path,
                 operator_call_id=(
                     llm_execution.operator_executions[-1].id
                     if llm_execution.operator_executions

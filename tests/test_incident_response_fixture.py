@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,8 @@ from tests.fixtures.incident_response_tracing_server import (
     PublishedResolution,
     _new_incident_sample,
     _resume_incident_sample,
+    _submit_startup_examples,
+    _startup_invocation_payloads,
     build_incident_response_app,
 )
 
@@ -26,6 +29,97 @@ def build_test_app():
 
 
 class IncidentResponseFixtureTests(unittest.TestCase):
+    def test_startup_examples_cover_both_public_entry_inputs(self) -> None:
+        payloads = _startup_invocation_payloads()
+
+        self.assertEqual(
+            ["new_incident", "resume_incident"],
+            [payload["entry_node_id"] for payload in payloads],
+        )
+        self.assertEqual(
+            [
+                "incident-response-startup-new",
+                "incident-response-startup-resume",
+            ],
+            [payload["session_key"] for payload in payloads],
+        )
+        self.assertTrue(
+            all(payload["event_mode"] == "full" for payload in payloads)
+        )
+        self.assertEqual(
+            "INC-2048",
+            payloads[0]["input"]["request"]["incident_id"],
+        )
+        self.assertEqual(
+            "INC-4096",
+            payloads[1]["input"]["checkpoint"]["incident"]["incident_id"],
+        )
+
+    def test_startup_examples_are_submitted_through_server_api(self) -> None:
+        responses = [
+            _FakeHttpResponse(200, {}),
+            _FakeHttpResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "workflow_id": "production_incident_response_v1",
+                            "revision_id": "revision-1",
+                            "registered": True,
+                        }
+                    ]
+                },
+            ),
+            _FakeHttpResponse(200, {"invocation_id": "invocation-new"}),
+            _FakeHttpResponse(200, {"invocation_id": "invocation-resume"}),
+        ]
+        requests: list[tuple[str, str, bytes | None]] = []
+
+        class FakeConnection:
+            def __init__(self, host: str, port: int, timeout: float) -> None:
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+
+            def request(
+                self,
+                method: str,
+                path: str,
+                body: bytes | None = None,
+                headers: dict[str, str] | None = None,
+            ) -> None:
+                requests.append((method, path, body))
+
+            def getresponse(self) -> _FakeHttpResponse:
+                return responses.pop(0)
+
+            def close(self) -> None:
+                return None
+
+        with patch(
+            "tests.fixtures.incident_response_tracing_server.HTTPConnection",
+            FakeConnection,
+        ):
+            _submit_startup_examples(
+                "127.0.0.1",
+                8765,
+                workflow_id="production_incident_response_v1",
+            )
+
+        self.assertEqual(
+            ["GET", "GET", "POST", "POST"],
+            [method for method, _, _ in requests],
+        )
+        submitted = [
+            json.loads(body)
+            for method, _, body in requests
+            if method == "POST" and body is not None
+        ]
+        self.assertEqual(
+            ["new_incident", "resume_incident"],
+            [payload["entry_node_id"] for payload in submitted],
+        )
+
     def test_demo_defaults_to_a_sqlite_runtime_store(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "demo.sqlite3"
@@ -95,7 +189,6 @@ class IncidentResponseFixtureTests(unittest.TestCase):
             invocation.context.data["normalized_incident"]["incident_id"],
         )
         session = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=invocation.workflow_revision_id,
             session_key="incident-response-new-test",
         )
@@ -361,6 +454,15 @@ class IncidentResponseFixtureTests(unittest.TestCase):
                 self.assertTrue(bootstrap["event_page"]["has_later"])
             finally:
                 reopened.close()
+
+
+class _FakeHttpResponse:
+    def __init__(self, status: int, payload: dict[str, object]) -> None:
+        self.status = status
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
 
 
 if __name__ == "__main__":

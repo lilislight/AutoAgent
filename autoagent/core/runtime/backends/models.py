@@ -31,25 +31,20 @@ class WorkflowVersionRow(RuntimeDatabaseBase):
     __tablename__ = "workflow_versions"
     __table_args__ = (
         UniqueConstraint(
-            "namespace",
             "workflow_id",
             "definition_hash",
-            "operator_manifest_hash",
             name="uq_workflow_versions_identity",
         ),
-        Index("ix_workflow_versions_lookup", "namespace", "workflow_id"),
+        Index("ix_workflow_versions_lookup", "workflow_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    namespace: Mapped[str] = mapped_column(String(255), nullable=False)
     workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
     workflow_version: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ir_version: Mapped[str] = mapped_column(String(64), nullable=False)
     compiler_version: Mapped[str] = mapped_column(String(64), nullable=False)
     definition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    operator_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     definition_json: Mapped[str] = mapped_column(Text, nullable=False)
-    operator_manifests_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
@@ -57,21 +52,18 @@ class SessionRow(RuntimeDatabaseBase):
     __tablename__ = "sessions"
     __table_args__ = (
         UniqueConstraint(
-            "namespace",
             "workflow_revision_id",
             "session_key",
             name="uq_sessions_external_identity",
         ),
         Index(
             "ix_sessions_lookup",
-            "namespace",
             "workflow_revision_id",
             "session_key",
         ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    namespace: Mapped[str] = mapped_column(String(255), nullable=False)
     workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
     workflow_revision_id: Mapped[str] = mapped_column(
         ForeignKey("workflow_versions.id"),
@@ -189,6 +181,11 @@ class UserEventRow(RuntimeDatabaseBase):
     type: Mapped[str] = mapped_column(String(128), nullable=False)
     data_json: Mapped[str] = mapped_column(Text, nullable=False)
     node_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    workflow_path_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+    )
     node_execution_id: Mapped[str] = mapped_column(String(36), nullable=False)
     operator_call_id: Mapped[str | None] = mapped_column(
         String(36),
@@ -213,18 +210,16 @@ class ArtifactRow(RuntimeDatabaseBase):
     __tablename__ = "artifacts"
     __table_args__ = (
         UniqueConstraint(
-            "namespace",
             "owner_invocation_id",
             "kind",
             "sha256",
             name="uq_artifacts_invocation_content",
         ),
         Index("ix_artifacts_owner", "owner_invocation_id"),
-        Index("ix_artifacts_sha256", "namespace", "sha256"),
+        Index("ix_artifacts_sha256", "sha256"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    namespace: Mapped[str] = mapped_column(String(255), nullable=False)
     owner_invocation_id: Mapped[str | None] = mapped_column(
         ForeignKey("invocations.id", ondelete="CASCADE"),
         nullable=True,

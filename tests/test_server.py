@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event as ThreadingEvent
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -20,7 +21,7 @@ from autoagent import (
 from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.runtime import RuntimeEvent, RuntimeStore, UserEventSpec
 from autoagent.core.server import AutoAgentServer
-from autoagent.core.server.trace import TraceProjectionReducer
+from autoagent.core.server.trace import TraceProjectionReducer, _workflow_groups
 from autoagent.core.server.app import (
     InvocationResumeRequest,
     InvocationSubmitRequest,
@@ -35,9 +36,75 @@ def historical_trace_model() -> HistoricalTracePayload:
     return HistoricalTracePayload(value=42)
 
 
+class WorkflowGroupViewTests(unittest.TestCase):
+    def test_nested_and_sibling_workflows_have_complete_group_trees(self) -> None:
+        nodes = [
+            {"id": "start", "workflow_path": []},
+            {"id": "first/inner/work", "workflow_path": ["first", "inner"]},
+            {"id": "second/work", "workflow_path": ["second"]},
+            {"id": "end", "workflow_path": []},
+        ]
+        edges = [
+            {
+                "id": "enter_first",
+                "from_node": "start",
+                "to_node": "first/inner/work",
+                "workflow_path": [],
+            },
+            {
+                "id": "first/inner/inside",
+                "from_node": "first/inner/work",
+                "to_node": "first/inner/work",
+                "workflow_path": ["first", "inner"],
+            },
+            {
+                "id": "between",
+                "from_node": "first/inner/work",
+                "to_node": "second/work",
+                "workflow_path": [],
+            },
+            {
+                "id": "leave_second",
+                "from_node": "second/work",
+                "to_node": "end",
+                "workflow_path": [],
+            },
+        ]
+
+        groups = {
+            value["id"]: value
+            for value in _workflow_groups(nodes, edges)
+        }
+
+        self.assertEqual({"first", "first/inner", "second"}, set(groups))
+        self.assertEqual("first", groups["first/inner"]["parent_group_id"])
+        self.assertEqual(
+            ["first/inner/work"],
+            groups["first"]["node_ids"],
+        )
+        self.assertEqual([], groups["first"]["direct_node_ids"])
+        self.assertEqual(
+            ["first/inner/inside"],
+            groups["first"]["edge_ids"],
+        )
+        self.assertEqual([], groups["first"]["direct_edge_ids"])
+        self.assertEqual(
+            ["first/inner/inside"],
+            groups["first/inner"]["direct_edge_ids"],
+        )
+        self.assertEqual(
+            ["first/inner/work"],
+            groups["first"]["entry_node_ids"],
+        )
+        self.assertEqual(
+            ["first/inner/work"],
+            groups["first"]["exit_node_ids"],
+        )
+
+
 class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.app = AutoAgentApp()
+        self.app = AutoAgentApp(settings=AutoAgentSettings())
         self.workflow = Workflow(id="server_wait")
         self.workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         self.app.register_workflow(self.workflow)
@@ -71,10 +138,8 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     def _revision_id(self, workflow: Workflow) -> str:
         snapshot = self.app.register_workflow(workflow).workflow_snapshot
         return workflow_revision_id(
-            self.app.namespace,
             snapshot.workflow_id,
             snapshot.definition_hash,
-            snapshot.operator_manifest_hash,
         )
 
     async def test_waiting_session_rejects_submit_before_new_admission(self) -> None:
@@ -168,6 +233,41 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError,
         )
 
+    async def test_slow_async_operator_does_not_block_server_health(self) -> None:
+        started = ThreadingEvent()
+
+        async def slow_external_call() -> str:
+            started.set()
+            await asyncio.sleep(0.2)
+            return "done"
+
+        workflow = Workflow(id="server_slow_external_call")
+        workflow.add_node(slow_external_call, node_id="slow_external_call")
+        revision_id = self._revision_id(workflow)
+        submitted = await self.submit(
+            revision_id,
+            InvocationSubmitRequest(entry_node_id="slow_external_call"),
+        )
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        self.assertTrue(started.is_set())
+        health = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "health"
+        )
+
+        response = await asyncio.wait_for(health(), timeout=0.05)
+
+        self.assertEqual("ok", response["status"])
+        self.assertIn(
+            submitted.invocation_id,
+            self.server._invocation_tasks,
+        )
+        await self._wait_for_state(submitted.invocation_id, "completed")
+
     async def test_shutdown_cancels_invocation_after_bounded_grace(self) -> None:
         app = AutoAgentApp(
             settings=AutoAgentSettings(shutdown_grace_timeout_ms=10)
@@ -191,6 +291,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_exposes_embeddable_v1_router(self) -> None:
         paths = {route.path for route in self.server.router.routes}
         self.assertIn("/api/v1/workflows", paths)
+        self.assertIn("/api/v1/workflows/stream", paths)
         self.assertIn(
             "/api/v1/workflow-revisions/{workflow_revision_id}/sessions",
             paths,
@@ -214,6 +315,10 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             "/api/v1/invocations/{invocation_id}/user-events/stream",
             paths,
         )
+        self.assertIn(
+            "/api/v1/sessions/{session_id}/user-events/stream",
+            paths,
+        )
         self.assertIn("/api/v1/runtime/status", paths)
         self.assertIn("/api/v1/runtime/stream", paths)
         self.assertIn("/api/v1/health/live", paths)
@@ -235,6 +340,14 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             submitted.invocation_id
         ]
         execution = invocation.latest_node_execution("wait")
+        session_notifications: list[str] = []
+        session_id = self.app.runtime_store.invocation_sessions[invocation.id]
+        unsubscribe = (
+            self.app.runtime_store.subscribe_session_user_event_changes(
+                session_id,
+                lambda: session_notifications.append("changed"),
+            )
+        )
         self.app.runtime_store.record_user_event(
             invocation_id=invocation.id,
             spec=UserEventSpec(
@@ -242,8 +355,19 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                 data={"wait_key": "approval"},
                 node_id="wait",
                 node_execution_id=execution.id,
+                workflow_path=("approval_flow",),
             ),
         )
+        self.app.runtime_store.record_user_event(
+            invocation_id=invocation.id,
+            spec=UserEventSpec(
+                type="approval_status",
+                data={"status": "still_waiting"},
+                node_id="wait",
+                node_execution_id=execution.id,
+            ),
+        )
+        unsubscribe()
 
         page = await self.server.trace.user_event_page(
             invocation.id,
@@ -251,7 +375,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             limit=200,
         )
 
-        self.assertEqual(page["live_sequence"], 1)
+        self.assertEqual(page["live_sequence"], 2)
         self.assertFalse(page["has_later"])
         self.assertEqual(page["items"][0]["type"], "approval_requested")
         self.assertEqual(
@@ -259,9 +383,14 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             {"wait_key": "approval"},
         )
         self.assertEqual(
+            page["items"][0]["workflow_path"],
+            ["approval_flow"],
+        )
+        self.assertEqual(
             self.app.runtime_store.runtime_events[invocation.id],
             [],
         )
+        self.assertEqual(["changed"], session_notifications)
 
         endpoint = next(
             route.endpoint
@@ -536,6 +665,25 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             second["items"][0]["workflow_id"],
         )
         self.assertFalse(second["has_more"])
+
+    async def test_local_workflow_registration_notifies_directory_stream(
+        self,
+    ) -> None:
+        changes: list[str] = []
+        unsubscribe = self.app.runtime_store.subscribe_workflow_changes(
+            lambda: changes.append("changed")
+        )
+        try:
+            workflow = Workflow(id="registered_after_server_start")
+            workflow.add_node(lambda: "done", node_id="done")
+            self.app.register_workflow(workflow)
+            # Re-registering the same immutable revision is not a directory
+            # change and must not produce a duplicate notification.
+            self.app.register_workflow(workflow)
+        finally:
+            unsubscribe()
+
+        self.assertEqual(["changed"], changes)
 
     async def test_agent_invocation_neighbors_page_in_both_directions(
         self,
@@ -966,6 +1114,63 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workflow_directory_can_refresh_database_revisions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow-refresh.db"
+            reader_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            reader = AutoAgentApp(runtime_store=reader_store)
+            first = Workflow(id="first_revision")
+            first.add_node(lambda: "first", node_id="first")
+            reader.register_workflow(first)
+            await reader.astart()
+            server = AutoAgentServer(reader)
+            try:
+                initial = await server.trace.list_workflows(
+                    cursor=None,
+                    limit=20,
+                )
+                self.assertEqual(
+                    ["first_revision"],
+                    [item["workflow_id"] for item in initial["items"]],
+                )
+
+                writer_store = RuntimeStore(
+                    backend=DatabaseBackend.from_path(path)
+                )
+                writer = AutoAgentApp(runtime_store=writer_store)
+                await writer.astart()
+                second = Workflow(id="later_revision")
+                second.add_node(lambda: "second", node_id="second")
+                writer.register_workflow(second)
+                try:
+                    await writer_store.aflush()
+                finally:
+                    await writer.aclose()
+
+                cached = await server.trace.list_workflows(
+                    cursor=None,
+                    limit=20,
+                )
+                self.assertNotIn(
+                    "later_revision",
+                    [item["workflow_id"] for item in cached["items"]],
+                )
+                refreshed = await server.trace.list_workflows(
+                    cursor=None,
+                    limit=20,
+                    refresh_database=True,
+                )
+                self.assertEqual(
+                    {"first_revision", "later_revision"},
+                    {item["workflow_id"] for item in refreshed["items"]},
+                )
+            finally:
+                await reader.aclose()
+
     async def test_historical_trace_does_not_require_runtime_model_registration(
         self,
     ) -> None:

@@ -38,10 +38,8 @@ def registered_revision_id(app: AutoAgentApp, workflow: Workflow) -> str:
     entry = app.register_workflow(workflow)
     snapshot = entry.workflow_snapshot
     return workflow_revision_id(
-        app.namespace,
         snapshot.workflow_id,
         snapshot.definition_hash,
-        snapshot.operator_manifest_hash,
     )
 
 
@@ -75,13 +73,10 @@ class WorkflowExecutorTests(unittest.TestCase):
         app = AutoAgentApp(runtime_store=store)
         entry = app.register_workflow(workflow)
         session = store.get_or_create_session(
-            namespace=app.namespace,
             workflow_id=workflow.id,
             workflow_revision_id=workflow_revision_id(
-                app.namespace,
                 entry.workflow_snapshot.workflow_id,
                 entry.workflow_snapshot.definition_hash,
-                entry.workflow_snapshot.operator_manifest_hash,
             ),
             session_key="recover-on-start",
         )
@@ -90,9 +85,6 @@ class WorkflowExecutorTests(unittest.TestCase):
             workflow_revision_id=session.workflow_revision_id,
             workflow_version=entry.workflow_ir.workflow_version,
             workflow_definition_hash=entry.workflow_ir.definition_hash,
-            workflow_operator_manifest_hash=(
-                entry.workflow_snapshot.operator_manifest_hash
-            ),
             entry_node_id="node",
             event_mode="full",
         )
@@ -291,7 +283,6 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(wait.wait_type, "human")
         self.assertEqual(wait.payload, {"request_id": "request-1"})
         stored = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=waiting.workflow_revision_id,
             session_key="reviewer-1",
         ).get_current_invocation()
@@ -440,7 +431,6 @@ class WorkflowExecutorTests(unittest.TestCase):
             persisted = None
             for _ in range(100):
                 session = app.runtime_store.find_session(
-                    namespace=app.namespace,
                     workflow_revision_id=registered_revision_id(app, workflow),
                     session_key="parallel-session",
                 )
@@ -628,7 +618,6 @@ class WorkflowExecutorTests(unittest.TestCase):
 
             self.assertTrue(operator_cancelled.is_set())
             session = app.runtime_store.find_session(
-                namespace=app.namespace,
                 workflow_revision_id=registered_revision_id(app, workflow),
                 session_key="session",
             )
@@ -711,7 +700,6 @@ class WorkflowExecutorTests(unittest.TestCase):
             session_id="readonly-session",
         )
         session = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=invocation.workflow_revision_id,
             session_key="readonly-session",
         )
@@ -1371,7 +1359,6 @@ class WorkflowExecutorTests(unittest.TestCase):
         thread.start()
         self.assertTrue(started.wait(timeout=1))
         before = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=registered_revision_id(app, workflow),
             session_key="shared-session",
         )
@@ -1382,7 +1369,6 @@ class WorkflowExecutorTests(unittest.TestCase):
             app.invoke(workflow, session_id="shared-session")
 
         after = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=registered_revision_id(app, workflow),
             session_key="shared-session",
         )
@@ -1413,7 +1399,6 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         # The session still holds the waiting invocation, unaffected.
         session = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=waiting.workflow_revision_id,
             session_key="shared-session",
         )
@@ -2078,7 +2063,6 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         invocation = app.invoke(workflow, session_id="session")
         session = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=invocation.workflow_revision_id,
             session_key="session",
         )
@@ -2127,7 +2111,6 @@ class WorkflowExecutorTests(unittest.TestCase):
             session_id="session",
         )
         session = app.runtime_store.find_session(
-            namespace=app.namespace,
             workflow_revision_id=invocation.workflow_revision_id,
             session_key="session",
         )

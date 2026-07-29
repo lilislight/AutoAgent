@@ -303,11 +303,13 @@ class AutoAgentServer:
         async def list_workflows(
             cursor: str | None = None,
             limit: int = Query(default=50, ge=1, le=200),
+            refresh_database: bool = False,
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_workflows(
                     cursor=cursor,
                     limit=limit,
+                    refresh_database=refresh_database,
                 )
             )
 
@@ -315,13 +317,63 @@ class AutoAgentServer:
         async def list_registered_workflows(
             cursor: str | None = None,
             limit: int = Query(default=50, ge=1, le=200),
+            refresh_database: bool = False,
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_workflows(
                     cursor=cursor,
                     limit=limit,
                     registered_only=True,
+                    refresh_database=refresh_database,
                 )
+            )
+
+        @router.get("/workflows/stream", dependencies=auth)
+        async def stream_workflow_directory(
+            request: Request,
+        ) -> StreamingResponse:
+            async def generate() -> AsyncIterator[str]:
+                loop = asyncio.get_running_loop()
+                changed = asyncio.Event()
+
+                def notify() -> None:
+                    loop.call_soon_threadsafe(changed.set)
+
+                unsubscribe = self.agent.runtime_store.subscribe_workflow_changes(
+                    notify
+                )
+                try:
+                    # A reconnect is also a synchronization boundary. The UI
+                    # refreshes the durable directory so changes made while
+                    # this connection was down are not missed.
+                    yield (
+                        "event: workflow_catalog_changed\n"
+                        "data: {}\n\n"
+                    )
+                    while not await request.is_disconnected():
+                        try:
+                            await asyncio.wait_for(
+                                changed.wait(),
+                                timeout=15,
+                            )
+                        except TimeoutError:
+                            yield ": heartbeat\n\n"
+                            continue
+                        changed.clear()
+                        yield (
+                            "event: workflow_catalog_changed\n"
+                            "data: {}\n\n"
+                        )
+                finally:
+                    unsubscribe()
+
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
             )
 
         @router.get("/workflows/{workflow_id}/revisions", dependencies=auth)
@@ -373,6 +425,66 @@ class AutoAgentServer:
                     cursor=cursor,
                     limit=limit,
                 )
+            )
+
+        @router.get(
+            "/sessions/{session_id}/user-events/stream",
+            dependencies=auth,
+        )
+        async def stream_session_user_event_changes(
+            request: Request,
+            session_id: UUID,
+        ) -> StreamingResponse:
+            async def generate() -> AsyncIterator[str]:
+                loop = asyncio.get_running_loop()
+                changed = asyncio.Event()
+
+                def notify() -> None:
+                    loop.call_soon_threadsafe(changed.set)
+
+                unsubscribe = (
+                    self.agent.runtime_store
+                    .subscribe_session_user_event_changes(
+                        session_id,
+                        notify,
+                    )
+                )
+                try:
+                    yield (
+                        "event: session_user_events_changed\n"
+                        "data: {}\n\n"
+                    )
+                    while not await request.is_disconnected():
+                        try:
+                            await asyncio.wait_for(
+                                changed.wait(),
+                                timeout=15,
+                            )
+                        except TimeoutError:
+                            yield ": heartbeat\n\n"
+                            continue
+                        changed.clear()
+                        yield (
+                            "event: session_user_events_changed\n"
+                            "data: {}\n\n"
+                        )
+                finally:
+                    unsubscribe()
+
+            await self._trace_call(
+                self.trace.list_invocations(
+                    session_id,
+                    cursor=None,
+                    limit=1,
+                )
+            )
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
             )
 
         @router.get(
@@ -751,7 +863,6 @@ class AutoAgentServer:
             except RuntimeError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             session = self.agent.runtime_store.find_session(
-                namespace=self.agent.namespace,
                 workflow_revision_id=workflow_revision_id,
                 session_key=body.session_key,
             )

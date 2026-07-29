@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import event, func, select, text, tuple_
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -30,7 +31,6 @@ from autoagent.core.runtime.backends.models import (
 )
 from autoagent.core.runtime.event import RuntimeEvent
 from autoagent.core.compiler import WorkflowVersionSnapshot, workflow_revision_id
-from autoagent.core.operators import OperatorManifest
 from autoagent.core.runtime.context import SessionContext
 from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.runtime.persistence import PersistenceEnvelope
@@ -122,7 +122,7 @@ class DatabaseBackend:
         self._inflight_bytes = 0
         self._pending_count = 0
         self._inflight_count = 0
-        self._workflow_version_ids: dict[tuple[str, str, str, str], UUID] = {}
+        self._workflow_version_ids: dict[tuple[str, str], UUID] = {}
         self._recovery_sequences: dict[UUID, int] = {}
         self._durable_states: dict[UUID, dict[str, Any]] = {}
         self._projection_sequences: dict[UUID, int] = {}
@@ -205,6 +205,7 @@ class DatabaseBackend:
             self._initialize_lock = asyncio.Lock()
         async with self._initialize_lock:
             if not self._initialized:
+                _ensure_sqlite_parent_directory(self.database_url)
                 self._queue_event = asyncio.Event()
                 # WAL is shared by every SQLite profile. FULL remains the
                 # durable default; NORMAL is an explicit performance choice.
@@ -301,25 +302,20 @@ class DatabaseBackend:
         if snapshot is None:
             raise ValueError("Workflow persistence envelope has no snapshot.")
         key = (
-            envelope.namespace,
             snapshot.workflow_id,
             snapshot.definition_hash,
-            snapshot.operator_manifest_hash,
         )
         version_id = self._workflow_version_ids.setdefault(
             key,
             UUID(
                 workflow_revision_id(
-                    envelope.namespace,
                     snapshot.workflow_id,
                     snapshot.definition_hash,
-                    snapshot.operator_manifest_hash,
                 )
             ),
         )
         record = {
             "id": version_id,
-            "namespace": envelope.namespace,
             "workflow_id": snapshot.workflow_id,
             "workflow_version": (
                 None
@@ -329,17 +325,8 @@ class DatabaseBackend:
             "ir_version": snapshot.ir_version,
             "compiler_version": snapshot.compiler_version,
             "definition_hash": snapshot.definition_hash,
-            "operator_manifest_hash": snapshot.operator_manifest_hash,
             "definition_json": _text(
                 self.serializer.dumps_unchecked(snapshot.definition)
-            ),
-            "operator_manifests_json": _text(
-                self.serializer.dumps_unchecked(
-                    [
-                        manifest.model_dump(mode="python")
-                        for manifest in snapshot.operator_manifests
-                    ]
-                )
             ),
             "created_at_ms": utc_timestamp_ms(),
         }
@@ -357,14 +344,12 @@ class DatabaseBackend:
     async def afind_session(
         self,
         *,
-        namespace: str,
         workflow_revision_id: str,
         session_key: str,
     ) -> Session | None:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.afind_session(
-                    namespace=namespace,
                     workflow_revision_id=workflow_revision_id,
                     session_key=session_key,
                 )
@@ -376,7 +361,6 @@ class DatabaseBackend:
             async with self._database_sessions() as database:
                 row = await database.scalar(
                     select(SessionRow).where(
-                        SessionRow.namespace == namespace,
                         SessionRow.workflow_revision_id
                         == workflow_revision_id,
                         SessionRow.session_key == session_key,
@@ -418,7 +402,6 @@ class DatabaseBackend:
         )
         session = Session(
             id=UUID(row.id),
-            namespace=row.namespace,
             workflow_id=row.workflow_id,
             workflow_revision_id=row.workflow_revision_id,
             session_key=row.session_key,
@@ -431,7 +414,6 @@ class DatabaseBackend:
     async def alist_recoverable_invocation_ids(
         self,
         *,
-        namespace: str,
         workflow_revision_ids: tuple[str, ...],
     ) -> tuple[UUID, ...]:
         if not workflow_revision_ids:
@@ -439,7 +421,6 @@ class DatabaseBackend:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_recoverable_invocation_ids(
-                    namespace=namespace,
                     workflow_revision_ids=workflow_revision_ids,
                 )
             )
@@ -453,7 +434,6 @@ class DatabaseBackend:
                         SessionRow.id == InvocationRow.session_id,
                     )
                     .where(
-                        SessionRow.namespace == namespace,
                         SessionRow.workflow_revision_id.in_(
                             workflow_revision_ids
                         ),
@@ -488,7 +468,6 @@ class DatabaseBackend:
         event_mode = invocation_record["event_mode"]
         persisted_input, input_artifacts = self.artifact_encoder.externalize(
             invocation_record.get("input"),
-            namespace=envelope.namespace,
             invocation_id=envelope.invocation_id,
         )
         artifacts: tuple[EncodedArtifact, ...] = input_artifacts
@@ -496,7 +475,6 @@ class DatabaseBackend:
         if event_mode != "minimal":
             persisted_state, state_artifacts = self._externalize_admission_state(
                 snapshot.state,
-                namespace=envelope.namespace,
                 invocation_id=envelope.invocation_id,
             )
             artifacts = (*artifacts, *state_artifacts)
@@ -516,7 +494,6 @@ class DatabaseBackend:
                 key: session_record[key]
                 for key in (
                     "id",
-                    "namespace",
                     "workflow_id",
                     "workflow_revision_id",
                     "session_key",
@@ -573,7 +550,6 @@ class DatabaseBackend:
             raise ValueError("Event persistence envelope is incomplete.")
         persisted_event, artifacts = self._externalize_event_values(
             event,
-            namespace=envelope.namespace,
             invocation_id=envelope.invocation_id,
         )
         encoded_payload = self.serializer.dumps(persisted_event["payload"])
@@ -594,7 +570,6 @@ class DatabaseBackend:
         )
         persisted_result, result_artifacts = self.artifact_encoder.externalize(
             envelope.invocation_result,
-            namespace=envelope.namespace,
             invocation_id=envelope.invocation_id,
         )
         artifacts = (*artifacts, *result_artifacts)
@@ -604,7 +579,6 @@ class DatabaseBackend:
             persisted_recovery, recovery_artifacts = (
                 self._externalize_admission_state(
                     envelope.recovery_snapshot.state,
-                    namespace=envelope.namespace,
                     invocation_id=envelope.invocation_id,
                 )
             )
@@ -685,12 +659,10 @@ class DatabaseBackend:
             raise ValueError("Invocation state persistence envelope is incomplete.")
         persisted_input, input_artifacts = self.artifact_encoder.externalize(
             envelope.invocation_record.get("input"),
-            namespace=envelope.namespace,
             invocation_id=envelope.invocation_id,
         )
         persisted_result, result_artifacts = self.artifact_encoder.externalize(
             envelope.invocation_record.get("result"),
-            namespace=envelope.namespace,
             invocation_id=envelope.invocation_id,
         )
         record = {
@@ -747,7 +719,6 @@ class DatabaseBackend:
         for event_value in envelope.user_events:
             persisted_data, event_artifacts = self.artifact_encoder.externalize(
                 event_value.data,
-                namespace=envelope.namespace,
                 invocation_id=envelope.invocation_id,
             )
             data_json = _text(self.serializer.dumps(persisted_data))
@@ -763,6 +734,11 @@ class DatabaseBackend:
                     "type": event_value.type,
                     "data_json": data_json,
                     "node_id": event_value.node_id,
+                    "workflow_path_json": _text(
+                        self.serializer.dumps_unchecked(
+                            list(event_value.workflow_path)
+                        )
+                    ),
                     "node_execution_id": str(
                         event_value.node_execution_id
                     ),
@@ -793,7 +769,6 @@ class DatabaseBackend:
         self,
         state: dict[str, Any],
         *,
-        namespace: str,
         invocation_id: UUID,
     ) -> tuple[dict[str, Any], tuple[EncodedArtifact, ...]]:
         """Externalize mutable values without replacing restart structures."""
@@ -818,7 +793,6 @@ class DatabaseBackend:
                     continue
                 persisted, encoded = self.artifact_encoder.externalize(
                     record[field],
-                    namespace=namespace,
                     invocation_id=invocation_id,
                 )
                 record[field] = persisted
@@ -829,7 +803,6 @@ class DatabaseBackend:
         self,
         event: RuntimeEvent,
         *,
-        namespace: str,
         invocation_id: UUID,
     ) -> tuple[dict[str, Any], tuple[EncodedArtifact, ...]]:
         """Externalize large Event values while preserving its typed envelope."""
@@ -837,19 +810,16 @@ class DatabaseBackend:
         artifacts: list[EncodedArtifact] = []
         persisted_payload, encoded = self.artifact_encoder.externalize(
             event.payload,
-            namespace=namespace,
             invocation_id=invocation_id,
         )
         artifacts.extend(encoded)
         persisted_input, encoded = self.artifact_encoder.externalize(
             event.input,
-            namespace=namespace,
             invocation_id=invocation_id,
         )
         artifacts.extend(encoded)
         persisted_output, encoded = self.artifact_encoder.externalize(
             event.output,
-            namespace=namespace,
             invocation_id=invocation_id,
         )
         artifacts.extend(encoded)
@@ -869,7 +839,6 @@ class DatabaseBackend:
                 if raw_operation.op != "remove":
                     persisted, encoded = self.artifact_encoder.externalize(
                         raw_operation.value,
-                        namespace=namespace,
                         invocation_id=invocation_id,
                     )
                     operation["value"] = persisted
@@ -1181,6 +1150,12 @@ class DatabaseBackend:
                 type=row.type,
                 data=data,
                 node_id=row.node_id,
+                workflow_path=tuple(
+                    str(value)
+                    for value in self.serializer.json_view(
+                        row.workflow_path_json
+                    )
+                ),
                 node_execution_id=UUID(row.node_execution_id),
                 operator_call_id=(
                     None
@@ -1223,23 +1198,19 @@ class DatabaseBackend:
     async def alist_trace_workflow_versions(
         self,
         *,
-        namespace: str,
         limit: int = 500,
         before: tuple[int, str] | None = None,
     ) -> tuple[tuple[str, WorkflowVersionSnapshot, int], ...]:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_trace_workflow_versions(
-                    namespace=namespace,
                     limit=limit,
                     before=before,
                 )
             )
         await self.ainitialize()
         async with self._database_sessions() as database:
-            statement = select(WorkflowVersionRow).where(
-                WorkflowVersionRow.namespace == namespace
-            )
+            statement = select(WorkflowVersionRow)
             if before is not None:
                 statement = statement.where(
                     tuple_(
@@ -1266,15 +1237,8 @@ class DatabaseBackend:
                     ir_version=row.ir_version,
                     compiler_version=row.compiler_version,
                     definition_hash=row.definition_hash,
-                    operator_manifest_hash=row.operator_manifest_hash,
                     definition=self.serializer.json_view(
                         row.definition_json
-                    ),
-                    operator_manifests=tuple(
-                        OperatorManifest.model_validate(value)
-                        for value in self.serializer.json_view(
-                            row.operator_manifests_json
-                        )
                     ),
                 ),
                 row.created_at_ms,
@@ -1285,7 +1249,6 @@ class DatabaseBackend:
     async def alist_trace_sessions(
         self,
         *,
-        namespace: str,
         workflow_revision_id: str,
         limit: int = 500,
         before: tuple[int, str] | None = None,
@@ -1293,7 +1256,6 @@ class DatabaseBackend:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_trace_sessions(
-                    namespace=namespace,
                     workflow_revision_id=workflow_revision_id,
                     limit=limit,
                     before=before,
@@ -1302,7 +1264,6 @@ class DatabaseBackend:
         await self.ainitialize()
         async with self._database_sessions() as database:
             statement = select(SessionRow).where(
-                SessionRow.namespace == namespace,
                 SessionRow.workflow_revision_id == workflow_revision_id,
             )
             if before is not None:
@@ -1360,7 +1321,6 @@ class DatabaseBackend:
         return tuple(
             {
                 "id": row.id,
-                "namespace": row.namespace,
                 "workflow_id": row.workflow_id,
                 "workflow_revision_id": row.workflow_revision_id,
                 "session_key": row.session_key,
@@ -1479,7 +1439,6 @@ class DatabaseBackend:
             ),
             "session": {
                 "id": session.id,
-                "namespace": session.namespace,
                 "workflow_id": session.workflow_id,
                 "workflow_revision_id": session.workflow_revision_id,
                 "session_key": session.session_key,
@@ -1504,7 +1463,6 @@ class DatabaseBackend:
             "workflow_revision_id": workflow.id,
             "workflow_version": workflow.workflow_version,
             "definition_hash": workflow.definition_hash,
-            "operator_manifest_hash": workflow.operator_manifest_hash,
             "entry_node_id": invocation.entry_node_id,
             "state": invocation.state,
             "execution_mode": invocation.execution_mode,
@@ -1833,11 +1791,8 @@ class DatabaseBackend:
     async def _persist_workflow_version(self, database, record: dict[str, Any]) -> None:
         row = await database.scalar(
             select(WorkflowVersionRow).where(
-                WorkflowVersionRow.namespace == record["namespace"],
                 WorkflowVersionRow.workflow_id == record["workflow_id"],
                 WorkflowVersionRow.definition_hash == record["definition_hash"],
-                WorkflowVersionRow.operator_manifest_hash
-                == record["operator_manifest_hash"],
             )
         )
         if row is None:
@@ -1854,12 +1809,9 @@ class DatabaseBackend:
             row.ir_version = record["ir_version"]
             row.compiler_version = record["compiler_version"]
             row.definition_json = record["definition_json"]
-            row.operator_manifests_json = record["operator_manifests_json"]
             key = (
-                row.namespace,
                 row.workflow_id,
                 row.definition_hash,
-                row.operator_manifest_hash,
             )
             self._workflow_version_ids[key] = UUID(row.id)
 
@@ -1874,10 +1826,8 @@ class DatabaseBackend:
         workflow_key = value["workflow_key"]
         version_row = await database.scalar(
             select(WorkflowVersionRow).where(
-                WorkflowVersionRow.namespace == workflow_key[0],
-                WorkflowVersionRow.workflow_id == workflow_key[1],
-                WorkflowVersionRow.definition_hash == workflow_key[2],
-                WorkflowVersionRow.operator_manifest_hash == workflow_key[3],
+                WorkflowVersionRow.workflow_id == workflow_key[0],
+                WorkflowVersionRow.definition_hash == workflow_key[1],
             )
         )
         if version_row is None:
@@ -1892,14 +1842,16 @@ class DatabaseBackend:
         ):
             raise RuntimeError(
                 "Session and Invocation workflow revision identities do not "
-                "match the durable Workflow revision."
+                "match the durable Workflow revision: "
+                f"durable={version_id}, "
+                f"session={session['workflow_revision_id']}, "
+                f"invocation={invocation['workflow_revision_id']}."
             )
         bundle = self.serializer.loads(_text(item.encoded))
         state = bundle["state"]
         event_mode = invocation["event_mode"]
         session_row = await database.get(SessionRow, session["id"])
         session_values = {
-            "namespace": session["namespace"],
             "workflow_id": session["workflow_id"],
             "workflow_revision_id": session["workflow_revision_id"],
             "session_key": session["session_key"],
@@ -2017,6 +1969,7 @@ class DatabaseBackend:
             "type",
             "data_json",
             "node_id",
+            "workflow_path_json",
             "node_execution_id",
             "operator_call_id",
             "occurred_at_ms",
@@ -2328,7 +2281,6 @@ class DatabaseBackend:
             [
                 ArtifactRow(
                     id=artifact_id,
-                    namespace=artifact.namespace,
                     owner_invocation_id=str(artifact.owner_invocation_id),
                     kind=artifact.kind,
                     storage=artifact.storage,
@@ -2595,3 +2547,19 @@ def _resolve_database_url(value: str | Path) -> str:
             "V1 DatabaseBackend supports SQLite and PostgreSQL only."
         )
     return text
+
+
+def _ensure_sqlite_parent_directory(database_url: str) -> None:
+    """Create the parent of a regular SQLite file before opening it."""
+
+    url = make_url(database_url)
+    if url.get_backend_name() != "sqlite":
+        return
+    database = url.database
+    if (
+        database is None
+        or database == ":memory:"
+        or database.startswith("file:")
+    ):
+        return
+    Path(database).expanduser().parent.mkdir(parents=True, exist_ok=True)

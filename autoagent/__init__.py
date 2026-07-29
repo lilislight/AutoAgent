@@ -16,7 +16,6 @@ from autoagent.core.operators import (
     Operator,
     OperatorContract,
     OperatorContractWarning,
-    OperatorManifest,
     ParameterContract,
     SchemaContract,
     StreamReducer,

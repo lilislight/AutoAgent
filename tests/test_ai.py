@@ -364,6 +364,67 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.message.content, "ok")
         self.assertFalse(client.closed)
 
+    async def test_request_omits_unset_optional_chat_completion_fields(
+        self,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def handler(params):
+            captured.update(params)
+            return {
+                "model": "fake",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            }
+
+        provider = ChatCompletionsProvider(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            client=FakeSDKClient(handler),
+        )
+        await provider.ainvoke(
+            LLMRequest(
+                messages=(LLMMessage(role="user", content="hello"),),
+            )
+        )
+
+        self.assertEqual(
+            {"model", "messages"},
+            set(captured),
+        )
+
+    async def test_success_status_provider_error_is_not_reported_as_choices(
+        self,
+    ) -> None:
+        async def handler(params):
+            return {
+                "error": "Unexpected endpoint or method.",
+            }
+
+        provider = ChatCompletionsProvider(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="model",
+            ),
+            client=FakeSDKClient(handler),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Unexpected endpoint or method",
+        ):
+            await provider.ainvoke(
+                LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                )
+            )
+
     async def test_provider_owns_sdk_client_and_disables_hidden_retries(
         self,
     ) -> None:
@@ -479,8 +540,8 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
             "default-model",
         )
         self.assertEqual(
-            captured["response_format"]["json_schema"]["name"],
-            "Answer",
+            captured["response_format"],
+            {"type": "json_object"},
         )
         self.assertNotIn("secret", repr(captured))
         self.assertEqual(captured["extra_body"], {"top_k": 12})
@@ -529,6 +590,48 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertIn("JSON Schema", payload["messages"][0]["content"])
         self.assertIn('"value"', payload["messages"][0]["content"])
+        self.assertEqual(payload["messages"][1]["content"], "answer")
+
+    async def test_generic_auto_mode_uses_json_object_and_schema_prompt(
+        self,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def handler(params):
+            captured["payload"] = params
+            return {
+                "model": "local-model",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"value":1}',
+                        },
+                    }
+                ],
+            }
+
+        operator = _create_test_operator(
+            ChatCompletionsConfig(
+                api_key="secret",
+                default_model="local-model",
+                base_url="http://localhost:1234/v1",
+            ),
+            handler=handler,
+        )
+        await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="answer"),),
+                    response_format=Answer,
+                )
+            }
+        )
+
+        payload = captured["payload"]
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIn("JSON Schema", payload["messages"][0]["content"])
         self.assertEqual(payload["messages"][1]["content"], "answer")
 
     async def test_deepseek_maps_tokens_reasoning_and_extended_usage(
@@ -1785,6 +1888,14 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": "parent:child result"})
         self.assertEqual(requests[0].messages[-1].content, "hello child")
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+        self.assertTrue(events)
+        self.assertEqual(
+            {("agent",)},
+            {event.workflow_path for event in events},
+        )
 
     def test_structured_output_failure_returns_to_prepare_once(self) -> None:
         requests: list[LLMRequest] = []

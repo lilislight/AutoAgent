@@ -5,8 +5,7 @@ from autoagent.core.operators.contract import (
     ParameterContract,
     SchemaContract,
 )
-from autoagent.core.operators.operator import Operator
-from autoagent.core.operators.manifest import OperatorManifest
+from autoagent.core.operators.operator import Operator, callable_operator_id
 from autoagent.core.operators.registry import CapabilityRegistry, OperatorRegistry
 from autoagent.core.operators.selector import OperatorResolutionError, OperatorResolver
 from autoagent.core.operators.streaming import (
@@ -19,7 +18,6 @@ __all__ = [
     "Capability",
     "CapabilityRegistry",
     "Operator",
-    "OperatorManifest",
     "OperatorContract",
     "OperatorContractWarning",
     "OperatorRegistry",
@@ -30,4 +28,5 @@ __all__ = [
     "StreamReducer",
     "StreamingResult",
     "streaming_result",
+    "callable_operator_id",
 ]

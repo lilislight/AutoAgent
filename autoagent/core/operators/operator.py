@@ -6,10 +6,14 @@ from types import MappingProxyType
 from typing import Any
 
 from autoagent.core.operators.contract import OperatorContract, callable_contract
-from autoagent.core.operators.manifest import (
-    OperatorManifest,
-    callable_operator_id,
-)
+
+
+def callable_operator_id(handler: Callable[..., Any]) -> str:
+    """Return the stable Operator id used for a directly bound callable."""
+
+    module = getattr(handler, "__module__", handler.__class__.__module__)
+    qualname = getattr(handler, "__qualname__", handler.__class__.__qualname__)
+    return f"python:{module}:{qualname}"
 
 
 class Operator:
@@ -77,17 +81,6 @@ class Operator:
     @property
     def version(self) -> str | int:
         return self._version
-
-    @property
-    def manifest(self) -> OperatorManifest:
-        """Return the immutable compatibility record persisted with execution."""
-
-        return OperatorManifest.from_contract(
-            operator_id=self.id,
-            version=self.version,
-            capability_id=self.capability_id,
-            contract=self.contract,
-        )
 
     @property
     def enabled(self) -> bool:

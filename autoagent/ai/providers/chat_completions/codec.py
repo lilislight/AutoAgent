@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any, Literal
-from urllib.parse import urlparse
 
 from autoagent.ai.models.llm import (
     LLMMessage,
@@ -83,10 +82,7 @@ def resolve_structured_output_mode(
 ) -> Literal["json_schema", "json_object", "prompt"]:
     if config.structured_output_mode != "auto":
         return config.structured_output_mode
-    hostname = (urlparse(config.base_url).hostname or "").lower()
-    if hostname == "api.deepseek.com" or hostname.endswith(".deepseek.com"):
-        return "json_object"
-    return "json_schema"
+    return "json_object"
 
 
 def encode_message(message: LLMMessage) -> dict[str, Any]:
@@ -117,6 +113,20 @@ def decode_response(
 ) -> LLMResponse:
     choices = raw.get("choices")
     if not isinstance(choices, list) or not choices:
+        error = raw.get("error")
+        if isinstance(error, str) and error.strip():
+            raise _response_error(
+                f"Chat Completions endpoint returned an error: {error}",
+                provider=provider,
+            )
+        if isinstance(error, Mapping):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                raise _response_error(
+                    "Chat Completions endpoint returned an error: "
+                    f"{message}",
+                    provider=provider,
+                )
         raise _response_error(
             "Chat Completions response has no choices.",
             provider=provider,

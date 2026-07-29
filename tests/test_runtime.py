@@ -258,7 +258,6 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_session_is_one_authoritative_in_memory_aggregate(self) -> None:
         store = RuntimeStore()
         first = await store.aget_or_create_session(
-            namespace="default",
             workflow_id="chat",
             workflow_revision_id="chat-revision",
             session_key="user-1",
@@ -266,7 +265,6 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         first.context.data["messages"] = [{"role": "user", "content": "hi"}]
 
         second = await store.aget_or_create_session(
-            namespace="default",
             workflow_id="chat",
             workflow_revision_id="chat-revision",
             session_key="user-1",
@@ -275,27 +273,24 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first, second)
         self.assertEqual(second.context.data["messages"][0]["content"], "hi")
 
-    async def test_session_identity_includes_namespace_and_revision(self) -> None:
+    async def test_session_identity_includes_revision(self) -> None:
         store = RuntimeStore()
         values = [
             await store.aget_or_create_session(
-                namespace=namespace,
                 workflow_id=workflow_id,
                 workflow_revision_id=revision_id,
                 session_key="same",
             )
-            for namespace, workflow_id, revision_id in (
-                ("default", "chat", "chat-v1"),
-                ("tenant", "chat", "chat-v1"),
-                ("default", "chat", "chat-v2"),
+            for workflow_id, revision_id in (
+                ("chat", "chat-v1"),
+                ("chat", "chat-v2"),
             )
         ]
-        self.assertEqual(3, len({session.id for session in values}))
+        self.assertEqual(2, len({session.id for session in values}))
 
     async def test_admission_creates_sequence_zero_genesis_checkpoint(self) -> None:
         store = RuntimeStore()
         session = await store.aget_or_create_session(
-            namespace="default",
             workflow_id="flow",
             workflow_revision_id="revision-flow",
             session_key="one",
@@ -377,7 +372,6 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             rebuilt_session.get_current_invocation().id,
         )
         session = store.find_session(
-            namespace="default",
             workflow_revision_id=rebuilt.workflow_revision_id,
             session_key="session",
         )
@@ -398,7 +392,6 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_direct_and_parallel_execution_records_round_trip(self) -> None:
         store = RuntimeStore()
         session = await store.aget_or_create_session(
-            namespace="default",
             workflow_id="flow",
             workflow_revision_id="revision-flow",
             session_key="one",

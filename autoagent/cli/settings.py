@@ -11,10 +11,6 @@ from autoagent.core.server import ServerSettings
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--namespace",
-        help="Override the App namespace for this process.",
-    )
-    parser.add_argument(
         "--store",
         choices=("auto", "memory", "database"),
         default="auto",
@@ -49,8 +45,6 @@ def app_settings_from_arguments(
         environ=environment,
     )
     updates: dict[str, object] = {}
-    if arguments.namespace is not None:
-        updates["namespace"] = arguments.namespace
     if arguments.max_thread_workers is not None:
         updates["executor_max_thread_workers"] = arguments.max_thread_workers
     if arguments.max_parallel_units is not None:

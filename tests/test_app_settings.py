@@ -37,7 +37,6 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             settings = AutoAgentSettings.from_env(
                 env_file=None,
                 environ={
-                    "AUTOAGENT_NAMESPACE": "tenant-a",
                     "AUTOAGENT_DATABASE_URL": (
                         f"sqlite+aiosqlite:///{database_path}"
                     ),
@@ -67,7 +66,6 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             )
             app = AutoAgentApp(settings=settings)
 
-            self.assertEqual("tenant-a", app.namespace)
             self.assertEqual(65_536, app.runtime_serializer.max_inline_bytes)
             self.assertIsInstance(app.runtime_store.backend, DatabaseBackend)
             backend = app.runtime_store.backend
@@ -130,7 +128,6 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             env_file = Path(directory) / ".env"
             env_file.write_text(
-                "AUTOAGENT_NAMESPACE=dotenv\n"
                 "AUTOAGENT_DATABASE_ECHO=false\n",
                 encoding="utf-8",
             )
@@ -138,25 +135,23 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             settings = AutoAgentSettings.from_env(
                 env_file=env_file,
                 environ={
-                    "AUTOAGENT_NAMESPACE": "process",
                     "AUTOAGENT_DATABASE_ECHO": "true",
                 },
             )
 
-        self.assertEqual("process", settings.namespace)
         self.assertTrue(settings.database_echo)
 
-    async def test_autoagent_app_loads_environment_without_code_configuration(
-        self,
-    ) -> None:
+    async def test_autoagent_app_loads_default_environment(self) -> None:
         with patch.dict(
             os.environ,
-            {"AUTOAGENT_NAMESPACE": "environment-app"},
+            {},
             clear=True,
+        ), patch(
+            "autoagent.core.app.settings.dotenv_values",
+            return_value={},
         ):
             app = AutoAgentApp()
         try:
-            self.assertEqual("environment-app", app.namespace)
             self.assertIsNone(app.runtime_store.backend)
         finally:
             await app.aclose()

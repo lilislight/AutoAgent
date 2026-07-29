@@ -17,10 +17,10 @@ import {
   subscribeToUserEvents,
 } from "../api";
 import {
-  logicalUserEventKeys,
+  logicalUnreadUserEventKeys,
   projectAgentInvocation,
   selectAgentInvocationAnchor,
-  shouldCountHydratedEventsAsUnread,
+  type AgentActivityItem,
   type AgentInvocationView,
 } from "../agentConversation";
 import type { InvocationSummary, UserEvent } from "../types";
@@ -29,9 +29,10 @@ interface SessionCache {
   events: Map<string, UserEvent[]>;
   inputs: Map<string, unknown>;
   loaded: Set<string>;
-  loading: Set<string>;
+  loading: Map<string, Promise<void>>;
+  visible: Set<string>;
   unread: Set<string>;
-  initializedAtMs: number;
+  readThrough: Map<string, number>;
 }
 
 interface AgentPanelProps {
@@ -39,6 +40,7 @@ interface AgentPanelProps {
   sessionId: string | null;
   invocationId: string | null;
   invocations: InvocationSummary[];
+  invocationsLoading: boolean;
   onClose: () => void;
   onUnreadCountChange: (count: number) => void;
 }
@@ -55,18 +57,22 @@ export function AgentPanel({
   sessionId,
   invocationId,
   invocations,
+  invocationsLoading,
   onClose,
   onUnreadCountChange,
 }: AgentPanelProps) {
   const caches = useRef(new Map<string, SessionCache>());
   const activeSessionId = useRef<string | null>(sessionId);
   activeSessionId.current = sessionId;
+  const openRef = useRef(open);
+  openRef.current = open;
   const [revision, setRevision] = useState(0);
   const [streamConnected, setStreamConnected] = useState<boolean | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const preservingScroll = useRef<{ height: number; top: number } | null>(null);
   const appendScroll = useRef(false);
   const positioning = useRef(false);
+  const positioningTimer = useRef<number | null>(null);
   const focusGeneration = useRef(0);
   const knownInvocations = useRef(new Map<string, InvocationSummary>());
   const olderNeighbor = useRef(new Map<string, string | null>());
@@ -77,6 +83,8 @@ export function AgentPanel({
   >(null);
   const [canLoadOlder, setCanLoadOlder] = useState(false);
   const [canLoadNewer, setCanLoadNewer] = useState(false);
+  const [focusedInvocationId, setFocusedInvocationId] =
+    useState<string | null>(null);
 
   const orderedInvocations = useMemo(
     () => [...invocations].sort(
@@ -88,6 +96,12 @@ export function AgentPanel({
   );
   const cache = sessionId ? getCache(caches.current, sessionId) : null;
   const latestInvocation = orderedInvocations.at(-1) ?? null;
+
+  useEffect(() => () => {
+    if (positioningTimer.current !== null) {
+      window.clearTimeout(positioningTimer.current);
+    }
+  }, []);
 
   useEffect(() => {
     for (const invocation of orderedInvocations) {
@@ -127,11 +141,21 @@ export function AgentPanel({
       ),
     );
     if (countUnread) {
-      for (const event of additions) {
-        for (const key of logicalUserEventKeys(event)) {
-          target.unread.add(`${invocationId}:${key}`);
-        }
+      const readThrough = target.readThrough.get(invocationId) ?? 0;
+      for (const key of logicalUnreadUserEventKeys(
+        additions,
+        readThrough,
+      )) {
+        target.unread.add(`${invocationId}:${key}`);
       }
+    } else {
+      target.readThrough.set(
+        invocationId,
+        Math.max(
+          target.readThrough.get(invocationId) ?? 0,
+          additions.at(-1)?.sequence ?? 0,
+        ),
+      );
     }
     return true;
   }, []);
@@ -141,38 +165,38 @@ export function AgentPanel({
     invocation: InvocationSummary,
     countUnread: boolean,
   ) => {
-    if (
-      target.loaded.has(invocation.id) ||
-      target.loading.has(invocation.id)
-    ) return;
-    target.loading.add(invocation.id);
+    if (target.loaded.has(invocation.id)) return;
+    const pending = target.loading.get(invocation.id);
+    if (pending) {
+      await pending;
+      return;
+    }
     setRevision((value) => value + 1);
-    try {
+    const request = (async () => {
       const [loaded, detail] = await Promise.all([
         getAllUserEvents(invocation.id),
         getInvocation(invocation.id),
       ]);
-      mergeEvents(target, invocation.id, loaded, countUnread && !open);
+      mergeEvents(target, invocation.id, loaded, countUnread);
       target.inputs.set(invocation.id, detail.input);
       target.loaded.add(invocation.id);
+    })();
+    target.loading.set(invocation.id, request);
+    try {
+      await request;
     } finally {
       target.loading.delete(invocation.id);
       publishUnread(target);
       setRevision((value) => value + 1);
     }
-  }, [mergeEvents, open, publishUnread]);
+  }, [mergeEvents, publishUnread]);
 
   useEffect(() => {
     publishUnread(cache);
     if (!cache || !latestInvocation) return;
-    void loadInvocation(
-      cache,
-      latestInvocation,
-      shouldCountHydratedEventsAsUnread(
-        latestInvocation.created_at_ms,
-        cache.initializedAtMs,
-      ),
-    );
+    // Initial hydration establishes the read watermark. Historical UserEvents
+    // must never reappear as unread after a page refresh or Session switch.
+    void loadInvocation(cache, latestInvocation, false);
   }, [
     cache,
     latestInvocation?.id,
@@ -182,8 +206,26 @@ export function AgentPanel({
   ]);
 
   useEffect(() => {
+    focusGeneration.current += 1;
+    setVisibleInvocationIds(cache ? [...cache.visible] : []);
+    setCanLoadOlder(false);
+    setCanLoadNewer(false);
+    setFocusedInvocationId(null);
+    setLoadingDirection(null);
+  }, [cache, sessionId]);
+
+  useEffect(() => {
     if (!open || !cache) return;
     cache.unread.clear();
+    for (const [id, values] of cache.events) {
+      cache.readThrough.set(
+        id,
+        Math.max(
+          cache.readThrough.get(id) ?? 0,
+          values.at(-1)?.sequence ?? 0,
+        ),
+      );
+    }
     publishUnread(cache);
   }, [cache, open, publishUnread, revision]);
 
@@ -213,7 +255,7 @@ export function AgentPanel({
             cache,
             latestInvocation.id,
             [event],
-            !open,
+            !openRef.current,
           )
         ) {
           publishUnread(cache);
@@ -228,7 +270,6 @@ export function AgentPanel({
     latestInvocation?.state,
     latestLoaded,
     mergeEvents,
-    open,
     publishUnread,
   ]);
 
@@ -260,12 +301,14 @@ export function AgentPanel({
         setLoadingDirection(null);
         return;
       }
-      setVisibleInvocationIds([target.id]);
+      cache.visible.add(target.id);
+      setVisibleInvocationIds([...cache.visible]);
       setCanLoadOlder(true);
       setCanLoadNewer(true);
       await loadInvocation(cache, target, false);
       if (cancelled || generation !== focusGeneration.current) return;
       positioning.current = true;
+      setFocusedInvocationId(target.id);
       setLoadingDirection(null);
       setRevision((value) => value + 1);
       requestAnimationFrame(() => {
@@ -273,10 +316,18 @@ export function AgentPanel({
         const anchor = element?.querySelector<HTMLElement>(
           `[data-invocation-id="${target.id}"]`,
         );
-        anchor?.scrollIntoView({ block: "center" });
-        requestAnimationFrame(() => {
-          positioning.current = false;
+        anchor?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
         });
+        if (positioningTimer.current !== null) {
+          window.clearTimeout(positioningTimer.current);
+        }
+        positioningTimer.current = window.setTimeout(() => {
+          positioning.current = false;
+          setFocusedInvocationId(null);
+          positioningTimer.current = null;
+        }, 650);
       });
     };
     void focus().catch(() => {
@@ -369,6 +420,7 @@ export function AgentPanel({
         appendScroll.current = true;
       }
       await loadInvocation(cache, candidate, false);
+      cache.visible.add(candidate.id);
       setVisibleInvocationIds((current) => (
         current.includes(candidate.id)
           ? current
@@ -418,7 +470,31 @@ export function AgentPanel({
     appendScroll.current = false;
   }, [revision, visibleInvocationIds]);
 
-  const loading = loadingDirection !== null;
+  const loading = invocationsLoading || loadingDirection !== null;
+
+  useEffect(() => {
+    if (!open || loading || loadedViews.length === 0) return;
+    const frame = requestAnimationFrame(() => {
+      const element = scrollRef.current;
+      if (!element) return;
+      const hasScrollableHistory =
+        element.scrollHeight > element.clientHeight + 8;
+      if (hasScrollableHistory) return;
+      if (canLoadOlder) {
+        void loadNeighbor("older");
+      } else if (canLoadNewer) {
+        void loadNeighbor("newer");
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    canLoadNewer,
+    canLoadOlder,
+    loadedViews.length,
+    loading,
+    loadNeighbor,
+    open,
+  ]);
 
   return (
     <AnimatePresence>
@@ -473,11 +549,14 @@ export function AgentPanel({
               }}
             >
               {(loadingDirection === "anchor" ||
-                loadingDirection === "older") && (
+                loadingDirection === "older" ||
+                (invocationsLoading && loadedViews.length === 0)) && (
                 <div className="agent-history-loader" aria-live="polite">
                   <LoaderCircle className="spin" size={15} />
                   <span>
-                    {loadingDirection === "anchor"
+                    {invocationsLoading
+                      ? "Loading Session Invocations"
+                      : loadingDirection === "anchor"
                       ? "Locating Current Invocation"
                       : "Loading Earlier Activity"}
                   </span>
@@ -498,6 +577,7 @@ export function AgentPanel({
                   key={view.invocation.id}
                   value={view}
                   input={cache?.inputs.get(view.invocation.id)}
+                  focused={view.invocation.id === focusedInvocationId}
                 />
               ))}
               {loadingDirection === "newer" && (
@@ -520,14 +600,15 @@ export function AgentPanel({
 function AgentInvocation({
   value,
   input,
+  focused,
 }: {
   value: AgentInvocationView;
   input: unknown;
+  focused: boolean;
 }) {
-  const collapseDetails = value.agentOutputSequence !== null;
   return (
     <article
-      className="agent-invocation"
+      className={`agent-invocation ${focused ? "is-focus-target" : ""}`}
       data-invocation-id={value.invocation.id}
     >
       <header>
@@ -540,33 +621,79 @@ function AgentInvocation({
           {renderChatValue(primaryInvocationInput(input))}
         </div>
       )}
-      {value.activity.length > 0 && (
-        <details className="agent-trace-details" open={!collapseDetails}>
+      {value.blocks.map((block) => (
+        <AgentActivityBlockView key={block.key} block={block} />
+      ))}
+    </article>
+  );
+}
+
+function AgentActivityBlockView({
+  block,
+}: {
+  block: AgentInvocationView["blocks"][number];
+}) {
+  if (block.kind === "custom") {
+    const { event, tone } = block.value;
+    return (
+      <section className={`agent-custom-event tone-${tone}`}>
+        <header>
+          {tone === "error" ? <CircleAlert size={14} /> : <Bot size={14} />}
+          <strong>{humanizeEventType(event.type)}</strong>
+          <time>{formatTime(event.occurred_at_ms)}</time>
+        </header>
+        {renderChatValue(event.data)}
+      </section>
+    );
+  }
+
+  const detailActivity = block.activity.filter(
+    (item) => item.kind === "thinking" || item.kind === "tool",
+  );
+  const messages = block.activity.filter(
+    (item) => item.kind === "message",
+  );
+  const otherActivity = block.activity.filter(
+    (item) => item.kind === "generic",
+  );
+  return (
+    <section className={`agent-standard-block kind-${block.kind}`}>
+      {detailActivity.length > 0 && (
+        <details
+          className="agent-trace-details"
+          open={block.outputSequence === null}
+        >
           <summary>
             <ChevronRight className="agent-details-chevron" size={14} />
             <span className="agent-details-closed">Show Reasoning and Tools</span>
             <span className="agent-details-open">Hide Reasoning and Tools</span>
           </summary>
           <div className="agent-activity-list">
-            {value.activity.map((item) => (
+            {detailActivity.map((item) => (
               <AgentActivityItemView key={item.key} item={item} />
             ))}
           </div>
         </details>
       )}
-      {value.agentOutputSequence !== null && (
+      {messages.map((item) => (
+        <AgentActivityItemView key={item.key} item={item} />
+      ))}
+      {otherActivity.map((item) => (
+        <AgentActivityItemView key={item.key} item={item} />
+      ))}
+      {block.outputSequence !== null && (
         <div className="agent-output">
-          {renderChatValue(value.agentOutput)}
+          {renderChatValue(block.output)}
         </div>
       )}
-    </article>
+    </section>
   );
 }
 
 function AgentActivityItemView({
   item,
 }: {
-  item: AgentInvocationView["activity"][number];
+  item: AgentActivityItem;
 }) {
   if (item.kind === "thinking") {
     const message = item.message;
@@ -659,9 +786,10 @@ function getCache(
       events: new Map(),
       inputs: new Map(),
       loaded: new Set(),
-      loading: new Set(),
+      loading: new Map(),
+      visible: new Set(),
       unread: new Set(),
-      initializedAtMs: Date.now(),
+      readThrough: new Map(),
     };
     caches.set(sessionId, cache);
   }

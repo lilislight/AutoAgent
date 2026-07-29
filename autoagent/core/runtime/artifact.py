@@ -28,7 +28,6 @@ class ArtifactPolicy:
 @dataclass(frozen=True)
 class EncodedArtifact:
     id: UUID
-    namespace: str
     owner_invocation_id: UUID
     kind: str
     storage: str
@@ -70,7 +69,6 @@ class RuntimeArtifactEncoder:
         self,
         value: Any,
         *,
-        namespace: str,
         invocation_id: UUID,
         preserve_root: bool = False,
     ) -> tuple[Any, tuple[EncodedArtifact, ...]]:
@@ -79,7 +77,6 @@ class RuntimeArtifactEncoder:
         artifacts: dict[UUID, EncodedArtifact] = {}
         transformed = self._externalize_value(
             value,
-            namespace=namespace,
             invocation_id=invocation_id,
             artifacts=artifacts,
             preserve_container=preserve_root,
@@ -101,7 +98,6 @@ class RuntimeArtifactEncoder:
         self,
         value: Any,
         *,
-        namespace: str,
         invocation_id: UUID,
         artifacts: dict[UUID, EncodedArtifact],
         preserve_container: bool = False,
@@ -112,7 +108,6 @@ class RuntimeArtifactEncoder:
             candidate = {
                 key: self._externalize_value(
                     item,
-                    namespace=namespace,
                     invocation_id=invocation_id,
                     artifacts=artifacts,
                 )
@@ -122,7 +117,6 @@ class RuntimeArtifactEncoder:
                 return candidate
             return self._externalize_candidate(
                 candidate,
-                namespace=namespace,
                 invocation_id=invocation_id,
                 artifacts=artifacts,
             )
@@ -130,7 +124,6 @@ class RuntimeArtifactEncoder:
             candidate = [
                 self._externalize_value(
                     item,
-                    namespace=namespace,
                     invocation_id=invocation_id,
                     artifacts=artifacts,
                 )
@@ -140,7 +133,6 @@ class RuntimeArtifactEncoder:
                 return candidate
             return self._externalize_candidate(
                 candidate,
-                namespace=namespace,
                 invocation_id=invocation_id,
                 artifacts=artifacts,
             )
@@ -148,7 +140,6 @@ class RuntimeArtifactEncoder:
             candidate = tuple(
                 self._externalize_value(
                     item,
-                    namespace=namespace,
                     invocation_id=invocation_id,
                     artifacts=artifacts,
                 )
@@ -158,13 +149,11 @@ class RuntimeArtifactEncoder:
                 return candidate
             return self._externalize_candidate(
                 candidate,
-                namespace=namespace,
                 invocation_id=invocation_id,
                 artifacts=artifacts,
             )
         return self._externalize_candidate(
             value,
-            namespace=namespace,
             invocation_id=invocation_id,
             artifacts=artifacts,
         )
@@ -173,7 +162,6 @@ class RuntimeArtifactEncoder:
         self,
         value: Any,
         *,
-        namespace: str,
         invocation_id: UUID,
         artifacts: dict[UUID, EncodedArtifact],
     ) -> Any:
@@ -188,7 +176,6 @@ class RuntimeArtifactEncoder:
             return known
         artifact = EncodedArtifact(
             id=uuid4(),
-            namespace=namespace,
             owner_invocation_id=invocation_id,
             kind="runtime_value",
             storage="database",

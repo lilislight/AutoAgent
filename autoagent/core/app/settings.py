@@ -21,7 +21,6 @@ from autoagent.core.runtime.retention import RuntimeRetentionMode
 _PREFIX = "AUTOAGENT_"
 AUTOAGENT_ENV_KEYS = frozenset(
     {
-        "AUTOAGENT_NAMESPACE",
         "AUTOAGENT_DATABASE_URL",
         "AUTOAGENT_DATABASE_ECHO",
         "AUTOAGENT_SERIALIZER_MAX_INLINE_BYTES",
@@ -56,7 +55,6 @@ class AutoAgentSettings:
     deployment.
     """
 
-    namespace: str = "default"
     database_url: str | None = None
     database_echo: bool = False
     serializer_max_inline_bytes: int | None = None
@@ -84,10 +82,6 @@ class AutoAgentSettings:
     retention_max_replay_checkpoints_per_invocation: int = 8
 
     def __post_init__(self) -> None:
-        namespace = self.namespace.strip()
-        if not namespace:
-            raise ValueError("AUTOAGENT_NAMESPACE cannot be empty.")
-        object.__setattr__(self, "namespace", namespace)
         database_url = (
             None
             if self.database_url is None or not self.database_url.strip()
@@ -157,7 +151,6 @@ class AutoAgentSettings:
             )
         values.update(os.environ if environ is None else environ)
         return cls(
-            namespace=_text(values, "NAMESPACE", "default"),
             database_url=_optional_text(values, "DATABASE_URL"),
             database_echo=_bool(values, "DATABASE_ECHO", False),
             serializer_max_inline_bytes=_optional_int(

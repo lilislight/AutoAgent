@@ -57,11 +57,27 @@ export type AgentActivityItem =
       value: AgentGenericEventView;
     };
 
+export interface AgentStandardBlock {
+  kind: "react" | "llm";
+  key: string;
+  sequence: number;
+  activity: AgentActivityItem[];
+  output: unknown;
+  outputSequence: number | null;
+}
+
+export interface AgentCustomBlock {
+  kind: "custom";
+  key: string;
+  sequence: number;
+  value: AgentGenericEventView;
+}
+
+export type AgentActivityBlock = AgentStandardBlock | AgentCustomBlock;
+
 export interface AgentInvocationView {
   invocation: InvocationSummary;
-  activity: AgentActivityItem[];
-  agentOutput: unknown;
-  agentOutputSequence: number | null;
+  blocks: AgentActivityBlock[];
 }
 
 type MutableMessage = AgentMessageView;
@@ -82,11 +98,15 @@ const KNOWN_TYPES = new Set([
   "agent_failed",
 ]);
 
-export function shouldCountHydratedEventsAsUnread(
-  invocationCreatedAtMs: number,
-  sessionCacheInitializedAtMs: number,
-): boolean {
-  return invocationCreatedAtMs > sessionCacheInitializedAtMs;
+export function logicalUnreadUserEventKeys(
+  events: UserEvent[],
+  readThroughSequence: number,
+): string[] {
+  return events.flatMap((event) =>
+    event.sequence > readThroughSequence
+      ? logicalUserEventKeys(event)
+      : [],
+  );
 }
 
 export function selectAgentInvocationAnchor(
@@ -113,6 +133,80 @@ export function projectAgentInvocation(
     (left, right) =>
       left.sequence - right.sequence ||
       left.occurred_at_ms - right.occurred_at_ms,
+  );
+  const reactPaths = new Set(
+    events
+      .filter(
+        (event) =>
+          event.type === "agent_output" ||
+          event.type === "agent_failed",
+      )
+      .map((event) => workflowPathKey(event.workflow_path)),
+  );
+  const grouped = new Map<
+    string,
+    {
+      kind: "react" | "llm";
+      sequence: number;
+      events: UserEvent[];
+    }
+  >();
+  const blocks: AgentActivityBlock[] = [];
+
+  for (const event of events) {
+    if (!KNOWN_TYPES.has(event.type)) {
+      blocks.push({
+        kind: "custom",
+        key: event.id,
+        sequence: event.sequence,
+        value: genericEvent(event),
+      });
+      continue;
+    }
+    const pathKey = workflowPathKey(event.workflow_path);
+    const react = (event.workflow_path?.length ?? 0) > 0 ||
+      reactPaths.has(pathKey);
+    const key = react
+      ? `react:${pathKey}`
+      : `llm:${
+          event.operator_call_id ??
+          event.node_execution_id ??
+          event.node_id
+        }`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.events.push(event);
+      continue;
+    }
+    grouped.set(key, {
+      kind: react ? "react" : "llm",
+      sequence: event.sequence,
+      events: [event],
+    });
+  }
+
+  for (const [key, group] of grouped) {
+    const projection = projectStandardEvents(group.events);
+    blocks.push({
+      kind: group.kind,
+      key,
+      sequence: group.sequence,
+      activity: projection.activity,
+      output: projection.output,
+      outputSequence: projection.outputSequence,
+    });
+  }
+  blocks.sort((left, right) => left.sequence - right.sequence);
+  return { invocation, blocks };
+}
+
+function projectStandardEvents(sourceEvents: UserEvent[]): {
+  activity: AgentActivityItem[];
+  output: unknown;
+  outputSequence: number | null;
+} {
+  const events = [...sourceEvents].sort(
+    (left, right) => left.sequence - right.sequence,
   );
   const messages = new Map<string, MutableMessage>();
   const tools = new Map<string, MutableTool>();
@@ -251,17 +345,8 @@ export function projectAgentInvocation(
       continue;
     }
     if (event.type === "message_aborted" || event.type === "agent_failed") {
-      genericEvents.push({ event, tone: "error" });
+      genericEvents.push(genericEvent(event));
       continue;
-    }
-    if (!KNOWN_TYPES.has(event.type)) {
-      genericEvents.push({
-        event,
-        tone: (
-          event.type.endsWith("_failed") ||
-          event.type.includes("error")
-        ) ? "error" : "default",
-      });
     }
   }
 
@@ -315,10 +400,9 @@ export function projectAgentInvocation(
   activity.sort((left, right) => left.sequence - right.sequence);
 
   return {
-    invocation,
     activity,
-    agentOutput,
-    agentOutputSequence,
+    output: agentOutput,
+    outputSequence: agentOutputSequence,
   };
 }
 
@@ -364,6 +448,21 @@ function createTool(
     completedAtMs: null,
     firstSequence: event.sequence,
   };
+}
+
+function genericEvent(event: UserEvent): AgentGenericEventView {
+  return {
+    event,
+    tone: (
+      event.type.endsWith("_failed") ||
+      event.type.includes("error") ||
+      event.type === "message_aborted"
+    ) ? "error" : "default",
+  };
+}
+
+function workflowPathKey(path: string[] | undefined): string {
+  return path && path.length > 0 ? path.join("\u0000") : "<root>";
 }
 
 function recordOf(value: unknown): Record<string, unknown> {

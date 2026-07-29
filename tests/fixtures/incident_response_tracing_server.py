@@ -5,7 +5,9 @@ import os
 import random
 import time
 from dataclasses import replace
+from http.client import HTTPConnection
 from pathlib import Path
+from threading import Thread
 from typing import Literal
 
 from dotenv import dotenv_values
@@ -26,6 +28,7 @@ from autoagent import (
     SystemCommand,
     TimeoutPolicy,
     Workflow,
+    UserEventMapping
 )
 from autoagent.core.runtime import (
     MapAggregationContext,
@@ -778,6 +781,10 @@ def build_incident_response_workflow() -> Workflow:
         input_mapping=lambda ctx: {
             "report": ctx.outputs.latest("investigation")
         },
+        user_event_mapping=UserEventMapping(
+        type="route_reviews",
+        transform=lambda output: {"answer": output},
+    ),
     )
     workflow.add_node(
         perform_security_review,
@@ -924,12 +931,10 @@ def build_incident_response_app(
                 ),
             )
         app = AutoAgentApp(
-            namespace="incident-response-example",
             settings=settings,
         )
     else:
         app = AutoAgentApp(
-            namespace="incident-response-example",
             runtime_store=runtime_store,
         )
     for model_type in _RUNTIME_MODELS:
@@ -1007,6 +1012,109 @@ def _resume_incident_sample() -> ResumeRequest:
     )
 
 
+def _startup_invocation_payloads() -> tuple[dict[str, object], ...]:
+    return (
+        {
+            "input": {
+                "request": _new_incident_sample().model_dump(mode="json"),
+            },
+            "session_key": "incident-response-startup-new",
+            "entry_node_id": "new_incident",
+            "event_mode": "full",
+        },
+        {
+            "input": {
+                "checkpoint": _resume_incident_sample().model_dump(mode="json"),
+            },
+            "session_key": "incident-response-startup-resume",
+            "entry_node_id": "resume_incident",
+            "event_mode": "full",
+        },
+    )
+
+
+def _submit_startup_examples(
+    host: str,
+    port: int,
+    *,
+    workflow_id: str,
+) -> None:
+    """Wait for the Server and submit both demonstration entry inputs."""
+
+    deadline = time.monotonic() + 30
+    while True:
+        connection = HTTPConnection(host, port, timeout=1)
+        try:
+            connection.request("GET", "/api/v1/health/live")
+            response = connection.getresponse()
+            response.read()
+            if response.status == 200:
+                break
+        except OSError:
+            if time.monotonic() >= deadline:
+                print("Startup examples were not submitted: Server did not become ready.")
+                return
+            time.sleep(0.05)
+        finally:
+            connection.close()
+
+    try:
+        connection = HTTPConnection(host, port, timeout=5)
+        connection.request("GET", "/api/v1/registered-workflows?limit=200")
+        response = connection.getresponse()
+        workflow_page = json.loads(response.read())
+        if response.status != 200:
+            raise RuntimeError(
+                f"Workflow directory returned HTTP {response.status}."
+            )
+        revision_id = next(
+            item["revision_id"]
+            for item in workflow_page["items"]
+            if item["workflow_id"] == workflow_id and item["registered"]
+        )
+    except (KeyError, StopIteration, ValueError, OSError, RuntimeError) as exc:
+        print(f"Startup examples were not submitted: {exc}")
+        return
+    finally:
+        connection.close()
+
+    endpoint = f"/api/v1/workflow-revisions/{revision_id}/invocations"
+    for payload in _startup_invocation_payloads():
+        connection = HTTPConnection(host, port, timeout=10)
+        try:
+            connection.request(
+                "POST",
+                endpoint,
+                body=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            body = response.read()
+            if response.status != 200:
+                detail = body.decode("utf-8", errors="replace")
+                print(
+                    f"Startup example {payload['entry_node_id']} was rejected: "
+                    f"HTTP {response.status} {detail}"
+                )
+                continue
+            submitted = json.loads(body)
+            print(
+                "Submitted startup example:",
+                payload["entry_node_id"],
+                submitted["invocation_id"],
+            )
+        except (OSError, ValueError) as exc:
+            print(
+                f"Startup example {payload['entry_node_id']} was not submitted: "
+                f"{exc}"
+            )
+        finally:
+            connection.close()
+
+
 def main() -> None:
     app, workflow = build_incident_response_app()
     env_file = dotenv_values(Path.cwd() / ".env")
@@ -1044,7 +1152,18 @@ def main() -> None:
             f"AUTOAGENT_SERVER_URL={server_url} "
             "npm --prefix ui run dev"
         )
-    AutoAgentServer(app).run(host=host, port=port)
+    server = AutoAgentServer(app)
+    Thread(
+        target=_submit_startup_examples,
+        kwargs={
+            "host": browser_host,
+            "port": port,
+            "workflow_id": workflow.id,
+        },
+        name="incident-response-startup-examples",
+        daemon=True,
+    ).start()
+    server.run(host=host, port=port)
 
 
 if __name__ == "__main__":

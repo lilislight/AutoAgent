@@ -1,8 +1,8 @@
 import {
+  logicalUnreadUserEventKeys,
   logicalUserEventKeys,
   projectAgentInvocation,
   selectAgentInvocationAnchor,
-  shouldCountHydratedEventsAsUnread,
 } from "../src/agentConversation.js";
 import type { InvocationSummary, UserEvent } from "../src/types.js";
 
@@ -12,7 +12,6 @@ const invocation: InvocationSummary = {
   workflow_revision_id: "revision-1",
   workflow_version: "1",
   definition_hash: "hash",
-  operator_manifest_hash: "operators",
   entry_node_id: "start",
   state: "completed",
   created_at_ms: 1_000,
@@ -67,27 +66,72 @@ const events: UserEvent[] = [
 ];
 
 const projection = projectAgentInvocation(invocation, events);
+const reactBlock = projection.blocks[0];
+if (reactBlock.kind !== "react") throw new Error("Expected ReAct block.");
 equal(
-  projection.activity.map((item) => item.kind),
+  reactBlock.activity.map((item) => item.kind),
   ["thinking", "tool", "tool", "thinking"],
 );
-const firstThinking = projection.activity[0];
+const firstThinking = reactBlock.activity[0];
 if (firstThinking.kind !== "thinking") throw new Error("Expected Thinking.");
 equal(firstThinking.message.reasoning, "look outside");
 equal(firstThinking.message.reasoningStartedAtMs, 1_100);
 equal(firstThinking.message.reasoningEndedAtMs, 1_160);
-const firstTool = projection.activity[1];
+const firstTool = reactBlock.activity[1];
 if (firstTool.kind !== "tool") throw new Error("Expected Tool.");
 equal(firstTool.tool.toolCallId, "call-1");
 equal(firstTool.tool.requestedAtMs, 1_160);
 equal(firstTool.tool.completedAtMs, 1_190);
 equal(firstTool.tool.result, { temperature: 21 });
-equal(projection.agentOutput, "It is sunny.");
+equal(reactBlock.output, "It is sunny.");
 
 const beforeOutput = projectAgentInvocation(invocation, events.slice(0, -1));
+const pendingReactBlock = beforeOutput.blocks[0];
+if (pendingReactBlock.kind !== "react") {
+  throw new Error("Expected pending ReAct block.");
+}
 equal(
-  beforeOutput.activity.map((item) => item.kind),
+  pendingReactBlock.activity.map((item) => item.kind),
   ["thinking", "tool", "tool", "thinking", "message"],
+);
+
+const mixedProjection = projectAgentInvocation(
+  invocation,
+  [
+    ...events,
+    event(
+      9,
+      "message_completed",
+      {
+        message: { role: "assistant", content: "晴天。" },
+        finish_reason: "stop",
+        model: "model",
+      },
+      1_240,
+      "translate",
+      [],
+    ),
+    event(
+      10,
+      "progress_update",
+      { percent: 100 },
+      1_250,
+      "custom",
+      [],
+    ),
+  ],
+);
+equal(
+  mixedProjection.blocks.map((block) => block.kind),
+  ["react", "llm", "custom"],
+);
+const standaloneLlm = mixedProjection.blocks[1];
+if (standaloneLlm.kind !== "llm") {
+  throw new Error("Expected standalone LLM block.");
+}
+equal(
+  standaloneLlm.activity.map((item) => item.kind),
+  ["message"],
 );
 
 equal(logicalUserEventKeys(events[0]), []);
@@ -97,8 +141,11 @@ equal(
 );
 equal(logicalUserEventKeys(events[3]), ["tool_result:call-1"]);
 equal(logicalUserEventKeys(events[7]), ["agent_output:invocation-1"]);
-equal(shouldCountHydratedEventsAsUnread(1_000, 1_001), false);
-equal(shouldCountHydratedEventsAsUnread(1_002, 1_001), true);
+equal(
+  logicalUnreadUserEventKeys(events, 7),
+  ["agent_output:invocation-1"],
+);
+equal(logicalUnreadUserEventKeys(events, 8), []);
 const olderInvocation = {
   ...invocation,
   id: "invocation-older",
@@ -124,6 +171,7 @@ function event(
   data: unknown,
   occurredAtMs: number,
   operatorCallId: string,
+  workflowPath: string[] = ["weather_agent"],
 ): UserEvent {
   return {
     id: `event-${sequence}`,
@@ -133,6 +181,7 @@ function event(
     type,
     data,
     node_id: "node",
+    workflow_path: workflowPath,
     node_execution_id: `node-${operatorCallId}`,
     operator_call_id: operatorCallId,
     occurred_at_ms: occurredAtMs,

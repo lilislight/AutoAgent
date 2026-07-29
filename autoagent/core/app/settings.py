@@ -61,9 +61,9 @@ class AutoAgentSettings:
     database_echo: bool = False
     serializer_max_inline_bytes: int | None = None
 
-    persistence_queue_low_watermark_bytes: int = 32 * 1024 * 1024
-    persistence_queue_high_watermark_bytes: int = 64 * 1024 * 1024
-    persistence_queue_hard_watermark_bytes: int = 128 * 1024 * 1024
+    persistence_queue_low_watermark_bytes: int = 128 * 1024 * 1024
+    persistence_queue_high_watermark_bytes: int = 256 * 1024 * 1024
+    persistence_queue_hard_watermark_bytes: int = 512 * 1024 * 1024
     persistence_admission_timeout_ms: float = 5_000
 
     database_batch_max_items: int = 256
@@ -167,17 +167,17 @@ class AutoAgentSettings:
             persistence_queue_low_watermark_bytes=_int(
                 values,
                 "PERSISTENCE_QUEUE_LOW_WATERMARK_BYTES",
-                32 * 1024 * 1024,
+                128 * 1024 * 1024,
             ),
             persistence_queue_high_watermark_bytes=_int(
                 values,
                 "PERSISTENCE_QUEUE_HIGH_WATERMARK_BYTES",
-                64 * 1024 * 1024,
+                256 * 1024 * 1024,
             ),
             persistence_queue_hard_watermark_bytes=_int(
                 values,
                 "PERSISTENCE_QUEUE_HARD_WATERMARK_BYTES",
-                128 * 1024 * 1024,
+                512 * 1024 * 1024,
             ),
             persistence_admission_timeout_ms=_float(
                 values,

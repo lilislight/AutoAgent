@@ -254,6 +254,145 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("event: user_event", first)
         self.assertIn('"type":"approval_requested"', first)
 
+    async def test_user_event_stream_waits_for_store_notification(
+        self,
+    ) -> None:
+        submitted = await self.submit(
+            self.workflow.id,
+            InvocationSubmitRequest(
+                input={"wait_key": "approval"},
+                session_key="notified-user-events",
+                event_mode="minimal",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+        invocation = self.app.runtime_store.invocations[
+            submitted.invocation_id
+        ]
+        execution = invocation.latest_node_execution("wait")
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "")
+            == "stream_invocation_user_events"
+        )
+
+        class ConnectedRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        page_calls = 0
+        original_page = self.server.trace.user_event_page
+
+        async def counted_page(*args, **kwargs):
+            nonlocal page_calls
+            page_calls += 1
+            return await original_page(*args, **kwargs)
+
+        with patch.object(
+            self.server.trace,
+            "user_event_page",
+            side_effect=counted_page,
+        ):
+            response = await endpoint(
+                ConnectedRequest(),
+                invocation.id,
+                0,
+                None,
+            )
+            next_event = asyncio.create_task(
+                anext(response.body_iterator)
+            )
+            await asyncio.sleep(0.05)
+
+            self.assertFalse(next_event.done())
+            self.assertEqual(1, page_calls)
+
+            self.app.runtime_store.record_user_event(
+                invocation_id=invocation.id,
+                spec=UserEventSpec(
+                    type="approval_requested",
+                    data={"wait_key": "approval"},
+                    node_id="wait",
+                    node_execution_id=execution.id,
+                ),
+            )
+            event = await asyncio.wait_for(next_event, timeout=0.5)
+            await response.body_iterator.aclose()
+
+        self.assertIn("event: user_event", event)
+        self.assertEqual(2, page_calls)
+
+    async def test_user_event_stream_sends_terminal_event_before_stream_end(
+        self,
+    ) -> None:
+        submitted = await self.submit(
+            self.workflow.id,
+            InvocationSubmitRequest(
+                input={"wait_key": "approval"},
+                session_key="terminal-user-event",
+                event_mode="minimal",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+        invocation = self.app.runtime_store.invocations[
+            submitted.invocation_id
+        ]
+        session_id = self.app.runtime_store.invocation_sessions[invocation.id]
+        session = self.app.runtime_store.sessions[session_id]
+        execution = invocation.latest_node_execution("wait")
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "")
+            == "stream_invocation_user_events"
+        )
+
+        class ConnectedRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        response = await endpoint(
+            ConnectedRequest(),
+            invocation.id,
+            0,
+            None,
+        )
+        first = asyncio.create_task(anext(response.body_iterator))
+        await asyncio.sleep(0.02)
+
+        invocation.mark_cancelled()
+        await self.app.runtime_store.apersist_invocation_state(
+            session,
+            invocation,
+        )
+        self.assertFalse(
+            first.done(),
+            "A terminal state alone must not close the stream before final UserEvents.",
+        )
+        self.app.runtime_store.record_user_event(
+            invocation_id=invocation.id,
+            spec=UserEventSpec(
+                type="message_aborted",
+                data={
+                    "error_type": "CancelledError",
+                    "message": "cancelled",
+                },
+                node_id="wait",
+                node_execution_id=execution.id,
+            ),
+        )
+
+        terminal_event = await asyncio.wait_for(first, timeout=0.5)
+        stream_end = await asyncio.wait_for(
+            anext(response.body_iterator),
+            timeout=0.5,
+        )
+        await response.body_iterator.aclose()
+
+        self.assertIn('"type":"message_aborted"', terminal_event)
+        self.assertIn("event: stream_end", stream_end)
+
     async def test_standalone_server_bounds_uvicorn_graceful_shutdown(
         self,
     ) -> None:
@@ -365,6 +504,48 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             second["items"][0]["workflow_id"],
         )
         self.assertFalse(second["has_more"])
+
+    async def test_agent_invocation_neighbors_page_in_both_directions(
+        self,
+    ) -> None:
+        workflow = Workflow(id="agent_neighbor_workflow")
+        workflow.add_node(lambda: "done", node_id="done")
+        self.app.register_workflow(workflow)
+        created = [
+            await self.app.ainvoke(
+                workflow,
+                session_id="agent-neighbors",
+            )
+            for _ in range(5)
+        ]
+        session_id = self.app.runtime_store.invocation_sessions[created[0].id]
+        ordered = sorted(
+            created,
+            key=lambda value: (value.created_at_ms, str(value.id)),
+        )
+        anchor = ordered[2]
+
+        older = await self.server.trace.list_invocation_neighbors(
+            session_id,
+            anchor_invocation_id=anchor.id,
+            direction="older",
+            limit=1,
+        )
+        newer = await self.server.trace.list_invocation_neighbors(
+            session_id,
+            anchor_invocation_id=anchor.id,
+            direction="newer",
+            limit=1,
+        )
+
+        self.assertEqual([str(ordered[1].id)], [
+            item["id"] for item in older["items"]
+        ])
+        self.assertEqual([str(ordered[3].id)], [
+            item["id"] for item in newer["items"]
+        ])
+        self.assertTrue(older["has_more"])
+        self.assertTrue(newer["has_more"])
 
     async def test_trace_bootstrap_separates_latest_projection_from_events(
         self,
@@ -759,6 +940,15 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                 session_id="history",
                 event_mode="standard",
             )
+            first_store.record_user_event(
+                invocation_id=invocation.id,
+                spec=UserEventSpec(
+                    type="agent_output",
+                    data={"output": {"answer": 42}},
+                    node_id="answer",
+                    node_execution_id=uuid4(),
+                ),
+            )
             await first_store.aflush()
             invocation_id = invocation.id
             await first.aclose()
@@ -842,5 +1032,18 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                     limit=200,
                 )
                 self.assertGreater(len(page["items"]), 0)
+                user_page = await server.trace.user_event_page(
+                    invocation_id,
+                    after_sequence=0,
+                    limit=200,
+                )
+                self.assertEqual(
+                    ["agent_output"],
+                    [item["type"] for item in user_page["items"]],
+                )
+                self.assertEqual(
+                    {"output": {"answer": 42}},
+                    user_page["items"][0]["data"],
+                )
             finally:
                 await second.aclose()

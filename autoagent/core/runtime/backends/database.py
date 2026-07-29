@@ -25,6 +25,7 @@ from autoagent.core.runtime.backends.models import (
     RuntimeDatabaseBase,
     RuntimeEventRow,
     SessionRow,
+    UserEventRow,
     WorkflowVersionRow,
 )
 from autoagent.core.runtime.event import RuntimeEvent
@@ -42,6 +43,7 @@ from autoagent.core.runtime.snapshot import (
 )
 from autoagent.core.runtime.store import RuntimeStore
 from autoagent.core.runtime.time import utc_timestamp_ms
+from autoagent.core.runtime.user_event import UserEvent
 
 
 logger = logging.getLogger(__name__)
@@ -713,6 +715,64 @@ class DatabaseBackend:
             coordinator_id=envelope.id,
         )
 
+    def _prepare_user_event_batch_item(
+        self,
+        envelope: PersistenceEnvelope,
+    ) -> _PersistenceItem:
+        if (
+            envelope.session_id is None
+            or envelope.invocation_id is None
+            or not envelope.user_events
+        ):
+            raise ValueError("UserEvent persistence envelope is incomplete.")
+        records: list[dict[str, Any]] = []
+        artifacts: list[EncodedArtifact] = []
+        encoded_bytes = 0
+        for event_value in envelope.user_events:
+            persisted_data, event_artifacts = self.artifact_encoder.externalize(
+                event_value.data,
+                namespace=envelope.namespace,
+                invocation_id=envelope.invocation_id,
+            )
+            data_json = _text(self.serializer.dumps(persisted_data))
+            encoded_bytes += len(data_json.encode("utf-8"))
+            artifacts.extend(event_artifacts)
+            records.append(
+                {
+                    "id": str(event_value.id),
+                    "session_id": str(envelope.session_id),
+                    "invocation_id": str(envelope.invocation_id),
+                    "sequence": event_value.sequence,
+                    "schema_version": event_value.schema_version,
+                    "type": event_value.type,
+                    "data_json": data_json,
+                    "node_id": event_value.node_id,
+                    "node_execution_id": str(
+                        event_value.node_execution_id
+                    ),
+                    "operator_call_id": (
+                        None
+                        if event_value.operator_call_id is None
+                        else str(event_value.operator_call_id)
+                    ),
+                    "occurred_at_ms": event_value.occurred_at_ms,
+                }
+            )
+        return _PersistenceItem(
+            kind="user_event_batch",
+            session_id=envelope.session_id,
+            invocation_id=envelope.invocation_id,
+            record={"events": records},
+            encoded=None,
+            artifacts=tuple(artifacts),
+            size_bytes=(
+                encoded_bytes
+                + sum(artifact.size_bytes for artifact in artifacts)
+                + 256 * len(records)
+            ),
+            coordinator_id=envelope.id,
+        )
+
     def _externalize_admission_state(
         self,
         state: dict[str, Any],
@@ -942,6 +1002,85 @@ class DatabaseBackend:
             )
         return events
 
+    async def alist_user_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> tuple[UserEvent, ...]:
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.alist_user_events(
+                    invocation_id=invocation_id,
+                    after_sequence=after_sequence,
+                    limit=limit,
+                )
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            rows = (
+                await database.scalars(
+                    select(UserEventRow)
+                    .where(
+                        UserEventRow.invocation_id == str(invocation_id),
+                        UserEventRow.sequence > after_sequence,
+                    )
+                    .order_by(UserEventRow.sequence)
+                    .limit(limit)
+                )
+            ).all()
+        data_values = await self._hydrate_runtime_values(
+            [self.serializer.loads(row.data_json) for row in rows]
+        )
+        events = tuple(
+            UserEvent(
+                id=UUID(row.id),
+                invocation_id=invocation_id,
+                sequence=row.sequence,
+                schema_version=row.schema_version,
+                type=row.type,
+                data=data,
+                node_id=row.node_id,
+                node_execution_id=UUID(row.node_execution_id),
+                operator_call_id=(
+                    None
+                    if row.operator_call_id is None
+                    else UUID(row.operator_call_id)
+                ),
+                occurred_at_ms=row.occurred_at_ms,
+            )
+            for row, data in zip(rows, data_values, strict=True)
+        )
+        if events:
+            self.coordinator.remember_user_events_durable(
+                invocation_id,
+                events[-1].sequence,
+            )
+        return events
+
+    async def alatest_user_event_sequence(
+        self,
+        invocation_id: UUID,
+    ) -> int:
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.alatest_user_event_sequence(invocation_id)
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            value = await database.scalar(
+                select(func.max(UserEventRow.sequence)).where(
+                    UserEventRow.invocation_id == str(invocation_id)
+                )
+            )
+        sequence = int(value or 0)
+        self.coordinator.remember_user_events_durable(
+            invocation_id,
+            sequence,
+        )
+        return sequence
+
     async def alist_trace_workflow_versions(
         self,
         *,
@@ -1091,13 +1230,17 @@ class DatabaseBackend:
         session_id: UUID,
         limit: int = 500,
         before: tuple[int, str] | None = None,
+        after: tuple[int, str] | None = None,
     ) -> tuple[dict[str, Any], ...]:
+        if before is not None and after is not None:
+            raise ValueError("Invocation lookup accepts before or after, not both.")
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_trace_invocations(
                     session_id=session_id,
                     limit=limit,
                     before=before,
+                    after=after,
                 )
             )
         await self.ainitialize()
@@ -1118,13 +1261,27 @@ class DatabaseBackend:
                         InvocationRow.id,
                     ) < before
                 )
+            if after is not None:
+                statement = statement.where(
+                    tuple_(
+                        InvocationRow.created_at_ms,
+                        InvocationRow.id,
+                    ) > after
+                )
+            order = (
+                (
+                    InvocationRow.created_at_ms.asc(),
+                    InvocationRow.id.asc(),
+                )
+                if after is not None
+                else (
+                    InvocationRow.created_at_ms.desc(),
+                    InvocationRow.id.desc(),
+                )
+            )
             rows = (
                 await database.execute(
-                    statement.order_by(
-                        InvocationRow.created_at_ms.desc(),
-                        InvocationRow.id.desc(),
-                    )
-                    .limit(limit)
+                    statement.order_by(*order).limit(limit)
                 )
             ).all()
         return tuple(
@@ -1318,6 +1475,21 @@ class DatabaseBackend:
                                 item.invocation_id,
                                 int(item.record["sequence"]),
                             )
+                        elif item.kind == "user_event_batch":
+                            assert item.invocation_id is not None
+                            assert item.coordinator_id is not None
+                            if item.record.get("persistence_failed"):
+                                self.coordinator.discard(item.coordinator_id)
+                            else:
+                                advanced.add(item.invocation_id)
+                                self.coordinator.mark_user_events_durable(
+                                    item.coordinator_id,
+                                    item.invocation_id,
+                                    max(
+                                        int(value["sequence"])
+                                        for value in item.record["events"]
+                                    ),
+                                )
                         elif item.kind == "admission":
                             assert item.invocation_id is not None
                             assert item.coordinator_id is not None
@@ -1346,7 +1518,8 @@ class DatabaseBackend:
     def _import_incoming(self) -> None:
         for envelope in self.coordinator.take(self.batch_max_items):
             if (
-                envelope.invocation_id is not None
+                envelope.kind != "user_event_batch"
+                and envelope.invocation_id is not None
                 and self.coordinator.invocation_error(envelope.invocation_id)
                 is not None
             ):
@@ -1359,21 +1532,35 @@ class DatabaseBackend:
                     item = self._prepare_admission_item(envelope)
                 elif envelope.kind == "invocation_state":
                     item = self._prepare_invocation_state_item(envelope)
+                elif envelope.kind == "user_event_batch":
+                    item = self._prepare_user_event_batch_item(envelope)
                 else:
                     item = self._prepare_event_item(envelope)
             except Exception as exc:
                 self.coordinator.discard(envelope.id)
                 if envelope.invocation_id is not None:
-                    sequence = (
-                        envelope.event.sequence
-                        if envelope.event is not None
-                        else 0
-                    )
-                    self.coordinator.fail_invocation(
-                        envelope.invocation_id,
-                        sequence,
-                        exc,
-                    )
+                    if envelope.kind == "user_event_batch":
+                        sequence = (
+                            envelope.user_events[0].sequence
+                            if envelope.user_events
+                            else 0
+                        )
+                        self.coordinator.degrade_user_events(
+                            envelope.invocation_id,
+                            sequence,
+                            str(exc),
+                        )
+                    else:
+                        sequence = (
+                            envelope.event.sequence
+                            if envelope.event is not None
+                            else 0
+                        )
+                        self.coordinator.fail_invocation(
+                            envelope.invocation_id,
+                            sequence,
+                            exc,
+                        )
                 else:
                     self.coordinator.mark_unavailable(exc)
                 logger.exception(
@@ -1424,34 +1611,70 @@ class DatabaseBackend:
         return batch
 
     async def _persist_batch(self, batch: list[_PersistenceItem]) -> None:
-        async with self._database_sessions.begin() as database:
-            workflow_items = [
-                item for item in batch if item.kind == "workflow_version"
-            ]
-            admission_items = [
-                item for item in batch if item.kind == "admission"
-            ]
-            invocation_state_items = [
-                item for item in batch if item.kind == "invocation_state"
-            ]
-            event_items = [item for item in batch if item.kind == "event"]
-            for item in workflow_items:
-                await self._persist_workflow_version(database, item.record)
-            if workflow_items:
-                await database.flush()
-            for item in admission_items:
-                await self._persist_admission(database, item)
-            for item in invocation_state_items:
-                await self._persist_invocation_state(database, item)
-            artifacts = tuple(
-                artifact
-                for item in batch
-                for artifact in item.artifacts
-            )
-            if artifacts:
-                await self._persist_artifacts(database, artifacts)
-            if event_items:
-                await self._persist_events(database, event_items)
+        workflow_items = [
+            item for item in batch if item.kind == "workflow_version"
+        ]
+        admission_items = [
+            item for item in batch if item.kind == "admission"
+        ]
+        invocation_state_items = [
+            item for item in batch if item.kind == "invocation_state"
+        ]
+        event_items = [item for item in batch if item.kind == "event"]
+        user_event_items = [
+            item for item in batch if item.kind == "user_event_batch"
+        ]
+        runtime_items = [
+            item for item in batch if item.kind != "user_event_batch"
+        ]
+        if runtime_items:
+            async with self._database_sessions.begin() as database:
+                for item in workflow_items:
+                    await self._persist_workflow_version(database, item.record)
+                if workflow_items:
+                    await database.flush()
+                for item in admission_items:
+                    await self._persist_admission(database, item)
+                for item in invocation_state_items:
+                    await self._persist_invocation_state(database, item)
+                artifacts = tuple(
+                    artifact
+                    for item in runtime_items
+                    for artifact in item.artifacts
+                )
+                if artifacts:
+                    await self._persist_artifacts(database, artifacts)
+                if event_items:
+                    await self._persist_events(database, event_items)
+        if user_event_items:
+            try:
+                async with self._database_sessions.begin() as database:
+                    artifacts = tuple(
+                        artifact
+                        for item in user_event_items
+                        for artifact in item.artifacts
+                    )
+                    if artifacts:
+                        await self._persist_artifacts(database, artifacts)
+                    await self._persist_user_events(database, user_event_items)
+            except (OperationalError, DBAPIError):
+                raise
+            except Exception as exc:
+                for item in user_event_items:
+                    assert item.invocation_id is not None
+                    item.record["persistence_failed"] = True
+                    self.coordinator.degrade_user_events(
+                        item.invocation_id,
+                        min(
+                            int(value["sequence"])
+                            for value in item.record["events"]
+                        ),
+                        str(exc),
+                    )
+                logger.exception(
+                    "UserEvent persistence failed; RuntimeEvent durability and "
+                    "Workflow execution remain available."
+                )
 
     async def _persist_workflow_version(self, database, record: dict[str, Any]) -> None:
         row = await database.scalar(
@@ -1595,6 +1818,70 @@ class DatabaseBackend:
         invocation_row.result_json = invocation["result_json"]
         invocation_row.error_json = invocation["error_json"]
         invocation_row.updated_at_ms = int(invocation["updated_at_ms"])
+
+    async def _persist_user_events(
+        self,
+        database,
+        items: list[_PersistenceItem],
+    ) -> None:
+        records = [
+            record
+            for item in items
+            for record in item.record["events"]
+        ]
+        identities = [
+            (record["invocation_id"], int(record["sequence"]))
+            for record in records
+        ]
+        existing_rows = (
+            await database.scalars(
+                select(UserEventRow).where(
+                    tuple_(
+                        UserEventRow.invocation_id,
+                        UserEventRow.sequence,
+                    ).in_(identities)
+                )
+            )
+        ).all()
+        existing = {
+            (row.invocation_id, row.sequence): row
+            for row in existing_rows
+        }
+        fields = (
+            "id",
+            "session_id",
+            "schema_version",
+            "type",
+            "data_json",
+            "node_id",
+            "node_execution_id",
+            "operator_call_id",
+            "occurred_at_ms",
+        )
+        for record in records:
+            identity = (
+                record["invocation_id"],
+                int(record["sequence"]),
+            )
+            row = existing.get(identity)
+            if row is None:
+                continue
+            if any(getattr(row, field) != record[field] for field in fields):
+                raise RuntimeError(
+                    "UserEvent sequence already contains different data: "
+                    f"invocation_id={identity[0]}, sequence={identity[1]}."
+                )
+        database.add_all(
+            [
+                UserEventRow(**record)
+                for record in records
+                if (
+                    record["invocation_id"],
+                    int(record["sequence"]),
+                )
+                not in existing
+            ]
+        )
 
     async def _persist_events(
         self,

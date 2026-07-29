@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
@@ -39,6 +40,7 @@ from autoagent.core.runtime import (
     capture_execution_state,
 )
 from autoagent.core.runtime.time import utc_timestamp_ms
+from autoagent.core.runtime.persistence import UserEventPersistenceError
 from tests.helpers import started_app
 from autoagent.core.runtime.backends.database import (
     _PersistenceItem,
@@ -50,7 +52,9 @@ from autoagent.core.runtime.backends.models import (
     RecoveryStateRow,
     RuntimeEventRow,
     SessionRow,
+    UserEventRow,
 )
+from autoagent.core.runtime.user_event import UserEventSpec
 
 
 class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +87,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                 "sessions",
                 "invocations",
                 "runtime_events",
+                "user_events",
                 "runtime_recovery_states",
                 "artifacts",
             },
@@ -449,6 +454,195 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
     def test_recovery_event_interval_must_be_positive(self) -> None:
         with self.assertRaisesRegex(ValueError, "recovery_event_interval"):
             DatabaseBackend.from_path(self.path, recovery_event_interval=0)
+
+    async def test_user_events_persist_for_every_mode_without_builtin_deltas(
+        self,
+    ) -> None:
+        workflow = Workflow(id="durable_user_events")
+        workflow.add_node(lambda value: value, node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
+        invocations = [
+            await app.ainvoke(
+                workflow,
+                input={"value": mode},
+                session_id=mode,
+                event_mode=mode,
+            )
+            for mode in ("minimal", "standard", "full")
+        ]
+        for invocation in invocations:
+            for event_type in (
+                "message_delta",
+                "reasoning_delta",
+                "tool_call_delta",
+            ):
+                self.store.record_user_event(
+                    invocation_id=invocation.id,
+                    spec=UserEventSpec(
+                        type=event_type,
+                        data={"delta": "transient"},
+                        node_id="node",
+                        node_execution_id=uuid4(),
+                    ),
+                )
+            self.store.record_user_event(
+                invocation_id=invocation.id,
+                spec=UserEventSpec(
+                    type="tool_call_requested",
+                    data={
+                        "call_id": "call-1",
+                        "reasoning_content": "authoritative reasoning",
+                        "arguments": {"city": "Paris"},
+                    },
+                    node_id="node",
+                    node_execution_id=uuid4(),
+                ),
+            )
+            self.store.record_user_event(
+                invocation_id=invocation.id,
+                spec=UserEventSpec(
+                    type="custom_stream_chunk",
+                    data={"text": "x" * 20_000},
+                    node_id="node",
+                    node_execution_id=uuid4(),
+                ),
+            )
+        await self.store.aflush()
+
+        async def load_rows() -> tuple[list[UserEventRow], list[ArtifactRow]]:
+            async with self.backend._database_sessions() as database:
+                return (
+                    list(
+                        (
+                            await database.scalars(
+                                select(UserEventRow).order_by(
+                                    UserEventRow.invocation_id,
+                                    UserEventRow.sequence,
+                                )
+                            )
+                        ).all()
+                    ),
+                    list(
+                        (await database.scalars(select(ArtifactRow))).all()
+                    ),
+                )
+
+        rows, artifacts = await self.backend._database_loop.arun(load_rows())
+        self.assertEqual(6, len(rows))
+        self.assertEqual(
+            {"tool_call_requested", "custom_stream_chunk"},
+            {row.type for row in rows},
+        )
+        self.assertEqual(
+            {str(invocation.id) for invocation in invocations},
+            {row.invocation_id for row in rows},
+        )
+        self.assertEqual(
+            {str(self.store.invocation_sessions[value.id]) for value in invocations},
+            {row.session_id for row in rows},
+        )
+        self.assertTrue(artifacts)
+
+        first_id = invocations[0].id
+        await app.aclose()
+        reopened_backend = DatabaseBackend.from_path(self.path)
+        reopened = RuntimeStore(backend=reopened_backend)
+        self.backend = reopened_backend
+        self.store = reopened
+        persisted = await reopened.alist_user_events(
+            invocation_id=first_id,
+            limit=20,
+        )
+        self.assertEqual(
+            ["tool_call_requested", "custom_stream_chunk"],
+            [event.type for event in persisted],
+        )
+        self.assertEqual(
+            "authoritative reasoning",
+            persisted[0].data["reasoning_content"],
+        )
+        self.assertEqual("x" * 20_000, persisted[1].data["text"])
+        self.assertEqual(
+            persisted[-1].sequence,
+            await reopened.alatest_user_event_sequence(first_id),
+        )
+
+    async def test_user_event_write_failure_does_not_poison_runtime_journal(
+        self,
+    ) -> None:
+        class InvalidUserEventBackend(DatabaseBackend):
+            async def _persist_user_events(self, database, items) -> None:
+                raise RuntimeError("invalid user event")
+
+        await self.store.aclose()
+        self.backend = InvalidUserEventBackend.from_path(self.path)
+        self.store = RuntimeStore(backend=self.backend)
+        workflow = Workflow(id="isolated_user_event_failure")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
+        invocation = await app.ainvoke(workflow, event_mode="full")
+        await self.store.aflush()
+
+        self.store.record_user_event(
+            invocation_id=invocation.id,
+            spec=UserEventSpec(
+                type="agent_output",
+                data={"output": "done"},
+                node_id="node",
+                node_execution_id=uuid4(),
+            ),
+        )
+        with self.assertRaises(UserEventPersistenceError):
+            await self.store.aflush()
+
+        self.assertEqual("healthy", self.store.persistence.health.state)
+        self.assertEqual(
+            "durable",
+            self.store.persistence_status(invocation.id),
+        )
+        self.assertEqual(
+            "degraded",
+            self.store.user_event_persistence_status(invocation.id),
+        )
+        with self.assertRaises(UserEventPersistenceError):
+            await app.aclose()
+
+    async def test_trace_invocations_support_bidirectional_anchor_queries(
+        self,
+    ) -> None:
+        workflow = Workflow(id="bidirectional_trace_invocations")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
+        created = [
+            await app.ainvoke(workflow, session_id="neighbors")
+            for _ in range(5)
+        ]
+        await self.store.aflush()
+        ordered = sorted(
+            created,
+            key=lambda value: (value.created_at_ms, str(value.id)),
+        )
+        anchor = ordered[2]
+        session_id = self.store.invocation_sessions[anchor.id]
+        anchor_key = (anchor.created_at_ms, str(anchor.id))
+
+        older = await self.backend.alist_trace_invocations(
+            session_id=session_id,
+            before=anchor_key,
+            limit=1,
+        )
+        newer = await self.backend.alist_trace_invocations(
+            session_id=session_id,
+            after=anchor_key,
+            limit=1,
+        )
+
+        self.assertEqual(str(ordered[1].id), older[0]["id"])
+        self.assertEqual(str(ordered[3].id), newer[0]["id"])
+        await app.aclose()
 
     def test_admission_timeout_must_be_non_negative(self) -> None:
         with self.assertRaisesRegex(ValueError, "admission_timeout_ms"):

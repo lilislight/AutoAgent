@@ -557,6 +557,72 @@ class TraceService:
             key_fields=("created_at_ms", "id"),
         ).to_dict()
 
+    async def list_invocation_neighbors(
+        self,
+        session_id: UUID,
+        *,
+        anchor_invocation_id: UUID,
+        direction: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        if direction not in {"older", "newer"}:
+            raise ValueError("Invocation neighbor direction must be older or newer.")
+        anchor = await self._invocation_detail(anchor_invocation_id)
+        if str(anchor["session_id"]) != str(session_id):
+            raise ValueError("Invocation anchor does not belong to this Session.")
+        anchor_key = (int(anchor["created_at_ms"]), str(anchor["id"]))
+        values: dict[str, dict[str, Any]] = {}
+        session = self.store.sessions.get(session_id)
+        memory_invocations = (
+            list(session.invocations)
+            if session is not None
+            else []
+        )
+        backend_loader = getattr(
+            self.store.backend,
+            "alist_trace_invocations",
+            None,
+        )
+        if backend_loader is not None:
+            query = {
+                "before": anchor_key if direction == "older" else None,
+                "after": anchor_key if direction == "newer" else None,
+            }
+            for record in await backend_loader(
+                session_id=session_id,
+                limit=limit + len(memory_invocations) + 1,
+                **query,
+            ):
+                values[str(record["id"])] = dict(record)
+        if session is not None:
+            revisions = await self._workflow_versions()
+            for invocation in memory_invocations:
+                record = self._invocation_summary(
+                    session,
+                    invocation,
+                    revisions,
+                )
+                key = (int(record["created_at_ms"]), str(record["id"]))
+                if (
+                    direction == "older" and key < anchor_key
+                    or direction == "newer" and key > anchor_key
+                ):
+                    values[str(record["id"])] = record
+        ordered = sorted(
+            values.values(),
+            key=lambda item: (item["created_at_ms"], item["id"]),
+            reverse=direction == "older",
+        )
+        has_more = len(ordered) > limit
+        selected = ordered[:limit]
+        selected.sort(key=lambda item: (item["created_at_ms"], item["id"]))
+        return {
+            "items": selected,
+            "has_more": has_more,
+            "direction": direction,
+            "anchor_invocation_id": str(anchor_invocation_id),
+        }
+
     async def trace_bootstrap(
         self,
         invocation_id: UUID,
@@ -661,12 +727,14 @@ class TraceService:
         after_sequence: int,
         limit: int,
     ) -> dict[str, Any]:
-        events = self.store.list_user_events(
+        events = await self.store.alist_user_events(
             invocation_id=invocation_id,
             after_sequence=after_sequence,
             limit=limit,
         )
-        live_sequence = self.store.latest_user_event_sequence(invocation_id)
+        live_sequence = await self.store.alatest_user_event_sequence(
+            invocation_id
+        )
         return {
             "items": [self.user_event_view(event) for event in events],
             "last_sequence": events[-1].sequence if events else None,
@@ -984,6 +1052,9 @@ class TraceService:
             ),
             "durable_sequence": self.store.durable_sequence(invocation.id),
             "persistence_status": self.store.persistence_status(invocation.id),
+            "user_event_persistence_status": (
+                self.store.user_event_persistence_status(invocation.id)
+            ),
             "created_at_ms": invocation.created_at_ms,
             "updated_at_ms": invocation.updated_at_ms,
         }

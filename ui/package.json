@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/graphRouting.test.js",
+    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/graphRouting.test.js && node .test-dist/tests/agentConversation.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

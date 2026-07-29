@@ -370,6 +370,25 @@ class AutoAgentServer:
                 )
             )
 
+        @router.get(
+            "/sessions/{session_id}/agent-invocations",
+            dependencies=auth,
+        )
+        async def list_agent_invocations(
+            session_id: UUID,
+            anchor_invocation_id: UUID,
+            direction: str = Query(pattern="^(older|newer)$"),
+            limit: int = Query(default=20, ge=1, le=100),
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.list_invocation_neighbors(
+                    session_id,
+                    anchor_invocation_id=anchor_invocation_id,
+                    direction=direction,
+                    limit=limit,
+                )
+            )
+
         @router.get("/invocations/{invocation_id}/trace", dependencies=auth)
         async def get_invocation_trace(
             invocation_id: UUID,
@@ -564,35 +583,60 @@ class AutoAgentServer:
 
             async def generate() -> AsyncIterator[str]:
                 cursor = after_sequence
-                heartbeat_at = asyncio.get_running_loop().time()
-                while not await request.is_disconnected():
-                    page = await self.trace.user_event_page(
+                loop = asyncio.get_running_loop()
+                changed = asyncio.Event()
+
+                def notify() -> None:
+                    loop.call_soon_threadsafe(changed.set)
+
+                unsubscribe = (
+                    self.agent.runtime_store.subscribe_user_event_changes(
                         invocation_id,
-                        after_sequence=cursor,
-                        limit=200,
+                        notify,
                     )
-                    for event in page["items"]:
-                        cursor = int(event["sequence"])
-                        yield (
-                            f"id: {cursor}\n"
-                            "event: user_event\n"
-                            f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                )
+                try:
+                    while not await request.is_disconnected():
+                        # Clear before reading. A concurrent notification is
+                        # either included in this page or leaves the Event set
+                        # for the next iteration, so no wakeup can be lost.
+                        changed.clear()
+                        page = await self.trace.user_event_page(
+                            invocation_id,
+                            after_sequence=cursor,
+                            limit=200,
                         )
-                    detail = await self.trace.invocation_detail(invocation_id)
-                    terminal = detail["state"] in {
-                        "completed",
-                        "failed",
-                        "cancelled",
-                        "interrupted",
-                    }
-                    if terminal and cursor >= int(page["live_sequence"]):
-                        yield "event: stream_end\ndata: {}\n\n"
-                        break
-                    now = asyncio.get_running_loop().time()
-                    if now - heartbeat_at >= 15:
-                        yield ": heartbeat\n\n"
-                        heartbeat_at = now
-                    await asyncio.sleep(0.1)
+                        for event in page["items"]:
+                            cursor = int(event["sequence"])
+                            yield (
+                                f"id: {cursor}\n"
+                                "event: user_event\n"
+                                f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                            )
+                        detail = await self.trace.invocation_detail(
+                            invocation_id
+                        )
+                        terminal = detail["state"] in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "interrupted",
+                        }
+                        if (
+                            terminal
+                            and cursor >= int(page["live_sequence"])
+                        ):
+                            yield "event: stream_end\ndata: {}\n\n"
+                            break
+                        try:
+                            await asyncio.wait_for(
+                                changed.wait(),
+                                timeout=15,
+                            )
+                        except TimeoutError:
+                            yield ": heartbeat\n\n"
+                finally:
+                    unsubscribe()
 
             await self._trace_call(self.trace.invocation_detail(invocation_id))
             return StreamingResponse(
@@ -737,6 +781,9 @@ class AutoAgentServer:
                         session=session,
                         invocation=invocation,
                     )
+                )
+                self.agent.runtime_store.notify_user_event_execution_settled(
+                    invocation_id
                 )
             else:
                 task.cancel()

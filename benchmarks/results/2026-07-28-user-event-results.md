@@ -127,10 +127,11 @@ memory.
 2. Per-chunk Event creation scales approximately linearly in retained bytes and
    becomes CPU/scheduling significant under concurrent load.
 3. Raw provider tokens should not automatically become one UserEvent each in
-   production. A later optimization should coalesce deltas by a small time or
-   byte window before serialization and RuntimeStore insertion.
-4. Until batching exists, Workflow authors should emit semantically useful
-   chunks rather than provider-token-sized chunks.
+   production. The follow-up below adds LLM-specific character/time
+   coalescing before serialization and RuntimeStore insertion.
+4. Generic Workflow streams preserve author-defined chunk boundaries; authors
+   should therefore emit semantically useful chunks rather than
+   provider-token-sized chunks.
 5. The current benchmark measures process-local retention, not long-lived UI
    subscribers or durable UserEvent storage. Those require separate benchmarks
    if either behavior is introduced.
@@ -167,6 +168,9 @@ transport:
 
 - adjacent small LLM text, reasoning, or matching Tool Call deltas are combined
   to a target of 32 characters before generic stream execution;
+- a partial LLM delta is released after at most approximately 8 ms, so
+  throughput-oriented coalescing cannot indefinitely delay the first visible
+  token or a later sparse update;
 - arbitrary user-defined stream chunks are not combined;
 - generated UserEventSpecs are transported in batches of at most 32;
 - a partial batch flushes after at most approximately 20 ms;
@@ -222,3 +226,8 @@ the Operator's `StreamingResult` yields four text deltas with lengths
 `32, 32, 32, 4`, followed by the unchanged completed response. Type changes,
 different Tool Call indexes, completed responses, errors, and cancellation are
 coalescing boundaries.
+
+Deterministic latency tests also hold the Provider stream open after emitting a
+small delta. They verify that both the first partial delta and a later partial
+delta become visible through the `llm_call` Operator on the configured deadline
+without cancelling the Provider's in-flight stream read.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from autoagent.ai.capabilities.llm_call import (
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 
 _LLM_STREAM_DELTA_TARGET_CHARS = 32
+_LLM_STREAM_DELTA_MAX_DELAY_SECONDS = 0.008
 
 
 def create_llm_call_operator(
@@ -86,33 +88,67 @@ async def _coalesce_llm_stream(
     """
 
     iterator = source.__aiter__()
+    loop = asyncio.get_running_loop()
     pending: LLMStreamChunk | None = None
+    pending_since: float | None = None
+    next_chunk_task: asyncio.Task[LLMStreamChunk] | None = None
     failed = False
     try:
         while True:
+            if next_chunk_task is None:
+                next_chunk_task = asyncio.create_task(iterator.__anext__())
+            timeout = (
+                max(
+                    0.0,
+                    _LLM_STREAM_DELTA_MAX_DELAY_SECONDS
+                    - (loop.time() - pending_since),
+                )
+                if pending is not None and pending_since is not None
+                else None
+            )
+            done, _ = await asyncio.wait(
+                (next_chunk_task,),
+                timeout=timeout,
+            )
+            if not done:
+                # Keep the in-flight ``__anext__`` Task alive. Cancelling it on
+                # every deadline can close or corrupt an async Provider stream.
+                assert pending is not None
+                yield pending
+                pending = None
+                pending_since = None
+                continue
+            completed_task = next_chunk_task
+            next_chunk_task = None
+            assert completed_task is not None
             try:
-                chunk = await iterator.__anext__()
+                chunk = completed_task.result()
             except StopAsyncIteration:
                 break
             if chunk.type == "completed":
                 if pending is not None:
                     yield pending
                     pending = None
+                    pending_since = None
                 yield chunk
                 continue
             if pending is None:
                 pending = chunk
+                pending_since = loop.time()
             elif _can_merge_llm_deltas(pending, chunk):
                 pending = _merge_llm_deltas(pending, chunk)
             else:
                 yield pending
                 pending = chunk
+                pending_since = loop.time()
             if _llm_delta_char_count(pending) >= _LLM_STREAM_DELTA_TARGET_CHARS:
                 yield pending
                 pending = None
+                pending_since = None
         if pending is not None:
             yield pending
             pending = None
+            pending_since = None
     except asyncio.CancelledError:
         failed = True
         raise
@@ -122,6 +158,10 @@ async def _coalesce_llm_stream(
             yield pending
         raise
     finally:
+        if next_chunk_task is not None:
+            next_chunk_task.cancel()
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
+                await next_chunk_task
         aclose = getattr(iterator, "aclose", None)
         if callable(aclose):
             try:

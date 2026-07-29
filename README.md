@@ -60,8 +60,9 @@ CLI, inside another service, or eventually on a hosted platform.
 - typed Input Mapping, Output Binding, Conditions, selectors, and aggregators;
 - Retry, fallback, timeout, recovery, resource, and failure policies;
 - explicit sync/async `StreamingResult` execution with one typed final output;
-- independent process-local `UserEvent` streams configured by snake_case
-  `UserEventMapping`, with standard ReAct message and Tool events;
+- independent `UserEvent` streams configured by snake_case `UserEventMapping`,
+  with standard ReAct message and Tool events, live SSE delivery, and durable
+  semantic history when a Database Store is configured;
 - process-local and durable Wait/Resume;
 - reusable child Workflows.
 
@@ -89,6 +90,10 @@ Each Invocation selects one observation level:
 | `minimal` | Final Invocation state and result with the lowest recording cost |
 | `standard` | Production tracing, durable Wait/Resume, and crash recovery |
 | `full` | Detailed phase data, state replay, debugging, and future Fork support |
+
+UserEvent history is orthogonal to these modes: semantic events are durable in
+all three modes, while built-in token/reasoning/Tool-call deltas remain
+memory/SSE-only and are replaced by their authoritative completed events.
 
 ### Tracing
 

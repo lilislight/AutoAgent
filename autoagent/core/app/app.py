@@ -843,6 +843,10 @@ class AutoAgentApp:
                 self._live_invocation_ids.add(invocation_id)
             else:
                 self._live_invocation_ids.discard(invocation_id)
+        if not live:
+            self.runtime_store.notify_user_event_execution_settled(
+                invocation_id
+            )
 
     def _ensure_open(self) -> None:
         if self._closed:

@@ -5,13 +5,14 @@ from dataclasses import replace
 import unittest
 from uuid import UUID, uuid4
 
-from autoagent.core.runtime import ExecutionSnapshot, RuntimeEvent
+from autoagent.core.runtime import ExecutionSnapshot, RuntimeEvent, UserEvent
 from autoagent.core.runtime.persistence import (
     BackendPersistenceError,
     PersistenceCoordinator,
     PersistenceEnvelope,
     PersistencePolicy,
     freeze_event_envelope,
+    freeze_user_event_batch_envelope,
 )
 
 
@@ -310,4 +311,96 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             envelope.event.sequence,
             self.coordinator.durable_sequence(envelope.invocation_id),
+        )
+
+    async def test_runtime_failure_keeps_independent_user_event_batch(self) -> None:
+        invocation_id = uuid4()
+        session_id = uuid4()
+        runtime = _envelope(
+            invocation_id=invocation_id,
+            session_id=session_id,
+        )
+        user_batch = freeze_user_event_batch_envelope(
+            namespace="default",
+            session_id=session_id,
+            invocation_id=invocation_id,
+            events=(
+                UserEvent(
+                    invocation_id=invocation_id,
+                    sequence=1,
+                    type="agent_output",
+                    data={"output": "done"},
+                    node_id="finish",
+                    node_execution_id=uuid4(),
+                    occurred_at_ms=10,
+                ),
+            ),
+        )
+        user_batch = replace(user_batch, estimated_bytes=256)
+        await self._publish(runtime)
+        await self._publish(user_batch)
+
+        self.coordinator.fail_invocation(
+            invocation_id,
+            1,
+            RuntimeError("runtime serialization failed"),
+        )
+
+        self.assertEqual(
+            ("user_event_batch",),
+            tuple(envelope.kind for envelope in self.coordinator.take(10)),
+        )
+
+    def test_user_event_gap_does_not_degrade_runtime_journal(self) -> None:
+        invocation_id = uuid4()
+        self.coordinator.remember_admission_durable(invocation_id)
+        self.coordinator.remember_durable(invocation_id, 3)
+
+        self.coordinator.degrade_user_events(invocation_id, 2, "user gap")
+
+        self.assertEqual("durable", self.coordinator.status(invocation_id, 3))
+        self.assertIsNotNone(
+            self.coordinator.user_event_gap(invocation_id)
+        )
+
+    async def test_pending_user_events_do_not_hold_runtime_status_open(
+        self,
+    ) -> None:
+        invocation_id = uuid4()
+        session_id = uuid4()
+        self.coordinator.remember_admission_durable(invocation_id)
+        self.coordinator.remember_durable(invocation_id, 3)
+        batch = freeze_user_event_batch_envelope(
+            namespace="default",
+            session_id=session_id,
+            invocation_id=invocation_id,
+            events=(
+                UserEvent(
+                    invocation_id=invocation_id,
+                    sequence=4,
+                    type="agent_output",
+                    data={"output": "done"},
+                    node_id="finish",
+                    node_execution_id=uuid4(),
+                    occurred_at_ms=10,
+                ),
+            ),
+        )
+        batch = replace(batch, estimated_bytes=256)
+        await self._publish(batch)
+
+        self.assertEqual("durable", self.coordinator.status(invocation_id, 3))
+        self.assertEqual(
+            "pending",
+            self.coordinator.user_event_status(invocation_id, 4),
+        )
+
+        self.coordinator.mark_user_events_durable(
+            batch.id,
+            invocation_id,
+            4,
+        )
+        self.assertEqual(
+            "durable",
+            self.coordinator.user_event_status(invocation_id, 4),
         )

@@ -23,6 +23,7 @@ import {
   submitInvocation,
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
+import { AgentPanel } from "./components/AgentPanel";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { ScopeBar } from "./components/ScopeBar";
 import { WorkflowCanvas } from "./components/WorkflowCanvas";
@@ -85,6 +86,8 @@ export default function App() {
     nodeId: string;
   } | null>(null);
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [agentUnreadCount, setAgentUnreadCount] = useState(0);
   const [runtimeStreamConnected, setRuntimeStreamConnected] = useState<boolean | null>(null);
   const [liveDraftGraph, setLiveDraftGraph] = useState<WorkflowGraphView | null>(null);
   const [liveDraftInvocation, setLiveDraftInvocation] = useState<InvocationDetail | null>(null);
@@ -917,6 +920,8 @@ export default function App() {
           !isTerminalInvocation(activeInvocationDetail.state)
         )}
         cancellingInvocation={cancelSubmitting}
+        agentOpen={agentOpen}
+        agentUnreadCount={agentUnreadCount}
         onRefreshInvocation={() => void refreshLatestInvocation()}
         onCancelInvocation={() => void cancelActiveInvocation()}
         onInspectInvocation={() => {
@@ -926,6 +931,7 @@ export default function App() {
             id: activeInvocationDetail.id,
           });
         }}
+        onToggleAgent={() => setAgentOpen((value) => !value)}
         onScopeChange={(workflowId, sessionId, invocationId) => {
           clearLiveDraft();
           setPendingNodeAction(null);
@@ -934,6 +940,14 @@ export default function App() {
           ui.setInvocationScope(workflowId, sessionId, invocationId);
         }}
         onToggleTheme={() => setDarkMode((value) => !value)}
+      />
+      <AgentPanel
+        open={agentOpen}
+        sessionId={ui.sessionId}
+        invocationId={ui.invocationId}
+        invocations={invocations}
+        onClose={() => setAgentOpen(false)}
+        onUnreadCountChange={setAgentUnreadCount}
       />
       {pendingNodeAction && !invokeOpen && !resumeOpen && (
         <NodeActionPrompt

@@ -55,8 +55,8 @@ Workflow 代码只描述业务行为。宿主环境负责 App 生命周期、持
 - 类型化 Input Mapping、Output Binding、Condition、selector 和 aggregator；
 - Retry、Fallback、Timeout、Recovery、Resource 和 Failure Policy；
 - 具有单一类型化最终输出的同步/异步 `StreamingResult` 执行；
-- 通过 snake_case `UserEventMapping` 配置的独立进程内 UserEvent 流，
-  并为 ReAct 提供标准消息和 Tool 事件；
+- 通过 snake_case `UserEventMapping` 配置的独立 UserEvent 流，并为 ReAct
+  提供标准消息和 Tool 事件、实时 SSE，以及配置 Database Store 后的语义历史持久化；
 - 进程内及跨进程 Wait/Resume；
 - 可复用子 Workflow。
 
@@ -83,6 +83,9 @@ Wait/Resume、持久化 backpressure、可配置 retention，以及通过 Artifa
 | `minimal` | 以最低记录成本保存 Invocation 最终状态和结果 |
 | `standard` | 生产 Trace、持久化 Wait/Resume 和崩溃恢复 |
 | `full` | 详细 phase、状态回放、调试和未来 Fork |
+
+UserEvent 历史与这三种模式正交：语义事件在三种模式下都会持久化；框架内置的
+token、reasoning 和 Tool-call delta 只存在于内存与 SSE 中，并由最终权威事件取代。
 
 ### Tracing
 

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
 from autoagent.core.runtime.event import RuntimeEvent
+from autoagent.core.runtime.user_event import UserEvent
 from autoagent.core.runtime.snapshot import ExecutionSnapshot
 from autoagent.core.runtime.time import utc_timestamp_ms
 
@@ -30,6 +31,7 @@ PersistenceKind = Literal[
     "admission",
     "invocation_state",
     "event",
+    "user_event_batch",
 ]
 
 
@@ -48,6 +50,22 @@ class InvocationPersistenceError(PersistenceError):
     ) -> None:
         super().__init__(
             f"Invocation persistence failed at sequence {sequence}: {message}"
+        )
+        self.invocation_id = invocation_id
+        self.sequence = sequence
+
+
+class UserEventPersistenceError(PersistenceError):
+    """One Invocation has a gap in its durable UserEvent journal."""
+
+    def __init__(
+        self,
+        invocation_id: UUID,
+        sequence: int,
+        message: str,
+    ) -> None:
+        super().__init__(
+            f"UserEvent persistence failed at sequence {sequence}: {message}"
         )
         self.invocation_id = invocation_id
         self.sequence = sequence
@@ -73,7 +91,7 @@ class PersistenceHealth:
 class PersistencePolicy:
     """Queue admission and memory bounds independent of a concrete sink."""
 
-    queue_high_watermark_bytes: int = 64 * 1024 * 1024
+    queue_high_watermark_bytes: int = 256 * 1024 * 1024
     queue_low_watermark_bytes: int | None = None
     queue_hard_watermark_bytes: int | None = None
     admission_timeout_ms: float = 5_000
@@ -115,6 +133,7 @@ class PersistenceEnvelope:
     invocation_result: Any | None = None
     invocation_error: dict[str, Any] | None = None
     event: RuntimeEvent | None = None
+    user_events: tuple[UserEvent, ...] = ()
     session_record: dict[str, Any] | None = None
     invocation_record: dict[str, Any] | None = None
     recovery_snapshot: ExecutionSnapshot | None = None
@@ -281,6 +300,39 @@ def freeze_invocation_state_envelope(
     )
 
 
+def freeze_user_event_batch_envelope(
+    *,
+    namespace: str,
+    session_id: UUID,
+    invocation_id: UUID,
+    events: tuple[UserEvent, ...],
+) -> PersistenceEnvelope:
+    """Freeze UserEvent payload ownership before crossing the thread boundary."""
+
+    if not events:
+        raise ValueError("UserEvent persistence batch cannot be empty.")
+    frozen_events = tuple(event.model_copy(deep=True) for event in events)
+    return PersistenceEnvelope(
+        kind="user_event_batch",
+        namespace=namespace,
+        session_id=session_id,
+        invocation_id=invocation_id,
+        estimated_bytes=256 + _estimate_runtime_bytes(
+            [
+                {
+                    "type": event.type,
+                    "data": event.data,
+                    "node_id": event.node_id,
+                    "node_execution_id": event.node_execution_id,
+                    "operator_call_id": event.operator_call_id,
+                }
+                for event in frozen_events
+            ]
+        ),
+        user_events=frozen_events,
+    )
+
+
 class PersistenceCoordinator:
     """Thread-safe producer/consumer boundary shared by every durable sink."""
 
@@ -293,11 +345,14 @@ class PersistenceCoordinator:
         self._reservations: dict[UUID, PersistenceReservation] = {}
         self._outstanding_bytes: dict[UUID, int] = {}
         self._outstanding_invocations: dict[UUID, UUID | None] = {}
+        self._outstanding_kinds: dict[UUID, PersistenceKind] = {}
         self._pending_bytes = 0
         self._durable_sequences: dict[UUID, int] = {}
         self._durable_admissions: set[UUID] = set()
         self._invocation_errors: dict[UUID, InvocationPersistenceError] = {}
         self._invocation_gaps: dict[UUID, InvocationPersistenceError] = {}
+        self._user_event_gaps: dict[UUID, UserEventPersistenceError] = {}
+        self._durable_user_event_sequences: dict[UUID, int] = {}
         self._health = PersistenceHealth()
         self._admission_pressure = False
         self._wake_consumer: Callable[[], None] | None = None
@@ -353,6 +408,13 @@ class PersistenceCoordinator:
         with self._lock:
             return self._invocation_gaps.get(invocation_id)
 
+    def user_event_gap(
+        self,
+        invocation_id: UUID,
+    ) -> UserEventPersistenceError | None:
+        with self._lock:
+            return self._user_event_gaps.get(invocation_id)
+
     async def await_admission(self) -> None:
         timeout_ms = self.policy.admission_timeout_ms
         started = asyncio.get_running_loop().time()
@@ -374,7 +436,8 @@ class PersistenceCoordinator:
     ) -> PersistenceReservation | None:
         with self._lock:
             if (
-                envelope.invocation_id is not None
+                envelope.kind != "user_event_batch"
+                and envelope.invocation_id is not None
                 and (
                     envelope.invocation_id in self._invocation_errors
                     or envelope.invocation_id in self._invocation_gaps
@@ -397,6 +460,7 @@ class PersistenceCoordinator:
             self._outstanding_invocations[reservation.id] = (
                 reservation.invocation_id
             )
+            self._outstanding_kinds[reservation.id] = envelope.kind
             self._pending_bytes += reservation.estimated_bytes
             return reservation
 
@@ -491,7 +555,8 @@ class PersistenceCoordinator:
                 else:
                     del self._incoming[session_id]
                 if (
-                    envelope.invocation_id is not None
+                    envelope.kind != "user_event_batch"
+                    and envelope.invocation_id is not None
                     and envelope.invocation_id in self._invocation_errors
                 ):
                     self._remove_outstanding(envelope.id)
@@ -520,6 +585,30 @@ class PersistenceCoordinator:
             self._remove_outstanding(envelope_id)
             self._durable_sequences[invocation_id] = max(
                 self._durable_sequences.get(invocation_id, 0),
+                sequence,
+            )
+
+    def mark_user_events_durable(
+        self,
+        envelope_id: UUID,
+        invocation_id: UUID,
+        sequence: int,
+    ) -> None:
+        with self._lock:
+            self._remove_outstanding(envelope_id)
+            self._durable_user_event_sequences[invocation_id] = max(
+                self._durable_user_event_sequences.get(invocation_id, 0),
+                sequence,
+            )
+
+    def remember_user_events_durable(
+        self,
+        invocation_id: UUID,
+        sequence: int,
+    ) -> None:
+        with self._lock:
+            self._durable_user_event_sequences[invocation_id] = max(
+                self._durable_user_event_sequences.get(invocation_id, 0),
                 sequence,
             )
 
@@ -563,7 +652,10 @@ class PersistenceCoordinator:
             for session_id, queue in self._incoming.items():
                 kept: deque[PersistenceEnvelope] = deque()
                 for envelope in queue:
-                    if envelope.invocation_id == invocation_id:
+                    if (
+                        envelope.invocation_id == invocation_id
+                        and envelope.kind != "user_event_batch"
+                    ):
                         self._remove_outstanding(envelope.id)
                     else:
                         kept.append(envelope)
@@ -592,6 +684,20 @@ class PersistenceCoordinator:
         )
         with self._lock:
             return self._invocation_gaps.setdefault(invocation_id, failure)
+
+    def degrade_user_events(
+        self,
+        invocation_id: UUID,
+        sequence: int,
+        message: str,
+    ) -> UserEventPersistenceError:
+        failure = UserEventPersistenceError(
+            invocation_id,
+            sequence,
+            message,
+        )
+        with self._lock:
+            return self._user_event_gaps.setdefault(invocation_id, failure)
 
     def mark_retrying(self, error: BaseException) -> None:
         self._set_health("retrying", error)
@@ -649,6 +755,7 @@ class PersistenceCoordinator:
     def _remove_outstanding(self, envelope_id: UUID) -> None:
         size = self._outstanding_bytes.pop(envelope_id, None)
         self._outstanding_invocations.pop(envelope_id, None)
+        self._outstanding_kinds.pop(envelope_id, None)
         if size is not None:
             self._pending_bytes -= size
 
@@ -674,10 +781,21 @@ class PersistenceCoordinator:
             )
         if invocation_gap is not None:
             raise invocation_gap
+        with self._lock:
+            user_event_gap = next(
+                iter(self._user_event_gaps.values()),
+                None,
+            )
+        if user_event_gap is not None:
+            raise user_event_gap
 
     def durable_sequence(self, invocation_id: UUID) -> int:
         with self._lock:
             return self._durable_sequences.get(invocation_id, 0)
+
+    def durable_user_event_sequence(self, invocation_id: UUID) -> int:
+        with self._lock:
+            return self._durable_user_event_sequences.get(invocation_id, 0)
 
     def status(
         self,
@@ -691,9 +809,36 @@ class PersistenceCoordinator:
                 return "degraded"
             durable = self._durable_sequences.get(invocation_id, 0)
             admission_durable = invocation_id in self._durable_admissions
-            pending = invocation_id in self._outstanding_invocations.values()
+            pending = any(
+                candidate == invocation_id
+                and self._outstanding_kinds.get(envelope_id)
+                != "user_event_batch"
+                for envelope_id, candidate
+                in self._outstanding_invocations.items()
+            )
             health = self._health
         if admission_durable and durable >= expected_sequence and not pending:
+            return "durable"
+        return "degraded" if health.state == "unavailable" else "pending"
+
+    def user_event_status(
+        self,
+        invocation_id: UUID,
+        expected_sequence: int,
+    ) -> PersistenceStatus:
+        with self._lock:
+            if invocation_id in self._user_event_gaps:
+                return "degraded"
+            durable = self._durable_user_event_sequences.get(invocation_id, 0)
+            pending = any(
+                candidate == invocation_id
+                and self._outstanding_kinds.get(envelope_id)
+                == "user_event_batch"
+                for envelope_id, candidate
+                in self._outstanding_invocations.items()
+            )
+            health = self._health
+        if durable >= expected_sequence and not pending:
             return "durable"
         return "degraded" if health.state == "unavailable" else "pending"
 

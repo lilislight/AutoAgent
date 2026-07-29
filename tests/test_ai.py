@@ -14,6 +14,7 @@ from autoagent import (
     AutoAgentApp,
     JsonRuntimeSerializer,
     StreamingResult,
+    Workflow,
     streaming_result,
 )
 from autoagent.ai import (
@@ -29,12 +30,24 @@ from autoagent.ai import (
     LLMToolCall,
     create_llm_call_operator,
     get_tool_definition,
+    llm_call_node,
     react_workflow,
     register_llm_call_operator,
     tool,
 )
 from autoagent.ai.providers.deepseek import DeepSeekConfig, DeepSeekProvider
 from autoagent.ai.providers.factory import llm_provider_from_environment
+from autoagent.ai.models.user_event import (
+    AgentFailedPayload,
+    AgentOutputPayload,
+    MessageAbortedPayload,
+    MessageCompletedPayload,
+    MessageDeltaPayload,
+    ReasoningDeltaPayload,
+    ToolCallDeltaPayload,
+    ToolCallRequestedPayload,
+    ToolResultPayload,
+)
 from tests.helpers import started_app
 
 
@@ -176,6 +189,100 @@ class ToolDecoratorTests(unittest.TestCase):
             @tool()
             def invalid(value: str):
                 return value
+
+
+class ReActUserEventPayloadTests(unittest.TestCase):
+    def test_semantic_payloads_are_provider_neutral_and_extensible(self) -> None:
+        self.assertEqual(
+            MessageDeltaPayload(delta="hello", provider_note="kept").model_dump(
+                mode="json"
+            ),
+            {"delta": "hello", "provider_note": "kept"},
+        )
+        self.assertEqual(
+            ReasoningDeltaPayload(delta="think").model_dump(mode="json"),
+            {"delta": "think"},
+        )
+        completed = MessageCompletedPayload(
+            message=LLMMessage(role="assistant", content="done"),
+            model="model",
+            provider_extension={"safe": True},
+        )
+        self.assertEqual(
+            completed.model_dump(mode="json")["provider_extension"],
+            {"safe": True},
+        )
+        self.assertEqual(
+            ToolCallDeltaPayload(
+                tool_call_index=0,
+                tool_call_id="call_1",
+                tool_name="weather",
+                arguments_delta='{"city":',
+            ).model_dump(mode="json"),
+            {
+                "tool_call_index": 0,
+                "tool_call_id": "call_1",
+                "tool_name": "weather",
+                "arguments_delta": '{"city":',
+            },
+        )
+
+    def test_authoritative_tool_and_output_payloads_validate(self) -> None:
+        requested = ToolCallRequestedPayload.model_validate(
+            {
+                "calls": [
+                    {
+                        "tool_call_id": "call_1",
+                        "name": "weather",
+                        "raw_arguments": '{"city":"Paris"}',
+                    }
+                ],
+                "reasoning_content": "I should check the weather.",
+            }
+        )
+        result = ToolResultPayload.model_validate(
+            {
+                "results": [
+                    {
+                        "tool_call_id": "call_1",
+                        "tool_id": "weather",
+                        "output": {"temperature": 21},
+                        "error": None,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(requested.calls[0].name, "weather")
+        self.assertEqual(
+            requested.reasoning_content,
+            "I should check the weather.",
+        )
+        self.assertEqual(result.results[0].output, {"temperature": 21})
+        self.assertEqual(
+            AgentOutputPayload(output="done").model_dump(mode="json"),
+            {"output": "done"},
+        )
+
+    def test_framework_failure_payloads_share_the_contract(self) -> None:
+        self.assertEqual(
+            MessageAbortedPayload(
+                error_type="cancelled",
+                message="stopped",
+            ).model_dump(mode="json"),
+            {"error_type": "cancelled", "message": "stopped"},
+        )
+        self.assertEqual(
+            AgentFailedPayload(
+                code="tool_failed",
+                message="Tool failed.",
+                detail={"tool_call_id": "call_1"},
+            ).model_dump(mode="json"),
+            {
+                "code": "tool_failed",
+                "message": "Tool failed.",
+                "detail": {"tool_call_id": "call_1"},
+            },
+        )
 
 
 class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -890,6 +997,98 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
             "".join(pieces),
         )
 
+    async def test_llm_call_operator_bounds_first_delta_latency(self) -> None:
+        source_closed = asyncio.Event()
+
+        class PausedProvider(LLMProvider):
+            provider_name = "paused"
+
+            async def ainvoke(self, request: LLMRequest) -> LLMResponse:
+                raise AssertionError("ainvoke should not be used")
+
+            async def astream(self, request: LLMRequest):
+                try:
+                    yield LLMStreamChunk(
+                        type="text_delta",
+                        text_delta="first",
+                    )
+                    await asyncio.Event().wait()
+                finally:
+                    source_closed.set()
+
+        operator = create_llm_call_operator(PausedProvider())
+        result = await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                ),
+                "mode": "stream",
+            }
+        )
+        assert isinstance(result, StreamingResult)
+        iterator = result.source.__aiter__()
+
+        started = asyncio.get_running_loop().time()
+        with patch(
+            "autoagent.ai.operators.llm_call."
+            "_LLM_STREAM_DELTA_MAX_DELAY_SECONDS",
+            0.010,
+        ):
+            first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+        elapsed = asyncio.get_running_loop().time() - started
+        await iterator.aclose()
+
+        self.assertEqual("first", first.text_delta)
+        self.assertLess(elapsed, 0.15)
+        self.assertTrue(source_closed.is_set())
+
+    async def test_llm_call_operator_bounds_each_partial_delta_interval(
+        self,
+    ) -> None:
+        release_second = asyncio.Event()
+
+        class GatedProvider(LLMProvider):
+            provider_name = "gated"
+
+            async def ainvoke(self, request: LLMRequest) -> LLMResponse:
+                raise AssertionError("ainvoke should not be used")
+
+            async def astream(self, request: LLMRequest):
+                yield LLMStreamChunk(type="text_delta", text_delta="one")
+                await release_second.wait()
+                yield LLMStreamChunk(type="text_delta", text_delta="two")
+                await asyncio.Event().wait()
+
+        operator = create_llm_call_operator(GatedProvider())
+        result = await operator.ainvoke(
+            {
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="hello"),),
+                ),
+                "mode": "stream",
+            }
+        )
+        assert isinstance(result, StreamingResult)
+        iterator = result.source.__aiter__()
+
+        with patch(
+            "autoagent.ai.operators.llm_call."
+            "_LLM_STREAM_DELTA_MAX_DELAY_SECONDS",
+            0.010,
+        ):
+            first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            release_second.set()
+            interval_started = asyncio.get_running_loop().time()
+            second = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            visible_interval = (
+                asyncio.get_running_loop().time() - interval_started
+            )
+        await iterator.aclose()
+
+        self.assertEqual("one", first.text_delta)
+        self.assertEqual("two", second.text_delta)
+        self.assertLess(visible_interval, 0.15)
+
     async def test_llm_call_operator_coalesces_only_matching_tool_call_deltas(
         self,
     ) -> None:
@@ -1144,6 +1343,51 @@ class ReActWorkflowTests(unittest.TestCase):
             default=True,
         )
         return app
+
+    def test_llm_call_node_emits_the_standard_non_stream_event_contract(
+        self,
+    ) -> None:
+        response = LLMResponse(
+            model="test-model",
+            message=LLMMessage(
+                role="assistant",
+                content="answer",
+                reasoning_content="private reasoning",
+            )
+        )
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses([response], requests)
+        workflow = Workflow(id="direct_llm_call")
+        workflow.add_node(
+            llm_call_node(
+                id="answer",
+                input_mapping=lambda ctx: {
+                    "request": ctx.invocation_input["request"],
+                    "mode": "invoke",
+                },
+            )
+        )
+
+        invocation = app.invoke(
+            workflow,
+            input={
+                "request": LLMRequest(
+                    messages=(LLMMessage(role="user", content="question"),)
+                )
+            },
+            event_mode="minimal",
+        )
+        events = app.runtime_store.list_user_events(
+            invocation_id=invocation.id,
+        )
+
+        self.assertEqual(invocation.state, "completed")
+        self.assertEqual([event.type for event in events], ["message_completed"])
+        self.assertEqual(events[0].data["message"]["content"], "answer")
+        self.assertEqual(
+            events[0].data["message"]["reasoning_content"],
+            "private reasoning",
+        )
 
     def test_graph_has_one_entry_one_exit_and_prepare_is_loop_header(self) -> None:
         requests: list[LLMRequest] = []
@@ -1424,6 +1668,17 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertEqual(
             requests[1].messages[-2].reasoning_content,
             "Try the unstable tool first.",
+        )
+        requested = next(
+            event
+            for event in app.runtime_store.list_user_events(
+                invocation_id=invocation.id
+            )
+            if event.type == "tool_call_requested"
+        )
+        self.assertEqual(
+            "Try the unstable tool first.",
+            requested.data["reasoning_content"],
         )
 
     def test_multiple_calls_to_one_tool_use_one_generated_map_node(self) -> None:

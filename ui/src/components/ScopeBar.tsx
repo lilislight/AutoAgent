@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Database,
   LoaderCircle,
+  MessageCircle,
   Moon,
   RefreshCw,
   Search,
@@ -37,9 +38,12 @@ interface ScopeBarProps {
   refreshingInvocation: boolean;
   canCancelInvocation: boolean;
   cancellingInvocation: boolean;
+  agentOpen: boolean;
+  agentUnreadCount: number;
   onRefreshInvocation: () => void;
   onCancelInvocation: () => void;
   onInspectInvocation: () => void;
+  onToggleAgent: () => void;
   onScopeChange: (workflowId: string, sessionId: string, invocationId: string) => void;
   onToggleTheme: () => void;
 }
@@ -56,9 +60,12 @@ export function ScopeBar({
   refreshingInvocation,
   canCancelInvocation,
   cancellingInvocation,
+  agentOpen,
+  agentUnreadCount,
   onRefreshInvocation,
   onCancelInvocation,
   onInspectInvocation,
+  onToggleAgent,
   onScopeChange,
   onToggleTheme,
 }: ScopeBarProps) {
@@ -79,6 +86,23 @@ export function ScopeBar({
         onScopeChange={onScopeChange}
       />
       <div className="scope-actions">
+        {sessionId && (
+          <button
+            className={`icon-button agent-trigger ${agentOpen ? "is-active" : ""}`}
+            type="button"
+            onClick={onToggleAgent}
+            title="Open Agent Activity for this Session"
+            aria-label="Open Agent Activity"
+            aria-expanded={agentOpen}
+          >
+            <MessageCircle size={17} />
+            {agentUnreadCount > 0 && (
+              <span className="agent-unread-badge">
+                {agentUnreadCount > 99 ? "99+" : agentUnreadCount}
+              </span>
+            )}
+          </button>
+        )}
         {selectedInvocation && (
           <button
             className="icon-button"

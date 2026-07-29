@@ -166,8 +166,15 @@ export interface InvocationSummary {
   live_sequence?: number;
   durable_sequence?: number;
   persistence_status?: string;
+  user_event_persistence_status?: string;
   created_at_ms: number;
   updated_at_ms: number;
+}
+
+export interface InvocationRecord extends InvocationSummary {
+  input: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: Record<string, unknown> | null;
 }
 
 export interface OperatorCallView {

@@ -113,6 +113,7 @@ business value.
 
 ### Tools and ReAct
 
+- `llm_call_node`
 - `tool`
 - `ToolDefinition`
 - `get_tool_definition`
@@ -131,7 +132,8 @@ business value.
 - `create_llm_call_operator`
 - `register_llm_call_operator`
 
-Workflow modules normally use protocol types, `tool`, and `react_workflow`.
+Workflow modules normally use protocol types, `llm_call_node`, `tool`, and
+`react_workflow`.
 CLI/host infrastructure configures the Provider. Do not create an App or
 register the Provider inside a Workflow definition.
 

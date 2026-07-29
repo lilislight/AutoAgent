@@ -11,8 +11,23 @@ from autoagent.ai.models.llm import (
     LLMUsage,
     response_format_from_type,
 )
+from autoagent.ai.models.user_event import (
+    AgentFailedPayload,
+    AgentOutputPayload,
+    MessageAbortedPayload,
+    MessageCompletedPayload,
+    MessageDeltaPayload,
+    ReactUserEventPayload,
+    ReasoningDeltaPayload,
+    ToolCallDeltaPayload,
+    ToolCallRequestedCall,
+    ToolCallRequestedPayload,
+    ToolResultPayload,
+)
 
 __all__ = [
+    "AgentFailedPayload",
+    "AgentOutputPayload",
     "LLMMessage",
     "LLMNamedToolChoice",
     "LLMRequest",
@@ -23,5 +38,14 @@ __all__ = [
     "LLMToolChoice",
     "LLMToolDefinition",
     "LLMUsage",
+    "MessageAbortedPayload",
+    "MessageCompletedPayload",
+    "MessageDeltaPayload",
+    "ReactUserEventPayload",
+    "ReasoningDeltaPayload",
+    "ToolCallDeltaPayload",
+    "ToolCallRequestedCall",
+    "ToolCallRequestedPayload",
+    "ToolResultPayload",
     "response_format_from_type",
 ]

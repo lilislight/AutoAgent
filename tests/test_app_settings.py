@@ -15,6 +15,22 @@ from autoagent.core.server import SERVER_ENV_KEYS
 
 
 class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_persistence_budget_is_128_256_512_mib(self) -> None:
+        settings = AutoAgentSettings.from_env(env_file=None, environ={})
+
+        self.assertEqual(
+            128 * 1024 * 1024,
+            settings.persistence_queue_low_watermark_bytes,
+        )
+        self.assertEqual(
+            256 * 1024 * 1024,
+            settings.persistence_queue_high_watermark_bytes,
+        )
+        self.assertEqual(
+            512 * 1024 * 1024,
+            settings.persistence_queue_hard_watermark_bytes,
+        )
+
     async def test_environment_builds_the_complete_database_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "runtime.db"

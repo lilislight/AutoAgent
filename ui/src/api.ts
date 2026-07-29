@@ -1,6 +1,7 @@
 import { projectEvents } from "./projection";
 import type {
   InvocationDetail,
+  InvocationRecord,
   InvocationCancelResponse,
   InvocationSummary,
   InvocationResumeResponse,
@@ -181,6 +182,27 @@ export async function listInvocations(sessionId: string): Promise<InvocationSumm
   )).items;
 }
 
+export function listAgentInvocationNeighbors(
+  sessionId: string,
+  anchorInvocationId: string,
+  direction: "older" | "newer",
+  limit = 20,
+): Promise<{
+  items: InvocationSummary[];
+  has_more: boolean;
+  direction: "older" | "newer";
+  anchor_invocation_id: string;
+}> {
+  const query = new URLSearchParams({
+    anchor_invocation_id: anchorInvocationId,
+    direction,
+    limit: String(limit),
+  });
+  return requestJson(
+    `${API}/sessions/${sessionId}/agent-invocations?${query.toString()}`,
+  );
+}
+
 export function submitInvocation(
   workflowId: string,
   body: {
@@ -240,7 +262,7 @@ export async function getTraceView(
 
 export function getInvocation(
   invocationId: string,
-): Promise<InvocationSummary> {
+): Promise<InvocationRecord> {
   return requestJson(`${API}/invocations/${invocationId}`);
 }
 

@@ -463,7 +463,7 @@ function UserEventView({
               <span className="event-runtime-meta">
                 {event.node_id}
               </span>
-              <JsonBlock value={event.data} empty="No UserEvent data." />
+              <JsonBlock value={event} empty="No UserEvent envelope." />
             </div>
           </li>
         ))}

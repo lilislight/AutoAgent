@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from autoagent import (
     AutoAgentApp,
     AutoAgentServer,
-    CapabilityRef,
     NodePolicy,
     RecoveryPolicy,
     Workflow,
@@ -25,6 +24,7 @@ from autoagent.ai import (
     LLMMessage,
     LLMRequest,
     LLMResponse,
+    llm_call_node,
     react_workflow,
     register_llm_call_operator,
     tool,
@@ -203,10 +203,11 @@ def build_workflow() -> Workflow:
 
     workflow.add_node(weather_agent, node_id="weather_agent")
     workflow.add_node(
-        CapabilityRef(id=LLM_CALL_CAPABILITY_ID),
-        node_id="translate_to_chinese",
-        input_mapping=map_translation_request,
-        policy=NodePolicy(recovery=RecoveryPolicy(mode="never")),
+        llm_call_node(
+            id="translate_to_chinese",
+            input_mapping=map_translation_request,
+            policy=NodePolicy(recovery=RecoveryPolicy(mode="never")),
+        ),
     )
     workflow.add_node(
         translated_output,

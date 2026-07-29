@@ -29,9 +29,14 @@ def prepare_request(question: str) -> LLMRequest:
     )
 ```
 
-An LLM Node should consume `LLMRequest` and produce `LLMResponse`. The runtime
-host registers an Operator implementing `llm_call`; Workflow source does not
-construct the App or register Provider credentials.
+An LLM Node should consume `LLMRequest` and produce `LLMResponse`. Build it
+with `llm_call_node(...)`, then add the returned Node to the Workflow. This
+installs AutoAgent's stable message, reasoning, and Tool-call UserEvent
+mappings. Do not use a raw `CapabilityRef("llm_call")` when the call should be
+visible in Agent Activity.
+
+The runtime host registers an Operator implementing `llm_call`; Workflow source
+does not construct the App or register Provider credentials.
 
 `LLMRequest` supports:
 
@@ -66,20 +71,22 @@ Operator calls and is not sent to the model API. Both modes produce one final
 framework `StreamingResult`; chunks remain transient and are not copied into
 Runtime state or persistence.
 
-ReActWorkflow also emits a mode-independent, process-local UserEvent stream for
-Agent UIs. Standard types use lowercase `snake_case`:
+Both `llm_call_node(...)` and ReActWorkflow emit mode-independent UserEvents
+for Agent UIs. Standard types use lowercase `snake_case`:
 
 - `message_delta`, `reasoning_delta`, `message_completed`, and
   `message_aborted`;
 - `tool_call_delta` and `tool_call_requested`;
 - `tool_result`, `agent_output`, and `agent_failed`.
 
-These mappings are installed by ReActWorkflow. Workflow authors do not inspect
-execution stages or manually translate LLM chunks. Tool-call parse or schema
-validation failures and structured-output validation failures are internal
-repair steps and do not emit failure-specific UserEvents. The raw model request
-is still visible as `tool_call_requested`; no `tool_result` exists unless a Tool
-Node actually runs.
+The standard LLM Node installs message, reasoning, and Tool-call mappings.
+ReActWorkflow reuses those mappings and additionally emits `tool_result`,
+`agent_output`, and `agent_failed`. Workflow authors do not inspect execution
+stages or manually translate LLM chunks. Tool-call parse or schema validation
+failures and structured-output validation failures are internal repair steps
+and do not emit failure-specific UserEvents. The raw model request is still
+visible as `tool_call_requested`; no `tool_result` exists unless a Tool Node
+actually runs.
 
 ## Structured output
 

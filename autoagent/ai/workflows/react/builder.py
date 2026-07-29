@@ -5,13 +5,16 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from autoagent.ai.capabilities.llm_call import LLM_CALL_CAPABILITY_ID
 from autoagent.ai.models.llm import (
     LLMMessage,
     LLMRequest,
     LLMResponse,
-    LLMStreamChunk,
 )
+from autoagent.ai.models.user_event import (
+    AgentOutputPayload,
+    ToolResultPayload,
+)
+from autoagent.ai.nodes import llm_call_node
 from autoagent.ai.models.react import (
     PreparedLLMCall,
     ToolCallBatch,
@@ -35,7 +38,6 @@ from autoagent.ai.workflows.react.tool_execution import (
 )
 from autoagent.core.operators import Operator
 from autoagent.core.workflow import (
-    CapabilityRef,
     EdgePolicy,
     MapPolicy,
     NodePolicy,
@@ -147,52 +149,13 @@ def react_workflow(
     def classify_response(response: LLMResponse) -> LLMResponse:
         return response
 
-    def text_delta(chunk: LLMStreamChunk) -> dict[str, Any] | None:
-        if chunk.type != "text_delta":
-            return None
-        return {"delta": chunk.text_delta}
-
-    def reasoning_delta(chunk: LLMStreamChunk) -> dict[str, Any] | None:
-        if chunk.type != "reasoning_delta":
-            return None
-        return {"delta": chunk.reasoning_delta}
-
-    def tool_call_delta(chunk: LLMStreamChunk) -> dict[str, Any] | None:
-        if chunk.type != "tool_call_delta":
-            return None
-        return {
-            "tool_call_index": chunk.tool_call_index,
-            "tool_call_id": chunk.tool_call_id,
-            "tool_name": chunk.tool_name,
-            "arguments_delta": chunk.tool_arguments_delta,
-        }
-
-    def completed_message(response: LLMResponse) -> dict[str, Any] | None:
-        if response.message.tool_calls:
-            return None
-        return response.model_dump(mode="json")
-
-    def requested_tool_calls(
-        response: LLMResponse,
-    ) -> dict[str, Any] | None:
-        if not response.message.tool_calls:
-            return None
-        return {
-            "calls": [
-                {
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "raw_arguments": call.raw_arguments,
-                }
-                for call in response.message.tool_calls
-            ]
-        }
-
     def tool_results(batch: ToolExecutionBatch) -> dict[str, Any]:
-        return batch.model_dump(mode="json")
+        return ToolResultPayload(
+            results=batch.results,
+        ).model_dump(mode="json")
 
     def agent_output(value: Any) -> dict[str, Any]:
-        return {"output": value}
+        return AgentOutputPayload(output=value).model_dump(mode="json")
 
     def map_response(ctx: Any) -> dict[str, Any]:
         return {"response": ctx.incoming[0].value}
@@ -249,35 +212,14 @@ def react_workflow(
         ),
     )
     workflow.add_node(
-        CapabilityRef(id=LLM_CALL_CAPABILITY_ID),
-        node_id="llm_call",
-        input_mapping=map_incoming,
-        policy=NodePolicy(
-            recovery=RecoveryPolicy(mode="never"),
-            resource=ResourcePolicy(
-                max_node_executions_per_invocation=max_steps,
-            ),
-        ),
-        metadata={"_autoagent_user_event_stream": "message"},
-        stream_user_event_mapping=(
-            UserEventMapping(type="message_delta", transform=text_delta),
-            UserEventMapping(
-                type="reasoning_delta",
-                transform=reasoning_delta,
-            ),
-            UserEventMapping(
-                type="tool_call_delta",
-                transform=tool_call_delta,
-            ),
-        ),
-        user_event_mapping=(
-            UserEventMapping(
-                type="message_completed",
-                transform=completed_message,
-            ),
-            UserEventMapping(
-                type="tool_call_requested",
-                transform=requested_tool_calls,
+        llm_call_node(
+            id="llm_call",
+            input_mapping=map_incoming,
+            policy=NodePolicy(
+                recovery=RecoveryPolicy(mode="never"),
+                resource=ResourcePolicy(
+                    max_node_executions_per_invocation=max_steps,
+                ),
             ),
         ),
     )

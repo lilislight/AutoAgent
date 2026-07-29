@@ -18,6 +18,7 @@ from autoagent.ai.models import (
     LLMUsage,
     response_format_from_type,
 )
+from autoagent.ai.nodes import llm_call_node
 from autoagent.ai.operators import (
     create_llm_call_operator,
     register_llm_call_operator,
@@ -60,6 +61,7 @@ __all__ = [
     "ToolDefinition",
     "create_llm_call_operator",
     "get_tool_definition",
+    "llm_call_node",
     "react_workflow",
     "register_llm_call_operator",
     "response_format_from_type",

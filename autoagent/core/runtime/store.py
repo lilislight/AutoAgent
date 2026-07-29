@@ -5,7 +5,7 @@ from collections import OrderedDict
 from copy import deepcopy
 import logging
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
@@ -20,6 +20,7 @@ from autoagent.core.runtime.persistence import (
     freeze_admission_envelope,
     freeze_event_envelope,
     freeze_invocation_state_envelope,
+    freeze_user_event_batch_envelope,
     freeze_workflow_envelope,
 )
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
@@ -115,6 +116,25 @@ class DurableBackend(Protocol):
         limit: int,
     ) -> tuple[RuntimeEvent, ...]: ...
 
+    async def alist_user_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int,
+        limit: int,
+    ) -> tuple[UserEvent, ...]: ...
+
+    async def alatest_user_event_sequence(
+        self,
+        invocation_id: UUID,
+    ) -> int: ...
+
+
+_NON_DURABLE_USER_EVENT_TYPES = frozenset(
+    {"message_delta", "reasoning_delta", "tool_call_delta"}
+)
+
+
 class RuntimeStore:
     """Authoritative in-memory runtime center with optional durability.
 
@@ -149,9 +169,15 @@ class RuntimeStore:
         self.invocations: dict[UUID, Invocation] = {}
         self.invocation_sessions: dict[UUID, UUID] = {}
         self.runtime_events: dict[UUID, list[RuntimeEvent]] = {}
-        # UserEvents are intentionally process-local in V1. They are neither
-        # persistence envelopes nor part of RuntimeEvent replay/recovery.
+        # UserEvents form an independent UI/application journal. They are not
+        # RuntimeEvents and never participate in execution replay/recovery.
         self.user_events: dict[UUID, list[UserEvent]] = {}
+        self._user_event_sequences: dict[UUID, int] = {}
+        self._expected_user_event_sequences: dict[UUID, int] = {}
+        self._user_event_change_listeners: dict[
+            UUID,
+            set[Callable[[], None]],
+        ] = {}
         self._replay_checkpoints: dict[
             tuple[UUID, int],
             ExecutionSnapshot,
@@ -446,6 +472,9 @@ class RuntimeStore:
             self.invocations[invocation.id] = invocation
             self.invocation_sessions[invocation.id] = session.id
             self.runtime_events[invocation.id] = []
+            self.user_events[invocation.id] = []
+            self._user_event_sequences[invocation.id] = 0
+            self._expected_user_event_sequences[invocation.id] = 0
             if invocation.event_mode == "full":
                 self._reduced_states[invocation.id] = state
                 self._replay_checkpoints[(invocation.id, 0)] = snapshot
@@ -823,11 +852,24 @@ class RuntimeStore:
                     after_sequence=0,
                     before_sequence=None,
                 )
+            latest_user_event_sequence = (
+                0
+                if self.backend is None
+                else await self.backend.alatest_user_event_sequence(
+                    invocation_id
+                )
+            )
             with self._lock:
                 self._cache_session(session)
                 self.invocations[invocation.id] = invocation
                 self.invocation_sessions[invocation.id] = session.id
                 self.runtime_events[invocation.id] = list(all_events)
+                self._user_event_sequences[invocation.id] = (
+                    latest_user_event_sequence
+                )
+                self._expected_user_event_sequences[invocation.id] = (
+                    latest_user_event_sequence
+                )
                 if invocation.event_mode == "full":
                     self._reduced_states[invocation.id] = (
                         capture_execution_state(session, invocation)
@@ -873,7 +915,7 @@ class RuntimeStore:
         invocation_id: UUID,
         spec: UserEventSpec,
     ) -> UserEvent:
-        """Validate, detach, sequence, and retain one process-local UserEvent."""
+        """Validate, detach, sequence, and retain one UserEvent."""
 
         event = self._record_user_events(
             invocation_id=invocation_id,
@@ -906,7 +948,10 @@ class RuntimeStore:
             if invocation_id not in self.invocations:
                 raise KeyError(f"Unknown Invocation: {invocation_id}")
             values = self.user_events.setdefault(invocation_id, [])
-            first_sequence = values[-1].sequence + 1 if values else 1
+            first_sequence = self._user_event_sequences.get(
+                invocation_id,
+                0,
+            ) + 1
             events = tuple(
                 UserEvent.model_construct(
                     id=uuid4(),
@@ -925,7 +970,117 @@ class RuntimeStore:
                 )
             )
             values.extend(events)
-            return events
+            self._user_event_sequences[invocation_id] = events[-1].sequence
+        self._publish_user_event_persistence(invocation_id, events)
+        self._notify_user_event_change(invocation_id)
+        return events
+
+    def _publish_user_event_persistence(
+        self,
+        invocation_id: UUID,
+        events: tuple[UserEvent, ...],
+    ) -> None:
+        persistence = self.persistence
+        if persistence is None:
+            return
+        durable_events = tuple(
+            event
+            for event in events
+            if event.type not in _NON_DURABLE_USER_EVENT_TYPES
+        )
+        if not durable_events:
+            return
+        with self._lock:
+            session_id = self.invocation_sessions[invocation_id]
+            session = self.sessions[session_id]
+        envelope = freeze_user_event_batch_envelope(
+            namespace=session.namespace,
+            session_id=session_id,
+            invocation_id=invocation_id,
+            events=durable_events,
+        )
+        with self._lock:
+            self._expected_user_event_sequences[invocation_id] = max(
+                self._expected_user_event_sequences.get(invocation_id, 0),
+                durable_events[-1].sequence,
+            )
+        reservation = persistence.try_reserve(envelope)
+        if reservation is None:
+            persistence.degrade_user_events(
+                invocation_id,
+                durable_events[0].sequence,
+                "persistence queue reached its hard memory limit",
+            )
+            logger.error(
+                "UserEvent batch was not queued because the persistence queue "
+                "reached its hard memory limit; execution and RuntimeEvent "
+                "durability remain available: invocation_id=%s pending_bytes=%s",
+                invocation_id,
+                persistence.pending_bytes,
+            )
+            return
+        persistence.publish(reservation, envelope)
+
+    def subscribe_user_event_changes(
+        self,
+        invocation_id: UUID,
+        listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        """Notify one lightweight listener after UserEvent or terminal changes."""
+
+        with self._lock:
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            self._user_event_change_listeners.setdefault(
+                invocation_id,
+                set(),
+            ).add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                listeners = self._user_event_change_listeners.get(
+                    invocation_id
+                )
+                if listeners is None:
+                    return
+                listeners.discard(listener)
+                if not listeners:
+                    self._user_event_change_listeners.pop(
+                        invocation_id,
+                        None,
+                    )
+
+        return unsubscribe
+
+    def notify_user_event_execution_settled(
+        self,
+        invocation_id: UUID,
+    ) -> None:
+        """Wake followers after all terminal UserEvents have been recorded."""
+
+        with self._lock:
+            invocation = self.invocations.get(invocation_id)
+            terminal = (
+                invocation is not None
+                and invocation.state
+                in {"completed", "failed", "cancelled", "interrupted"}
+            )
+        if terminal:
+            self._notify_user_event_change(invocation_id)
+
+    def _notify_user_event_change(self, invocation_id: UUID) -> None:
+        with self._lock:
+            listeners = tuple(
+                self._user_event_change_listeners.get(invocation_id, ())
+            )
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception(
+                    "UserEvent change listener failed: invocation_id=%s",
+                    invocation_id,
+                )
 
     def list_user_events(
         self,
@@ -951,12 +1106,94 @@ class RuntimeStore:
 
     def latest_user_event_sequence(self, invocation_id: UUID) -> int:
         with self._lock:
-            values = self.user_events.get(invocation_id, ())
-            if values:
-                return values[-1].sequence
+            sequence = self._user_event_sequences.get(invocation_id)
+            if sequence is not None:
+                return sequence
             if invocation_id not in self.invocations:
                 raise KeyError(f"Unknown Invocation: {invocation_id}")
             return 0
+
+    async def alist_user_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> tuple[UserEvent, ...]:
+        if after_sequence < 0 or limit < 1:
+            raise ValueError("Invalid UserEvent page.")
+        with self._lock:
+            known_in_memory = invocation_id in self.user_events
+            memory_values = [
+                event
+                for event in self.user_events.get(invocation_id, ())
+                if event.sequence > after_sequence
+            ]
+            first_memory_sequence = (
+                self.user_events[invocation_id][0].sequence
+                if self.user_events.get(invocation_id)
+                else None
+            )
+        needs_durable_prefix = (
+            self.backend is not None
+            and (
+                not known_in_memory
+                or (
+                    first_memory_sequence is not None
+                    and after_sequence < first_memory_sequence - 1
+                )
+            )
+        )
+        durable_values: tuple[UserEvent, ...] = ()
+        if needs_durable_prefix:
+            durable_values = await self.backend.alist_user_events(
+                invocation_id=invocation_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+            if len(durable_values) >= limit:
+                return durable_values
+        selected = [
+            event
+            for event in memory_values
+            if (
+                not durable_values
+                or event.sequence > durable_values[-1].sequence
+            )
+        ][: limit - len(durable_values)]
+        if known_in_memory or durable_values:
+            return (
+                *durable_values,
+                *(event.model_copy(deep=True) for event in selected),
+            )
+        if self.backend is None:
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            return ()
+        return ()
+
+    async def alatest_user_event_sequence(self, invocation_id: UUID) -> int:
+        with self._lock:
+            sequence = self._user_event_sequences.get(invocation_id)
+            known_in_memory = invocation_id in self.user_events
+        if sequence is not None or known_in_memory:
+            return sequence or 0
+        if self.backend is None:
+            if invocation_id not in self.invocations:
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            return 0
+        return await self.backend.alatest_user_event_sequence(invocation_id)
+
+    def user_event_persistence_status(self, invocation_id: UUID) -> str:
+        if self.backend is None:
+            return "memory_only"
+        with self._lock:
+            expected = self._expected_user_event_sequences.get(
+                invocation_id,
+                0,
+            )
+        assert self.persistence is not None
+        return self.persistence.user_event_status(invocation_id, expected)
 
     def persistence_status(self, invocation_id: UUID) -> str:
         if (
@@ -1044,6 +1281,8 @@ class RuntimeStore:
                     return
                 if self.durable_sequence(invocation_id) < invocation.event_sequence:
                     return
+            if self.user_event_persistence_status(invocation_id) != "durable":
+                return
             release = getattr(self.backend, "release_invocation_cache", None)
             if release is not None:
                 release(invocation_id)
@@ -1082,6 +1321,9 @@ class RuntimeStore:
                     session.current_invocation_id = None
         self.runtime_events.pop(invocation_id, None)
         self.user_events.pop(invocation_id, None)
+        self._user_event_sequences.pop(invocation_id, None)
+        self._expected_user_event_sequences.pop(invocation_id, None)
+        self._user_event_change_listeners.pop(invocation_id, None)
         self._reduced_states.pop(invocation_id, None)
         for key in [
             key

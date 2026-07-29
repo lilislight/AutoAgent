@@ -148,6 +148,46 @@ class RuntimeEventRow(RuntimeDatabaseBase):
     operations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class UserEventRow(RuntimeDatabaseBase):
+    __tablename__ = "user_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "invocation_id",
+            "sequence",
+            name="uq_user_event_sequence",
+        ),
+        Index("ix_user_events_invocation", "invocation_id", "sequence"),
+        Index(
+            "ix_user_events_session_time",
+            "session_id",
+            "occurred_at_ms",
+            "invocation_id",
+            "sequence",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("invocations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    type: Mapped[str] = mapped_column(String(128), nullable=False)
+    data_json: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    node_execution_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    operator_call_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+    )
+    occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class RecoveryStateRow(RuntimeDatabaseBase):
     __tablename__ = "runtime_recovery_states"
 

@@ -1,5 +1,3 @@
-import ELKModule from "elkjs/lib/elk.bundled.js";
-
 import {
   GRAPH_NODE_HEIGHT,
   GRAPH_NODE_WIDTH,
@@ -28,11 +26,9 @@ type LayoutResult = {
   edges?: RoutedLayoutEdge[];
 };
 
-type ElkConstructor = new () => {
+export type ElkLayoutEngine = {
   layout: (graph: unknown) => Promise<LayoutResult>;
 };
-
-const ELK = ELKModule as unknown as ElkConstructor;
 
 const ENTRY_ANCHOR_ID = "__autoagent_entry_anchor__";
 const EXIT_ANCHOR_ID = "__autoagent_exit_anchor__";
@@ -42,8 +38,8 @@ const OUTPUT_PORT_SUFFIX = "__autoagent_output_port__";
 
 export async function computeWorkflowLayout(
   graph: WorkflowGraphView,
+  engine: ElkLayoutEngine,
 ): Promise<WorkflowLayout> {
-  const elk = new ELK();
   const visibleChildren = graph.nodes.map((node) => ({
     id: node.id,
     width: GRAPH_NODE_WIDTH,
@@ -120,7 +116,7 @@ export async function computeWorkflowLayout(
       targets: [groupAnchorId("exit", groupIndex)],
     })),
   ]);
-  const result = await elk.layout({
+  const result = await engine.layout({
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",

@@ -353,7 +353,14 @@ class ReactWeatherFixtureTests(unittest.TestCase):
             )
         )
         try:
-            registered = app.workflow_registry.get(workflow.id)
+            registered = next(
+                (
+                    entry
+                    for entry in app.workflow_registry.values()
+                    if entry.workflow is workflow
+                ),
+                None,
+            )
 
             self.assertIsNotNone(registered)
             assert registered is not None

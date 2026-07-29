@@ -1,7 +1,11 @@
-import type {
-  LayoutWorkerResponse,
-  WorkflowLayout,
-} from "./layoutTypes.js";
+import ELK from "elkjs/lib/elk-api.js";
+import ELKWorker from "elkjs/lib/elk-worker.min.js?worker";
+
+import {
+  computeWorkflowLayout,
+  type ElkLayoutEngine,
+} from "./layoutEngine.js";
+import type { WorkflowLayout } from "./layoutTypes.js";
 import type { WorkflowGraphView } from "./types.js";
 
 export type {
@@ -10,14 +14,7 @@ export type {
   WorkflowLayout,
 } from "./layoutTypes.js";
 
-type PendingLayout = {
-  resolve: (layout: WorkflowLayout) => void;
-  reject: (error: Error) => void;
-};
-
-let layoutWorker: Worker | null = null;
-let nextRequestId = 1;
-const pendingLayouts = new Map<number, PendingLayout>();
+const LAYOUT_TIMEOUT_MS = 15_000;
 
 export async function layoutWorkflow(
   graph: WorkflowGraphView,
@@ -25,12 +22,20 @@ export async function layoutWorkflow(
   if (typeof Worker === "undefined") {
     return computeWithoutWorker(graph);
   }
+  const elk = new ELK({
+    workerFactory: () => new ELKWorker(),
+  });
   try {
-    return await computeInWorker(graph);
+    return await withTimeout(
+      computeWorkflowLayout(graph, elk as ElkLayoutEngine),
+      LAYOUT_TIMEOUT_MS,
+    );
   } catch {
     // Worker construction may be blocked by a restrictive CSP or unsupported
     // embedding environment. Layout remains available on the main thread.
     return computeWithoutWorker(graph);
+  } finally {
+    elk.terminateWorker();
   }
 }
 
@@ -64,55 +69,31 @@ export function saveLayout(
   }
 }
 
-function computeInWorker(
-  graph: WorkflowGraphView,
-): Promise<WorkflowLayout> {
-  const worker = getLayoutWorker();
-  const requestId = nextRequestId++;
-  return new Promise((resolve, reject) => {
-    pendingLayouts.set(requestId, { resolve, reject });
-    worker.postMessage({ requestId, graph });
-  });
-}
-
 async function computeWithoutWorker(
   graph: WorkflowGraphView,
 ): Promise<WorkflowLayout> {
-  const { computeWorkflowLayout } = await import("./layoutEngine.js");
-  return computeWorkflowLayout(graph);
-}
-
-function getLayoutWorker(): Worker {
-  if (layoutWorker) return layoutWorker;
-  const worker = new Worker(
-    new URL("./layout.worker.ts", import.meta.url),
-    { type: "module", name: "autoagent-layout" },
+  const { computeWorkflowLayoutOnMainThread } = await import(
+    "./layoutFallback.js"
   );
-  worker.onmessage = (event: MessageEvent<LayoutWorkerResponse>) => {
-    const response = event.data;
-    const pending = pendingLayouts.get(response.requestId);
-    if (!pending) return;
-    pendingLayouts.delete(response.requestId);
-    if ("error" in response) {
-      pending.reject(new Error(response.error));
-    } else {
-      pending.resolve(response.layout);
-    }
-  };
-  worker.onerror = () => {
-    failLayoutWorker(new Error("Workflow layout Worker failed."));
-  };
-  layoutWorker = worker;
-  return worker;
+  return computeWorkflowLayoutOnMainThread(graph);
 }
 
-function failLayoutWorker(error: Error): void {
-  layoutWorker?.terminate();
-  layoutWorker = null;
-  for (const pending of pendingLayouts.values()) {
-    pending.reject(error);
-  }
-  pendingLayouts.clear();
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(`Workflow layout timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
 }
 
 function layoutKey(definitionHash: string): string {

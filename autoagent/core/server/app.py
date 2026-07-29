@@ -55,6 +55,7 @@ class InvocationSubmitRequest(_ApiModel):
 
 class InvocationSubmitResponse(_ApiModel):
     workflow_id: str
+    workflow_revision_id: str
     session_id: UUID
     session_key: str
     invocation_id: UUID
@@ -69,6 +70,7 @@ class InvocationResumeRequest(_ApiModel):
 
 class InvocationResumeResponse(_ApiModel):
     workflow_id: str
+    workflow_revision_id: str
     session_id: UUID
     session_key: str
     invocation_id: UUID
@@ -342,15 +344,18 @@ class AutoAgentServer:
                 self.trace.workflow_graph(revision_id)
             )
 
-        @router.get("/workflows/{workflow_id}/sessions", dependencies=auth)
+        @router.get(
+            "/workflow-revisions/{workflow_revision_id}/sessions",
+            dependencies=auth,
+        )
         async def list_sessions(
-            workflow_id: str,
+            workflow_revision_id: str,
             cursor: str | None = None,
             limit: int = Query(default=50, ge=1, le=200),
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_sessions(
-                    workflow_id,
+                    workflow_revision_id,
                     cursor=cursor,
                     limit=limit,
                 )
@@ -649,19 +654,25 @@ class AutoAgentServer:
             )
 
         @router.post(
-            "/workflows/{workflow_id}/invocations",
+            "/workflow-revisions/{workflow_revision_id}/invocations",
             response_model=InvocationSubmitResponse,
             dependencies=auth,
         )
         async def submit_invocation(
-            workflow_id: str,
+            workflow_revision_id: str,
             body: InvocationSubmitRequest,
         ) -> InvocationSubmitResponse:
             if not self.execution_enabled:
                 raise HTTPException(status_code=403, detail="Execution API is disabled.")
-            entry = self.agent.workflow_registry.get(workflow_id)
+            entry = self._registered_entry_for_revision(workflow_revision_id)
             if entry is None:
-                raise HTTPException(status_code=404, detail=f"Unknown Workflow: {workflow_id}")
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Workflow revision is not registered for execution: "
+                        f"{workflow_revision_id}"
+                    ),
+                )
             try:
                 admitted = await self.agent._aadmit_invocation(
                     entry.workflow,
@@ -695,7 +706,8 @@ class AutoAgentServer:
             if session_key is None:
                 raise RuntimeError("Admitted Server Session has no external key.")
             return InvocationSubmitResponse(
-                workflow_id=workflow_id,
+                workflow_id=entry.workflow_ir.workflow_id,
+                workflow_revision_id=workflow_revision_id,
                 session_id=admitted.session.id,
                 session_key=session_key,
                 invocation_id=invocation_id,
@@ -703,19 +715,25 @@ class AutoAgentServer:
             )
 
         @router.post(
-            "/workflows/{workflow_id}/resume",
+            "/workflow-revisions/{workflow_revision_id}/resume",
             response_model=InvocationResumeResponse,
             dependencies=auth,
         )
         async def resume_invocation(
-            workflow_id: str,
+            workflow_revision_id: str,
             body: InvocationResumeRequest,
         ) -> InvocationResumeResponse:
             if not self.execution_enabled:
                 raise HTTPException(status_code=403, detail="Execution API is disabled.")
-            entry = self.agent.workflow_registry.get(workflow_id)
+            entry = self._registered_entry_for_revision(workflow_revision_id)
             if entry is None:
-                raise HTTPException(status_code=404, detail=f"Unknown Workflow: {workflow_id}")
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Workflow revision is not registered for execution: "
+                        f"{workflow_revision_id}"
+                    ),
+                )
             kwargs: dict[str, Any] = {
                 "session_id": body.session_key,
                 "wait_key": body.wait_key,
@@ -734,13 +752,14 @@ class AutoAgentServer:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             session = self.agent.runtime_store.find_session(
                 namespace=self.agent.namespace,
-                workflow_id=workflow_id,
+                workflow_revision_id=workflow_revision_id,
                 session_key=body.session_key,
             )
             if session is None:
                 raise HTTPException(status_code=404, detail="Session disappeared.")
             return InvocationResumeResponse(
-                workflow_id=workflow_id,
+                workflow_id=entry.workflow_ir.workflow_id,
+                workflow_revision_id=workflow_revision_id,
                 session_id=session.id,
                 session_key=body.session_key,
                 invocation_id=invocation.id,
@@ -794,6 +813,9 @@ class AutoAgentServer:
             )
 
         return router
+
+    def _registered_entry_for_revision(self, revision_id: str):
+        return self.agent.workflow_registry.get(revision_id)
 
     def _runtime_status(self) -> dict[str, Any]:
         store = self.agent.runtime_store

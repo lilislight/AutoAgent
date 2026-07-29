@@ -12,7 +12,7 @@ import {
   type RoutableEdge,
   type RoutableNode,
 } from "../src/graphRouting.js";
-import { computeWorkflowLayout } from "../src/layoutEngine.js";
+import { computeWorkflowLayoutOnMainThread as computeWorkflowLayout } from "../src/layoutFallback.js";
 import { loadSavedLayout, saveLayout } from "../src/layout.js";
 import type { WorkflowGraphView } from "../src/types.js";
 

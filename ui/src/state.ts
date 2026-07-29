@@ -10,7 +10,7 @@ export type InspectorTab =
   | "context"
   | "definition";
 interface TraceUiState {
-  workflowId: string | null;
+  workflowRevisionId: string | null;
   sessionId: string | null;
   invocationId: string | null;
   cursorSequence: number | null;
@@ -18,11 +18,11 @@ interface TraceUiState {
   followLive: boolean;
   selection: TraceSelection;
   inspectorTab: InspectorTab;
-  setWorkflow: (id: string | null) => void;
+  setWorkflowRevision: (id: string | null) => void;
   setSession: (id: string | null) => void;
   setInvocation: (id: string | null) => void;
   setInvocationScope: (
-    workflowId: string,
+    workflowRevisionId: string,
     sessionId: string,
     invocationId: string,
   ) => void;
@@ -33,7 +33,7 @@ interface TraceUiState {
 }
 
 export const useTraceUi = create<TraceUiState>((set) => ({
-  workflowId: null,
+  workflowRevisionId: null,
   sessionId: null,
   invocationId: null,
   cursorSequence: null,
@@ -41,9 +41,9 @@ export const useTraceUi = create<TraceUiState>((set) => ({
   followLive: true,
   selection: null,
   inspectorTab: "overview",
-  setWorkflow: (workflowId) =>
+  setWorkflowRevision: (workflowRevisionId) =>
     set({
-      workflowId,
+      workflowRevisionId,
       sessionId: null,
       invocationId: null,
       cursorSequence: null,
@@ -68,9 +68,9 @@ export const useTraceUi = create<TraceUiState>((set) => ({
       followLive: true,
       selection: null,
     }),
-  setInvocationScope: (workflowId, sessionId, invocationId) =>
+  setInvocationScope: (workflowRevisionId, sessionId, invocationId) =>
     set({
-      workflowId,
+      workflowRevisionId,
       sessionId,
       invocationId,
       cursorSequence: null,

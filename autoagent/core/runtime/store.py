@@ -89,7 +89,7 @@ class DurableBackend(Protocol):
         self,
         *,
         namespace: str,
-        workflow_id: str,
+        workflow_revision_id: str,
         session_key: str,
     ) -> Session | None: ...
 
@@ -97,7 +97,7 @@ class DurableBackend(Protocol):
         self,
         *,
         namespace: str,
-        workflow_ids: tuple[str, ...],
+        workflow_revision_ids: tuple[str, ...],
     ) -> tuple[UUID, ...]: ...
 
     async def aload_execution_snapshot(
@@ -107,7 +107,23 @@ class DurableBackend(Protocol):
         at_or_before_sequence: int | None,
     ) -> ExecutionSnapshot | None: ...
 
+    async def aload_trace_execution_snapshot(
+        self,
+        invocation_id: UUID,
+        *,
+        at_or_before_sequence: int | None,
+    ) -> ExecutionSnapshot | None: ...
+
     async def alist_runtime_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int,
+        before_sequence: int | None,
+        limit: int,
+    ) -> tuple[RuntimeEvent, ...]: ...
+
+    async def alist_trace_runtime_events(
         self,
         *,
         invocation_id: UUID,
@@ -213,19 +229,19 @@ class RuntimeStore:
         self,
         *,
         namespace: str,
-        workflow_ids: tuple[str, ...],
+        workflow_revision_ids: tuple[str, ...],
     ) -> tuple[UUID, ...]:
         """List active durable Invocations eligible for startup recovery."""
 
-        if not workflow_ids:
+        if not workflow_revision_ids:
             return ()
-        workflow_id_set = set(workflow_ids)
+        revision_id_set = set(workflow_revision_ids)
         with self._lock:
             invocation_ids = [
                 invocation.id
                 for session in self.sessions.values()
                 if session.namespace == namespace
-                and session.workflow_id in workflow_id_set
+                and session.workflow_revision_id in revision_id_set
                 for invocation in [session.get_current_invocation()]
                 if invocation is not None
                 and invocation.event_mode != "minimal"
@@ -234,7 +250,7 @@ class RuntimeStore:
         if self.backend is not None:
             persisted = await self.backend.alist_recoverable_invocation_ids(
                 namespace=namespace,
-                workflow_ids=workflow_ids,
+                workflow_revision_ids=workflow_revision_ids,
             )
             invocation_ids.extend(persisted)
         return tuple(dict.fromkeys(invocation_ids))
@@ -316,9 +332,10 @@ class RuntimeStore:
         *,
         namespace: str,
         workflow_id: str,
+        workflow_revision_id: str,
         session_key: str | None,
     ) -> Session:
-        key = (namespace, workflow_id, session_key)
+        key = (namespace, workflow_revision_id, session_key)
         with self._lock:
             session_id = self.session_keys.get(key)
             if session_id is not None:
@@ -326,6 +343,7 @@ class RuntimeStore:
             session = Session(
                 namespace=namespace,
                 workflow_id=workflow_id,
+                workflow_revision_id=workflow_revision_id,
                 session_key=session_key,
             )
             self._cache_session(session)
@@ -336,19 +354,25 @@ class RuntimeStore:
         *,
         namespace: str,
         workflow_id: str,
+        workflow_revision_id: str,
         session_key: str | None,
     ) -> Session:
         if session_key is not None:
             existing = await self.afind_session(
                 namespace=namespace,
-                workflow_id=workflow_id,
+                workflow_revision_id=workflow_revision_id,
                 session_key=session_key,
             )
             if existing is not None:
+                if existing.workflow_id != workflow_id:
+                    raise ValueError(
+                        "Workflow id does not match the requested Workflow revision."
+                    )
                 return existing
         return self.get_or_create_session(
             namespace=namespace,
             workflow_id=workflow_id,
+            workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
 
@@ -356,12 +380,12 @@ class RuntimeStore:
         self,
         *,
         namespace: str,
-        workflow_id: str,
+        workflow_revision_id: str,
         session_key: str,
     ) -> Session | None:
         with self._lock:
             session_id = self.session_keys.get(
-                (namespace, workflow_id, session_key)
+                (namespace, workflow_revision_id, session_key)
             )
             return self.sessions.get(session_id) if session_id is not None else None
 
@@ -369,19 +393,19 @@ class RuntimeStore:
         self,
         *,
         namespace: str,
-        workflow_id: str,
+        workflow_revision_id: str,
         session_key: str,
     ) -> Session | None:
         value = self.find_session(
             namespace=namespace,
-            workflow_id=workflow_id,
+            workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
         if value is not None or self.backend is None:
             return value
         value = await self.backend.afind_session(
             namespace=namespace,
-            workflow_id=workflow_id,
+            workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
         if value is not None:
@@ -398,6 +422,10 @@ class RuntimeStore:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(f"Unknown session: {session_id}")
+            if invocation.workflow_revision_id != session.workflow_revision_id:
+                raise ValueError(
+                    "Invocation workflow revision does not match its Session."
+                )
             self._ensure_session_can_admit(session)
         if self.persistence is not None:
             await self.persistence.await_admission()
@@ -419,6 +447,7 @@ class RuntimeStore:
                             "id",
                             "namespace",
                             "workflow_id",
+                            "workflow_revision_id",
                             "session_key",
                             "current_invocation_id",
                             "created_at_ms",
@@ -430,6 +459,7 @@ class RuntimeStore:
                         for key in (
                             "id",
                             "session_id",
+                            "workflow_revision_id",
                             "entry_node_id",
                             "state",
                             "execution_mode",
@@ -519,7 +549,7 @@ class RuntimeStore:
         self,
         *,
         namespace: str,
-        workflow_id: str,
+        workflow_revision_id: str,
         session_key: str,
         wait_key: str,
         workflow_definition_hash: str | None = None,
@@ -527,7 +557,7 @@ class RuntimeStore:
     ) -> Session:
         session = await self.afind_session(
             namespace=namespace,
-            workflow_id=workflow_id,
+            workflow_revision_id=workflow_revision_id,
             session_key=session_key,
         )
         if session is None:
@@ -796,6 +826,52 @@ class RuntimeStore:
                 ] = snapshot
         return snapshot
 
+    async def aload_trace_execution_snapshot(
+        self,
+        invocation_id: UUID,
+        *,
+        at_or_before_sequence: int | None = None,
+    ) -> ExecutionSnapshot | None:
+        """Load a JSON-view snapshot without instantiating user runtime types."""
+
+        with self._lock:
+            candidates = [
+                snapshot
+                for (candidate_id, sequence), snapshot
+                in self._replay_checkpoints.items()
+                if candidate_id == invocation_id
+                and (
+                    at_or_before_sequence is None
+                    or sequence <= at_or_before_sequence
+                )
+            ]
+        if candidates:
+            snapshot = max(
+                candidates,
+                key=lambda value: value.through_sequence,
+            )
+            return snapshot.model_copy(
+                update={
+                    "state": self.serializer.json_view(
+                        self.serializer.dumps_unchecked(snapshot.state)
+                    )
+                },
+                deep=True,
+            )
+        if self.backend is None:
+            return None
+        loader = getattr(
+            self.backend,
+            "aload_trace_execution_snapshot",
+            None,
+        )
+        if loader is None:
+            return None
+        return await loader(
+            invocation_id,
+            at_or_before_sequence=at_or_before_sequence,
+        )
+
     async def arebuild_execution(
         self,
         invocation_id: UUID,
@@ -903,6 +979,50 @@ class RuntimeStore:
         if self.backend is None:
             return ()
         return await self.backend.alist_runtime_events(
+            invocation_id=invocation_id,
+            after_sequence=after_sequence,
+            before_sequence=before_sequence,
+            limit=limit,
+        )
+
+    async def alist_trace_runtime_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int = 0,
+        before_sequence: int | None = None,
+        limit: int = 1000,
+    ) -> tuple[RuntimeEvent, ...]:
+        """Read Events for observation without restoring user runtime types."""
+
+        if after_sequence < 0 or limit < 1:
+            raise ValueError("Invalid RuntimeEvent page.")
+        with self._lock:
+            known_in_memory = invocation_id in self.runtime_events
+            values = [
+                event
+                for event in self.runtime_events.get(invocation_id, [])
+                if event.sequence > after_sequence
+                and (
+                    before_sequence is None
+                    or event.sequence < before_sequence
+                )
+            ]
+        if known_in_memory:
+            selected = (
+                values[-limit:]
+                if before_sequence is not None
+                else values[:limit]
+            )
+            return tuple(event.model_copy(deep=True) for event in selected)
+        if self.backend is None:
+            return ()
+        loader = getattr(
+            self.backend,
+            "alist_trace_runtime_events",
+            self.backend.alist_runtime_events,
+        )
+        return await loader(
             invocation_id=invocation_id,
             after_sequence=after_sequence,
             before_sequence=before_sequence,
@@ -1254,7 +1374,11 @@ class RuntimeStore:
     def _cache_session(self, session: Session) -> None:
         self.sessions[session.id] = session
         self.session_keys[
-            (session.namespace, session.workflow_id, session.session_key)
+            (
+                session.namespace,
+                session.workflow_revision_id,
+                session.session_key,
+            )
         ] = session.id
 
     def _persistence_advanced(self, invocation_id: UUID) -> None:

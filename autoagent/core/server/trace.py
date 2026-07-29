@@ -9,8 +9,17 @@ from typing import Any
 from uuid import UUID
 
 from autoagent.core.app import AutoAgentApp
-from autoagent.core.compiler import WorkflowVersionSnapshot
-from autoagent.core.runtime import Invocation, RuntimeEvent, Session, UserEvent
+from autoagent.core.compiler import (
+    WorkflowVersionSnapshot,
+    workflow_revision_id,
+)
+from autoagent.core.runtime import (
+    Invocation,
+    RuntimeEvent,
+    Session,
+    UserEvent,
+    apply_state_operations,
+)
 
 
 @dataclass(frozen=True)
@@ -386,7 +395,7 @@ class TraceService:
         registered_only: bool = False,
     ) -> dict[str, Any]:
         versions = await self._workflow_versions()
-        grouped: dict[str, dict[str, Any]] = {}
+        values: list[dict[str, Any]] = []
         registered = self._registered_workflow_identities()
         for revision_id, snapshot, created_at_ms in versions:
             identity = (
@@ -396,7 +405,6 @@ class TraceService:
             )
             if registered_only and identity not in registered:
                 continue
-            current = grouped.get(snapshot.workflow_id)
             value = {
                 "workflow_id": snapshot.workflow_id,
                 "workflow_version": snapshot.workflow_version,
@@ -409,18 +417,16 @@ class TraceService:
                 "created_at_ms": created_at_ms,
                 "updated_at_ms": created_at_ms,
             }
-            if current is None or created_at_ms >= current["updated_at_ms"]:
-                grouped[snapshot.workflow_id] = value
-        values = sorted(
-            grouped.values(),
-            key=lambda item: (item["updated_at_ms"], item["workflow_id"]),
+            values.append(value)
+        values.sort(
+            key=lambda item: (item["updated_at_ms"], item["revision_id"]),
             reverse=True,
         )
         return _paginate(
             values,
             cursor=cursor,
             limit=limit,
-            key_fields=("updated_at_ms", "workflow_id"),
+            key_fields=("updated_at_ms", "revision_id"),
         ).to_dict()
 
     async def list_workflow_versions(
@@ -476,7 +482,7 @@ class TraceService:
 
     async def list_sessions(
         self,
-        workflow_id: str,
+        workflow_revision_id: str,
         *,
         cursor: str | None,
         limit: int,
@@ -486,13 +492,13 @@ class TraceService:
             session
             for session in self.store.sessions.values()
             if session.namespace == self.agent.namespace
-            and session.workflow_id == workflow_id
+            and session.workflow_revision_id == workflow_revision_id
         ]
         backend_loader = getattr(self.store.backend, "alist_trace_sessions", None)
         if backend_loader is not None:
             for record in await backend_loader(
                 namespace=self.agent.namespace,
-                workflow_id=workflow_id,
+                workflow_revision_id=workflow_revision_id,
                 limit=limit + len(memory_sessions) + 1,
                 before=_decode_cursor(cursor),
             ):
@@ -538,12 +544,10 @@ class TraceService:
             ):
                 values[str(record["id"])] = dict(record)
         if session is not None:
-            revisions = await self._workflow_versions()
             for invocation in memory_invocations:
                 values[str(invocation.id)] = self._invocation_summary(
                     session,
                     invocation,
-                    revisions,
                 )
         ordered = sorted(
             values.values(),
@@ -595,12 +599,10 @@ class TraceService:
             ):
                 values[str(record["id"])] = dict(record)
         if session is not None:
-            revisions = await self._workflow_versions()
             for invocation in memory_invocations:
                 record = self._invocation_summary(
                     session,
                     invocation,
-                    revisions,
                 )
                 key = (int(record["created_at_ms"]), str(record["id"]))
                 if (
@@ -678,7 +680,7 @@ class TraceService:
         before_sequence: int | None,
         limit: int,
     ) -> dict[str, Any]:
-        events = await self.store.alist_runtime_events(
+        events = await self.store.alist_trace_runtime_events(
             invocation_id=invocation_id,
             after_sequence=after_sequence,
             before_sequence=before_sequence,
@@ -709,7 +711,7 @@ class TraceService:
         invocation_id: UUID,
         sequence: int,
     ) -> dict[str, Any]:
-        events = await self.store.alist_runtime_events(
+        events = await self.store.alist_trace_runtime_events(
             invocation_id=invocation_id,
             after_sequence=sequence - 1,
             limit=1,
@@ -760,27 +762,56 @@ class TraceService:
             raise ValueError(
                 "Historical Runtime state is available only for full tracing."
             )
-        session, invocation = await self.store.arebuild_execution(
-            invocation_id,
-            through_sequence=through_sequence,
+        target_sequence = (
+            int(detail["live_sequence"])
+            if through_sequence is None
+            else through_sequence
         )
+        snapshot = await self.store.aload_trace_execution_snapshot(
+            invocation_id,
+            at_or_before_sequence=target_sequence,
+        )
+        if snapshot is None:
+            raise KeyError(
+                f"No execution snapshot for Invocation: {invocation_id}"
+            )
+        state = deepcopy(snapshot.state)
+        cursor = snapshot.through_sequence
+        while cursor < target_sequence:
+            events = await self.store.alist_trace_runtime_events(
+                invocation_id=invocation_id,
+                after_sequence=cursor,
+                before_sequence=target_sequence + 1,
+                limit=min(1_000, target_sequence - cursor),
+            )
+            if not events:
+                break
+            for event in events:
+                if event.sequence != cursor + 1:
+                    raise ValueError(
+                        "RuntimeEvent journal is not contiguous: "
+                        f"expected sequence {cursor + 1}, "
+                        f"got {event.sequence}."
+                    )
+                if event.operations is None:
+                    raise ValueError(
+                        f"Full RuntimeEvent {event.sequence} has no "
+                        "state operations."
+                    )
+                state = apply_state_operations(
+                    state,
+                    event.operations,
+                )
+                cursor = event.sequence
         return {
             "invocation_id": str(invocation_id),
-            "through_sequence": invocation.event_sequence,
-            "session_context": _json_value(
-                self.store,
-                session.context.to_record(),
+            "through_sequence": cursor,
+            "session_context": deepcopy(
+                state["session"]["context"]
             ),
-            "invocation": _json_value(
-                self.store,
-                invocation.to_record(session.id),
-            ),
-            "node_executions": _json_value(
-                self.store,
-                [
-                    execution.to_record(invocation.id)
-                    for execution in invocation.node_executions
-                ],
+            "invocation": deepcopy(state["invocation"]),
+            "node_executions": deepcopy(
+                state.get("node_executions", [])
             ),
         }
 
@@ -806,7 +837,7 @@ class TraceService:
                 break
         cursor = nearest_sequence
         while cursor < through_sequence:
-            page = await self.store.alist_runtime_events(
+            page = await self.store.alist_trace_runtime_events(
                 invocation_id=invocation_id,
                 after_sequence=cursor,
                 limit=min(1_000, through_sequence - cursor),
@@ -965,9 +996,8 @@ class TraceService:
         if invocation is not None:
             session_id = self.store.invocation_sessions[invocation_id]
             session = self.store.sessions[session_id]
-            revisions = await self._workflow_versions()
             return {
-                **self._invocation_summary(session, invocation, revisions),
+                **self._invocation_summary(session, invocation),
                 "input": _json_value(self.store, invocation.input),
                 "result": _json_value(self.store, invocation.result),
                 "error": (
@@ -995,6 +1025,7 @@ class TraceService:
             "id": str(session.id),
             "namespace": session.namespace,
             "workflow_id": session.workflow_id,
+            "workflow_revision_id": session.workflow_revision_id,
             "session_key": session.session_key,
             "current_invocation_id": (
                 str(session.current_invocation_id)
@@ -1013,30 +1044,12 @@ class TraceService:
         self,
         session: Session,
         invocation: Invocation,
-        revisions: list[tuple[str, WorkflowVersionSnapshot, int]],
     ) -> dict[str, Any]:
-        revision_id = next(
-            (
-                candidate
-                for candidate, snapshot, _ in revisions
-                if snapshot.workflow_id == invocation.workflow_id
-                and snapshot.definition_hash
-                == invocation.workflow_definition_hash
-                and snapshot.operator_manifest_hash
-                == invocation.workflow_operator_manifest_hash
-            ),
-            _revision_id(
-                self.agent.namespace,
-                invocation.workflow_id,
-                invocation.workflow_definition_hash or "",
-                invocation.workflow_operator_manifest_hash or "",
-            ),
-        )
         return {
             "id": str(invocation.id),
             "session_id": str(session.id),
             "workflow_id": invocation.workflow_id,
-            "workflow_revision_id": revision_id,
+            "workflow_revision_id": invocation.workflow_revision_id,
             "workflow_version": invocation.workflow_version,
             "definition_hash": invocation.workflow_definition_hash,
             "operator_manifest_hash": (
@@ -1080,12 +1093,22 @@ class TraceService:
                 or refresh_database
             )
         ):
-            self._database_workflow_versions = list(
-                await backend_loader(
+            database_versions: list[
+                tuple[str, WorkflowVersionSnapshot, int]
+            ] = []
+            before: tuple[int, str] | None = None
+            while True:
+                page = list(await backend_loader(
                     namespace=self.agent.namespace,
                     limit=500,
-                )
-            )
+                    before=before,
+                ))
+                database_versions.extend(page)
+                if len(page) < 500:
+                    break
+                last_revision_id, _, last_created_at_ms = page[-1]
+                before = (last_created_at_ms, last_revision_id)
+            self._database_workflow_versions = database_versions
         for revision_id, snapshot, created_at_ms in (
             self._database_workflow_versions or ()
         ):
@@ -1107,7 +1130,7 @@ class TraceService:
             if identity in values:
                 continue
             values[identity] = (
-                _revision_id(
+                workflow_revision_id(
                     self.agent.namespace,
                     snapshot.workflow_id,
                     snapshot.definition_hash,
@@ -1126,7 +1149,7 @@ class TraceService:
             values.setdefault(
                 identity,
                 (
-                    _revision_id(
+                    workflow_revision_id(
                         self.agent.namespace,
                         snapshot.workflow_id,
                         snapshot.definition_hash,
@@ -1222,25 +1245,6 @@ def _workflow_groups(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return groups
-
-
-def _revision_id(
-    namespace: str,
-    workflow_id: str,
-    definition_hash: str,
-    operator_manifest_hash: str,
-) -> str:
-    import hashlib
-
-    value = "\0".join(
-        (
-            namespace,
-            workflow_id,
-            definition_hash,
-            operator_manifest_hash,
-        )
-    )
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _json_value(store, value: Any) -> Any:

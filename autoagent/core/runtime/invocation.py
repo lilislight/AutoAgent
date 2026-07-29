@@ -62,6 +62,7 @@ class Invocation:
     def __init__(
         self,
         workflow_id: str,
+        workflow_revision_id: str,
         workflow_version: str | int | None,
         entry_node_id: str,
         input: dict[str, Any] | None = None,
@@ -89,6 +90,7 @@ class Invocation:
             raise ValueError(f"Invalid event_mode: {event_mode}")
         self.id = id or uuid4()
         self.workflow_id = workflow_id
+        self.workflow_revision_id = workflow_revision_id
         self.workflow_version = workflow_version
         self.workflow_definition_hash = workflow_definition_hash
         self.workflow_operator_manifest_hash = workflow_operator_manifest_hash
@@ -421,6 +423,7 @@ class Invocation:
             "id": str(self.id),
             "session_id": str(session_id),
             "workflow_id": self.workflow_id,
+            "workflow_revision_id": self.workflow_revision_id,
             "workflow_version": self.workflow_version,
             "workflow_definition_hash": self.workflow_definition_hash,
             "workflow_operator_manifest_hash": self.workflow_operator_manifest_hash,
@@ -454,6 +457,7 @@ class Invocation:
         return cls(
             id=UUID(str(record["id"])),
             workflow_id=str(record["workflow_id"]),
+            workflow_revision_id=str(record["workflow_revision_id"]),
             workflow_version=record.get("workflow_version"),
             workflow_definition_hash=record.get("workflow_definition_hash"),
             workflow_operator_manifest_hash=record.get(

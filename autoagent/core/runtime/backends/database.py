@@ -29,7 +29,7 @@ from autoagent.core.runtime.backends.models import (
     WorkflowVersionRow,
 )
 from autoagent.core.runtime.event import RuntimeEvent
-from autoagent.core.compiler import WorkflowVersionSnapshot
+from autoagent.core.compiler import WorkflowVersionSnapshot, workflow_revision_id
 from autoagent.core.operators import OperatorManifest
 from autoagent.core.runtime.context import SessionContext
 from autoagent.core.runtime.hooks import RuntimeEventLoop
@@ -306,7 +306,17 @@ class DatabaseBackend:
             snapshot.definition_hash,
             snapshot.operator_manifest_hash,
         )
-        version_id = self._workflow_version_ids.setdefault(key, uuid4())
+        version_id = self._workflow_version_ids.setdefault(
+            key,
+            UUID(
+                workflow_revision_id(
+                    envelope.namespace,
+                    snapshot.workflow_id,
+                    snapshot.definition_hash,
+                    snapshot.operator_manifest_hash,
+                )
+            ),
+        )
         record = {
             "id": version_id,
             "namespace": envelope.namespace,
@@ -348,14 +358,14 @@ class DatabaseBackend:
         self,
         *,
         namespace: str,
-        workflow_id: str,
+        workflow_revision_id: str,
         session_key: str,
     ) -> Session | None:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.afind_session(
                     namespace=namespace,
-                    workflow_id=workflow_id,
+                    workflow_revision_id=workflow_revision_id,
                     session_key=session_key,
                 )
             )
@@ -367,7 +377,8 @@ class DatabaseBackend:
                 row = await database.scalar(
                     select(SessionRow).where(
                         SessionRow.namespace == namespace,
-                        SessionRow.workflow_id == workflow_id,
+                        SessionRow.workflow_revision_id
+                        == workflow_revision_id,
                         SessionRow.session_key == session_key,
                     )
                 )
@@ -375,9 +386,9 @@ class DatabaseBackend:
             self.coordinator.mark_retrying(exc)
             logger.warning(
                 "Historical Session lookup is unavailable; execution may "
-                "create a process-local Session instead: workflow_id=%s "
+                "create a process-local Session instead: workflow_revision_id=%s "
                 "session_key=%s error=%s",
-                workflow_id,
+                workflow_revision_id,
                 session_key,
                 exc,
             )
@@ -399,7 +410,7 @@ class DatabaseBackend:
                     "Persisted active Invocation was not loaded during "
                     "AutoAgentApp.start(). Register the Workflow before starting "
                     "the App so startup recovery can claim it: "
-                    f"workflow_id={workflow_id}, "
+                    f"workflow_revision_id={workflow_revision_id}, "
                     f"invocation_id={invocation_row.id}"
                 )
         context = await self._hydrate_runtime_values(
@@ -409,6 +420,7 @@ class DatabaseBackend:
             id=UUID(row.id),
             namespace=row.namespace,
             workflow_id=row.workflow_id,
+            workflow_revision_id=row.workflow_revision_id,
             session_key=row.session_key,
             context=SessionContext.from_record(context),
             created_at_ms=row.created_at_ms,
@@ -420,15 +432,15 @@ class DatabaseBackend:
         self,
         *,
         namespace: str,
-        workflow_ids: tuple[str, ...],
+        workflow_revision_ids: tuple[str, ...],
     ) -> tuple[UUID, ...]:
-        if not workflow_ids:
+        if not workflow_revision_ids:
             return ()
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_recoverable_invocation_ids(
                     namespace=namespace,
-                    workflow_ids=workflow_ids,
+                    workflow_revision_ids=workflow_revision_ids,
                 )
             )
         await self.ainitialize()
@@ -442,7 +454,9 @@ class DatabaseBackend:
                     )
                     .where(
                         SessionRow.namespace == namespace,
-                        SessionRow.workflow_id.in_(workflow_ids),
+                        SessionRow.workflow_revision_id.in_(
+                            workflow_revision_ids
+                        ),
                         SessionRow.current_invocation_id == InvocationRow.id,
                         InvocationRow.event_mode != "minimal",
                         InvocationRow.state.in_(
@@ -504,6 +518,7 @@ class DatabaseBackend:
                     "id",
                     "namespace",
                     "workflow_id",
+                    "workflow_revision_id",
                     "session_key",
                     "current_invocation_id",
                     "created_at_ms",
@@ -514,6 +529,7 @@ class DatabaseBackend:
                 key: invocation_record[key]
                 for key in (
                     "id",
+                    "workflow_revision_id",
                     "entry_node_id",
                     "state",
                     "execution_mode",
@@ -918,6 +934,59 @@ class DatabaseBackend:
             ),
         )
 
+    async def aload_trace_execution_snapshot(
+        self,
+        invocation_id: UUID,
+        *,
+        at_or_before_sequence: int | None = None,
+    ) -> ExecutionSnapshot | None:
+        """Load a type-neutral snapshot for observation and UI replay."""
+
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.aload_trace_execution_snapshot(
+                    invocation_id,
+                    at_or_before_sequence=at_or_before_sequence,
+                )
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            row = await database.get(InvocationRow, str(invocation_id))
+            recovery_row = await database.get(
+                RecoveryStateRow,
+                str(invocation_id),
+            )
+        if row is None:
+            return None
+        use_recovery = (
+            recovery_row is not None
+            and (
+                at_or_before_sequence is None
+                or recovery_row.event_sequence <= at_or_before_sequence
+            )
+        )
+        encoded_state = (
+            recovery_row.state_json
+            if use_recovery and recovery_row is not None
+            else row.genesis_state_json
+        )
+        if encoded_state is None:
+            return None
+        return ExecutionSnapshot(
+            invocation_id=invocation_id,
+            through_sequence=(
+                recovery_row.event_sequence
+                if use_recovery and recovery_row is not None
+                else 0
+            ),
+            state=self.serializer.json_view(encoded_state),
+            created_at_ms=(
+                recovery_row.updated_at_ms
+                if use_recovery and recovery_row is not None
+                else row.created_at_ms
+            ),
+        )
+
     async def alist_runtime_events(
         self,
         *,
@@ -1001,6 +1070,76 @@ class DatabaseBackend:
                 events[-1].sequence,
             )
         return events
+
+    async def alist_trace_runtime_events(
+        self,
+        *,
+        invocation_id: UUID,
+        after_sequence: int = 0,
+        before_sequence: int | None = None,
+        limit: int = 1000,
+    ) -> tuple[RuntimeEvent, ...]:
+        """Load type-neutral Events for tracing without runtime registrations."""
+
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.alist_trace_runtime_events(
+                    invocation_id=invocation_id,
+                    after_sequence=after_sequence,
+                    before_sequence=before_sequence,
+                    limit=limit,
+                )
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            statement = select(RuntimeEventRow).where(
+                RuntimeEventRow.invocation_id == str(invocation_id),
+                RuntimeEventRow.sequence > after_sequence,
+            )
+            if before_sequence is not None:
+                statement = statement.where(
+                    RuntimeEventRow.sequence < before_sequence
+                ).order_by(RuntimeEventRow.sequence.desc())
+            else:
+                statement = statement.order_by(RuntimeEventRow.sequence)
+            rows = (
+                await database.scalars(statement.limit(limit))
+            ).all()
+        if before_sequence is not None:
+            rows.reverse()
+        return tuple(
+            RuntimeEvent(
+                id=UUID(row.id),
+                invocation_id=invocation_id,
+                sequence=row.sequence,
+                schema_version=row.schema_version,
+                event_type=row.event_type,
+                event_name=row.event_name,
+                subject_type=row.subject_type,
+                subject_id=row.subject_id,
+                occurred_at_ms=row.occurred_at_ms,
+                elapsed_ns=row.elapsed_ns,
+                status=row.status,
+                timing=self.serializer.json_view(row.timing_json),
+                payload=self.serializer.json_view(row.payload_json),
+                input=(
+                    None
+                    if row.input_json is None
+                    else self.serializer.json_view(row.input_json)
+                ),
+                output=(
+                    None
+                    if row.output_json is None
+                    else self.serializer.json_view(row.output_json)
+                ),
+                operations=(
+                    None
+                    if row.operations_json is None
+                    else self.serializer.json_view(row.operations_json)
+                ),
+            )
+            for row in rows
+        )
 
     async def alist_user_events(
         self,
@@ -1086,21 +1225,32 @@ class DatabaseBackend:
         *,
         namespace: str,
         limit: int = 500,
+        before: tuple[int, str] | None = None,
     ) -> tuple[tuple[str, WorkflowVersionSnapshot, int], ...]:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_trace_workflow_versions(
                     namespace=namespace,
                     limit=limit,
+                    before=before,
                 )
             )
         await self.ainitialize()
         async with self._database_sessions() as database:
+            statement = select(WorkflowVersionRow).where(
+                WorkflowVersionRow.namespace == namespace
+            )
+            if before is not None:
+                statement = statement.where(
+                    tuple_(
+                        WorkflowVersionRow.created_at_ms,
+                        WorkflowVersionRow.id,
+                    )
+                    < before
+                )
             rows = (
                 await database.scalars(
-                    select(WorkflowVersionRow)
-                    .where(WorkflowVersionRow.namespace == namespace)
-                    .order_by(
+                    statement.order_by(
                         WorkflowVersionRow.created_at_ms.desc(),
                         WorkflowVersionRow.id.desc(),
                     )
@@ -1117,10 +1267,12 @@ class DatabaseBackend:
                     compiler_version=row.compiler_version,
                     definition_hash=row.definition_hash,
                     operator_manifest_hash=row.operator_manifest_hash,
-                    definition=self.serializer.loads(row.definition_json),
+                    definition=self.serializer.json_view(
+                        row.definition_json
+                    ),
                     operator_manifests=tuple(
                         OperatorManifest.model_validate(value)
-                        for value in self.serializer.loads(
+                        for value in self.serializer.json_view(
                             row.operator_manifests_json
                         )
                     ),
@@ -1134,7 +1286,7 @@ class DatabaseBackend:
         self,
         *,
         namespace: str,
-        workflow_id: str,
+        workflow_revision_id: str,
         limit: int = 500,
         before: tuple[int, str] | None = None,
     ) -> tuple[dict[str, Any], ...]:
@@ -1142,7 +1294,7 @@ class DatabaseBackend:
             return await self._database_loop.arun(
                 self.alist_trace_sessions(
                     namespace=namespace,
-                    workflow_id=workflow_id,
+                    workflow_revision_id=workflow_revision_id,
                     limit=limit,
                     before=before,
                 )
@@ -1151,7 +1303,7 @@ class DatabaseBackend:
         async with self._database_sessions() as database:
             statement = select(SessionRow).where(
                 SessionRow.namespace == namespace,
-                SessionRow.workflow_id == workflow_id,
+                SessionRow.workflow_revision_id == workflow_revision_id,
             )
             if before is not None:
                 statement = statement.where(
@@ -1210,6 +1362,7 @@ class DatabaseBackend:
                 "id": row.id,
                 "namespace": row.namespace,
                 "workflow_id": row.workflow_id,
+                "workflow_revision_id": row.workflow_revision_id,
                 "session_key": row.session_key,
                 "current_invocation_id": row.current_invocation_id,
                 "current_invocation_state": (
@@ -1328,6 +1481,7 @@ class DatabaseBackend:
                 "id": session.id,
                 "namespace": session.namespace,
                 "workflow_id": session.workflow_id,
+                "workflow_revision_id": session.workflow_revision_id,
                 "session_key": session.session_key,
                 "current_invocation_id": session.current_invocation_id,
                 "current_invocation_state": invocation.state,
@@ -1732,6 +1886,14 @@ class DatabaseBackend:
                 "durable yet."
             )
         version_id = UUID(version_row.id)
+        if (
+            str(version_id) != session["workflow_revision_id"]
+            or str(version_id) != invocation["workflow_revision_id"]
+        ):
+            raise RuntimeError(
+                "Session and Invocation workflow revision identities do not "
+                "match the durable Workflow revision."
+            )
         bundle = self.serializer.loads(_text(item.encoded))
         state = bundle["state"]
         event_mode = invocation["event_mode"]
@@ -1739,6 +1901,7 @@ class DatabaseBackend:
         session_values = {
             "namespace": session["namespace"],
             "workflow_id": session["workflow_id"],
+            "workflow_revision_id": session["workflow_revision_id"],
             "session_key": session["session_key"],
             "current_invocation_id": invocation["id"],
             "context_json": _text(

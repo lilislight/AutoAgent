@@ -96,7 +96,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         )
         session = app.runtime_store.find_session(
             namespace=app.namespace,
-            workflow_id=workflow.id,
+            workflow_revision_id=invocation.workflow_revision_id,
             session_key="incident-response-new-test",
         )
         assert session is not None

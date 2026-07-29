@@ -12,6 +12,7 @@ from autoagent import (
     UserEventMapping,
     streaming_result,
 )
+from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.executor.node_executor import _retry_delay_seconds
 from autoagent.core.workflow import (
     BackoffPolicy,
@@ -26,6 +27,16 @@ from autoagent.core.workflow import (
     Workflow,
 )
 from tests.helpers import started_app
+
+
+def registered_revision_id(app: AutoAgentApp, workflow: Workflow) -> str:
+    snapshot = app.register_workflow(workflow).workflow_snapshot
+    return workflow_revision_id(
+        app.namespace,
+        snapshot.workflow_id,
+        snapshot.definition_hash,
+        snapshot.operator_manifest_hash,
+    )
 
 
 class TextReducer:
@@ -764,7 +775,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         time.sleep(0.01)
         stored = app.runtime_store.find_session(
             namespace=app.namespace,
-            workflow_id=workflow.id,
+            workflow_revision_id=invocation.workflow_revision_id,
             session_key="session",
         ).get_current_invocation()
         execution = stored.latest_node_execution("slow")
@@ -807,7 +818,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             await asyncio.sleep(0.01)
             stored = app.runtime_store.find_session(
                 namespace=app.namespace,
-                workflow_id=workflow.id,
+                workflow_revision_id=registered_revision_id(app, workflow),
                 session_key="session",
             ).get_current_invocation()
             execution = stored.latest_node_execution("slow")

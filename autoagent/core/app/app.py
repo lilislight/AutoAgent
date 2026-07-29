@@ -10,7 +10,12 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel
 
 from autoagent.core.app.settings import AutoAgentSettings
-from autoagent.core.compiler import WorkflowCompiler, WorkflowIR, WorkflowVersionSnapshot
+from autoagent.core.compiler import (
+    WorkflowCompiler,
+    WorkflowIR,
+    WorkflowVersionSnapshot,
+    workflow_revision_id,
+)
 from autoagent.core.executor import NodeExecutor, WorkflowExecutor
 from autoagent.core.operators import (
     Capability,
@@ -125,6 +130,7 @@ class AutoAgentApp:
             runtime_store=self.runtime_store,
         )
         self.workflow_registry: dict[str, WorkflowRegistryEntry] = {}
+        self._workflow_object_revision_ids: dict[int, str] = {}
         self._workflow_registry_lock = RLock()
         # Process-local liveness is deliberately not persisted. If an id is in
         # this set, its worker/control loop is still owned by this App and a
@@ -179,7 +185,7 @@ class AutoAgentApp:
         with self._workflow_registry_lock:
             entries = tuple(self.workflow_registry.values())
         for entry in entries:
-            self._refresh_workflow_snapshot(entry.workflow_ir.workflow_id)
+            self._refresh_workflow_snapshot(entry.workflow)
             await self.runtime_store.asave_workflow_snapshot(
                 self.namespace,
                 entry.workflow_snapshot,
@@ -187,19 +193,31 @@ class AutoAgentApp:
         recoverable_ids = (
             await self.runtime_store.alist_recoverable_invocation_ids(
                 namespace=self.namespace,
-                workflow_ids=tuple(
-                    entry.workflow_ir.workflow_id for entry in entries
+                workflow_revision_ids=tuple(
+                    workflow_revision_id(
+                        self.namespace,
+                        entry.workflow_snapshot.workflow_id,
+                        entry.workflow_snapshot.definition_hash,
+                        entry.workflow_snapshot.operator_manifest_hash,
+                    )
+                    for entry in entries
                 ),
             )
         )
-        entries_by_id = {
-            entry.workflow_ir.workflow_id: entry for entry in entries
+        entries_by_revision = {
+            workflow_revision_id(
+                self.namespace,
+                entry.workflow_snapshot.workflow_id,
+                entry.workflow_snapshot.definition_hash,
+                entry.workflow_snapshot.operator_manifest_hash,
+            ): entry
+            for entry in entries
         }
         for invocation_id in recoverable_ids:
             session, invocation = await self.runtime_store.arebuild_execution(
                 invocation_id
             )
-            entry = entries_by_id.get(invocation.workflow_id)
+            entry = entries_by_revision.get(invocation.workflow_revision_id)
             if entry is None:
                 continue
             if invocation.state == "waiting":
@@ -275,15 +293,20 @@ class AutoAgentApp:
     def register_workflow(self, workflow: Workflow) -> WorkflowRegistryEntry:
         """Compile and cache a Workflow without invoking it.
 
-        AutoAgentServer uses this registry to expose execution APIs by workflow
-        id. Re-registering the same object is idempotent; reusing an id for a
-        different Workflow object is rejected because runtime history is keyed
-        by workflow id and compiled definition hash.
+        AutoAgentServer uses this registry to expose execution APIs by Workflow
+        revision. Re-registering the same object is idempotent. Distinct
+        revisions may share a human-readable ``workflow.id``.
         """
 
         workflow_ir = self._get_or_compile_workflow(workflow)
-        workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
-        return self.workflow_registry[workflow.id]
+        workflow_snapshot = self._refresh_workflow_snapshot(workflow)
+        revision_id = workflow_revision_id(
+            self.namespace,
+            workflow_snapshot.workflow_id,
+            workflow_snapshot.definition_hash,
+            workflow_snapshot.operator_manifest_hash,
+        )
+        return self.workflow_registry[revision_id]
 
     def register_capability(
         self,
@@ -609,14 +632,19 @@ class AutoAgentApp:
                 )
             )
         workflow_ir = self._get_or_compile_workflow(workflow)
-        workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
+        workflow_snapshot = self._refresh_workflow_snapshot(workflow)
         await self.runtime_store.asave_workflow_snapshot(
             self.namespace,
             workflow_snapshot,
         )
         session = await self.runtime_store.aclaim_waiting_session(
             namespace=self.namespace,
-            workflow_id=workflow_ir.workflow_id,
+            workflow_revision_id=workflow_revision_id(
+                self.namespace,
+                workflow_snapshot.workflow_id,
+                workflow_snapshot.definition_hash,
+                workflow_snapshot.operator_manifest_hash,
+            ),
             session_key=session_id,
             wait_key=wait_key,
             workflow_definition_hash=workflow_ir.definition_hash,
@@ -642,19 +670,32 @@ class AutoAgentApp:
 
     def _get_or_compile_workflow(self, workflow: Workflow) -> WorkflowIR:
         with self._workflow_registry_lock:
-            registry_entry = self.workflow_registry.get(workflow.id)
+            object_key = id(workflow)
+            revision_id = self._workflow_object_revision_ids.get(object_key)
+            registry_entry = (
+                self.workflow_registry.get(revision_id)
+                if revision_id is not None
+                else None
+            )
+            if registry_entry is not None:
+                return registry_entry.workflow_ir
+
+            workflow_ir, workflow_snapshot = self._compile_workflow_locked(workflow)
+            revision_id = workflow_revision_id(
+                self.namespace,
+                workflow_snapshot.workflow_id,
+                workflow_snapshot.definition_hash,
+                workflow_snapshot.operator_manifest_hash,
+            )
+            registry_entry = self.workflow_registry.get(revision_id)
             if registry_entry is None:
-                workflow_ir, workflow_snapshot = self._compile_workflow_locked(workflow)
                 registry_entry = WorkflowRegistryEntry(
                     workflow=workflow,
                     workflow_ir=workflow_ir,
                     workflow_snapshot=workflow_snapshot,
                 )
-                self.workflow_registry[workflow.id] = registry_entry
-            elif registry_entry.workflow is not workflow:
-                raise ValueError(
-                    f"Duplicate workflow id already registered: {workflow.id}"
-                )
+                self.workflow_registry[revision_id] = registry_entry
+            self._workflow_object_revision_ids[object_key] = revision_id
             return registry_entry.workflow_ir
 
     def _compile_workflow_locked(
@@ -733,7 +774,7 @@ class AutoAgentApp:
         if event_mode not in {"minimal", "standard", "full"}:
             raise ValueError(f"Invalid event_mode: {event_mode}")
         workflow_ir = self._get_or_compile_workflow(workflow)
-        workflow_snapshot = self._refresh_workflow_snapshot(workflow.id)
+        workflow_snapshot = self._refresh_workflow_snapshot(workflow)
         await self.runtime_store.asave_workflow_snapshot(
             self.namespace,
             workflow_snapshot,
@@ -744,6 +785,12 @@ class AutoAgentApp:
 
         session = await self._get_or_create_session(
             workflow_id=workflow_ir.workflow_id,
+            workflow_revision_id=workflow_revision_id(
+                self.namespace,
+                workflow_snapshot.workflow_id,
+                workflow_snapshot.definition_hash,
+                workflow_snapshot.operator_manifest_hash,
+            ),
             session_id=session_id,
         )
         current = session.get_current_invocation()
@@ -774,6 +821,7 @@ class AutoAgentApp:
     ) -> _PreparedInvocation:
         invocation = Invocation(
             workflow_id=workflow_ir.workflow_id,
+            workflow_revision_id=session.workflow_revision_id,
             workflow_version=workflow_ir.workflow_version,
             workflow_definition_hash=workflow_ir.definition_hash,
             workflow_operator_manifest_hash=workflow_snapshot.operator_manifest_hash,
@@ -803,27 +851,42 @@ class AutoAgentApp:
 
     def _refresh_workflow_snapshot(
         self,
-        workflow_id: str,
+        workflow: Workflow,
     ) -> WorkflowVersionSnapshot:
         """Refresh late-bound Operator manifests without recompiling graph IR."""
 
         with self._workflow_registry_lock:
-            entry = self.workflow_registry[workflow_id]
+            object_key = id(workflow)
+            previous_revision_id = self._workflow_object_revision_ids[object_key]
+            entry = self.workflow_registry[previous_revision_id]
             snapshot = WorkflowVersionSnapshot.from_workflow_ir(
                 entry.workflow_ir,
                 operator_registry=self.operator_registry,
             )
             entry.workflow_snapshot = snapshot
+            revision_id = workflow_revision_id(
+                self.namespace,
+                snapshot.workflow_id,
+                snapshot.definition_hash,
+                snapshot.operator_manifest_hash,
+            )
+            if revision_id != previous_revision_id:
+                if self.workflow_registry.get(previous_revision_id) is entry:
+                    del self.workflow_registry[previous_revision_id]
+                self.workflow_registry[revision_id] = entry
+                self._workflow_object_revision_ids[object_key] = revision_id
             return snapshot
 
     async def _get_or_create_session(
         self,
         *,
         workflow_id: str,
+        workflow_revision_id: str,
         session_id: str | None,
     ) -> Session:
         return await self.runtime_store.aget_or_create_session(
             workflow_id=workflow_id,
+            workflow_revision_id=workflow_revision_id,
             session_key=session_id or str(uuid4()),
             namespace=self.namespace,
         )

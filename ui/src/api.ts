@@ -129,13 +129,26 @@ interface ServerTraceBootstrap {
 }
 
 export async function listWorkflows(): Promise<WorkflowSummary[]> {
-  return (await requestJson<Page<WorkflowSummary>>(`${API}/workflows?limit=200`)).items;
+  return listAllWorkflowPages(`${API}/workflows`);
 }
 
 export async function listRegisteredWorkflows(): Promise<WorkflowSummary[]> {
-  return (await requestJson<Page<WorkflowSummary>>(
-    `${API}/registered-workflows?limit=200`,
-  )).items;
+  return listAllWorkflowPages(`${API}/registered-workflows`);
+}
+
+async function listAllWorkflowPages(path: string): Promise<WorkflowSummary[]> {
+  const values: WorkflowSummary[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = new URLSearchParams({ limit: "200" });
+    if (cursor) query.set("cursor", cursor);
+    const page = await requestJson<Page<WorkflowSummary>>(
+      `${path}?${query.toString()}`,
+    );
+    values.push(...page.items);
+    cursor = page.has_more ? page.next_cursor : null;
+  } while (cursor);
+  return values;
 }
 
 export function getWorkflowGraph(workflow: WorkflowSummary): Promise<WorkflowGraphView> {
@@ -170,9 +183,13 @@ export async function createAuthenticationSession(token: string): Promise<void> 
   await postJson(`${API}/auth/session`, { token });
 }
 
-export async function listSessions(workflowId: string): Promise<SessionSummary[]> {
+export async function listSessions(
+  workflowRevisionId: string,
+): Promise<SessionSummary[]> {
   return (await requestJson<Page<SessionSummary>>(
-    `${API}/workflows/${encodeURIComponent(workflowId)}/sessions?limit=200`,
+    `${API}/workflow-revisions/${
+      encodeURIComponent(workflowRevisionId)
+    }/sessions?limit=200`,
   )).items;
 }
 
@@ -204,7 +221,7 @@ export function listAgentInvocationNeighbors(
 }
 
 export function submitInvocation(
-  workflowId: string,
+  workflowRevisionId: string,
   body: {
     input?: Record<string, unknown> | null;
     session_id?: string | null;
@@ -212,23 +229,33 @@ export function submitInvocation(
     event_mode?: "minimal" | "standard" | "full";
   },
 ): Promise<InvocationSubmitResponse> {
-  return postJson(`${API}/workflows/${encodeURIComponent(workflowId)}/invocations`, {
-    input: body.input,
-    session_key: body.session_id,
-    entry_node_id: body.entry_node_id,
-    event_mode: body.event_mode ?? "standard",
-  });
+  return postJson(
+    `${API}/workflow-revisions/${
+      encodeURIComponent(workflowRevisionId)
+    }/invocations`,
+    {
+      input: body.input,
+      session_key: body.session_id,
+      entry_node_id: body.entry_node_id,
+      event_mode: body.event_mode ?? "standard",
+    },
+  );
 }
 
 export function resumeInvocation(
-  workflowId: string,
+  workflowRevisionId: string,
   body: { session_id: string; wait_key: string; output?: unknown },
 ): Promise<InvocationResumeResponse> {
-  return postJson(`${API}/workflows/${encodeURIComponent(workflowId)}/resume`, {
-    session_key: body.session_id,
-    wait_key: body.wait_key,
-    output: body.output,
-  });
+  return postJson(
+    `${API}/workflow-revisions/${
+      encodeURIComponent(workflowRevisionId)
+    }/resume`,
+    {
+      session_key: body.session_id,
+      wait_key: body.wait_key,
+      output: body.output,
+    },
+  );
 }
 
 export function cancelInvocation(

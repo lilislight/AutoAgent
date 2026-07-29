@@ -51,7 +51,7 @@ export default function App() {
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [eventBuffer, setEventBuffer] = useState<RuntimeEvent[]>([]);
   const [pendingScope, setPendingScope] = useState<{
-    workflowId: string;
+    workflowRevisionId: string;
     sessionId: string;
     invocationId: string;
   } | null>(null);
@@ -65,7 +65,8 @@ export default function App() {
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(248);
   const [invokeOpen, setInvokeOpen] = useState(false);
-  const [invokeWorkflowId, setInvokeWorkflowId] = useState<string | null>(null);
+  const [invokeWorkflowRevisionId, setInvokeWorkflowRevisionId] =
+    useState<string | null>(null);
   const [invokeInput, setInvokeInput] = useState("{}");
   const [invokeSessionKey, setInvokeSessionKey] = useState("");
   const [invokeEntryNodeId, setInvokeEntryNodeId] = useState("");
@@ -152,12 +153,12 @@ export default function App() {
     enabled: authenticated,
   });
   const registeredWorkflows = registeredWorkflowQuery.data ?? [];
-  const workflows = useMemo(() => {
-    return buildWorkflowDirectory(workflowQuery.data ?? [], registeredWorkflows);
-  }, [registeredWorkflows, workflowQuery.data]);
+  const workflows = workflowQuery.data ?? [];
   const invokeWorkflow =
     registeredWorkflows.find(
-      (value) => value.workflow_id === (invokeWorkflowId ?? ui.workflowId),
+      (value) =>
+        value.revision_id
+        === (invokeWorkflowRevisionId ?? ui.workflowRevisionId),
     ) ??
     registeredWorkflows[0] ??
     null;
@@ -174,8 +175,8 @@ export default function App() {
   });
   const invokeGraph = invokeGraphQuery.data;
   const invokeSessionQuery = useQuery({
-    queryKey: ["sessions", invokeWorkflow?.workflow_id, "invoke"],
-    queryFn: () => listSessions(invokeWorkflow!.workflow_id),
+    queryKey: ["sessions", invokeWorkflow?.revision_id, "invoke"],
+    queryFn: () => listSessions(invokeWorkflow!.revision_id),
     enabled: invokeOpen && Boolean(invokeWorkflow),
   });
   const invokeSessions = invokeSessionQuery.data ?? [];
@@ -184,18 +185,25 @@ export default function App() {
     if (pendingScope) return;
     if (!workflowQuery.isSuccess) return;
     if (workflows.length === 0) {
-      if (ui.workflowId) ui.setWorkflow(null);
+      if (ui.workflowRevisionId) ui.setWorkflowRevision(null);
       return;
     }
-    if (!ui.workflowId || !workflows.some((value) => value.workflow_id === ui.workflowId)) {
-      ui.setWorkflow(workflows[0].workflow_id);
+    if (
+      !ui.workflowRevisionId ||
+      !workflows.some(
+        (value) => value.revision_id === ui.workflowRevisionId,
+      )
+    ) {
+      ui.setWorkflowRevision(
+        (workflows.find((value) => value.registered) ?? workflows[0]).revision_id,
+      );
     }
   }, [pendingScope, ui, workflowQuery.isSuccess, workflows]);
 
   const sessionQuery = useQuery({
-    queryKey: ["sessions", ui.workflowId],
-    queryFn: () => listSessions(ui.workflowId!),
-    enabled: Boolean(ui.workflowId),
+    queryKey: ["sessions", ui.workflowRevisionId],
+    queryFn: () => listSessions(ui.workflowRevisionId!),
+    enabled: Boolean(ui.workflowRevisionId),
   });
   const sessions = sessionQuery.data ?? [];
   useEffect(() => {
@@ -235,7 +243,7 @@ export default function App() {
   useEffect(() => {
     if (!pendingScope) return;
     ui.setInvocationScope(
-      pendingScope.workflowId,
+      pendingScope.workflowRevisionId,
       pendingScope.sessionId,
       pendingScope.invocationId,
     );
@@ -482,7 +490,7 @@ export default function App() {
     [activeInvocationDetail, latestTimelineProjection, liveDraftTimeline],
   );
   const viewedWorkflow = activeGraph ?? workflows.find(
-    (workflow) => workflow.workflow_id === ui.workflowId,
+    (workflow) => workflow.revision_id === ui.workflowRevisionId,
   ) ?? null;
   const viewedWorkflowIsRegistered = Boolean(
     viewedWorkflow && registeredWorkflows.some(
@@ -493,7 +501,9 @@ export default function App() {
     ),
   );
   const selectedDirectoryWorkflow =
-    workflows.find((workflow) => workflow.workflow_id === ui.workflowId) ?? null;
+    workflows.find(
+      (workflow) => workflow.revision_id === ui.workflowRevisionId,
+    ) ?? null;
   const selectedGraphQuery = useQuery({
     queryKey: [
       "workflow-graph",
@@ -664,14 +674,19 @@ export default function App() {
   };
 
   const submitFromUi = async () => {
-    const workflowId = invokeWorkflow?.workflow_id;
-    if (!workflowId || !invokeEntryNodeId || !invokeGraph || invokeSubmitting) return;
+    const workflowRevisionId = invokeWorkflow?.revision_id;
+    if (
+      !workflowRevisionId ||
+      !invokeEntryNodeId ||
+      !invokeGraph ||
+      invokeSubmitting
+    ) return;
     setInvokeSubmitting(true);
     setInvokeError(null);
     setInvokeMessage(null);
     try {
       const parsedInput = parseJsonObject(invokeInput);
-      const response = await submitInvocation(workflowId, {
+      const response = await submitInvocation(workflowRevisionId, {
         input: parsedInput,
         session_id: invokeSessionKey.trim() || null,
         entry_node_id: invokeEntryNodeId.trim() || null,
@@ -697,12 +712,13 @@ export default function App() {
       ));
       setLiveDraftTimeline(createLiveDraftTimeline(response.invocation_id));
       setPendingScope({
-        workflowId: response.workflow_id,
+        workflowRevisionId: response.workflow_revision_id,
         sessionId: response.session_id,
         invocationId: response.invocation_id,
       });
       upsertSubmittedScope(queryClient, {
         workflowId: response.workflow_id,
+        workflowRevisionId: response.workflow_revision_id,
         sessionId: response.session_id,
         invocationId: response.invocation_id,
         sessionKey: invokeSessionKey.trim() || null,
@@ -710,14 +726,20 @@ export default function App() {
         state: response.state,
         eventMode: invokeEventMode,
       });
-      ui.setInvocationScope(response.workflow_id, response.session_id, response.invocation_id);
+      ui.setInvocationScope(
+        response.workflow_revision_id,
+        response.session_id,
+        response.invocation_id,
+      );
       ui.setCursor(0, true);
       setInvokeOpen(false);
       setPendingNodeAction(null);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["workflows"] }),
         queryClient.invalidateQueries({ queryKey: ["registered-workflows"] }),
-        queryClient.invalidateQueries({ queryKey: ["sessions", response.workflow_id] }),
+        queryClient.invalidateQueries({
+          queryKey: ["sessions", response.workflow_revision_id],
+        }),
         queryClient.invalidateQueries({ queryKey: ["invocations", response.session_id] }),
       ]);
     } catch (submitError) {
@@ -728,12 +750,13 @@ export default function App() {
   };
 
   const stageInvoke = (entryNodeId: string) => {
-    const workflowId =
-      registeredWorkflows.find((workflow) => workflow.workflow_id === ui.workflowId)
-        ?.workflow_id ??
-      registeredWorkflows[0]?.workflow_id ??
+    const workflowRevisionId =
+      registeredWorkflows.find(
+        (workflow) => workflow.revision_id === ui.workflowRevisionId,
+      )?.revision_id ??
+      registeredWorkflows[0]?.revision_id ??
       null;
-    setInvokeWorkflowId(workflowId);
+    setInvokeWorkflowRevisionId(workflowRevisionId);
     const currentSession = sessions.find((value) => value.id === ui.sessionId);
     setInvokeSessionKey(
       activeInvocationDetail &&
@@ -773,13 +796,14 @@ export default function App() {
     setResumeSubmitting(true);
     setResumeError(null);
     try {
-      const response = await resumeInvocation(activeGraph.workflow_id, {
+      const response = await resumeInvocation(activeGraph.revision_id, {
         session_id: view.session.session_key,
         wait_key: waitKey,
         output,
       });
       upsertSubmittedScope(queryClient, {
         workflowId: response.workflow_id,
+        workflowRevisionId: response.workflow_revision_id,
         sessionId: response.session_id,
         invocationId: response.invocation_id,
         sessionKey: view.session.session_key,
@@ -791,7 +815,9 @@ export default function App() {
         queryClient.invalidateQueries({
           queryKey: ["trace-view", response.session_id, response.invocation_id],
         }),
-        queryClient.invalidateQueries({ queryKey: ["sessions", response.workflow_id] }),
+        queryClient.invalidateQueries({
+          queryKey: ["sessions", response.workflow_revision_id],
+        }),
         queryClient.invalidateQueries({ queryKey: ["invocations", response.session_id] }),
       ]);
       setResumeOpen(false);
@@ -908,7 +934,7 @@ export default function App() {
       <ScopeBar
         workflows={workflows}
         invocations={invocations}
-        workflowId={ui.workflowId}
+        workflowRevisionId={ui.workflowRevisionId}
         sessionId={ui.sessionId}
         invocationId={ui.invocationId}
         invocationState={activeInvocationDetail?.state ?? null}
@@ -932,12 +958,16 @@ export default function App() {
           });
         }}
         onToggleAgent={() => setAgentOpen((value) => !value)}
-        onScopeChange={(workflowId, sessionId, invocationId) => {
+        onScopeChange={(workflowRevisionId, sessionId, invocationId) => {
           clearLiveDraft();
           setPendingNodeAction(null);
           setInvokeOpen(false);
           setResumeOpen(false);
-          ui.setInvocationScope(workflowId, sessionId, invocationId);
+          ui.setInvocationScope(
+            workflowRevisionId,
+            sessionId,
+            invocationId,
+          );
         }}
         onToggleTheme={() => setDarkMode((value) => !value)}
       />
@@ -964,7 +994,7 @@ export default function App() {
         <InvocationLauncher
           workflows={registeredWorkflows}
           sessions={invokeSessions}
-          workflowId={invokeWorkflow?.workflow_id ?? null}
+          workflowRevisionId={invokeWorkflow?.revision_id ?? null}
           input={invokeInput}
           sessionKey={invokeSessionKey}
           entryNodeId={invokeEntryNodeId}
@@ -977,8 +1007,8 @@ export default function App() {
           graphError={invokeGraphQuery.error}
           sessionsLoading={invokeSessionQuery.isLoading}
           sessionsError={invokeSessionQuery.error}
-          onWorkflowChange={(workflowId) => {
-            setInvokeWorkflowId(workflowId);
+          onWorkflowChange={(workflowRevisionId) => {
+            setInvokeWorkflowRevisionId(workflowRevisionId);
             setInvokeEntryNodeId("");
             setInvokeError(null);
           }}
@@ -1118,7 +1148,7 @@ export default function App() {
             followLive={false}
             selection={null}
             canInvoke={Boolean(
-              selectedDirectoryWorkflow?.registered_in_current_app &&
+              selectedDirectoryWorkflow?.registered &&
               runtimeStatusQuery.data?.execution.accepting_invocations
             )}
             onInspect={() => undefined}
@@ -1130,7 +1160,7 @@ export default function App() {
           icon={<GitBranch size={28} />}
           title="No invocation selected"
           detail={
-            ui.workflowId
+            ui.workflowRevisionId
               ? "Loading the selected Workflow graph."
               : "Select a Workflow to inspect or invoke it."
           }
@@ -1175,7 +1205,7 @@ function NodeActionPrompt({
 function InvocationLauncher({
   workflows,
   sessions,
-  workflowId,
+  workflowRevisionId,
   input,
   sessionKey,
   entryNodeId,
@@ -1199,7 +1229,7 @@ function InvocationLauncher({
 }: {
   workflows: WorkflowSummary[];
   sessions: Array<{ id: string; session_key: string | null }>;
-  workflowId: string | null;
+  workflowRevisionId: string | null;
   input: string;
   sessionKey: string;
   entryNodeId: string;
@@ -1242,13 +1272,16 @@ function InvocationLauncher({
         <label>
           Workflow
           <select
-            value={workflowId ?? ""}
+            value={workflowRevisionId ?? ""}
             onChange={(event) => onWorkflowChange(event.target.value || null)}
             disabled={submitting || workflows.length === 0}
           >
             <option value="">Select workflow</option>
             {workflows.map((workflow) => (
-              <option key={workflow.workflow_id} value={workflow.workflow_id}>
+              <option
+                key={workflow.revision_id}
+                value={workflow.revision_id}
+              >
                 {workflow.name || workflow.workflow_id} · {formatWorkflowRevision(
                   workflow.workflow_version,
                   workflow.definition_hash,
@@ -1337,7 +1370,10 @@ function InvocationLauncher({
         </label>
         {message && <p className="invoke-message">{message}</p>}
         {error && <p className="invoke-error">{error}</p>}
-        <button type="submit" disabled={!workflowId || !entryNodeId || submitting}>
+        <button
+          type="submit"
+          disabled={!workflowRevisionId || !entryNodeId || submitting}
+        >
           {submitting ? "Submitting..." : "Invoke"}
         </button>
       </form>
@@ -1539,59 +1575,6 @@ function cachedProjection(
   return projected;
 }
 
-/**
- * Collapse durable revisions into one scope selector option per workflow id.
- *
- * Sessions are keyed by workflow id, while each Invocation carries the exact
- * definition hash that its trace must render.  The selector therefore groups
- * revisions for navigation, prefers the currently executable revision when it
- * exists, and leaves the exact historical revision visible in the scope badge
- * once an Invocation is selected.
- */
-function buildWorkflowDirectory(
-  snapshots: WorkflowSummary[],
-  registered: WorkflowSummary[],
-): WorkflowSummary[] {
-  const registeredKeys = new Set(
-    registered.map((workflow) => workflowRevisionKey(workflow)),
-  );
-  const grouped = new Map<string, WorkflowSummary[]>();
-  for (const snapshot of snapshots) {
-    const values = grouped.get(snapshot.workflow_id) ?? [];
-    values.push(snapshot);
-    grouped.set(snapshot.workflow_id, values);
-  }
-  return [...grouped.values()]
-    .map((revisions) => {
-      const current = revisions.find((revision) =>
-        registeredKeys.has(workflowRevisionKey(revision)),
-      );
-      const representative = current ?? revisions[0];
-      return {
-        ...representative,
-        revision_count: revisions.length,
-        registered_in_current_app: current !== undefined,
-      };
-    })
-    .sort((left, right) => {
-      const sourceOrder =
-        Number(Boolean(right.registered_in_current_app)) -
-        Number(Boolean(left.registered_in_current_app));
-      return sourceOrder || left.workflow_id.localeCompare(right.workflow_id);
-    });
-}
-
-function workflowRevisionKey(workflow: Pick<
-  WorkflowSummary,
-  "workflow_id" | "definition_hash" | "operator_manifest_hash"
->): string {
-  return [
-    workflow.workflow_id,
-    workflow.definition_hash,
-    workflow.operator_manifest_hash,
-  ].join("/");
-}
-
 function formatWorkflowRevision(
   version: string | number | null,
   definitionHash: string | null,
@@ -1606,6 +1589,7 @@ function upsertSubmittedScope(
   queryClient: QueryClient,
   value: {
     workflowId: string;
+    workflowRevisionId: string;
     sessionId: string;
     invocationId: string;
     sessionKey: string | null;
@@ -1616,13 +1600,14 @@ function upsertSubmittedScope(
 ): void {
   const now = Date.now();
   queryClient.setQueryData<SessionSummary[]>(
-    ["sessions", value.workflowId],
+    ["sessions", value.workflowRevisionId],
     (current) => {
       const existing = current ?? [];
       const nextSession: SessionSummary = {
         id: value.sessionId,
         namespace: "default",
         workflow_id: value.workflowId,
+        workflow_revision_id: value.workflowRevisionId,
         session_key: value.sessionKey,
         current_invocation_id: value.invocationId,
         invocation_count: 1,
@@ -1651,6 +1636,7 @@ function upsertSubmittedScope(
       const nextInvocation: InvocationSummary = {
         id: value.invocationId,
         workflow_id: value.workflowId,
+        workflow_revision_id: value.workflowRevisionId,
         workflow_version: null,
         definition_hash: null,
         operator_manifest_hash: null,
@@ -1701,6 +1687,7 @@ function createDraftInvocation(graph: WorkflowGraphView): InvocationDetail {
   return {
     id: "draft",
     workflow_id: graph.workflow_id,
+    workflow_revision_id: graph.revision_id,
     workflow_version: graph.workflow_version,
     definition_hash: graph.definition_hash,
     operator_manifest_hash: graph.operator_manifest_hash,
@@ -1727,6 +1714,7 @@ function createLiveDraftInvocation(
   return {
     id: invocationId,
     workflow_id: graph.workflow_id,
+    workflow_revision_id: graph.revision_id,
     workflow_version: graph.workflow_version,
     definition_hash: graph.definition_hash,
     operator_manifest_hash: graph.operator_manifest_hash,

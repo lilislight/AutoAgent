@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from enum import Enum
 from functools import partial
 from typing import Any
+from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,6 +16,23 @@ from autoagent.core.operators.contract import SchemaContract
 from autoagent.core.operators.manifest import callable_operator_id
 from autoagent.core.workflow import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.core.workflow.hooks import get_workflow_hook_version
+
+
+_WORKFLOW_REVISION_NAMESPACE = UUID("fe569b0d-f5dd-4de8-aa91-fc77bb4ddd21")
+
+
+def workflow_revision_id(
+    namespace: str,
+    workflow_id: str,
+    definition_hash: str,
+    operator_manifest_hash: str,
+) -> str:
+    """Return the stable identity of one executable Workflow revision."""
+
+    identity = "\0".join(
+        (namespace, workflow_id, definition_hash, operator_manifest_hash)
+    )
+    return str(uuid5(_WORKFLOW_REVISION_NAMESPACE, identity))
 
 
 class WorkflowVersionSnapshot(BaseModel):

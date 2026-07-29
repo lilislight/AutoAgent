@@ -138,10 +138,15 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_recovery_capture_matches_compacted_full_state(self) -> None:
-        session = Session(workflow_id="flow", session_key="session")
+        session = Session(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            session_key="session",
+        )
         session.context.data["session_payload"] = {"value": 1}
         invocation = Invocation(
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             workflow_version=1,
             entry_node_id="entry",
             event_mode="standard",
@@ -187,9 +192,14 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_reducer_rejects_non_contiguous_event_journal(self) -> None:
-        session = Session(workflow_id="flow", session_key="session")
+        session = Session(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            session_key="session",
+        )
         invocation = Invocation(
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             workflow_version=1,
             entry_node_id="entry",
             event_mode="full",
@@ -225,6 +235,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
 
         invocation = Invocation(
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             workflow_version=1,
             entry_node_id="entry",
             event_mode="full",
@@ -249,6 +260,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         first = await store.aget_or_create_session(
             namespace="default",
             workflow_id="chat",
+            workflow_revision_id="chat-revision",
             session_key="user-1",
         )
         first.context.data["messages"] = [{"role": "user", "content": "hi"}]
@@ -256,24 +268,26 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         second = await store.aget_or_create_session(
             namespace="default",
             workflow_id="chat",
+            workflow_revision_id="chat-revision",
             session_key="user-1",
         )
 
         self.assertIs(first, second)
         self.assertEqual(second.context.data["messages"][0]["content"], "hi")
 
-    async def test_session_identity_includes_namespace_and_workflow(self) -> None:
+    async def test_session_identity_includes_namespace_and_revision(self) -> None:
         store = RuntimeStore()
         values = [
             await store.aget_or_create_session(
                 namespace=namespace,
                 workflow_id=workflow_id,
+                workflow_revision_id=revision_id,
                 session_key="same",
             )
-            for namespace, workflow_id in (
-                ("default", "chat"),
-                ("tenant", "chat"),
-                ("default", "research"),
+            for namespace, workflow_id, revision_id in (
+                ("default", "chat", "chat-v1"),
+                ("tenant", "chat", "chat-v1"),
+                ("default", "chat", "chat-v2"),
             )
         ]
         self.assertEqual(3, len({session.id for session in values}))
@@ -283,10 +297,12 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         session = await store.aget_or_create_session(
             namespace="default",
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             session_key="one",
         )
         invocation = Invocation(
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             workflow_version=1,
             entry_node_id="entry",
             event_mode="full",
@@ -362,7 +378,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         session = store.find_session(
             namespace="default",
-            workflow_id=workflow.id,
+            workflow_revision_id=rebuilt.workflow_revision_id,
             session_key="session",
         )
         assert session is not None
@@ -384,10 +400,12 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         session = await store.aget_or_create_session(
             namespace="default",
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             session_key="one",
         )
         invocation = Invocation(
             workflow_id="flow",
+            workflow_revision_id="revision-flow",
             workflow_version=1,
             entry_node_id="entry",
         )

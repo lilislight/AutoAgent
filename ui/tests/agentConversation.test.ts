@@ -9,6 +9,7 @@ import type { InvocationSummary, UserEvent } from "../src/types.js";
 const invocation: InvocationSummary = {
   id: "invocation-1",
   workflow_id: "workflow",
+  workflow_revision_id: "revision-1",
   workflow_version: "1",
   definition_hash: "hash",
   operator_manifest_hash: "operators",

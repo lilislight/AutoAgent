@@ -66,10 +66,19 @@ class ProjectHost:
             raise
 
     def workflow(self, workflow_id: str) -> Workflow:
-        entry = self.app.workflow_registry.get(workflow_id)
-        if entry is None:
+        matches = [
+            entry
+            for entry in self.app.workflow_registry.values()
+            if entry.workflow_ir.workflow_id == workflow_id
+        ]
+        if not matches:
             raise KeyError(f"Unknown Workflow: {workflow_id}")
-        return entry.workflow
+        if len(matches) > 1:
+            raise ValueError(
+                "Workflow id resolves to multiple registered revisions: "
+                f"{workflow_id}"
+            )
+        return matches[0].workflow
 
     async def start(self) -> None:
         if self._closed:

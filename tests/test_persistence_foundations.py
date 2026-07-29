@@ -218,7 +218,7 @@ class PersistenceIdentityTests(unittest.TestCase):
         invocation = app.invoke(workflow, input={"value": "hello"}, session_id="s1")
         session = app.runtime_store.find_session(
             namespace=app.namespace,
-            workflow_id=workflow.id,
+            workflow_revision_id=invocation.workflow_revision_id,
             session_key="s1",
         )
         assert session is not None
@@ -226,14 +226,13 @@ class PersistenceIdentityTests(unittest.TestCase):
 
         self.assertIsNotNone(loaded)
         assert loaded is not None
+        entry = app.workflow_registry[invocation.workflow_revision_id]
         self.assertEqual(
-            app.workflow_registry[workflow.id].workflow_ir.definition_hash,
+            entry.workflow_ir.definition_hash,
             loaded.workflow_definition_hash,
         )
         self.assertEqual(
-            app.workflow_registry[
-                workflow.id
-            ].workflow_snapshot.operator_manifest_hash,
+            entry.workflow_snapshot.operator_manifest_hash,
             loaded.workflow_operator_manifest_hash,
         )
 
@@ -296,7 +295,9 @@ class PersistenceIdentityTests(unittest.TestCase):
         self.assertEqual(second.result, {"output": "two"})
         self.assertEqual(1, len(second.node_executions))
         self.assertEqual(
-            app.workflow_registry[workflow.id].workflow_ir.definition_hash,
+            app.workflow_registry[
+                second.workflow_revision_id
+            ].workflow_ir.definition_hash,
             first_hash,
         )
 

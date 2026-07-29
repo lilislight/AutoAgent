@@ -12,8 +12,10 @@
   "include": [
     "src/graphRouting.ts",
     "src/agentConversation.ts",
+    "src/elkjs.d.ts",
     "src/layout.ts",
     "src/layoutEngine.ts",
+    "src/layoutFallback.ts",
     "src/layoutTypes.ts",
     "src/types.ts",
     "tests/graphRouting.test.ts",

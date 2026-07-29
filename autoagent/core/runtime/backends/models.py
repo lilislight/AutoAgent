@@ -58,16 +58,25 @@ class SessionRow(RuntimeDatabaseBase):
     __table_args__ = (
         UniqueConstraint(
             "namespace",
-            "workflow_id",
+            "workflow_revision_id",
             "session_key",
             name="uq_sessions_external_identity",
         ),
-        Index("ix_sessions_lookup", "namespace", "workflow_id", "session_key"),
+        Index(
+            "ix_sessions_lookup",
+            "namespace",
+            "workflow_revision_id",
+            "session_key",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     namespace: Mapped[str] = mapped_column(String(255), nullable=False)
     workflow_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_versions.id"),
+        nullable=False,
+    )
     session_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     current_invocation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     context_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")

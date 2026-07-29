@@ -8,6 +8,7 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
+from pydantic import BaseModel
 
 from autoagent import (
     AutoAgentApp,
@@ -16,6 +17,7 @@ from autoagent import (
     SystemCommand,
     Workflow,
 )
+from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.runtime import RuntimeEvent, RuntimeStore, UserEventSpec
 from autoagent.core.server import AutoAgentServer
 from autoagent.core.server.trace import TraceProjectionReducer
@@ -25,12 +27,21 @@ from autoagent.core.server.app import (
 )
 
 
+class HistoricalTracePayload(BaseModel):
+    value: int
+
+
+def historical_trace_model() -> HistoricalTracePayload:
+    return HistoricalTracePayload(value=42)
+
+
 class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.app = AutoAgentApp()
         self.workflow = Workflow(id="server_wait")
         self.workflow.add_node(SystemCommand(id="wait"), node_id="wait")
         self.app.register_workflow(self.workflow)
+        self.workflow_revision_id = self._revision_id(self.workflow)
         await self.app.astart()
         self.server = AutoAgentServer(self.app)
         self.submit = next(
@@ -57,9 +68,18 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             )
         await self.app.aclose()
 
+    def _revision_id(self, workflow: Workflow) -> str:
+        snapshot = self.app.register_workflow(workflow).workflow_snapshot
+        return workflow_revision_id(
+            self.app.namespace,
+            snapshot.workflow_id,
+            snapshot.definition_hash,
+            snapshot.operator_manifest_hash,
+        )
+
     async def test_waiting_session_rejects_submit_before_new_admission(self) -> None:
         first = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 session_key="same",
                 input={"wait_key": "approval"},
@@ -70,7 +90,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(HTTPException) as captured:
             await self.submit(
-                self.workflow.id,
+                self.workflow_revision_id,
                 InvocationSubmitRequest(
                     session_key="same",
                     input={"wait_key": "other"},
@@ -85,7 +105,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_submit_response_session_key_can_resume_wait(self) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 input={"wait_key": "approval"},
             ),
@@ -93,7 +113,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         await self._wait_for_state(submitted.invocation_id, "waiting")
 
         resumed = await self.resume(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationResumeRequest(
                 session_key=submitted.session_key,
                 wait_key="approval",
@@ -108,7 +128,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_submit_selects_event_mode_per_invocation(self) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 input={"wait_key": "minimal"},
                 session_key="minimal",
@@ -171,6 +191,18 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_exposes_embeddable_v1_router(self) -> None:
         paths = {route.path for route in self.server.router.routes}
         self.assertIn("/api/v1/workflows", paths)
+        self.assertIn(
+            "/api/v1/workflow-revisions/{workflow_revision_id}/sessions",
+            paths,
+        )
+        self.assertIn(
+            "/api/v1/workflow-revisions/{workflow_revision_id}/invocations",
+            paths,
+        )
+        self.assertIn(
+            "/api/v1/workflow-revisions/{workflow_revision_id}/resume",
+            paths,
+        )
         self.assertIn("/api/v1/invocations/{invocation_id}/trace", paths)
         self.assertIn("/api/v1/invocations/{invocation_id}", paths)
         self.assertIn("/api/v1/invocations/{invocation_id}/stream", paths)
@@ -191,7 +223,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 input={"wait_key": "approval"},
                 session_key="user-events",
@@ -258,7 +290,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 input={"wait_key": "approval"},
                 session_key="notified-user-events",
@@ -327,7 +359,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 input={"wait_key": "approval"},
                 session_key="terminal-user-event",
@@ -451,7 +483,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         workflow.add_node(slow, node_id="slow")
         self.app.register_workflow(workflow)
         submitted = await self.submit(
-            workflow.id,
+            self._revision_id(workflow),
             InvocationSubmitRequest(entry_node_id="slow"),
         )
         await self._wait_for_state(submitted.invocation_id, "running")
@@ -463,7 +495,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_waiting_invocation_can_be_cancelled_without_active_task(self) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 session_key="cancel-wait",
                 input={"wait_key": "approval"},
@@ -551,7 +583,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         submitted = await self.submit(
-            self.workflow.id,
+            self.workflow_revision_id,
             InvocationSubmitRequest(
                 input={"wait_key": "trace"},
                 session_key="trace",
@@ -559,6 +591,16 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await self._wait_for_state(submitted.invocation_id, "waiting")
+        for _ in range(1_000):
+            events = await self.app.runtime_store.alist_runtime_events(
+                invocation_id=submitted.invocation_id,
+                limit=200,
+            )
+            if any(event.event_name == "wait.created" for event in events):
+                break
+            await asyncio.sleep(0.001)
+        else:
+            self.fail("wait.created was not recorded before trace bootstrap.")
 
         bootstrap = await self.server.trace.trace_bootstrap(
             submitted.invocation_id,
@@ -619,7 +661,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.app.register_workflow(workflow)
         submitted = await self.submit(
-            workflow.id,
+            self._revision_id(workflow),
             InvocationSubmitRequest(
                 input={"value": 41},
                 session_key="event-values",
@@ -924,6 +966,178 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_trace_does_not_require_runtime_model_registration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unregistered-model.db"
+            first_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            first = AutoAgentApp(runtime_store=first_store)
+            workflow = Workflow(id="historical_model")
+            workflow.add_node(
+                historical_trace_model,
+                node_id="model",
+            )
+            first.register_workflow(workflow)
+            await first.astart()
+            invocation = await first.ainvoke(
+                workflow,
+                session_id="history",
+                event_mode="full",
+            )
+            await first_store.aflush()
+            invocation_id = invocation.id
+            await first.aclose()
+
+            second_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            second = AutoAgentApp(runtime_store=second_store)
+            await second.astart()
+            server = AutoAgentServer(second)
+            try:
+                self.assertNotIn(
+                    f"{HistoricalTracePayload.__module__}:"
+                    f"{HistoricalTracePayload.__qualname__}",
+                    second.runtime_serializer._models,
+                )
+                bootstrap = await server.trace.trace_bootstrap(
+                    invocation_id,
+                    tail_limit=20,
+                )
+                page = await server.trace.event_page(
+                    invocation_id,
+                    after_sequence=0,
+                    before_sequence=None,
+                    limit=200,
+                )
+                output_details = [
+                    await server.trace.event_detail(
+                        invocation_id,
+                        item["sequence"],
+                    )
+                    for item in page["items"]
+                    if item["has_output"]
+                ]
+                self.assertEqual(
+                    "historical_model",
+                    bootstrap["workflow"]["workflow_id"],
+                )
+                self.assertEqual(
+                    {"value": 42},
+                    next(
+                        detail["output"]
+                        for detail in output_details
+                        if detail["output"] == {"value": 42}
+                    ),
+                )
+                state = await server.trace.runtime_state(
+                    invocation_id,
+                    through_sequence=bootstrap["invocation"][
+                        "live_sequence"
+                    ],
+                )
+                self.assertEqual(
+                    {"output": {"value": 42}},
+                    state["invocation"]["result"],
+                )
+            finally:
+                await second.aclose()
+
+    async def test_directory_keeps_registered_and_historical_revisions_separate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "revisions.db"
+
+            first_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
+            first = AutoAgentApp(runtime_store=first_store)
+            first_workflow = Workflow(id="revision_history")
+            first_workflow.add_node(lambda: "first", node_id="first")
+            first.register_workflow(first_workflow)
+            await first.astart()
+            first_invocation = await first.ainvoke(
+                first_workflow,
+                session_id="shared-key",
+            )
+            await first_store.aflush()
+            first_revision_id = first_invocation.workflow_revision_id
+            await first.aclose()
+
+            second_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
+            second = AutoAgentApp(runtime_store=second_store)
+            second_workflow = Workflow(id="revision_history")
+            second_workflow.add_node(lambda: "second", node_id="second")
+            second.register_workflow(second_workflow)
+            await second.astart()
+            try:
+                second_invocation = await second.ainvoke(
+                    second_workflow,
+                    session_id="shared-key",
+                )
+                await second_store.aflush()
+                second_revision_id = second_invocation.workflow_revision_id
+                server = AutoAgentServer(second)
+
+                directory_page = await server.trace.list_workflows(
+                    cursor=None,
+                    limit=10,
+                )
+                revisions = {
+                    item["revision_id"]: item
+                    for item in directory_page["items"]
+                }
+                self.assertEqual(
+                    {first_revision_id, second_revision_id},
+                    set(revisions),
+                )
+                self.assertFalse(revisions[first_revision_id]["registered"])
+                self.assertTrue(revisions[second_revision_id]["registered"])
+
+                first_sessions = await server.trace.list_sessions(
+                    first_revision_id,
+                    cursor=None,
+                    limit=10,
+                )
+                second_sessions = await server.trace.list_sessions(
+                    second_revision_id,
+                    cursor=None,
+                    limit=10,
+                )
+                self.assertEqual(1, len(first_sessions["items"]))
+                self.assertEqual(1, len(second_sessions["items"]))
+                self.assertNotEqual(
+                    first_sessions["items"][0]["id"],
+                    second_sessions["items"][0]["id"],
+                )
+                self.assertEqual(
+                    first_revision_id,
+                    first_sessions["items"][0]["workflow_revision_id"],
+                )
+                self.assertEqual(
+                    second_revision_id,
+                    second_sessions["items"][0]["workflow_revision_id"],
+                )
+
+                historical_graph = await server.trace.workflow_graph(
+                    first_revision_id
+                )
+                current_graph = await server.trace.workflow_graph(
+                    second_revision_id
+                )
+                self.assertEqual(
+                    ["first"],
+                    [node["id"] for node in historical_graph["nodes"]],
+                )
+                self.assertEqual(
+                    ["second"],
+                    [node["id"] for node in current_graph["nodes"]],
+                )
+            finally:
+                await second.aclose()
+
     async def test_historical_trace_keeps_exact_graph_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trace.db"
@@ -951,6 +1165,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             )
             await first_store.aflush()
             invocation_id = invocation.id
+            revision_id = invocation.workflow_revision_id
             await first.aclose()
 
             second_store = RuntimeStore(
@@ -966,7 +1181,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                     limit=10,
                 )
                 sessions = await server.trace.list_sessions(
-                    "historical_trace",
+                    revision_id,
                     cursor=None,
                     limit=10,
                 )
@@ -986,6 +1201,8 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                         for item in workflows["items"]
                     ],
                 )
+                self.assertEqual(revision_id, workflows["items"][0]["revision_id"])
+                self.assertFalse(workflows["items"][0]["registered"])
                 self.assertEqual(1, sessions["items"][0]["invocation_count"])
                 self.assertEqual(
                     str(invocation_id),

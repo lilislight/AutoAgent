@@ -29,7 +29,7 @@ type ScopeColumn = "workflow" | "session" | "invocation";
 interface ScopeBarProps {
   workflows: WorkflowSummary[];
   invocations: InvocationSummary[];
-  workflowId: string | null;
+  workflowRevisionId: string | null;
   sessionId: string | null;
   invocationId: string | null;
   invocationState: RuntimeState | null;
@@ -44,14 +44,18 @@ interface ScopeBarProps {
   onCancelInvocation: () => void;
   onInspectInvocation: () => void;
   onToggleAgent: () => void;
-  onScopeChange: (workflowId: string, sessionId: string, invocationId: string) => void;
+  onScopeChange: (
+    workflowRevisionId: string,
+    sessionId: string,
+    invocationId: string,
+  ) => void;
   onToggleTheme: () => void;
 }
 
 export function ScopeBar({
   workflows,
   invocations,
-  workflowId,
+  workflowRevisionId,
   sessionId,
   invocationId,
   invocationState,
@@ -80,7 +84,7 @@ export function ScopeBar({
       </div>
       <ScopeNavigator
         workflows={workflows}
-        workflowId={workflowId}
+        workflowRevisionId={workflowRevisionId}
         sessionId={sessionId}
         invocationId={invocationId}
         onScopeChange={onScopeChange}
@@ -287,14 +291,14 @@ function formatBytes(value: number): string {
 
 function ScopeNavigator({
   workflows,
-  workflowId,
+  workflowRevisionId,
   sessionId,
   invocationId,
   onScopeChange,
 }: Pick<
   ScopeBarProps,
   | "workflows"
-  | "workflowId"
+  | "workflowRevisionId"
   | "sessionId"
   | "invocationId"
   | "onScopeChange"
@@ -302,17 +306,23 @@ function ScopeNavigator({
   const containerRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [activeColumn, setActiveColumn] = useState<ScopeColumn>("workflow");
-  const [draftScope, setDraftScope] = useState({ workflowId, sessionId, invocationId });
+  const [draftScope, setDraftScope] = useState({
+    workflowRevisionId,
+    sessionId,
+    invocationId,
+  });
   const [queries, setQueries] = useState<Record<ScopeColumn, string>>({
     workflow: "",
     session: "",
     invocation: "",
   });
-  const selectedWorkflow = workflows.find((value) => value.workflow_id === draftScope.workflowId);
+  const selectedWorkflow = workflows.find(
+    (value) => value.revision_id === draftScope.workflowRevisionId,
+  );
   const sessionQuery = useQuery({
-    queryKey: ["sessions", draftScope.workflowId],
-    queryFn: () => listSessions(draftScope.workflowId!),
-    enabled: Boolean(draftScope.workflowId),
+    queryKey: ["sessions", draftScope.workflowRevisionId],
+    queryFn: () => listSessions(draftScope.workflowRevisionId!),
+    enabled: Boolean(draftScope.workflowRevisionId),
   });
   const stagedSessions = sessionQuery.data ?? [];
   const selectedSession = stagedSessions.find((value) => value.id === draftScope.sessionId);
@@ -326,9 +336,13 @@ function ScopeNavigator({
   const sortedWorkflows = useMemo(
     () => [...workflows].sort((left, right) => {
       const sourceOrder =
-        Number(Boolean(right.registered_in_current_app)) -
-        Number(Boolean(left.registered_in_current_app));
-      return sourceOrder || left.workflow_id.localeCompare(right.workflow_id);
+        Number(Boolean(right.registered)) -
+        Number(Boolean(left.registered));
+      return (
+        sourceOrder ||
+        left.workflow_id.localeCompare(right.workflow_id) ||
+        right.revision_id.localeCompare(left.revision_id)
+      );
     }),
     [workflows],
   );
@@ -342,8 +356,8 @@ function ScopeNavigator({
   );
 
   useEffect(() => {
-    setDraftScope({ workflowId, sessionId, invocationId });
-  }, [invocationId, sessionId, workflowId]);
+    setDraftScope({ workflowRevisionId, sessionId, invocationId });
+  }, [invocationId, sessionId, workflowRevisionId]);
 
   useEffect(() => {
     if (!open) return;
@@ -365,7 +379,11 @@ function ScopeNavigator({
     setQueries((current) => ({ ...current, [column]: value }));
   };
   const chooseWorkflow = (id: string) => {
-    setDraftScope({ workflowId: id, sessionId: null, invocationId: null });
+    setDraftScope({
+      workflowRevisionId: id,
+      sessionId: null,
+      invocationId: null,
+    });
     setActiveColumn("session");
     setQuery("session", "");
   };
@@ -375,9 +393,9 @@ function ScopeNavigator({
     setQuery("invocation", "");
   };
   const chooseInvocation = (id: string) => {
-    if (!draftScope.workflowId || !draftScope.sessionId) return;
+    if (!draftScope.workflowRevisionId || !draftScope.sessionId) return;
     setDraftScope((current) => ({ ...current, invocationId: id }));
-    onScopeChange(draftScope.workflowId, draftScope.sessionId, id);
+    onScopeChange(draftScope.workflowRevisionId, draftScope.sessionId, id);
     setOpen(false);
   };
 
@@ -423,10 +441,14 @@ function ScopeNavigator({
           >
             {filterItems(sortedWorkflows, queries.workflow, workflowSearchText).map((workflow) => (
               <button
-                key={workflow.workflow_id}
-                className={`scope-navigator-item ${workflow.workflow_id === draftScope.workflowId ? "is-selected" : ""}`}
+                key={workflow.revision_id}
+                className={`scope-navigator-item ${
+                  workflow.revision_id === draftScope.workflowRevisionId
+                    ? "is-selected"
+                    : ""
+                }`}
                 type="button"
-                onClick={() => chooseWorkflow(workflow.workflow_id)}
+                onClick={() => chooseWorkflow(workflow.revision_id)}
               >
                 <span className="scope-navigator-item-title">
                   <Workflow size={13} />
@@ -445,10 +467,14 @@ function ScopeNavigator({
             active={activeColumn === "session"}
             column="session"
             count={sortedSessions.length}
-            disabled={!draftScope.workflowId}
+            disabled={!draftScope.workflowRevisionId}
             loading={sessionQuery.isLoading || sessionQuery.isFetching}
             error={sessionQuery.error}
-            emptyLabel={draftScope.workflowId ? "No sessions for this workflow." : "Select a workflow first."}
+            emptyLabel={
+              draftScope.workflowRevisionId
+                ? "No sessions for this revision."
+                : "Select a workflow revision first."
+            }
             query={queries.session}
             onQueryChange={(value) => setQuery("session", value)}
             onActivate={() => setActiveColumn("session")}
@@ -662,11 +688,7 @@ function formatRelativeTime(value: number): string {
 }
 
 function workflowDirectoryLabel(workflow: WorkflowSummary): string {
-  const revisions = workflow.revision_count ?? 1;
-  const source = workflow.registered_in_current_app
-    ? "Registered"
-    : "Historical only";
-  return `${source} · ${revisions} revision${revisions === 1 ? "" : "s"}`;
+  return workflow.registered ? "Registered" : "Historical · Not registered";
 }
 
 function workflowRevisionLabel(

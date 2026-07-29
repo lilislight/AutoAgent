@@ -56,6 +56,7 @@ export interface RuntimeStatus {
 
 export interface InvocationSubmitResponse {
   workflow_id: string;
+  workflow_revision_id: string;
   session_id: string;
   invocation_id: string;
   state: RuntimeState;
@@ -63,6 +64,7 @@ export interface InvocationSubmitResponse {
 
 export interface InvocationResumeResponse {
   workflow_id: string;
+  workflow_revision_id: string;
   session_id: string;
   invocation_id: string;
   state: RuntimeState;
@@ -81,10 +83,6 @@ export interface WorkflowSummary {
   operator_manifest_hash: string;
   name: string | null;
   description: string | null;
-  /** Client-side directory metadata derived from persisted snapshots. */
-  revision_count?: number;
-  /** Whether this exact revision is registered by the current App process. */
-  registered_in_current_app?: boolean;
   registered?: boolean;
   created_at_ms?: number;
   updated_at_ms?: number;
@@ -143,6 +141,7 @@ export interface SessionSummary {
   id: string;
   namespace: string;
   workflow_id: string;
+  workflow_revision_id: string;
   session_key: string | null;
   current_invocation_id: string | null;
   current_invocation_state?: RuntimeState | null;
@@ -155,7 +154,7 @@ export interface InvocationSummary {
   id: string;
   session_id?: string;
   workflow_id: string;
-  workflow_revision_id?: string;
+  workflow_revision_id: string;
   workflow_version: string | number | null;
   definition_hash: string | null;
   operator_manifest_hash: string | null;

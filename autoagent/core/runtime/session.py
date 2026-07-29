@@ -13,10 +13,11 @@ class Session:
     """Long-lived workflow session with shared context and invocation history.
 
     Session is owned by RuntimeStore/AutoAgentApp, not by end users directly.
-    Identity is `(namespace, workflow_id, session_key)` at store level; `id` is
-    the internal UUID persisted by the store. A session keeps its Invocation
-    objects as a list so an in-memory runtime has the same tree shape that a UI
-    or database snapshot needs to reconstruct later.
+    Identity is `(namespace, workflow_revision_id, session_key)` at store level;
+    `workflow_id` is retained only as readable metadata. `id` is the internal
+    UUID persisted by the store. A session keeps its Invocation objects as a
+    list so an in-memory runtime has the same tree shape that a UI or database
+    snapshot needs to reconstruct later.
 
     Mutable execution progress belongs to Invocation/NodeExecution, not here.
     The only execution pointer stored on Session is current_invocation_id, which
@@ -26,6 +27,7 @@ class Session:
     def __init__(
         self,
         workflow_id: str,
+        workflow_revision_id: str,
         session_key: str | None = None,
         namespace: str = "default",
         *,
@@ -39,6 +41,7 @@ class Session:
         self.id = id or uuid4()
         self.namespace = namespace
         self.workflow_id = workflow_id
+        self.workflow_revision_id = workflow_revision_id
         self.session_key = session_key
         self.context = context or SessionContext()
         self.invocations: list[Invocation] = list(invocations or [])
@@ -51,11 +54,13 @@ class Session:
 
         AutoAgentApp or RuntimeStore calls this after creating a new invocation
         or restoring one from persistence. It rejects workflow mismatches because
-        a session is scoped to exactly one workflow id.
+        a Session is scoped to exactly one Workflow revision.
         """
 
-        if invocation.workflow_id != self.workflow_id:
-            raise ValueError("Invocation workflow_id does not match this session.")
+        if invocation.workflow_revision_id != self.workflow_revision_id:
+            raise ValueError(
+                "Invocation workflow_revision_id does not match this session."
+            )
         if not any(existing.id == invocation.id for existing in self.invocations):
             self.invocations.append(invocation)
         self.current_invocation_id = invocation.id
@@ -83,6 +88,7 @@ class Session:
             "id": str(self.id),
             "namespace": self.namespace,
             "workflow_id": self.workflow_id,
+            "workflow_revision_id": self.workflow_revision_id,
             "session_key": self.session_key,
             "context": self.context.to_record(),
             "current_invocation_id": (
@@ -106,6 +112,7 @@ class Session:
             id=UUID(str(record["id"])),
             namespace=str(record["namespace"]),
             workflow_id=str(record["workflow_id"]),
+            workflow_revision_id=str(record["workflow_revision_id"]),
             session_key=record.get("session_key"),
             context=SessionContext.from_record(record.get("context", {})),
             invocations=list(invocations or []),

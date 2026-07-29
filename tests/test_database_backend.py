@@ -39,6 +39,7 @@ from autoagent.core.runtime import (
     build_state_operations,
     capture_execution_state,
 )
+from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.runtime.persistence import UserEventPersistenceError
 from tests.helpers import started_app
@@ -113,6 +114,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         workflow_columns = await self.backend._database_loop.arun(
             table_columns("workflow_versions")
         )
+        session_columns = await self.backend._database_loop.arun(
+            table_columns("sessions")
+        )
         self.assertIn("genesis_state_json", invocation_columns)
         self.assertIn("event_mode", invocation_columns)
         self.assertIn("input_json", invocation_columns)
@@ -122,6 +126,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("state_json", invocation_columns)
         self.assertNotIn("snapshot_json", workflow_columns)
         self.assertIn("definition_json", workflow_columns)
+        self.assertIn("workflow_revision_id", session_columns)
         self.assertIn("operator_manifests_json", workflow_columns)
 
     async def test_close_abandons_flush_after_shutdown_deadline(self) -> None:
@@ -207,7 +212,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
         session = self.store.find_session(
             namespace="default",
-            workflow_id=workflow.id,
+            workflow_revision_id=invocation.workflow_revision_id,
             session_key="same",
         )
         self.assertIsNotNone(session)
@@ -252,7 +257,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
         session = self.store.find_session(
             namespace="default",
-            workflow_id=workflow.id,
+            workflow_revision_id=invocation.workflow_revision_id,
             session_key="same",
         )
         assert session is not None
@@ -330,13 +335,21 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             app.namespace,
             entry.workflow_snapshot,
         )
+        revision_id = workflow_revision_id(
+            app.namespace,
+            entry.workflow_snapshot.workflow_id,
+            entry.workflow_snapshot.definition_hash,
+            entry.workflow_snapshot.operator_manifest_hash,
+        )
         session = await self.store.aget_or_create_session(
             namespace=app.namespace,
             workflow_id=workflow.id,
+            workflow_revision_id=revision_id,
             session_key="same",
         )
         invocation = Invocation(
             workflow_id=workflow.id,
+            workflow_revision_id=revision_id,
             workflow_version=entry.workflow_ir.workflow_version,
             workflow_definition_hash=entry.workflow_ir.definition_hash,
             workflow_operator_manifest_hash=(
@@ -383,6 +396,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.store = RuntimeStore(backend=self.backend)
         session_id = Invocation(
             workflow_id="batch",
+            workflow_revision_id="batch-revision",
             workflow_version=1,
             entry_node_id="node",
         ).id
@@ -1331,6 +1345,43 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, reopened_store.invocations)
         await reopened.aclose()
 
+    async def test_start_ignores_active_unregistered_workflow_revision(
+        self,
+    ) -> None:
+        historical = Workflow(id="historical_active_revision")
+        historical.add_node(SystemCommand(id="wait"), node_id="wait")
+        first = AutoAgentApp(runtime_store=self.store)
+        first.register_workflow(historical)
+        await first.astart()
+        waiting = await first.ainvoke(
+            historical,
+            input={"wait_key": "approval"},
+            session_id="historical-session",
+        )
+        self.assertEqual("waiting", waiting.state)
+        await self.store.aflush()
+        invocation_id = waiting.id
+        await first.aclose()
+
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened_store = RuntimeStore(backend=self.backend)
+        self.store = reopened_store
+        reopened = AutoAgentApp(runtime_store=reopened_store)
+        registered = Workflow(id="registered_other_revision")
+        registered.add_node(lambda: "ok", node_id="done")
+        reopened.register_workflow(registered)
+        await reopened.astart()
+        try:
+            self.assertNotIn(invocation_id, reopened_store.invocations)
+            persisted = await self.backend.aload_trace_invocation(
+                invocation_id
+            )
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("waiting", persisted["state"])
+        finally:
+            await reopened.aclose()
+
     async def test_transient_database_failure_retries_without_losing_events(self) -> None:
         class FlakyBackend(DatabaseBackend):
             failures_remaining = 1
@@ -2190,13 +2241,21 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         entry = app.register_workflow(workflow)
+        revision_id = workflow_revision_id(
+            app.namespace,
+            entry.workflow_snapshot.workflow_id,
+            entry.workflow_snapshot.definition_hash,
+            entry.workflow_snapshot.operator_manifest_hash,
+        )
         session = await store.aget_or_create_session(
             namespace=app.namespace,
             workflow_id=workflow.id,
+            workflow_revision_id=revision_id,
             session_key="recovery",
         )
         invocation = Invocation(
             workflow_id=workflow.id,
+            workflow_revision_id=revision_id,
             workflow_version=entry.workflow_ir.workflow_version,
             workflow_definition_hash=entry.workflow_ir.definition_hash,
             workflow_operator_manifest_hash=entry.workflow_snapshot.operator_manifest_hash,
@@ -2282,13 +2341,21 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         store = RuntimeStore()
         app = AutoAgentApp(runtime_store=store)
         entry = app.register_workflow(workflow)
+        revision_id = workflow_revision_id(
+            app.namespace,
+            entry.workflow_snapshot.workflow_id,
+            entry.workflow_snapshot.definition_hash,
+            entry.workflow_snapshot.operator_manifest_hash,
+        )
         session = await store.aget_or_create_session(
             namespace=app.namespace,
             workflow_id=workflow.id,
+            workflow_revision_id=revision_id,
             session_key="recovery",
         )
         invocation = Invocation(
             workflow_id=workflow.id,
+            workflow_revision_id=revision_id,
             workflow_version=entry.workflow_ir.workflow_version,
             workflow_definition_hash=entry.workflow_ir.definition_hash,
             workflow_operator_manifest_hash=entry.workflow_snapshot.operator_manifest_hash,

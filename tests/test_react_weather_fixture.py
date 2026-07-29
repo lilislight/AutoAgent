@@ -29,6 +29,7 @@ from tests.fixtures.react_weather_agent import (
     get_city_profile,
     get_current_weather,
 )
+from tests.helpers import isolated_app
 
 
 class ReactWeatherFixtureTests(unittest.TestCase):
@@ -60,7 +61,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
                 model="fake",
             )
 
-        app = AutoAgentApp()
+        app = isolated_app()
         app.register_capability(
             LLM_CALL_CAPABILITY_ID,
             contract=LLM_CALL_CONTRACT,
@@ -126,7 +127,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
             modes.append(mode)
             return next(responses)
 
-        app = AutoAgentApp()
+        app = isolated_app()
         app.register_capability(
             LLM_CALL_CAPABILITY_ID,
             contract=LLM_CALL_CONTRACT,
@@ -243,7 +244,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
             ) -> LLMResponse:
                 return next(response_iterator)
 
-            app = AutoAgentApp(
+            app = isolated_app(
                 runtime_store=RuntimeStore(
                     backend=DatabaseBackend.from_path(path)
                 )

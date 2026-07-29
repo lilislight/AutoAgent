@@ -48,7 +48,7 @@ from autoagent.ai.models.user_event import (
     ToolCallRequestedPayload,
     ToolResultPayload,
 )
-from tests.helpers import started_app
+from tests.helpers import isolated_app, started_app
 
 
 class SDKModel:
@@ -124,7 +124,7 @@ class DataclassAnswer:
 
 class LLMContractTests(unittest.TestCase):
     def test_explicit_capability_contract_exists_before_operator(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
         capability = app.register_capability(
             LLM_CALL_CAPABILITY_ID,
             contract=LLM_CALL_CONTRACT,
@@ -467,7 +467,7 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
                 ],
             }
 
-        app = AutoAgentApp()
+        app = isolated_app()
         operator = _register_test_operator(
             app,
             ChatCompletionsConfig(

@@ -9,6 +9,7 @@ from typing import Any
 
 from autoagent import (
     AutoAgentApp,
+    AutoAgentSettings,
     BackoffPolicy,
     CapabilityRef,
     CapabilitySelectionPolicy,
@@ -290,7 +291,7 @@ def review_requires_refinement(ctx: ConditionContext) -> bool:
 
 
 def build_app() -> AutoAgentApp:
-    app = AutoAgentApp()
+    app = AutoAgentApp(settings=AutoAgentSettings())
     app.register_capability(
         "incident_log_analysis",
         description="Search and interpret logs related to a production incident.",

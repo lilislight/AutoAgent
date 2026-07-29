@@ -7,7 +7,6 @@ import autoagent
 from pydantic import BaseModel, ValidationError
 
 from autoagent import (
-    AutoAgentApp,
     CapabilityRef,
     CapabilitySelectionPolicy,
     Node,
@@ -18,7 +17,7 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core.operators import OperatorContractWarning
-from tests.helpers import started_app
+from tests.helpers import isolated_app, started_app
 
 
 class SearchRequest(BaseModel):
@@ -45,7 +44,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertFalse(hasattr(autoagent, "capability"))
 
     def test_app_capability_decorator_registers_contract_and_default_operator(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.capability("web_search", operator_id="builtin_search")
         def search(query: str) -> str:
@@ -77,7 +76,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         )
 
     def test_register_capability_without_operator_cannot_compile_reference(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
         app.register_capability("web_search")
         workflow = Workflow(
             id="missing_implementation",
@@ -90,7 +89,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertEqual(result.diagnostics[0].code, "CAPABILITY_HAS_NO_OPERATOR")
 
     def test_operator_requires_registered_capability(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         with self.assertRaisesRegex(ValueError, "unknown capability"):
             app.register_operator(
@@ -100,7 +99,7 @@ class OperatorRegistrationTests(unittest.TestCase):
             )
 
     def test_duplicate_ids_are_rejected_without_overwriting_registry(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
         app.register_capability("search")
 
         with self.assertRaisesRegex(ValueError, "already registered"):
@@ -119,8 +118,8 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertIs(app.operator_registry.get("search_impl"), original)
 
     def test_explicit_apps_have_isolated_registries(self) -> None:
-        first = AutoAgentApp()
-        second = AutoAgentApp()
+        first = isolated_app()
+        second = isolated_app()
 
         @first.capability("isolated")
         def implementation(value: str) -> str:
@@ -131,7 +130,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertFalse(second.operator_registry.contains("implementation"))
 
     def test_operator_type_mismatch_warns_but_registers(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.capability("normalize")
         def normalize(value: str) -> str:
@@ -149,7 +148,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertEqual(registered.id, "integer_normalizer")
 
     def test_operator_missing_required_capability_parameter_is_rejected(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.capability("search")
         def search(query: str) -> str:
@@ -166,7 +165,7 @@ class OperatorRegistrationTests(unittest.TestCase):
             )
 
     def test_operator_kwargs_can_accept_capability_parameters(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.capability("search_kwargs")
         def search(query: str, limit: int = 10) -> str:
@@ -184,7 +183,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertEqual(registered.id, "flexible_search")
 
     def test_operator_varargs_are_rejected(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         def unsupported(*values: str) -> str:
             return "".join(values)
@@ -193,7 +192,7 @@ class OperatorRegistrationTests(unittest.TestCase):
             app.register_operator(unsupported, operator_id="unsupported")
 
     def test_pydantic_annotation_generates_contract_and_json_schema(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
         app.register_capability("typed_search")
 
         def typed_search(request: SearchRequest) -> list[str]:
@@ -220,7 +219,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         )
 
     def test_public_apis_reject_schema_overrides(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         def handler(value: str) -> str:
             return value
@@ -241,7 +240,7 @@ class OperatorRegistrationTests(unittest.TestCase):
             )
 
     def test_json_schema_view_cannot_mutate_operator_contract(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.operator("detached_schema")
         def handler(value: str) -> str:
@@ -255,7 +254,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertIn("value", registered.contract.input.json_schema["properties"])
 
     def test_no_argument_operator_has_closed_object_input_schema(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.operator("no_arguments")
         def no_arguments() -> str:
@@ -273,7 +272,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         )
 
     def test_typed_kwargs_are_open_and_validated(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.operator("typed_kwargs")
         def typed_kwargs(query: str, **options: int) -> str:
@@ -295,7 +294,7 @@ class OperatorRegistrationTests(unittest.TestCase):
             contract.validate({"query": "docs", "limit": "two"})
 
     def test_standalone_operator_can_be_registered_without_capability(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.operator("specific_task")
         def specific_task(value: str) -> str:

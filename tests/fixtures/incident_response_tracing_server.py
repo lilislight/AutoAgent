@@ -935,6 +935,7 @@ def build_incident_response_app(
         )
     else:
         app = AutoAgentApp(
+            settings=AutoAgentSettings(),
             runtime_store=runtime_store,
         )
     for model_type in _RUNTIME_MODELS:

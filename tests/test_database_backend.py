@@ -42,7 +42,7 @@ from autoagent.core.runtime import (
 from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.runtime.persistence import UserEventPersistenceError
-from tests.helpers import started_app
+from tests.helpers import isolated_app, started_app
 from autoagent.core.runtime.backends.database import (
     _PersistenceItem,
     _is_retryable_database_error,
@@ -2238,7 +2238,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
             node_id="node",
             policy=NodePolicy(recovery=RecoveryPolicy(mode="idempotent")),
         )
-        result = AutoAgentApp().compiler.compile(invalid)
+        result = isolated_app().compiler.compile(invalid)
         self.assertFalse(result.ok)
         self.assertIn(
             "POLICY_RECOVERY_IDEMPOTENCY_KEY_REQUIRED",

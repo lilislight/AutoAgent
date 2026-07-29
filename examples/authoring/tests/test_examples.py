@@ -4,12 +4,19 @@ from contextlib import redirect_stdout
 from io import StringIO
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from typing import Any, Literal
+from unittest.mock import patch
 
-from autoagent import AutoAgentApp, StreamingResult, streaming_result
+from autoagent import (
+    AutoAgentApp,
+    AutoAgentSettings,
+    StreamingResult,
+    streaming_result,
+)
 from autoagent.ai import (
     LLM_CALL_CAPABILITY_ID,
     LLM_CALL_CONTRACT,
@@ -51,7 +58,7 @@ class AuthoringExamplesTests(unittest.TestCase):
         workflow = self.project.workflow_by_id("release_review")
         input_value = self._json("inputs/orchestration.json")
         expected = self._json("expected/orchestration.json")
-        app = AutoAgentApp()
+        app = AutoAgentApp(settings=AutoAgentSettings())
         app.register_workflow(workflow)
         app.start()
         try:
@@ -239,7 +246,7 @@ class AuthoringExamplesTests(unittest.TestCase):
                 reducer=_CompletedResponseReducer(),
             )
 
-        app = AutoAgentApp()
+        app = AutoAgentApp(settings=AutoAgentSettings())
         app.register_capability(
             LLM_CALL_CAPABILITY_ID,
             contract=LLM_CALL_CONTRACT,
@@ -377,7 +384,16 @@ class AuthoringExamplesTests(unittest.TestCase):
 
     def _run_cli(self, *arguments: str) -> tuple[int, str]:
         output = StringIO()
-        with redirect_stdout(output):
+        clean_environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AUTOAGENT_")
+        }
+        with patch.dict(
+            os.environ,
+            clean_environment,
+            clear=True,
+        ), redirect_stdout(output):
             code = cli_main(arguments)
         return code, output.getvalue()
 

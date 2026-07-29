@@ -23,7 +23,7 @@ from autoagent.core.workflow import (
     TimeoutPolicy,
     Workflow,
 )
-from tests.helpers import started_app
+from tests.helpers import isolated_app, started_app
 
 
 def start_message(message: str) -> dict[str, str]:
@@ -47,7 +47,7 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_app_execution_requires_explicit_start(self) -> None:
         workflow = Workflow(id="explicit_app_start")
         workflow.add_node(lambda: "done", node_id="node")
-        app = AutoAgentApp()
+        app = isolated_app()
 
         with self.assertRaisesRegex(RuntimeError, "not started"):
             app.invoke(workflow)
@@ -70,7 +70,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
         store = RuntimeStore()
-        app = AutoAgentApp(runtime_store=store)
+        app = isolated_app(runtime_store=store)
         entry = app.register_workflow(workflow)
         session = store.get_or_create_session(
             workflow_id=workflow.id,

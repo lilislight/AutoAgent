@@ -9,6 +9,7 @@ import tempfile
 import textwrap
 import unittest
 from collections.abc import Iterator
+from unittest.mock import patch
 
 from autoagent.cli import build_parser, main
 from autoagent.cli.settings import app_settings_from_arguments
@@ -328,7 +329,16 @@ class AutoAgentCliTests(unittest.TestCase):
 
     def run_cli(self, *arguments: str) -> tuple[int, str]:
         output = StringIO()
-        with redirect_stdout(output):
+        clean_environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AUTOAGENT_")
+        }
+        with patch.dict(
+            os.environ,
+            clean_environment,
+            clear=True,
+        ), redirect_stdout(output):
             code = main(arguments)
         return code, output.getvalue()
 

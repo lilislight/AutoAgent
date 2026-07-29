@@ -5,8 +5,8 @@ from typing import Any
 from autoagent import AutoAgentApp, AutoAgentSettings
 
 
-def started_app(*args: Any, **kwargs: Any) -> AutoAgentApp:
-    """Build and explicitly start an App for tests without durable recovery."""
+def isolated_app(*args: Any, **kwargs: Any) -> AutoAgentApp:
+    """Build an App whose settings never inherit the developer environment."""
 
     # Unit tests must not inherit a developer's repository-local ``.env``.
     # In particular, enabling AUTOAGENT_DATABASE_URL for a manual tracing run
@@ -14,6 +14,12 @@ def started_app(*args: Any, **kwargs: Any) -> AutoAgentApp:
     # leave database connections/persistence workers behind in tests that only
     # need the in-memory RuntimeStore.
     kwargs.setdefault("settings", AutoAgentSettings())
-    app = AutoAgentApp(*args, **kwargs)
+    return AutoAgentApp(*args, **kwargs)
+
+
+def started_app(*args: Any, **kwargs: Any) -> AutoAgentApp:
+    """Build and explicitly start an App for tests without durable recovery."""
+
+    app = isolated_app(*args, **kwargs)
     app.start()
     return app

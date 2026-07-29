@@ -355,6 +355,7 @@ class RuntimeSerializerTests(unittest.TestCase):
             decode=lambda value: Token(value["value"]),
         )
         app = AutoAgentApp(
+            settings=AutoAgentSettings(),
             runtime_codecs=(codec,),
             runtime_models=(Message,),
         )
@@ -376,6 +377,7 @@ class RuntimeSerializerTests(unittest.TestCase):
         store = RuntimeStore(serializer=JsonRuntimeSerializer())
         with self.assertRaisesRegex(ValueError, "owned by runtime_store"):
             AutoAgentApp(
+                settings=AutoAgentSettings(),
                 runtime_store=store,
                 runtime_serializer=JsonRuntimeSerializer(),
             )

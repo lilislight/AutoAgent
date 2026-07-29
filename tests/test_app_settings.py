@@ -12,6 +12,7 @@ from autoagent import AutoAgentApp, AutoAgentSettings, DatabaseBackend
 from autoagent.ai.providers.factory import LLM_PROVIDER_ENV_KEYS
 from autoagent.core.app.settings import AUTOAGENT_ENV_KEYS
 from autoagent.core.server import SERVER_ENV_KEYS
+from tests.helpers import isolated_app
 
 
 class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
@@ -153,6 +154,26 @@ class AutoAgentSettingsTests(unittest.IsolatedAsyncioTestCase):
             app = AutoAgentApp()
         try:
             self.assertIsNone(app.runtime_store.backend)
+        finally:
+            await app.aclose()
+
+    async def test_isolated_test_app_does_not_load_database_environment(
+        self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {"AUTOAGENT_DATABASE_URL": "invalid-database-url"},
+            clear=True,
+        ), patch(
+            "autoagent.core.app.settings.dotenv_values",
+            return_value={
+                "AUTOAGENT_DATABASE_URL": "also-invalid-database-url",
+            },
+        ):
+            app = isolated_app()
+        try:
+            self.assertIsNone(app.runtime_store.backend)
+            self.assertIsNone(app.settings.database_url)
         finally:
             await app.aclose()
 

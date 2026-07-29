@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 
 from autoagent import (
-    AutoAgentApp,
     CapabilityRef,
     Edge,
     EdgePolicy,
@@ -13,6 +12,7 @@ from autoagent import (
     Node,
     Workflow,
 )
+from tests.helpers import isolated_app
 
 
 def source(value: str) -> str:
@@ -180,7 +180,7 @@ class WorkflowDiagramTests(unittest.TestCase):
         )
 
     def test_app_preview_uses_registered_capability_contracts(self) -> None:
-        app = AutoAgentApp()
+        app = isolated_app()
 
         @app.capability("uppercase")
         def uppercase(value: str) -> str:

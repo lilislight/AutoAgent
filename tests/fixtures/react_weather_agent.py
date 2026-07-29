@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from autoagent import (
     AutoAgentApp,
+    AutoAgentSettings,
     AutoAgentServer,
     NodePolicy,
     RecoveryPolicy,
@@ -238,7 +239,9 @@ def build_app(
             }
         )
     )
-    app = AutoAgentApp()
+    app = AutoAgentApp(
+        settings=AutoAgentSettings() if config is not None else None
+    )
     register_llm_call_operator(
         app,
         provider,

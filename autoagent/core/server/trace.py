@@ -383,9 +383,6 @@ class TraceService:
             tuple[UUID, int], dict[str, Any]
         ] = OrderedDict()
         self._cache_size = cache_size
-        self._database_workflow_versions: list[
-            tuple[str, WorkflowVersionSnapshot, int]
-        ] | None = None
 
     async def list_workflows(
         self,
@@ -393,10 +390,11 @@ class TraceService:
         cursor: str | None,
         limit: int,
         registered_only: bool = False,
-        refresh_database: bool = False,
     ) -> dict[str, Any]:
-        versions = await self._workflow_versions(
-            refresh_database=refresh_database,
+        versions = await self._workflow_version_page(
+            limit=limit,
+            before=_decode_cursor(cursor),
+            registered_only=registered_only,
         )
         values: list[dict[str, Any]] = []
         registered = self._registered_workflow_identities()
@@ -451,8 +449,11 @@ class TraceService:
                 "updated_at_ms": created_at_ms,
             }
             for revision_id, snapshot, created_at_ms
-            in await self._workflow_versions()
-            if snapshot.workflow_id == workflow_id
+            in await self._workflow_version_page(
+                limit=limit,
+                before=_decode_cursor(cursor),
+                workflow_id=workflow_id,
+            )
         ]
         values.sort(
             key=lambda item: (item["created_at_ms"], item["revision_id"]),
@@ -466,14 +467,19 @@ class TraceService:
         ).to_dict()
 
     async def workflow_graph(self, revision_id: str) -> dict[str, Any]:
-        for candidate, snapshot, _ in await self._workflow_versions():
+        for candidate, snapshot, _ in self._memory_workflow_versions():
             if candidate == revision_id:
                 return _graph_view(revision_id, snapshot)
-        for candidate, snapshot, _ in await self._workflow_versions(
-            refresh_database=True,
-        ):
-            if candidate == revision_id:
-                return _graph_view(revision_id, snapshot)
+        backend_loader = getattr(
+            self.store.backend,
+            "aload_trace_workflow_version",
+            None,
+        )
+        if backend_loader is not None:
+            value = await backend_loader(revision_id)
+            if value is not None:
+                candidate, snapshot, _ = value
+                return _graph_view(candidate, snapshot)
         raise KeyError(f"Unknown Workflow revision: {revision_id}")
 
     async def list_sessions(
@@ -1063,66 +1069,97 @@ class TraceService:
             "updated_at_ms": invocation.updated_at_ms,
         }
 
-    async def _workflow_versions(
+    async def _workflow_version_page(
         self,
         *,
-        refresh_database: bool = False,
+        limit: int,
+        before: tuple[int, str] | None,
+        workflow_id: str | None = None,
+        registered_only: bool = False,
     ) -> list[tuple[str, WorkflowVersionSnapshot, int]]:
         values: dict[
             tuple[str, str],
             tuple[str, WorkflowVersionSnapshot, int],
         ] = {}
+        memory_versions = [
+            value
+            for value in self._memory_workflow_versions()
+            if workflow_id is None or value[1].workflow_id == workflow_id
+        ]
+        registered = self._registered_workflow_identities()
+        if registered_only:
+            return [
+                value
+                for value in memory_versions
+                if (value[1].workflow_id, value[1].definition_hash)
+                in registered
+            ]
         backend_loader = getattr(
             self.store.backend,
             "alist_trace_workflow_versions",
             None,
         )
-        if (
-            backend_loader is not None
-            and (
-                self._database_workflow_versions is None
-                or refresh_database
+        if backend_loader is not None:
+            database_versions = await backend_loader(
+                limit=limit + len(memory_versions) + 1,
+                before=before,
+                workflow_id=workflow_id,
             )
-        ):
-            database_versions: list[
-                tuple[str, WorkflowVersionSnapshot, int]
-            ] = []
-            before: tuple[int, str] | None = None
-            while True:
-                page = list(await backend_loader(
-                    limit=500,
-                    before=before,
-                ))
-                database_versions.extend(page)
-                if len(page) < 500:
-                    break
-                last_revision_id, _, last_created_at_ms = page[-1]
-                before = (last_created_at_ms, last_revision_id)
-            self._database_workflow_versions = database_versions
-        for revision_id, snapshot, created_at_ms in (
-            self._database_workflow_versions or ()
-        ):
-            identity = (snapshot.workflow_id, snapshot.definition_hash)
-            canonical_revision_id = workflow_revision_id(
-                snapshot.workflow_id,
-                snapshot.definition_hash,
-            )
-            current = values.get(identity)
-            if current is None or created_at_ms > current[2]:
-                values[identity] = (
-                    canonical_revision_id,
+            for revision_id, snapshot, created_at_ms in database_versions:
+                values[(snapshot.workflow_id, snapshot.definition_hash)] = (
+                    revision_id,
                     snapshot,
                     created_at_ms,
                 )
-        for key, snapshot in self.store.workflow_versions.items():
+            registered_loader = getattr(
+                self.store.backend,
+                "aload_trace_workflow_versions",
+                None,
+            )
+            if registered_loader is not None:
+                revision_ids = tuple(
+                    revision_id
+                    for revision_id, snapshot, _ in memory_versions
+                    if (
+                        snapshot.workflow_id,
+                        snapshot.definition_hash,
+                    )
+                    not in values
+                )
+                if revision_ids:
+                    for revision_id, snapshot, created_at_ms in (
+                        await registered_loader(revision_ids)
+                    ):
+                        values[
+                            (snapshot.workflow_id, snapshot.definition_hash)
+                        ] = (
+                            revision_id,
+                            snapshot,
+                            created_at_ms,
+                        )
+        for revision_id, snapshot, created_at_ms in memory_versions:
             identity = (snapshot.workflow_id, snapshot.definition_hash)
-            if identity in values:
-                continue
-            values[identity] = (
-                workflow_revision_id(
-                    snapshot.workflow_id,
-                    snapshot.definition_hash,
+            values.setdefault(
+                identity,
+                (
+                    revision_id,
+                    snapshot,
+                    created_at_ms,
                 ),
+            )
+        return list(values.values())
+
+    def _memory_workflow_versions(
+        self,
+    ) -> list[tuple[str, WorkflowVersionSnapshot, int]]:
+        values: dict[
+            tuple[str, str],
+            tuple[str, WorkflowVersionSnapshot, int],
+        ] = {}
+        for snapshot in self.store.workflow_versions.values():
+            identity = (snapshot.workflow_id, snapshot.definition_hash)
+            values[identity] = (
+                workflow_revision_id(*identity),
                 snapshot,
                 0,
             )
@@ -1132,10 +1169,7 @@ class TraceService:
             values.setdefault(
                 identity,
                 (
-                    workflow_revision_id(
-                        snapshot.workflow_id,
-                        snapshot.definition_hash,
-                    ),
+                    workflow_revision_id(*identity),
                     snapshot,
                     0,
                 ),

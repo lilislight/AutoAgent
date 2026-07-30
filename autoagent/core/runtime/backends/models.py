@@ -35,7 +35,17 @@ class WorkflowVersionRow(RuntimeDatabaseBase):
             "definition_hash",
             name="uq_workflow_versions_identity",
         ),
-        Index("ix_workflow_versions_lookup", "workflow_id"),
+        Index(
+            "ix_workflow_versions_directory",
+            "created_at_ms",
+            "id",
+        ),
+        Index(
+            "ix_workflow_versions_lookup",
+            "workflow_id",
+            "created_at_ms",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

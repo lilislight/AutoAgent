@@ -9,7 +9,7 @@ from typing import Any, Callable, Protocol
 from uuid import UUID, uuid4
 
 from autoagent.core.compiler import WorkflowVersionSnapshot
-from autoagent.core.runtime.event import RuntimeEvent
+from autoagent.core.runtime.event import RuntimeEvent, StateOperation
 from autoagent.core.runtime.user_event import UserEvent, UserEventSpec
 from autoagent.core.runtime.invocation import Invocation
 from autoagent.core.runtime.persistence import (
@@ -22,6 +22,7 @@ from autoagent.core.runtime.persistence import (
     freeze_invocation_state_envelope,
     freeze_user_event_batch_envelope,
     freeze_workflow_envelope,
+    estimate_runtime_bytes,
 )
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
 from autoagent.core.runtime.retention import RuntimeRetentionPolicy
@@ -29,6 +30,8 @@ from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
     apply_state_operations,
+    build_recovery_state_operations,
+    capture_recovery_state,
     capture_execution_state,
     compact_recovery_state,
     reduce_execution_state,
@@ -56,6 +59,29 @@ def _standard_recovery_point(event: RuntimeEvent) -> bool:
             "skipped",
         }
     return event.event_name in {"invocation.running"}
+
+
+def _updated_state_estimate(
+    previous: dict[str, Any],
+    previous_bytes: int,
+    operations: tuple[StateOperation, ...],
+) -> int:
+    """Update a recovery-root estimate by scanning changed leaves only."""
+
+    estimated = previous_bytes
+    for operation in operations:
+        if operation.op in {"replace", "remove"}:
+            try:
+                old_value: Any = previous
+                for segment in operation.path:
+                    old_value = old_value[segment]
+            except (KeyError, IndexError, TypeError):
+                old_value = None
+            else:
+                estimated -= estimate_runtime_bytes(old_value)
+        if operation.op in {"add", "replace"}:
+            estimated += estimate_runtime_bytes(operation.value)
+    return max(256, estimated)
 
 
 class SessionBusyError(RuntimeError):
@@ -207,6 +233,7 @@ class RuntimeStore:
             ExecutionSnapshot,
         ] = {}
         self._reduced_states: dict[UUID, dict[str, Any]] = {}
+        self._reduced_state_estimated_bytes: dict[UUID, int] = {}
         self._pending_admissions: dict[UUID, Invocation] = {}
         self._durable_terminal_lru: OrderedDict[UUID, None] = OrderedDict()
         self._evicted_event_sequences: OrderedDict[UUID, int] = OrderedDict()
@@ -480,23 +507,22 @@ class RuntimeStore:
                     "node_executions": [],
                 }
             else:
-                state = deepcopy(
-                    {
-                        "session": session_record,
-                        "invocation": invocation_record,
-                        "node_executions": [],
-                    }
+                raw_state = {
+                    "session": session_record,
+                    "invocation": invocation_record,
+                    "node_executions": [],
+                }
+                state = (
+                    compact_recovery_state(raw_state)
+                    if invocation.event_mode == "standard"
+                    else deepcopy(raw_state)
                 )
-            persisted_snapshot_state = (
-                compact_recovery_state(state)
-                if invocation.event_mode == "standard"
-                else state
-            )
             snapshot = ExecutionSnapshot(
                 invocation_id=invocation.id,
                 through_sequence=0,
-                state=persisted_snapshot_state,
+                state=state,
             )
+            snapshot_estimated_bytes = estimate_runtime_bytes(state)
             self._pending_admissions[session_id] = invocation
         with self._lock:
             pending = self._pending_admissions.get(session_id)
@@ -513,8 +539,12 @@ class RuntimeStore:
             self.user_events[invocation.id] = []
             self._user_event_sequences[invocation.id] = 0
             self._expected_user_event_sequences[invocation.id] = 0
-            if invocation.event_mode == "full":
+            if invocation.event_mode in {"standard", "full"}:
                 self._reduced_states[invocation.id] = state
+                self._reduced_state_estimated_bytes[invocation.id] = (
+                    snapshot_estimated_bytes
+                )
+            if invocation.event_mode == "full":
                 self._replay_checkpoints[(invocation.id, 0)] = snapshot
         if self.persistence is not None:
             try:
@@ -526,6 +556,7 @@ class RuntimeStore:
                         invocation.workflow_definition_hash or "",
                     ),
                     snapshot=snapshot,
+                    snapshot_estimated_bytes=snapshot_estimated_bytes,
                 )
             except Exception as exc:
                 self.persistence.fail_invocation(invocation.id, 0, exc)
@@ -589,7 +620,6 @@ class RuntimeStore:
         node_execution_ids: tuple[UUID, ...] = (),
         force_recovery_checkpoint: bool = False,
     ) -> RuntimeEvent:
-        del node_execution_ids
         if event.invocation_id != invocation.id:
             raise ValueError("RuntimeEvent invocation does not match aggregate.")
         if invocation.event_mode == "minimal":
@@ -598,41 +628,81 @@ class RuntimeStore:
             raise ValueError("Full RuntimeEvent has no StateOperations.")
         if invocation.event_mode == "standard" and event.operations is not None:
             raise ValueError("Standard RuntimeEvent cannot contain StateOperations.")
+        # This is the one ownership boundary for RuntimeEvent data. Both the
+        # in-memory journal and persistence share this detached object.
+        owned_event = event.model_copy(deep=True)
         with self._lock:
             events = self.runtime_events.setdefault(invocation.id, [])
             expected = events[-1].sequence + 1 if events else 1
-            if event.sequence != expected:
+            if owned_event.sequence != expected:
                 raise ValueError(
-                    f"Expected event sequence {expected}, got {event.sequence}."
+                    "Expected event sequence "
+                    f"{expected}, got {owned_event.sequence}."
                 )
-            reduced = None
-            if event.operations is not None:
-                previous = self._reduced_states.get(invocation.id)
-                if previous is None:
-                    raise KeyError(f"Unknown Invocation aggregate: {invocation.id}")
-                reduced = apply_state_operations(previous, event.operations)
+            previous = self._reduced_states.get(invocation.id)
+            if previous is None:
+                raise KeyError(f"Unknown Invocation aggregate: {invocation.id}")
+            previous_estimated_bytes = self._reduced_state_estimated_bytes.get(
+                invocation.id
+            )
+            if previous_estimated_bytes is None:
+                previous_estimated_bytes = estimate_runtime_bytes(previous)
+            if invocation.event_mode == "full":
+                assert owned_event.operations is not None
+                operations = owned_event.operations
+                reduced = apply_state_operations(previous, operations)
+                reduced_estimated_bytes = _updated_state_estimate(
+                    previous,
+                    previous_estimated_bytes,
+                    operations,
+                )
+            elif (
+                force_recovery_checkpoint
+                or _standard_recovery_point(owned_event)
+            ):
+                operations = build_recovery_state_operations(
+                    previous,
+                    session,
+                    invocation,
+                    node_execution_ids=node_execution_ids,
+                )
+                reduced = apply_state_operations(previous, operations)
+                reduced_estimated_bytes = _updated_state_estimate(
+                    previous,
+                    previous_estimated_bytes,
+                    operations,
+                )
+            else:
+                reduced = previous
+                reduced_estimated_bytes = previous_estimated_bytes
         with self._lock:
             events = self.runtime_events.setdefault(invocation.id, [])
             expected = events[-1].sequence + 1 if events else 1
-            if event.sequence != expected:
+            if owned_event.sequence != expected:
                 raise RuntimeError(
                     "Invocation Event sequence changed while persistence "
                     "accepted an Event."
                 )
-            events.append(event)
-            if reduced is not None:
-                self._reduced_states[invocation.id] = reduced
+            events.append(owned_event)
+            self._reduced_states[invocation.id] = reduced
+            self._reduced_state_estimated_bytes[invocation.id] = (
+                reduced_estimated_bytes
+            )
             self.sessions[session.id] = session
             self.invocations[invocation.id] = invocation
         if self.persistence is not None:
             try:
                 recovery_snapshot = (
-                    ExecutionSnapshot.capture(session, invocation)
+                    ExecutionSnapshot(
+                        invocation_id=invocation.id,
+                        through_sequence=owned_event.sequence,
+                        state=reduced,
+                    )
                     if (
                         force_recovery_checkpoint
                         or (
                             invocation.event_mode == "standard"
-                            and _standard_recovery_point(event)
+                            and _standard_recovery_point(owned_event)
                         )
                     )
                     else None
@@ -650,28 +720,33 @@ class RuntimeStore:
                         if invocation.error is not None
                         else None
                     ),
-                    event=event,
+                    event=owned_event,
                     recovery_snapshot=recovery_snapshot,
                     force_recovery_checkpoint=force_recovery_checkpoint,
+                    recovery_snapshot_estimated_bytes=(
+                        reduced_estimated_bytes
+                        if recovery_snapshot is not None
+                        else 0
+                    ),
                 )
             except Exception as exc:
                 self.persistence.fail_invocation(
                     invocation.id,
-                    event.sequence,
+                    owned_event.sequence,
                     exc,
                 )
                 logger.exception(
                     "Invocation Event could not be copied for persistence; "
                     "execution remains available: invocation_id=%s sequence=%s",
                     invocation.id,
-                    event.sequence,
+                    owned_event.sequence,
                 )
             else:
                 self._publish_persistence(envelope)
         if self.backend is not None:
             self._persistence_advanced(invocation.id)
         self._notify_runtime_change(invocation.id)
-        return event
+        return owned_event
 
     async def apersist_invocation_state(
         self,
@@ -947,6 +1022,15 @@ class RuntimeStore:
                 if invocation.event_mode == "full":
                     self._reduced_states[invocation.id] = (
                         capture_execution_state(session, invocation)
+                    )
+                elif invocation.event_mode == "standard":
+                    self._reduced_states[invocation.id] = (
+                        capture_recovery_state(session, invocation)
+                    )
+                reduced = self._reduced_states.get(invocation.id)
+                if reduced is not None:
+                    self._reduced_state_estimated_bytes[invocation.id] = (
+                        estimate_runtime_bytes(reduced)
                     )
         return session, invocation
 
@@ -1576,6 +1660,7 @@ class RuntimeStore:
         self._user_event_change_listeners.pop(invocation_id, None)
         self._runtime_change_listeners.pop(invocation_id, None)
         self._reduced_states.pop(invocation_id, None)
+        self._reduced_state_estimated_bytes.pop(invocation_id, None)
         for key in [
             key
             for key in self._replay_checkpoints

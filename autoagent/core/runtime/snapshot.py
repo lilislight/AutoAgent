@@ -102,10 +102,18 @@ def _compact_recovery_state_in_place(state: dict[str, Any]) -> None:
     """Compact a private state tree without making another defensive copy."""
 
     for execution in state["node_executions"]:
-        execution["input"] = None
-        for operator_call in execution.get("operator_executions", ()):
-            operator_call.pop("input", None)
-            operator_call.pop("output", None)
+        _compact_node_execution_record_in_place(execution)
+
+
+def _compact_node_execution_record_in_place(
+    execution: dict[str, Any],
+) -> None:
+    """Remove trace-only values from one privately owned Node record."""
+
+    execution["input"] = None
+    for operator_call in execution.get("operator_executions", ()):
+        operator_call.pop("input", None)
+        operator_call.pop("output", None)
 
 
 def restore_execution_state(state: dict[str, Any]) -> tuple[Session, Invocation]:
@@ -165,6 +173,7 @@ def build_state_operations(
     invocation: Invocation,
     *,
     node_execution_ids: tuple[UUID, ...] = (),
+    copy_operation_values: bool = True,
 ) -> tuple[StateOperation, ...]:
     """Build one state delta from explicit mutable runtime sections.
 
@@ -183,6 +192,7 @@ def build_state_operations(
         previous=previous_session,
         current=current_session,
         fields=_MUTABLE_SESSION_FIELDS,
+        copy_operation_values=copy_operation_values,
     )
 
     current_invocation = invocation.to_record(session.id)
@@ -193,6 +203,7 @@ def build_state_operations(
         previous=previous_invocation,
         current=current_invocation,
         fields=_MUTABLE_INVOCATION_FIELDS,
+        copy_operation_values=copy_operation_values,
     )
 
     previous_executions = previous.get("node_executions", [])
@@ -217,7 +228,11 @@ def build_state_operations(
                 StateOperation(
                     op="add",
                     path=("node_executions", len(previous_executions)),
-                    value=deepcopy(record),
+                    value=(
+                        deepcopy(record)
+                        if copy_operation_values
+                        else record
+                    ),
                 )
             )
             previous_executions = [*previous_executions, record]
@@ -229,6 +244,76 @@ def build_state_operations(
                 previous=previous_executions[previous_index],
                 current=record,
                 fields=_MUTABLE_NODE_EXECUTION_FIELDS,
+                copy_operation_values=copy_operation_values,
+            )
+    return tuple(operations)
+
+
+def build_recovery_state_operations(
+    previous: dict[str, Any],
+    session: Session,
+    invocation: Invocation,
+    *,
+    node_execution_ids: tuple[UUID, ...] = (),
+) -> tuple[StateOperation, ...]:
+    """Build internal Standard-mode deltas without trace-only Node values."""
+
+    operations: list[StateOperation] = []
+    current_session = session.to_record()
+    _replace_changed_fields(
+        operations,
+        section="session",
+        previous=previous["session"],
+        current=current_session,
+        fields=_MUTABLE_SESSION_FIELDS,
+        copy_operation_values=False,
+    )
+    current_invocation = invocation.to_record(session.id)
+    _replace_changed_fields(
+        operations,
+        section="invocation",
+        previous=previous["invocation"],
+        current=current_invocation,
+        fields=_MUTABLE_INVOCATION_FIELDS,
+        copy_operation_values=False,
+    )
+
+    previous_executions = previous.get("node_executions", [])
+    previous_indexes = {
+        str(record["id"]): index
+        for index, record in enumerate(previous_executions)
+    }
+    seen: set[UUID] = set()
+    for execution_id in node_execution_ids:
+        if execution_id in seen:
+            continue
+        seen.add(execution_id)
+        execution = invocation.get_node_execution(execution_id)
+        if execution is None:
+            raise KeyError(
+                f"Event references unknown NodeExecution: {execution_id}"
+            )
+        record = execution.to_record(invocation.id)
+        _compact_node_execution_record_in_place(record)
+        previous_index = previous_indexes.get(str(execution_id))
+        if previous_index is None:
+            operations.append(
+                StateOperation(
+                    op="add",
+                    path=("node_executions", len(previous_executions)),
+                    value=record,
+                )
+            )
+            previous_executions = [*previous_executions, record]
+            previous_indexes[str(execution_id)] = len(previous_executions) - 1
+        elif previous_executions[previous_index] != record:
+            _replace_changed_fields(
+                operations,
+                section=("node_executions", previous_index),
+                previous=previous_executions[previous_index],
+                current=record,
+                fields=_MUTABLE_NODE_EXECUTION_FIELDS,
+                copy_operation_values=False,
             )
     return tuple(operations)
 
@@ -300,6 +385,7 @@ def _replace_changed_fields(
     previous: dict[str, Any],
     current: dict[str, Any],
     fields: tuple[str, ...],
+    copy_operation_values: bool,
 ) -> None:
     prefix = (section,) if isinstance(section, str) else section
     for field in fields:
@@ -308,6 +394,7 @@ def _replace_changed_fields(
             path=(*prefix, field),
             previous=previous.get(field),
             current=current.get(field),
+            copy_operation_values=copy_operation_values,
         )
 
 
@@ -317,6 +404,7 @@ def _diff_state_value(
     path: tuple[str | int, ...],
     previous: Any,
     current: Any,
+    copy_operation_values: bool,
 ) -> None:
     """Emit leaf-level tree edits while preserving append-only histories."""
 
@@ -330,7 +418,11 @@ def _diff_state_value(
                 StateOperation(
                     op="add",
                     path=(*path, key),
-                    value=deepcopy(current[key]),
+                    value=(
+                        deepcopy(current[key])
+                        if copy_operation_values
+                        else current[key]
+                    ),
                 )
             )
         for key in sorted(set(previous) & set(current)):
@@ -339,6 +431,7 @@ def _diff_state_value(
                 path=(*path, key),
                 previous=previous[key],
                 current=current[key],
+                copy_operation_values=copy_operation_values,
             )
         return
     if (
@@ -352,7 +445,11 @@ def _diff_state_value(
                 StateOperation(
                     op="add",
                     path=(*path, index),
-                    value=deepcopy(current[index]),
+                    value=(
+                        deepcopy(current[index])
+                        if copy_operation_values
+                        else current[index]
+                    ),
                 )
             )
         return
@@ -360,7 +457,7 @@ def _diff_state_value(
         StateOperation(
             op="replace",
             path=path,
-            value=deepcopy(current),
+            value=deepcopy(current) if copy_operation_values else current,
         )
     )
 

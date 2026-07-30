@@ -10,19 +10,13 @@ These are the intentionally deferred findings from the 2026-07-30 backend
 audit. Confirmed correctness, retention, SSE, recovery, lifecycle, and database
 configuration fixes from that audit are covered by source history and tests.
 
-- [ ] Reduce producer-loop snapshot and copy work. Full-mode operation
-  construction, Standard recovery snapshots, deep-copying Event values, and
-  recursive byte estimation still run before records reach the persistence
-  worker. Build lightweight immutable deltas or use copy-on-write structural
-  sharing so the persistence thread cannot observe later Context mutations.
-  Benchmark runtime-loop pause time with large Context and outputs.
-- [ ] Make Trace list queries page at the Store/backend boundary. Session and
-  Invocation endpoints and the UI now expose stable 20-item cursor pages, but
-  the Store still copies and sorts complete in-memory collections before
-  slicing a page, while Workflow database refresh can load every historical
-  revision into a process cache. Push keyset limits into each Store/backend,
-  merge only active in-memory overlays, add bounded caches, and test with large
-  historical datasets.
+- [ ] Finish Trace paging for large in-memory overlays. Workflow database
+  directories now use keyset pages, a Graph loads one Revision directly by ID,
+  and registered Workflow pages are loaded on demand. Session and Invocation
+  database endpoints are also keyset-paged. Remaining work is to avoid copying
+  and sorting complete in-memory Session and Invocation collections before
+  merging each database page, and to add large mixed memory/database soak
+  coverage.
 - [ ] Bound ReAct conversation history together with the planned summary and
   Context-window work. Until then every Session message is retained and copied
   into each subsequent LLM request. Add a configurable token budget, preserve
@@ -32,9 +26,10 @@ configuration fixes from that audit are covered by source history and tests.
   a `ThreadPoolExecutor` Future cannot stop a function that has already begun;
   users enabling Retry or Fallback must make side effects idempotent. Process
   isolation and forced termination are explicitly deferred.
-- [ ] Add soak and performance coverage for the remaining findings, including
-  large Context snapshot latency, paged historical Trace queries, and long
-  ReAct Sessions.
+- [ ] Add long-running soak coverage for the remaining findings. Extend the
+  existing Producer ownership, structural-sharing, queue-size, and smoke
+  benchmarks with large mutable Context/output workloads; also cover mixed
+  memory/database Trace pages and long ReAct Sessions.
 
 ## 1. Validate the Agent authoring experience
 

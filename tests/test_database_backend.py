@@ -407,6 +407,54 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
             await app.aclose()
 
+    async def test_permanent_write_failure_releases_prepared_items(
+        self,
+    ) -> None:
+        class FailingEventBackend(DatabaseBackend):
+            async def _persist_batch(self, batch):
+                if any(item.kind == "event" for item in batch):
+                    raise RuntimeError("permanent event write failure")
+                await super()._persist_batch(batch)
+
+        await self.store.aclose()
+        backend = FailingEventBackend.from_path(self.path)
+        store = RuntimeStore(backend=backend)
+        self.backend = backend
+        self.store = store
+        workflow = Workflow(id="permanent_write_failure")
+        workflow.add_node(lambda: "done", node_id="node")
+        app = AutoAgentApp(runtime_store=store)
+        await app.astart()
+
+        with self.assertLogs(
+            "autoagent.core.runtime.backends.database",
+            level="ERROR",
+        ):
+            invocation = await app.ainvoke(workflow)
+            for _ in range(200):
+                assert store.persistence is not None
+                if store.persistence.health.state == "unavailable":
+                    break
+                await asyncio.sleep(0.005)
+
+        assert store.persistence is not None
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual("unavailable", store.persistence.health.state)
+        self.assertEqual({}, backend._queues)
+        self.assertEqual(0, backend._pending_count)
+        self.assertEqual(0, backend._pending_bytes)
+        self.assertEqual(0, backend._inflight_count)
+        self.assertEqual(0, backend._inflight_bytes)
+        self.assertFalse(hasattr(backend, "_halted_items"))
+        self.assertGreater(store.persistence.pending_count, 0)
+        self.assertEqual(
+            store.persistence.pending_count,
+            store.pending_persistence_count,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await app.aclose()
+
     async def test_batch_byte_limit_finishes_current_batch(self) -> None:
         await self.store.aclose()
         self.backend = DatabaseBackend.from_path(
@@ -2346,6 +2394,14 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["safe"], calls)
         self.assertEqual("recovery", recovered.execution_mode)
         self.assertEqual("interrupted", recovered.state)
+        self.assertTrue(
+            any(
+                event.event_name == "node.interrupted"
+                and event.subject_id == str(execution.id)
+                and event.payload["error"]["code"] == "WORKER_LOST"
+                for event in events
+            )
+        )
         self.assertEqual(
             "recovery.interrupted",
             events[-1].event_name,

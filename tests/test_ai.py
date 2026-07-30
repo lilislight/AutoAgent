@@ -173,7 +173,7 @@ class ToolDecoratorTests(unittest.TestCase):
 
         self.assertEqual(definition.name, "search")
         self.assertEqual(definition.description, "Search indexed documents.")
-        self.assertTrue(definition.id.endswith(".search"))
+        self.assertEqual("search", definition.id)
         self.assertEqual(
             definition.contract.input.json_schema["properties"]["query"]["type"],
             "string",

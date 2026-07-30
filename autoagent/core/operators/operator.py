@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
+from functools import partial
 from types import MappingProxyType
 from typing import Any
 
 from autoagent.core.operators.contract import OperatorContract, callable_contract
 
 
-def callable_operator_id(handler: Callable[..., Any]) -> str:
-    """Return the stable Operator id used for a directly bound callable."""
+def callable_operator_name(handler: Callable[..., Any]) -> str:
+    """Return a callable name that is independent of its import location."""
 
-    module = getattr(handler, "__module__", handler.__class__.__module__)
-    qualname = getattr(handler, "__qualname__", handler.__class__.__qualname__)
-    return f"python:{module}:{qualname}"
+    target = handler.func if isinstance(handler, partial) else handler
+    name = getattr(target, "__name__", None)
+    if not name:
+        name = target.__class__.__name__
+    return str(name)
+
+
+def callable_operator_id(handler: Callable[..., Any]) -> str:
+    """Return the runtime id used for a directly bound callable."""
+
+    return f"python:{callable_operator_name(handler)}"
 
 
 class Operator:
@@ -35,6 +44,7 @@ class Operator:
         priority: int = 0,
         enabled: bool = True,
         metadata: dict[str, Any] | None = None,
+        definition_name: str | None = None,
     ) -> None:
         resolved_id = id.strip()
         if not resolved_id:
@@ -61,6 +71,7 @@ class Operator:
         self._enabled = enabled
         self._contract = contract
         self._metadata = dict(metadata or {})
+        self._definition_name = definition_name or resolved_id
 
     @property
     def id(self) -> str:
@@ -95,6 +106,12 @@ class Operator:
     @property
     def metadata(self) -> MappingProxyType[str, Any]:
         return MappingProxyType(self._metadata)
+
+    @property
+    def definition_name(self) -> str:
+        """Stable name included in Workflow revision semantics."""
+
+        return self._definition_name
 
     @property
     def is_async(self) -> bool:
@@ -143,7 +160,11 @@ class Operator:
         Direct Operators keep version 1 compatibility metadata.
         """
 
-        return cls(id=operator_id or callable_operator_id(handler), handler=handler)
+        return cls(
+            id=operator_id or callable_operator_id(handler),
+            handler=handler,
+            definition_name=callable_operator_name(handler),
+        )
 
 
 def _call_handler(handler: Callable[..., Any], input: Any) -> Any:

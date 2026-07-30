@@ -1064,8 +1064,34 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=7,
+                event_type="state_change",
+                event_name="node.cancelled",
+                subject_type="node",
+                subject_id="worker",
+                occurred_at_ms=7,
+                status="cancelled",
+                payload={
+                    "node_id": "worker",
+                    "node_execution_id": str(execution_id),
+                    "state": "cancelled",
+                    "error": {
+                        "code": "INVOCATION_FAILED_FAST",
+                        "message": "Sibling branch failed.",
+                    },
+                },
+            ),
+        )
 
-        self.assertEqual("running", projection["nodes"]["worker"]["state"])
+        self.assertEqual("cancelled", projection["nodes"]["worker"]["state"])
+        self.assertEqual(
+            "INVOCATION_FAILED_FAST",
+            projection["nodes"]["worker"]["latest_error"]["code"],
+        )
         self.assertEqual(
             1,
             projection["node_executions"][str(execution_id)][
@@ -1093,7 +1119,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             projection["nodes"]["worker"]["stream_chunk_count"],
         )
         self.assertEqual(8, projection["nodes"]["worker"]["parallel_call_count"])
-        self.assertEqual(6, projection["through_sequence"])
+        self.assertEqual(7, projection["through_sequence"])
 
     async def test_projection_preserves_executed_loop_node_after_later_skip(
         self,
@@ -1221,7 +1247,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_workflow_directory_can_refresh_database_revisions(
+    async def test_workflow_directory_reads_fresh_keyset_page(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1258,23 +1284,105 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await writer.aclose()
 
-                cached = await server.trace.list_workflows(
+                current = await server.trace.list_workflows(
                     cursor=None,
                     limit=20,
                 )
-                self.assertNotIn(
-                    "later_revision",
-                    [item["workflow_id"] for item in cached["items"]],
+                self.assertEqual(
+                    {"first_revision", "later_revision"},
+                    {item["workflow_id"] for item in current["items"]},
                 )
                 refreshed = await server.trace.list_workflows(
                     cursor=None,
                     limit=20,
-                    refresh_database=True,
                 )
                 self.assertEqual(
                     {"first_revision", "later_revision"},
                     {item["workflow_id"] for item in refreshed["items"]},
                 )
+            finally:
+                await reader.aclose()
+
+    async def test_workflow_directory_does_not_drain_database_pages(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow-pages.db"
+            store = RuntimeStore(backend=DatabaseBackend.from_path(path))
+            app = AutoAgentApp(runtime_store=store)
+            for index in range(4):
+                workflow = Workflow(id=f"workflow_{index}")
+                workflow.add_node(lambda: "done", node_id="done")
+                app.register_workflow(workflow)
+            await app.astart()
+            await store.aflush()
+            server = AutoAgentServer(app)
+            backend = store.backend
+            assert backend is not None
+            original = backend.alist_trace_workflow_versions
+            calls: list[dict[str, object]] = []
+
+            async def traced(**kwargs):
+                if not backend._database_loop.is_current():
+                    calls.append(dict(kwargs))
+                return await original(**kwargs)
+
+            backend.alist_trace_workflow_versions = traced
+            try:
+                page = await server.trace.list_workflows(
+                    cursor=None,
+                    limit=1,
+                )
+                self.assertTrue(page["has_more"])
+                self.assertEqual(1, len(page["items"]))
+                self.assertEqual(1, len(calls))
+                self.assertEqual(6, calls[0]["limit"])
+                self.assertIsNone(calls[0]["before"])
+            finally:
+                await app.aclose()
+
+    async def test_workflow_graph_uses_direct_revision_lookup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "workflow-lookup.db"
+            writer_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            writer = AutoAgentApp(runtime_store=writer_store)
+            workflow = Workflow(id="direct_lookup")
+            workflow.add_node(lambda: "done", node_id="done")
+            writer.register_workflow(workflow)
+            await writer.astart()
+            await writer_store.aflush()
+            entry = next(iter(writer.workflow_registry.values()))
+            revision_id = workflow_revision_id(
+                entry.workflow_snapshot.workflow_id,
+                entry.workflow_snapshot.definition_hash,
+            )
+            await writer.aclose()
+
+            reader_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path)
+            )
+            reader = AutoAgentApp(runtime_store=reader_store)
+            await reader.astart()
+            server = AutoAgentServer(reader)
+            backend = reader_store.backend
+            assert backend is not None
+
+            async def fail_list(**kwargs):
+                self.fail(
+                    "Graph lookup attempted to list Workflow revisions."
+                )
+
+            backend.alist_trace_workflow_versions = fail_list
+            try:
+                graph = await server.trace.workflow_graph(revision_id)
+                self.assertEqual("direct_lookup", graph["workflow_id"])
+                self.assertEqual(["done"], [
+                    node["id"] for node in graph["nodes"]
+                ])
             finally:
                 await reader.aclose()
 
@@ -1407,6 +1515,30 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(revisions[first_revision_id]["registered"])
                 self.assertTrue(revisions[second_revision_id]["registered"])
+
+                first_revision_page = (
+                    await server.trace.list_workflow_versions(
+                        "revision_history",
+                        cursor=None,
+                        limit=1,
+                    )
+                )
+                second_revision_page = (
+                    await server.trace.list_workflow_versions(
+                        "revision_history",
+                        cursor=first_revision_page["next_cursor"],
+                        limit=1,
+                    )
+                )
+                self.assertEqual(
+                    {first_revision_id, second_revision_id},
+                    {
+                        first_revision_page["items"][0]["revision_id"],
+                        second_revision_page["items"][0]["revision_id"],
+                    },
+                )
+                self.assertTrue(first_revision_page["has_more"])
+                self.assertFalse(second_revision_page["has_more"])
 
                 first_sessions = await server.trace.list_sessions(
                     first_revision_id,

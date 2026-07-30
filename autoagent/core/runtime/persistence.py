@@ -136,6 +136,7 @@ class PersistenceEnvelope:
     session_record: dict[str, Any] | None = None
     invocation_record: dict[str, Any] | None = None
     recovery_snapshot: ExecutionSnapshot | None = None
+    recovery_snapshot_estimated_bytes: int = 0
     force_recovery_checkpoint: bool = False
     id: UUID = field(default_factory=uuid4)
 
@@ -169,13 +170,21 @@ def freeze_admission_envelope(
     invocation_id: UUID,
     workflow_key: tuple[str, str],
     snapshot: ExecutionSnapshot,
+    snapshot_estimated_bytes: int | None = None,
 ) -> PersistenceEnvelope:
-    frozen = snapshot.model_copy(deep=True)
+    # Admission built this immutable-by-ownership snapshot specifically for
+    # RuntimeStore and persistence. Sharing it avoids copying the genesis
+    # Runtime State a second time before it crosses the persistence boundary.
+    frozen = snapshot
     return PersistenceEnvelope(
         kind="admission",
         session_id=session_id,
         invocation_id=invocation_id,
-        estimated_bytes=1024 + _estimate_runtime_bytes(frozen.state),
+        estimated_bytes=1024 + (
+            snapshot_estimated_bytes
+            if snapshot_estimated_bytes is not None
+            else _estimate_runtime_bytes(frozen.state)
+        ),
         workflow_key=workflow_key,
         execution_snapshot=frozen,
     )
@@ -194,37 +203,29 @@ def freeze_event_envelope(
     event: RuntimeEvent,
     recovery_snapshot: ExecutionSnapshot | None,
     force_recovery_checkpoint: bool,
+    recovery_snapshot_estimated_bytes: int = 0,
 ) -> PersistenceEnvelope:
-    """Copy mutable payload ownership once before crossing a thread boundary."""
+    """Wrap one already-owned Event for the persistence thread."""
 
-    frozen_event = event.model_copy(deep=True)
-    # ExecutionSnapshot.capture already detached this state from the live
-    # aggregate. It is private to this envelope, so copying it a second time
-    # would double the hottest Standard-mode checkpoint cost.
+    # RuntimeStore owns Event payloads before they enter its journal. The same
+    # immutable-by-ownership object can safely be handed to persistence.
+    frozen_event = event
     frozen_recovery = recovery_snapshot
+    if frozen_recovery is not None and recovery_snapshot_estimated_bytes <= 0:
+        recovery_snapshot_estimated_bytes = _estimate_runtime_bytes(
+            frozen_recovery.state
+        )
     estimated_bytes = 256 + _estimate_runtime_bytes(
         {
             "payload": frozen_event.payload,
             "timing": frozen_event.timing,
             "input": frozen_event.input,
             "output": frozen_event.output,
-            "operations": (
-                None
-                if frozen_event.operations is None
-                else [
-                    operation.model_dump(mode="python")
-                    for operation in frozen_event.operations
-                ]
-            ),
-            "recovery_state": (
-                frozen_recovery.state
-                if frozen_recovery is not None
-                else None
-            ),
+            "operations": frozen_event.operations,
             "invocation_result": invocation_result,
             "invocation_error": invocation_error,
         }
-    )
+    ) + recovery_snapshot_estimated_bytes
     return PersistenceEnvelope(
         kind="event",
         session_id=session_id,
@@ -238,6 +239,11 @@ def freeze_event_envelope(
         invocation_error=deepcopy(invocation_error),
         event=frozen_event,
         recovery_snapshot=frozen_recovery,
+        recovery_snapshot_estimated_bytes=(
+            recovery_snapshot_estimated_bytes
+            if frozen_recovery is not None
+            else 0
+        ),
         force_recovery_checkpoint=force_recovery_checkpoint,
     )
 
@@ -537,12 +543,15 @@ class PersistenceCoordinator:
                 or snapshot is None
             ):
                 continue
-            removed_bytes = _estimate_runtime_bytes(snapshot.state)
+            removed_bytes = previous.recovery_snapshot_estimated_bytes
+            if removed_bytes <= 0:
+                removed_bytes = _estimate_runtime_bytes(snapshot.state)
             reduced_bytes = max(256, previous.estimated_bytes - removed_bytes)
             queue[index] = replace(
                 previous,
                 estimated_bytes=reduced_bytes,
                 recovery_snapshot=None,
+                recovery_snapshot_estimated_bytes=0,
             )
             tracked = self._outstanding_bytes.get(previous.id)
             if tracked is not None:
@@ -902,23 +911,26 @@ def _estimate_runtime_bytes(value: Any, seen: set[int] | None = None) -> int:
     if identity in tracked:
         return 64
     tracked.add(identity)
-    try:
-        if isinstance(value, dict):
-            return 128 + sum(
-                _estimate_runtime_bytes(key, tracked)
-                + _estimate_runtime_bytes(item, tracked)
-                for key, item in value.items()
-            )
-        if isinstance(value, (list, tuple, set, frozenset)):
-            return 96 + sum(
-                _estimate_runtime_bytes(item, tracked)
-                for item in value
-            )
-        if isinstance(value, BaseModel):
-            return 128 + _estimate_runtime_bytes(
-                value.model_dump(mode="python"),
-                tracked,
-            )
-        return 256
-    finally:
-        tracked.remove(identity)
+    if isinstance(value, dict):
+        return 128 + sum(
+            _estimate_runtime_bytes(key, tracked)
+            + _estimate_runtime_bytes(item, tracked)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return 96 + sum(
+            _estimate_runtime_bytes(item, tracked)
+            for item in value
+        )
+    if isinstance(value, BaseModel):
+        return 128 + sum(
+            _estimate_runtime_bytes(getattr(value, field), tracked)
+            for field in type(value).model_fields
+        )
+    return 256
+
+
+def estimate_runtime_bytes(value: Any) -> int:
+    """Estimate retained queue bytes for one already-owned Runtime value."""
+
+    return _estimate_runtime_bytes(value)

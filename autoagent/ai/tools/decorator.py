@@ -64,11 +64,7 @@ def tool(
         resolved_name = (name or getattr(function, "__name__", "")).strip()
         if not resolved_name:
             raise ValueError("Tool name cannot be inferred; provide name explicitly.")
-        resolved_id = (
-            id
-            or f"{getattr(function, '__module__', '__main__')}."
-            f"{getattr(function, '__qualname__', resolved_name)}"
-        ).strip()
+        resolved_id = (id or resolved_name).strip()
         if not resolved_id:
             raise ValueError("Tool id cannot be empty.")
         resolved_description = (

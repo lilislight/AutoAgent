@@ -297,6 +297,20 @@ button {
   font-weight: 700;
 }
 
+.invoke-panel .invoke-load-more {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.invoke-panel .invoke-load-more:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
 .invoke-panel button:disabled {
   cursor: default;
   opacity: 0.6;

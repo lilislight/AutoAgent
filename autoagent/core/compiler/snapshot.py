@@ -4,14 +4,13 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import Enum
-from functools import partial
 from typing import Any
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.core.compiler.workflow_ir import WorkflowIR
-from autoagent.core.operators import Operator, callable_operator_id
+from autoagent.core.operators import Operator, callable_operator_name
 from autoagent.core.operators.contract import SchemaContract
 from autoagent.core.workflow import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.core.workflow.hooks import get_workflow_hook_version
@@ -153,9 +152,9 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
 
 def _binding_definition(binding: Any) -> dict[str, Any]:
     if isinstance(binding, Operator):
-        return {"kind": "operator", "id": binding.id}
+        return {"kind": "operator", "id": binding.definition_name}
     if callable(binding):
-        return {"kind": "operator", "id": callable_operator_id(binding)}
+        return {"kind": "operator", "id": callable_operator_name(binding)}
     if isinstance(binding, CapabilityRef):
         return {"kind": "capability", "id": binding.id}
     if isinstance(binding, OperatorRef):
@@ -169,26 +168,9 @@ def _hook_definition(hook: Any) -> Any:
     if hook is None:
         return None
     if callable(hook):
-        definition = {"callable": _callable_identity(hook)}
         version = get_workflow_hook_version(hook)
-        if version is not None:
-            definition["version"] = version
-        return definition
+        return {"version": version}
     return _canonicalize(hook)
-
-
-def _callable_identity(handler: Any) -> Any:
-    """Identify hook location without treating source text as compatibility."""
-
-    if isinstance(handler, partial):
-        return {
-            "partial": _callable_identity(handler.func),
-            "args": _canonicalize(handler.args),
-            "keywords": _canonicalize(handler.keywords or {}),
-        }
-    module = getattr(handler, "__module__", handler.__class__.__module__)
-    qualname = getattr(handler, "__qualname__", handler.__class__.__qualname__)
-    return f"{module}:{qualname}"
 
 
 def _canonicalize(value: Any) -> Any:

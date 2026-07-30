@@ -415,6 +415,11 @@ class NodeExecution:
         self.error = error
         self.ended_at_ms = utc_timestamp_ms()
         self.updated_at_ms = self.ended_at_ms
+        for execution in self.operator_executions:
+            if execution.state == "running":
+                execution.state = "interrupted"
+                execution.error = error
+                execution.ended_at_ms = self.ended_at_ms
 
     def mark_interrupted(self, error: RuntimeErrorInfo | None = None) -> None:
         self.state = "interrupted"

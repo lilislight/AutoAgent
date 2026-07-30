@@ -350,13 +350,11 @@ class AutoAgentServer:
         async def list_workflows(
             cursor: str | None = None,
             limit: int = Query(default=20, ge=1, le=200),
-            refresh_database: bool = False,
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_workflows(
                     cursor=cursor,
                     limit=limit,
-                    refresh_database=refresh_database,
                 )
             )
 
@@ -364,14 +362,12 @@ class AutoAgentServer:
         async def list_registered_workflows(
             cursor: str | None = None,
             limit: int = Query(default=20, ge=1, le=200),
-            refresh_database: bool = False,
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_workflows(
                     cursor=cursor,
                     limit=limit,
                     registered_only=True,
-                    refresh_database=refresh_database,
                 )
             )
 

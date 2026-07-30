@@ -402,7 +402,7 @@ class Invocation:
         self.updated_at_ms = utc_timestamp_ms()
 
     def interrupt_active_node_executions(self, reason: RuntimeErrorInfo) -> None:
-        """Make all unfinished work terminal after recovery is rejected."""
+        """Interrupt unfinished NodeExecutions without finalizing the Invocation."""
 
         for execution in self.node_executions:
             if execution.state in {"created", "ready", "running", "waiting"}:
@@ -410,7 +410,7 @@ class Invocation:
         self.scheduler.ready_queue.clear()
         self.scheduler.waiting_executions.clear()
         self.scheduler.transition_queue.clear()
-        self.mark_interrupted(reason)
+        self.updated_at_ms = utc_timestamp_ms()
 
     def to_record(self, session_id: UUID) -> dict[str, Any]:
         return {

@@ -20,7 +20,7 @@ import {
   getHealth,
   getRuntimeStatus,
   listInvocationPage,
-  listRegisteredWorkflows,
+  listRegisteredWorkflowPage,
   listSessionPage,
   listWorkflowPage,
   resumeInvocation,
@@ -35,6 +35,7 @@ import { AgentPanel } from "./components/AgentPanel";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { ScopeBar } from "./components/ScopeBar";
 import { WorkflowCanvas } from "./components/WorkflowCanvas";
+import { mergeInvocationStatus } from "./invocationStatus";
 import { projectEvents } from "./projection";
 import { useTraceUi } from "./state";
 import type {
@@ -146,21 +147,23 @@ export default function App() {
   }, [authenticated, runtimeStatusQuery.refetch]);
   const workflowQuery = useInfiniteQuery({
     queryKey: ["workflows", workflowRefreshGeneration],
-    queryFn: ({ pageParam }) => listWorkflowPage(
-      pageParam,
-      workflowRefreshGeneration > 0 && pageParam === null,
-    ),
+    queryFn: ({ pageParam }) => listWorkflowPage(pageParam),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) =>
       lastPage.has_more ? lastPage.next_cursor : undefined,
     enabled: authenticated,
   });
-  const registeredWorkflowQuery = useQuery({
+  const registeredWorkflowQuery = useInfiniteQuery({
     queryKey: ["registered-workflows"],
-    queryFn: () => listRegisteredWorkflows(false),
+    queryFn: ({ pageParam }) =>
+      listRegisteredWorkflowPage(pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.next_cursor : undefined,
     enabled: authenticated,
   });
-  const registeredWorkflows = registeredWorkflowQuery.data ?? [];
+  const registeredWorkflows =
+    registeredWorkflowQuery.data?.pages.flatMap((page) => page.items) ?? [];
   const workflows = workflowQuery.data?.pages.flatMap((page) => page.items) ?? [];
   useEffect(() => {
     if (!authenticated) return;
@@ -321,7 +324,7 @@ export default function App() {
   const polledInvocation = invocationStatusQuery.data;
   const activeInvocation = liveDraftInvocation ?? (
     view
-      ? { ...view.invocation, ...polledInvocation }
+      ? mergeInvocationStatus(view.invocation, polledInvocation)
       : null
   );
   const streamEligible = activeInvocation
@@ -428,6 +431,11 @@ export default function App() {
                 invocation: { ...current.invocation, ...status },
               }
             : current,
+        );
+        queryClient.setQueryData(
+          ["invocation-status", activeInvocationId],
+          (current: Awaited<ReturnType<typeof getInvocation>> | undefined) =>
+            current ? { ...current, ...status } : current,
         );
         queryClient.setQueryData<InfiniteData<Page<InvocationSummary>>>(
           ["invocations", activeSessionId],
@@ -662,15 +670,38 @@ export default function App() {
     if (!ui.sessionId || !ui.invocationId || refreshingLatest) return;
     setRefreshingLatest(true);
     try {
-      const result = await viewQuery.refetch();
-      if (result.data && ui.followLive) {
-        ui.setCursor(result.data.projection.through_sequence, true);
+      const [viewResult, statusResult] = await Promise.all([
+        viewQuery.refetch(),
+        invocationStatusQuery.refetch(),
+      ]);
+      const status = statusResult.data;
+      if (status) {
+        queryClient.setQueryData<TraceBootstrap>(
+          ["trace-view", ui.sessionId, ui.invocationId],
+          (current) => current
+            ? {
+                ...current,
+                invocation: { ...current.invocation, ...status },
+              }
+            : current,
+        );
+        queryClient.setQueryData<InfiniteData<Page<InvocationSummary>>>(
+          ["invocations", ui.sessionId],
+          (current) => mapInfiniteItems(current, (item) =>
+            item.id === status.id ? { ...item, ...status } : item,
+          ),
+        );
+      }
+      if (viewResult.data && ui.followLive) {
+        ui.setCursor(viewResult.data.projection.through_sequence, true);
       }
     } finally {
       setRefreshingLatest(false);
     }
   }, [
     refreshingLatest,
+    invocationStatusQuery,
+    queryClient,
     ui,
     viewQuery,
     ui.invocationId,
@@ -1123,6 +1154,8 @@ export default function App() {
       {invokeOpen && (
         <InvocationLauncher
           workflows={registeredWorkflows}
+          workflowsHasMore={Boolean(registeredWorkflowQuery.hasNextPage)}
+          workflowsLoadingMore={registeredWorkflowQuery.isFetchingNextPage}
           sessions={invokeSessions}
           workflowRevisionId={invokeWorkflow?.revision_id ?? null}
           input={invokeInput}
@@ -1141,6 +1174,9 @@ export default function App() {
             setInvokeWorkflowRevisionId(workflowRevisionId);
             setInvokeEntryNodeId("");
             setInvokeError(null);
+          }}
+          onLoadMoreWorkflows={() => {
+            void registeredWorkflowQuery.fetchNextPage();
           }}
           onInputChange={setInvokeInput}
           onSessionKeyChange={setInvokeSessionKey}
@@ -1339,6 +1375,8 @@ function NodeActionPrompt({
 
 function InvocationLauncher({
   workflows,
+  workflowsHasMore,
+  workflowsLoadingMore,
   sessions,
   workflowRevisionId,
   input,
@@ -1354,6 +1392,7 @@ function InvocationLauncher({
   sessionsLoading,
   sessionsError,
   onWorkflowChange,
+  onLoadMoreWorkflows,
   onInputChange,
   onSessionKeyChange,
   onSessionSelect,
@@ -1363,6 +1402,8 @@ function InvocationLauncher({
   onSubmit,
 }: {
   workflows: WorkflowSummary[];
+  workflowsHasMore: boolean;
+  workflowsLoadingMore: boolean;
   sessions: Array<{ id: string; session_key: string | null }>;
   workflowRevisionId: string | null;
   input: string;
@@ -1378,6 +1419,7 @@ function InvocationLauncher({
   sessionsLoading: boolean;
   sessionsError: Error | null;
   onWorkflowChange: (value: string | null) => void;
+  onLoadMoreWorkflows: () => void;
   onInputChange: (value: string) => void;
   onSessionKeyChange: (value: string) => void;
   onSessionSelect: (value: string) => void;
@@ -1425,6 +1467,18 @@ function InvocationLauncher({
             ))}
           </select>
         </label>
+        {workflowsHasMore && (
+          <button
+            className="invoke-load-more"
+            type="button"
+            onClick={onLoadMoreWorkflows}
+            disabled={submitting || workflowsLoadingMore}
+          >
+            {workflowsLoadingMore
+              ? "Loading workflows…"
+              : "Load more workflows"}
+          </button>
+        )}
         <label>
           Existing session
           <select

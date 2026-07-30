@@ -12,6 +12,7 @@
   "include": [
     "src/graphRouting.ts",
     "src/agentConversation.ts",
+    "src/invocationStatus.ts",
     "src/elkjs.d.ts",
     "src/layout.ts",
     "src/layoutEngine.ts",
@@ -19,6 +20,7 @@
     "src/layoutTypes.ts",
     "src/types.ts",
     "tests/graphRouting.test.ts",
-    "tests/agentConversation.test.ts"
+    "tests/agentConversation.test.ts",
+    "tests/invocationStatus.test.ts"
   ]
 }

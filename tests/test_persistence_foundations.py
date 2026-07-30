@@ -86,6 +86,47 @@ class PersistenceIdentityTests(unittest.TestCase):
             second_snapshot.definition["name"],
         )
 
+    def test_callable_import_location_does_not_change_revision_or_operator_id(
+        self,
+    ) -> None:
+        def callable_from(module: str):
+            def evaluate(value: str) -> str:
+                return value
+
+            evaluate.__module__ = module
+            return evaluate
+
+        direct = callable_from("__main__")
+        imported = callable_from("project.workflows.incident")
+        first = Workflow(
+            id="stable_import",
+            nodes=[Node(id="quality_gate", capability=direct)],
+        )
+        second = Workflow(
+            id="stable_import",
+            nodes=[Node(id="quality_gate", capability=imported)],
+        )
+
+        first_ir, first_snapshot = self.compile(first)
+        second_ir, second_snapshot = self.compile(second)
+
+        self.assertEqual(
+            first_snapshot.definition_hash,
+            second_snapshot.definition_hash,
+        )
+        self.assertEqual(
+            {"kind": "operator", "id": "evaluate"},
+            first_snapshot.definition["nodes"][0]["capability"],
+        )
+        self.assertEqual(
+            "python:evaluate@quality_gate",
+            first_ir.nodes["quality_gate"].capability.id,
+        )
+        self.assertEqual(
+            first_ir.nodes["quality_gate"].capability.id,
+            second_ir.nodes["quality_gate"].capability.id,
+        )
+
     def test_definition_hash_changes_for_version_policy_and_contract(self) -> None:
         base_ir, _ = self.compile(
             Workflow(id="stable", version=1, nodes=[Node(id="echo", capability=echo)])
@@ -150,6 +191,33 @@ class PersistenceIdentityTests(unittest.TestCase):
         self.assertEqual(
             2,
             second_snapshot.definition["edges"][0]["condition"]["version"],
+        )
+
+    def test_hook_import_location_does_not_change_definition_hash(self) -> None:
+        def condition_from(module: str):
+            @workflow_hook(version=1)
+            def condition(_ctx) -> bool:
+                return True
+
+            condition.__module__ = module
+            return condition
+
+        def build(condition) -> Workflow:
+            workflow = Workflow(id="hook_import", version=1)
+            workflow.add_node(echo, node_id="start")
+            workflow.add_node(echo, node_id="finish")
+            workflow.add_edge("start", "finish", condition=condition)
+            return workflow
+
+        _, direct = self.compile(build(condition_from("__main__")))
+        _, imported = self.compile(
+            build(condition_from("project.workflows.incident"))
+        )
+
+        self.assertEqual(direct.definition_hash, imported.definition_hash)
+        self.assertEqual(
+            {"version": 1},
+            direct.definition["edges"][0]["condition"],
         )
 
     def test_workflow_hook_rejects_invalid_versions(self) -> None:

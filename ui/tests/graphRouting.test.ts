@@ -20,7 +20,8 @@ import {
   saveAutomaticLayout,
   saveLayout,
 } from "../src/layout.js";
-import type { WorkflowGraphView } from "../src/types.js";
+import { projectEvents } from "../src/projection.js";
+import type { RuntimeEvent, WorkflowGraphView } from "../src/types.js";
 
 type TestCase = {
   name: string;
@@ -28,6 +29,38 @@ type TestCase = {
 };
 
 const tests: TestCase[] = [
+  {
+    name: "projection marks a fail-fast sibling Node cancelled",
+    run: () => {
+      const invocationId = "invocation";
+      const events = [
+        runtimeEvent(1, "node.running", "running"),
+        runtimeEvent(2, "node.cancelled", "cancelled", {
+          code: "INVOCATION_FAILED_FAST",
+          message: "Sibling branch failed.",
+        }),
+        {
+          ...runtimeEvent(3, "invocation.failed", "failed"),
+          subject_type: "invocation",
+          subject_id: invocationId,
+          payload: { state: "failed" },
+        },
+      ];
+
+      const projection = projectEvents(invocationId, events);
+
+      equal(projection.nodes.worker.state, "cancelled");
+      equal(
+        (
+          projection.nodes.worker.latest_error as
+            | Record<string, unknown>
+            | null
+        )?.code,
+        "INVOCATION_FAILED_FAST",
+      );
+      equal(projection.invocation_state, "failed");
+    },
+  },
   {
     name: "ports are constrained to right output and left input",
     run: () => {
@@ -378,6 +411,47 @@ const tests: TestCase[] = [
     },
   },
 ];
+
+function runtimeEvent(
+  sequence: number,
+  eventName: string,
+  state: string,
+  error: Record<string, unknown> | null = null,
+): RuntimeEvent {
+  return {
+    id: `event-${sequence}`,
+    invocation_id: "invocation",
+    sequence,
+    schema_version: 1,
+    event_type: "state_change",
+    event_name: eventName,
+    subject_type: "node",
+    subject_id: "execution",
+    occurred_at_ms: sequence,
+    elapsed_ns: null,
+    status: state,
+    timing: {},
+    has_input: false,
+    has_output: false,
+    has_operations: false,
+    payload: {
+      node_id: "worker",
+      node_execution_id: "execution",
+      state,
+      error,
+    },
+    input: null,
+    output: null,
+    operations: null,
+    type: eventName,
+    entity_type: "node",
+    entity_id: "execution",
+    node_id: "worker",
+    edge_id: null,
+    channel: "runtime",
+    visibility: "internal",
+  };
+}
 
 for (const test of tests) {
   await test.run();

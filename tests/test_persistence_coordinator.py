@@ -63,7 +63,7 @@ class PersistencePolicyTests(unittest.TestCase):
 
 
 class PersistenceEnvelopeTests(unittest.TestCase):
-    def test_freeze_detaches_nested_event_payload_from_runtime_owner(self) -> None:
+    def test_freeze_shares_runtime_store_owned_event(self) -> None:
         invocation_id = uuid4()
         mutable = {"items": [{"value": "before"}]}
         event = RuntimeEvent(
@@ -93,9 +93,10 @@ class PersistenceEnvelopeTests(unittest.TestCase):
         mutable["items"][0]["value"] = "after"
 
         self.assertEqual(
-            "before",
+            "after",
             envelope.event.payload["mutable"]["items"][0]["value"],
         )
+        self.assertIs(event, envelope.event)
         self.assertGreater(envelope.estimated_bytes, 256)
 
 

@@ -5,7 +5,7 @@ import type {
   RuntimeEvent,
   RuntimeProjection,
   RuntimeState,
-} from "./types";
+} from "./types.js";
 
 export function projectEvents(
   invocationId: string,

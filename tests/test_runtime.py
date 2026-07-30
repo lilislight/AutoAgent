@@ -31,6 +31,84 @@ from tests.helpers import started_app
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_record_event_takes_one_detached_payload_ownership(self) -> None:
+        store = RuntimeStore()
+        session = await store.aget_or_create_session(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            session_key="event-ownership",
+        )
+        invocation = Invocation(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            workflow_version=1,
+            entry_node_id="entry",
+            event_mode="standard",
+        )
+        await store.aadmit_invocation(session.id, invocation)
+        mutable = {"items": [{"value": "before"}]}
+        event = RuntimeEvent(
+            invocation_id=invocation.id,
+            sequence=invocation.next_event_sequence(),
+            event_type="state_change",
+            event_name="invocation.running",
+            subject_type="invocation",
+            subject_id=str(invocation.id),
+            occurred_at_ms=utc_timestamp_ms(),
+            payload={"mutable": mutable},
+        )
+
+        owned = await store.arecord_event(session, invocation, event)
+        mutable["items"][0]["value"] = "after"
+
+        self.assertIsNot(event, owned)
+        self.assertIs(owned, store.runtime_events[invocation.id][0])
+        self.assertEqual(
+            "before",
+            owned.payload["mutable"]["items"][0]["value"],
+        )
+
+    async def test_standard_recovery_roots_share_unchanged_branches(self) -> None:
+        store = RuntimeStore()
+        session = await store.aget_or_create_session(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            session_key="recovery-roots",
+        )
+        invocation = Invocation(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            workflow_version=1,
+            entry_node_id="entry",
+            event_mode="standard",
+        )
+        await store.aadmit_invocation(session.id, invocation)
+        genesis = store.reduced_state(invocation.id)
+        invocation.context.data["nested"] = {"value": 1}
+        event = RuntimeEvent(
+            invocation_id=invocation.id,
+            sequence=invocation.next_event_sequence(),
+            event_type="state_change",
+            event_name="invocation.running",
+            subject_type="invocation",
+            subject_id=str(invocation.id),
+            occurred_at_ms=utc_timestamp_ms(),
+        )
+
+        await store.arecord_event(session, invocation, event)
+        current = store.reduced_state(invocation.id)
+        invocation.context.data["nested"]["value"] = 2
+
+        self.assertIs(genesis["session"], current["session"])
+        self.assertNotIn(
+            "nested",
+            genesis["invocation"]["context"]["data"],
+        )
+        self.assertEqual(
+            1,
+            current["invocation"]["context"]["data"]["nested"]["value"],
+        )
+
     async def test_runtime_change_subscription_wakes_on_minimal_state_update(
         self,
     ) -> None:

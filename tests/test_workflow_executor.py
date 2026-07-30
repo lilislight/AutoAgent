@@ -556,11 +556,37 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_edge("start", "wait_a")
         workflow.add_edge("start", "wait_b")
 
-        invocation = started_app().invoke(workflow, session_id="session")
+        app = started_app()
+        invocation = app.invoke(workflow, session_id="session")
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "WAIT_KEY_CONFLICT")
         self.assertEqual(invocation.scheduler.waiting_executions, {})
+        self.assertEqual(
+            {"failed", "cancelled"},
+            {execution.state for execution in invocation.node_executions[1:]},
+        )
+        cancelled = next(
+            execution
+            for execution in invocation.node_executions
+            if execution.state == "cancelled"
+        )
+        self.assertEqual(
+            "INVOCATION_FAILED_FAST",
+            cancelled.error.code,
+        )
+        self.assertTrue(
+            any(
+                event.event_name == "node.cancelled"
+                and event.subject_id == str(cancelled.id)
+                and event.payload["error"]["code"]
+                == "INVOCATION_FAILED_FAST"
+                for event in app.runtime_store.runtime_events.get(
+                    invocation.id,
+                    (),
+                )
+            )
+        )
 
     def test_async_callable_runs_in_native_async_path(self) -> None:
         async def async_start(message: str) -> dict[str, str]:
@@ -683,7 +709,68 @@ class WorkflowExecutorTests(unittest.TestCase):
                 invocation.latest_node_execution("operator").state,
                 "cancelled",
             )
+            self.assertTrue(
+                any(
+                    event.event_name == "node.cancelled"
+                    and event.payload["error"]["code"]
+                    == "INVOCATION_CANCELLED"
+                    for event in app.runtime_store.runtime_events[invocation.id]
+                )
+            )
             self.assertFalse(invocation.execution_mailbox.has_pending())
+
+        asyncio.run(scenario())
+
+    def test_infrastructure_failure_cancels_unfinished_nodes_with_events(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            workflow = Workflow(id="infrastructure_terminalization")
+            workflow.add_node(lambda: "done", node_id="worker")
+            app = started_app()
+            entry = app.register_workflow(workflow)
+            revision_id = workflow_revision_id(
+                entry.workflow_snapshot.workflow_id,
+                entry.workflow_snapshot.definition_hash,
+            )
+            session = await app.runtime_store.aget_or_create_session(
+                workflow_id=workflow.id,
+                workflow_revision_id=revision_id,
+                session_key="session",
+            )
+            invocation = Invocation(
+                workflow_id=workflow.id,
+                workflow_revision_id=revision_id,
+                workflow_version=entry.workflow_ir.workflow_version,
+                workflow_definition_hash=entry.workflow_ir.definition_hash,
+                entry_node_id="worker",
+                event_mode="standard",
+            )
+            await app.runtime_store.aadmit_invocation(
+                session.id,
+                invocation,
+            )
+            execution = invocation.create_node_execution("worker")
+            invocation.mark_running()
+            invocation.mark_node_running(execution.id)
+
+            await app.workflow_executor.afail_infrastructure(
+                session=session,
+                invocation=invocation,
+                error=RuntimeError("control path failed"),
+            )
+            events = app.runtime_store.runtime_events[invocation.id]
+
+            self.assertEqual("failed", invocation.state)
+            self.assertEqual("cancelled", execution.state)
+            self.assertEqual(
+                "INVOCATION_INFRASTRUCTURE_ERROR",
+                execution.error.code,
+            )
+            self.assertEqual(
+                ["node.cancelled", "invocation.failed"],
+                [event.event_name for event in events],
+            )
 
         asyncio.run(scenario())
 
@@ -1558,7 +1645,18 @@ class WorkflowExecutorTests(unittest.TestCase):
         completed = app.invoke(second)
 
         self.assertEqual(failed.state, "failed")
-        self.assertEqual(failed.latest_node_execution("slow").state, "cancelled")
+        cancelled = failed.latest_node_execution("slow")
+        self.assertEqual(cancelled.state, "cancelled")
+        self.assertEqual(cancelled.error.code, "INVOCATION_FAILED_FAST")
+        self.assertTrue(
+            any(
+                event.event_name == "node.cancelled"
+                and event.subject_id == str(cancelled.id)
+                and event.payload["error"]["code"]
+                == "INVOCATION_FAILED_FAST"
+                for event in app.runtime_store.runtime_events[failed.id]
+            )
+        )
         self.assertEqual(completed.state, "completed")
         self.assertEqual(completed.result, {"output": "new"})
 

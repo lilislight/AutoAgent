@@ -130,53 +130,25 @@ interface ServerTraceBootstrap {
 
 export function listWorkflowPage(
   cursor: string | null = null,
-  refreshDatabase = false,
 ): Promise<Page<WorkflowSummary>> {
-  return listPage(`${API}/workflows`, cursor, refreshDatabase);
+  return listPage(`${API}/workflows`, cursor);
 }
 
-export async function listRegisteredWorkflows(
-  refreshDatabase = false,
-): Promise<WorkflowSummary[]> {
-  return listAllWorkflowPages(
+export function listRegisteredWorkflowPage(
+  cursor: string | null = null,
+): Promise<Page<WorkflowSummary>> {
+  return listPage(
     `${API}/registered-workflows`,
-    refreshDatabase,
+    cursor,
   );
-}
-
-async function listAllWorkflowPages(
-  path: string,
-  refreshDatabase: boolean,
-): Promise<WorkflowSummary[]> {
-  const values: WorkflowSummary[] = [];
-  let cursor: string | null = null;
-  let firstPage = true;
-  do {
-    const query = new URLSearchParams({ limit: "20" });
-    if (cursor) query.set("cursor", cursor);
-    if (firstPage && refreshDatabase) {
-      query.set("refresh_database", "true");
-    }
-    const page = await requestJson<Page<WorkflowSummary>>(
-      `${path}?${query.toString()}`,
-    );
-    values.push(...page.items);
-    cursor = page.has_more ? page.next_cursor : null;
-    firstPage = false;
-  } while (cursor);
-  return values;
 }
 
 function listPage<T>(
   path: string,
   cursor: string | null,
-  refreshDatabase = false,
 ): Promise<Page<T>> {
   const query = new URLSearchParams({ limit: "20" });
   if (cursor) query.set("cursor", cursor);
-  if (refreshDatabase && cursor === null) {
-    query.set("refresh_database", "true");
-  }
   return requestJson<Page<T>>(`${path}?${query.toString()}`);
 }
 

@@ -166,6 +166,7 @@ class WorkflowExecutor:
                 session,
                 invocation,
                 node_execution_ids=node_execution_ids,
+                copy_operation_values=False,
             )
             if invocation.event_mode == "full"
             else None
@@ -187,10 +188,10 @@ class WorkflowExecutor:
             occurred_at_ms=occurred_at_ms or utc_timestamp_ms(),
             elapsed_ns=elapsed_ns,
             status=_event_status(normalized_name, detail),
-            timing=dict(timing or {}),
-            payload=deepcopy(detail or {}),
-            input=deepcopy(input) if invocation.event_mode == "full" else None,
-            output=deepcopy(output) if invocation.event_mode == "full" else None,
+            timing=timing or {},
+            payload=detail or {},
+            input=input if invocation.event_mode == "full" else None,
+            output=output if invocation.event_mode == "full" else None,
             operations=operations,
         )
         applied = await self.runtime_store.arecord_event(
@@ -268,6 +269,11 @@ class WorkflowExecutor:
         )
         invocation.mark_failed(runtime_error)
         try:
+            await self._cancel_unfinished_nodes(
+                session=session,
+                invocation=invocation,
+                error=runtime_error,
+            )
             await self._record_event(
                 session,
                 invocation,
@@ -353,6 +359,11 @@ class WorkflowExecutor:
                     message="Process ended while this NodeExecution was running.",
                 )
             )
+            await self._record_terminal_node_events(
+                session=session,
+                invocation=invocation,
+                executions=(interrupted,),
+            )
             request = NodeExecutionRequest(
                 node_id=interrupted.node_id,
                 activations=interrupted.incoming_activations,
@@ -435,12 +446,13 @@ class WorkflowExecutor:
         message: str,
     ) -> None:
         error = RuntimeErrorInfo(code=code, message=message)
-        changed_execution_ids = tuple(
-            execution.id
-            for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running"}
+        changed_execution_ids = await self._interrupt_unfinished_nodes(
+            session=session,
+            invocation=invocation,
+            error=error,
+            abandon_workers=False,
         )
-        invocation.interrupt_active_node_executions(error)
+        invocation.mark_interrupted(error)
         await self._record_event(
             session,
             invocation,
@@ -460,6 +472,13 @@ class WorkflowExecutor:
         """Advance one Invocation until it reaches a stable public state."""
 
         while True:
+            if invocation.state == "failed":
+                return await self._finish_failed_invocation(
+                    workflow_ir=workflow_ir,
+                    session=session,
+                    invocation=invocation,
+                )
+
             transitions = invocation.scheduler.drain_transitions()
             if transitions:
                 skipped_before_routing = set(
@@ -485,19 +504,11 @@ class WorkflowExecutor:
                     skipped_before_routing,
                 )
                 if invocation.state == "failed":
-                    abandoned = await self._abandon_active_work(invocation)
-                    await self._record_event(
-                        session,
-                        invocation,
-                        "invocation.failed",
-                        node_execution_ids=abandoned,
+                    return await self._finish_failed_invocation(
+                        workflow_ir=workflow_ir,
+                        session=session,
+                        invocation=invocation,
                     )
-                    self._record_agent_failed_user_event(
-                        workflow_ir,
-                        invocation,
-                    )
-                    invocation.execution_mailbox.close()
-                    return invocation
                 continue
 
             ready_requests = invocation.scheduler.drain_ready()
@@ -516,19 +527,11 @@ class WorkflowExecutor:
                 if invocation.state in {"failed", "interrupted"}:
                     if invocation.state == "interrupted":
                         return invocation
-                    abandoned = await self._abandon_active_work(invocation)
-                    await self._record_event(
-                        session,
-                        invocation,
-                        "invocation.failed",
-                        node_execution_ids=abandoned,
+                    return await self._finish_failed_invocation(
+                        workflow_ir=workflow_ir,
+                        session=session,
+                        invocation=invocation,
                     )
-                    self._record_agent_failed_user_event(
-                        workflow_ir,
-                        invocation,
-                    )
-                    invocation.execution_mailbox.close()
-                    return invocation
                 continue
 
             if self.node_executor.has_running(invocation.execution_mailbox):
@@ -560,6 +563,10 @@ class WorkflowExecutor:
                     session,
                     invocation,
                     "wait.created",
+                    node_execution_ids=tuple(
+                        waiting.node_execution_id
+                        for waiting in invocation.scheduler.waiting_executions.values()
+                    ),
                     force_recovery_checkpoint=True,
                     detail={
                         "state": "waiting",
@@ -586,16 +593,40 @@ class WorkflowExecutor:
                     code="DEFERRED_BRANCH_FAILURE",
                     message="A branch could not complete.",
                 )
+                changed_execution_ids: tuple[UUID, ...] = ()
                 if invocation.deferred_terminal_state == "interrupted":
+                    changed_execution_ids = (
+                        await self._interrupt_unfinished_nodes(
+                            session=session,
+                            invocation=invocation,
+                            error=error,
+                        )
+                    )
                     invocation.mark_interrupted(error)
                     terminal_event_name = "recovery.interrupted"
                 else:
                     invocation.mark_failed(error)
                     terminal_event_name = "invocation.failed"
+                if invocation.state == "failed":
+                    return await self._finish_failed_invocation(
+                        workflow_ir=workflow_ir,
+                        session=session,
+                        invocation=invocation,
+                    )
                 await self._record_event(
                     session,
                     invocation,
                     terminal_event_name,
+                    node_execution_ids=(
+                        changed_execution_ids
+                        if invocation.state == "interrupted"
+                        else ()
+                    ),
+                    force_recovery_checkpoint=True,
+                    detail={
+                        "state": invocation.state,
+                        "error": error.to_record(),
+                    },
                 )
                 self._record_agent_failed_user_event(
                     workflow_ir,
@@ -625,17 +656,11 @@ class WorkflowExecutor:
                     message="Workflow has no ready, running, waiting, or completed exit node.",
                 )
             )
-            await self._record_event(
-                session,
-                invocation,
-                "invocation.failed",
+            return await self._finish_failed_invocation(
+                workflow_ir=workflow_ir,
+                session=session,
+                invocation=invocation,
             )
-            self._record_agent_failed_user_event(
-                workflow_ir,
-                invocation,
-            )
-            invocation.execution_mailbox.close()
-            return invocation
 
     async def _record_edge_event(
         self,
@@ -699,17 +724,12 @@ class WorkflowExecutor:
             code="INVOCATION_CANCELLED",
             message="Invocation was cancelled by its caller.",
         )
-        changed_execution_ids = tuple(
-            execution.id
-            for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running", "waiting"}
+        changed_execution_ids = await self._cancel_unfinished_nodes(
+            session=session,
+            invocation=invocation,
+            error=error,
         )
-        invocation.cancel_active_node_executions(error)
         invocation.mark_cancelled()
-        abandoned_messages = await self.node_executor.abandon(
-            invocation.execution_mailbox
-        )
-        self._record_abandoned_user_events(invocation, abandoned_messages)
         await self._record_event(
             session,
             invocation,
@@ -1862,22 +1882,141 @@ class WorkflowExecutor:
             )
         return None
 
-    async def _abandon_active_work(self, invocation: Invocation) -> tuple[UUID, ...]:
+    async def _abandon_active_work(
+        self,
+        session: Session,
+        invocation: Invocation,
+    ) -> tuple[UUID, ...]:
         error = RuntimeErrorInfo(
             code="INVOCATION_FAILED_FAST",
             message="Node execution was cancelled after fail-fast invocation failure.",
+            detail={
+                "invocation_error": (
+                    invocation.error.to_record()
+                    if invocation.error is not None
+                    else None
+                )
+            },
         )
-        changed_execution_ids = tuple(
-            execution.id
+        return await self._cancel_unfinished_nodes(
+            session=session,
+            invocation=invocation,
+            error=error,
+        )
+
+    async def _finish_failed_invocation(
+        self,
+        *,
+        workflow_ir: WorkflowIR,
+        session: Session,
+        invocation: Invocation,
+    ) -> Invocation:
+        abandoned = await self._abandon_active_work(session, invocation)
+        await self._record_event(
+            session,
+            invocation,
+            "invocation.failed",
+            node_execution_ids=abandoned,
+            force_recovery_checkpoint=True,
+            detail={
+                "state": "failed",
+                "error": (
+                    invocation.error.to_record()
+                    if invocation.error is not None
+                    else None
+                ),
+            },
+        )
+        self._record_agent_failed_user_event(workflow_ir, invocation)
+        invocation.execution_mailbox.close()
+        return invocation
+
+    async def _cancel_unfinished_nodes(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+        error: RuntimeErrorInfo,
+    ) -> tuple[UUID, ...]:
+        changed_executions = tuple(
+            execution
             for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running"}
+            if execution.state in {"created", "ready", "running", "waiting"}
         )
         invocation.cancel_active_node_executions(error)
         abandoned_messages = await self.node_executor.abandon(
             invocation.execution_mailbox
         )
         self._record_abandoned_user_events(invocation, abandoned_messages)
-        return changed_execution_ids
+        await self._record_terminal_node_events(
+            session=session,
+            invocation=invocation,
+            executions=changed_executions,
+        )
+        return tuple(execution.id for execution in changed_executions)
+
+    async def _interrupt_unfinished_nodes(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+        error: RuntimeErrorInfo,
+        abandon_workers: bool = True,
+    ) -> tuple[UUID, ...]:
+        changed_executions = tuple(
+            execution
+            for execution in invocation.node_executions
+            if execution.state in {"created", "ready", "running", "waiting"}
+        )
+        invocation.interrupt_active_node_executions(error)
+        if abandon_workers:
+            abandoned_messages = await self.node_executor.abandon(
+                invocation.execution_mailbox
+            )
+            self._record_abandoned_user_events(
+                invocation,
+                abandoned_messages,
+            )
+        await self._record_terminal_node_events(
+            session=session,
+            invocation=invocation,
+            executions=changed_executions,
+        )
+        return tuple(execution.id for execution in changed_executions)
+
+    async def _record_terminal_node_events(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+        executions: tuple[NodeExecution, ...],
+    ) -> None:
+        for execution in executions:
+            await self._record_event(
+                session,
+                invocation,
+                f"node.{execution.state}",
+                node_execution_ids=(execution.id,),
+                detail={
+                    "node_id": execution.node_id,
+                    "node_execution_id": str(execution.id),
+                    "state": execution.state,
+                    "error": (
+                        execution.error.to_record()
+                        if execution.error is not None
+                        else None
+                    ),
+                },
+                elapsed_ns=(
+                    max(
+                        0,
+                        perf_counter_ns()
+                        - execution.started_at_monotonic_ns,
+                    )
+                    if execution.started_at_monotonic_ns
+                    else None
+                ),
+            )
 
     def _check_operator_attempt_resource(
         self,

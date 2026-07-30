@@ -109,7 +109,6 @@ class DatabaseBackend:
             name="autoagent-persistence-runtime"
         )
         self._queues: dict[str, deque[_PersistenceItem]] = {}
-        self._halted_items: deque[_PersistenceItem] = deque()
         self._ready_sessions: deque[str] = deque()
         self._ready_set: set[str] = set()
         self._queue_event: asyncio.Event | None = None
@@ -1200,17 +1199,23 @@ class DatabaseBackend:
         *,
         limit: int = 500,
         before: tuple[int, str] | None = None,
+        workflow_id: str | None = None,
     ) -> tuple[tuple[str, WorkflowVersionSnapshot, int], ...]:
         if not self._database_loop.is_current():
             return await self._database_loop.arun(
                 self.alist_trace_workflow_versions(
                     limit=limit,
                     before=before,
+                    workflow_id=workflow_id,
                 )
             )
         await self.ainitialize()
         async with self._database_sessions() as database:
             statement = select(WorkflowVersionRow)
+            if workflow_id is not None:
+                statement = statement.where(
+                    WorkflowVersionRow.workflow_id == workflow_id,
+                )
             if before is not None:
                 statement = statement.where(
                     tuple_(
@@ -1226,6 +1231,69 @@ class DatabaseBackend:
                         WorkflowVersionRow.id.desc(),
                     )
                     .limit(limit)
+                )
+            ).all()
+        return tuple(
+            (
+                row.id,
+                WorkflowVersionSnapshot(
+                    workflow_id=row.workflow_id,
+                    workflow_version=row.workflow_version,
+                    ir_version=row.ir_version,
+                    compiler_version=row.compiler_version,
+                    definition_hash=row.definition_hash,
+                    definition=self.serializer.json_view(
+                        row.definition_json
+                    ),
+                ),
+                row.created_at_ms,
+            )
+            for row in rows
+        )
+
+    async def aload_trace_workflow_version(
+        self,
+        revision_id: str,
+    ) -> tuple[str, WorkflowVersionSnapshot, int] | None:
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.aload_trace_workflow_version(revision_id)
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            row = await database.get(WorkflowVersionRow, revision_id)
+        if row is None:
+            return None
+        return (
+            row.id,
+            WorkflowVersionSnapshot(
+                workflow_id=row.workflow_id,
+                workflow_version=row.workflow_version,
+                ir_version=row.ir_version,
+                compiler_version=row.compiler_version,
+                definition_hash=row.definition_hash,
+                definition=self.serializer.json_view(row.definition_json),
+            ),
+            row.created_at_ms,
+        )
+
+    async def aload_trace_workflow_versions(
+        self,
+        revision_ids: tuple[str, ...],
+    ) -> tuple[tuple[str, WorkflowVersionSnapshot, int], ...]:
+        if not revision_ids:
+            return ()
+        if not self._database_loop.is_current():
+            return await self._database_loop.arun(
+                self.aload_trace_workflow_versions(revision_ids)
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            rows = (
+                await database.scalars(
+                    select(WorkflowVersionRow).where(
+                        WorkflowVersionRow.id.in_(revision_ids)
+                    )
                 )
             ).all()
         return tuple(
@@ -1622,9 +1690,9 @@ class DatabaseBackend:
                         break
             finally:
                 self._database_loop.end_compatibility_wait()
-            with self._pressure_lock:
-                self._inflight_bytes -= batch_bytes
-                self._inflight_count -= len(control_items)
+                with self._pressure_lock:
+                    self._inflight_bytes -= batch_bytes
+                    self._inflight_count -= len(control_items)
 
     def _import_incoming(self) -> None:
         for envelope in self.coordinator.take(self.batch_max_items):
@@ -2407,9 +2475,6 @@ class DatabaseBackend:
         error: BaseException,
     ) -> None:
         self.coordinator.mark_unavailable(error)
-        self._halted_items.extend(batch)
-        for queue in self._queues.values():
-            self._halted_items.extend(queue)
         logger.error(
             "Database persistence is unavailable; Workflow execution remains "
             "available in memory and new submission will be limited by "

@@ -98,6 +98,62 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual({"output": "recovered"}, recovered.result)
         app.close()
 
+    def test_start_recovers_independent_invocations_concurrently(self) -> None:
+        active = 0
+        peak_active = 0
+
+        async def recover() -> str:
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            await asyncio.sleep(0.03)
+            active -= 1
+            return "recovered"
+
+        workflow = Workflow(id="parallel_startup_recovery")
+        workflow.add_node(
+            recover,
+            node_id="node",
+            policy=NodePolicy(
+                recovery=RecoveryPolicy(mode="replay_safe", max_attempts=1)
+            ),
+        )
+        store = RuntimeStore()
+        app = isolated_app(runtime_store=store)
+        entry = app.register_workflow(workflow)
+        revision_id = workflow_revision_id(
+            entry.workflow_snapshot.workflow_id,
+            entry.workflow_snapshot.definition_hash,
+        )
+        invocation_ids = []
+        for index in range(2):
+            session = store.get_or_create_session(
+                workflow_id=workflow.id,
+                workflow_revision_id=revision_id,
+                session_key=f"recover-{index}",
+            )
+            invocation = Invocation(
+                workflow_id=workflow.id,
+                workflow_revision_id=revision_id,
+                workflow_version=entry.workflow_ir.workflow_version,
+                workflow_definition_hash=entry.workflow_ir.definition_hash,
+                entry_node_id="node",
+                event_mode="full",
+            )
+            asyncio.run(store.aadmit_invocation(session.id, invocation))
+            invocation_ids.append(invocation.id)
+
+        app.start()
+
+        self.assertEqual(2, peak_active)
+        self.assertTrue(
+            all(
+                store.invocations[invocation_id].state == "completed"
+                for invocation_id in invocation_ids
+            )
+        )
+        app.close()
+
     def test_workflow_executor_is_async_only(self) -> None:
         app = started_app()
         self.assertFalse(hasattr(app.workflow_executor, "invoke"))

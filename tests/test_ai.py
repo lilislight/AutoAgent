@@ -1229,7 +1229,9 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
                                     "tool_calls": [
                                         {
                                             "index": 0,
+                                            "id": "call_1",
                                             "function": {
+                                                "name": "lookup",
                                                 "arguments": '"Tokyo"}',
                                             },
                                         }
@@ -1275,6 +1277,14 @@ class ChatCompletionsProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result.reducer.finish().message.tool_calls[0].raw_arguments,
             '{"city":"Tokyo"}',
+        )
+        self.assertEqual(
+            "call_1",
+            result.reducer.finish().message.tool_calls[0].id,
+        )
+        self.assertEqual(
+            "lookup",
+            result.reducer.finish().message.tool_calls[0].name,
         )
 
     async def test_closing_coalesced_llm_stream_closes_provider_source(
@@ -1974,6 +1984,72 @@ class ReActWorkflowTests(unittest.TestCase):
             invocation.error.code,
         )
 
+    def test_empty_tool_identity_is_normalized_and_returned_for_repair(
+        self,
+    ) -> None:
+        calls: list[int] = []
+
+        @tool(id="known", description="Known Tool.")
+        def known(value: int) -> int:
+            calls.append(value)
+            return value
+
+        requests: list[LLMRequest] = []
+        app = self.app_with_responses(
+            [
+                LLMResponse(
+                    message=LLMMessage(
+                        role="assistant",
+                        tool_calls=(
+                            LLMToolCall(
+                                id="",
+                                name="known",
+                                raw_arguments='{"value":1}',
+                            ),
+                            LLMToolCall(
+                                id="call_2",
+                                name="",
+                                raw_arguments='{"value":2}',
+                            ),
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                    model="fake",
+                ),
+                _text_response("repaired"),
+            ],
+            requests,
+        )
+        workflow = react_workflow(
+            id="empty_tool_identity_repair",
+            instructions="Use tools.",
+            tools=[known],
+        )
+
+        invocation = app.invoke(workflow, input={"input": "use tools"})
+
+        self.assertEqual("completed", invocation.state)
+        self.assertEqual([], calls)
+        repair_messages = requests[1].messages
+        assistant = repair_messages[-3]
+        first_error = repair_messages[-2]
+        second_error = repair_messages[-1]
+        self.assertEqual(
+            "invalid_tool_call_0",
+            assistant.tool_calls[0].id,
+        )
+        self.assertEqual(
+            "__invalid_tool__",
+            assistant.tool_calls[1].name,
+        )
+        self.assertEqual(
+            "invalid_tool_call_0",
+            first_error.tool_call_id,
+        )
+        self.assertIn("Tool call id cannot be empty", first_error.content)
+        self.assertEqual("call_2", second_error.tool_call_id)
+        self.assertIn("Tool name cannot be empty", second_error.content)
+
     def test_tool_execution_error_is_returned_to_model_for_recovery(self) -> None:
         calls: list[int] = []
 
@@ -2030,7 +2106,7 @@ class ReActWorkflowTests(unittest.TestCase):
             requested.data["reasoning_content"],
         )
 
-    def test_multiple_calls_to_one_tool_use_one_generated_map_node(self) -> None:
+    def test_duplicate_model_call_ids_still_execute_each_map_item(self) -> None:
         calls: list[int] = []
 
         @tool(id="double", description="Double one integer.")
@@ -2051,7 +2127,7 @@ class ReActWorkflowTests(unittest.TestCase):
                                 raw_arguments='{"value":2}',
                             ),
                             LLMToolCall(
-                                id="call_2",
+                                id="call_1",
                                 name="double",
                                 raw_arguments='{"value":4}',
                             ),
@@ -2093,6 +2169,14 @@ class ReActWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(len(requested.data["calls"]), 2)
         self.assertEqual(len(result.data["results"]), 2)
+        self.assertEqual(
+            ["call_1", "call_1"],
+            [
+                message.tool_call_id
+                for message in requests[1].messages
+                if message.role == "tool"
+            ],
+        )
         self.assertEqual("llm_call", requested.node_id)
         self.assertEqual("tool_0_double", result.node_id)
         self.assertNotIn(

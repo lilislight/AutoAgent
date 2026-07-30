@@ -112,7 +112,6 @@ class AutoAgentServer:
             else default_ui
         )
         self._invocation_tasks: dict[UUID, asyncio.Task[Any]] = {}
-        self._invocation_failures: dict[UUID, BaseException] = {}
         self._started_at_ms = time.time_ns() // 1_000_000
         self.trace = TraceService(app, cache_size=trace_cache_size)
         self.router = self._build_router()
@@ -253,24 +252,38 @@ class AutoAgentServer:
 
             async def generate() -> AsyncIterator[str]:
                 loop = asyncio.get_running_loop()
-                workflow_changed = asyncio.Event()
+                changed = asyncio.Event()
+                workflow_changed = True
                 previous_status: str | None = None
-                heartbeat_at = loop.time()
 
                 def notify_workflow_changed() -> None:
-                    loop.call_soon_threadsafe(workflow_changed.set)
+                    nonlocal workflow_changed
+                    workflow_changed = True
+                    loop.call_soon_threadsafe(changed.set)
 
-                unsubscribe = (
+                def notify_runtime_status_changed() -> None:
+                    loop.call_soon_threadsafe(changed.set)
+
+                unsubscribe_workflows = (
                     self.agent.runtime_store.subscribe_workflow_changes(
                         notify_workflow_changed
                     )
+                )
+                persistence = self.agent.runtime_store.persistence
+                unsubscribe_status = (
+                    persistence.subscribe_status_changes(
+                        notify_runtime_status_changed
+                    )
+                    if persistence is not None
+                    else lambda: None
                 )
                 try:
                     # Reconnecting is a synchronization boundary for both
                     # channels. The client refreshes the durable Workflow
                     # directory and receives the current Runtime status.
-                    workflow_changed.set()
+                    changed.set()
                     while not await request.is_disconnected():
+                        changed.clear()
                         chunks: list[str] = []
                         payload = json.dumps(
                             self._runtime_status(),
@@ -281,27 +294,24 @@ class AutoAgentServer:
                             chunks.append(
                                 f"event: runtime_status\ndata: {payload}\n\n"
                             )
-                        if workflow_changed.is_set():
-                            workflow_changed.clear()
+                        if workflow_changed:
+                            workflow_changed = False
                             chunks.append(
                                 "event: workflow_catalog_changed\n"
                                 "data: {}\n\n"
                             )
                         if chunks:
                             yield "".join(chunks)
-                        now = loop.time()
-                        if now - heartbeat_at >= 15:
-                            yield ": heartbeat\n\n"
-                            heartbeat_at = now
                         try:
                             await asyncio.wait_for(
-                                workflow_changed.wait(),
-                                timeout=0.5,
+                                changed.wait(),
+                                timeout=15,
                             )
                         except TimeoutError:
-                            pass
+                            yield ": heartbeat\n\n"
                 finally:
-                    unsubscribe()
+                    unsubscribe_status()
+                    unsubscribe_workflows()
 
             return StreamingResponse(
                 generate(),
@@ -339,7 +349,7 @@ class AutoAgentServer:
         @router.get("/workflows", dependencies=auth)
         async def list_workflows(
             cursor: str | None = None,
-            limit: int = Query(default=50, ge=1, le=200),
+            limit: int = Query(default=20, ge=1, le=200),
             refresh_database: bool = False,
         ) -> dict[str, Any]:
             return await self._trace_call(
@@ -353,7 +363,7 @@ class AutoAgentServer:
         @router.get("/registered-workflows", dependencies=auth)
         async def list_registered_workflows(
             cursor: str | None = None,
-            limit: int = Query(default=50, ge=1, le=200),
+            limit: int = Query(default=20, ge=1, le=200),
             refresh_database: bool = False,
         ) -> dict[str, Any]:
             return await self._trace_call(
@@ -369,7 +379,7 @@ class AutoAgentServer:
         async def list_workflow_revisions(
             workflow_id: str,
             cursor: str | None = None,
-            limit: int = Query(default=50, ge=1, le=200),
+            limit: int = Query(default=20, ge=1, le=200),
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_workflow_versions(
@@ -392,7 +402,7 @@ class AutoAgentServer:
         async def list_sessions(
             workflow_revision_id: str,
             cursor: str | None = None,
-            limit: int = Query(default=50, ge=1, le=200),
+            limit: int = Query(default=20, ge=1, le=200),
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_sessions(
@@ -406,7 +416,7 @@ class AutoAgentServer:
         async def list_invocations(
             session_id: UUID,
             cursor: str | None = None,
-            limit: int = Query(default=50, ge=1, le=200),
+            limit: int = Query(default=20, ge=1, le=200),
         ) -> dict[str, Any]:
             return await self._trace_call(
                 self.trace.list_invocations(
@@ -606,54 +616,75 @@ class AutoAgentServer:
 
             async def generate() -> AsyncIterator[str]:
                 cursor = after_sequence
-                heartbeat_at = asyncio.get_running_loop().time()
+                loop = asyncio.get_running_loop()
+                changed = asyncio.Event()
                 previous_detail: str | None = None
-                while not await request.is_disconnected():
-                    page = await self.trace.event_page(
+
+                def notify() -> None:
+                    loop.call_soon_threadsafe(changed.set)
+
+                unsubscribe = (
+                    self.agent.runtime_store.subscribe_runtime_changes(
                         invocation_id,
-                        after_sequence=cursor,
-                        before_sequence=None,
-                        limit=200,
+                        notify,
                     )
-                    for event in page["items"]:
-                        cursor = int(event["sequence"])
-                        yield (
-                            f"id: {cursor}\n"
-                            "event: runtime_event\n"
-                            f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                )
+                try:
+                    changed.set()
+                    while not await request.is_disconnected():
+                        changed.clear()
+                        page = await self.trace.event_page(
+                            invocation_id,
+                            after_sequence=cursor,
+                            before_sequence=None,
+                            limit=200,
                         )
-                    detail = await self.trace.invocation_detail(invocation_id)
-                    encoded_detail = json.dumps(detail, separators=(",", ":"))
-                    if encoded_detail != previous_detail:
-                        previous_detail = encoded_detail
-                        yield (
-                            "event: invocation_status\n"
-                            f"data: {encoded_detail}\n\n"
+                        for event in page["items"]:
+                            cursor = int(event["sequence"])
+                            yield (
+                                f"id: {cursor}\n"
+                                "event: runtime_event\n"
+                                f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                            )
+                        detail = await self.trace.invocation_detail(invocation_id)
+                        encoded_detail = json.dumps(
+                            detail,
+                            separators=(",", ":"),
                         )
-                    terminal = detail["state"] in {
-                        "completed",
-                        "failed",
-                        "cancelled",
-                        "interrupted",
-                    }
-                    persistence_settled = detail["persistence_status"] in {
-                        "memory_only",
-                        "durable",
-                        "degraded",
-                        "unserializable",
-                    }
-                    if (
-                        terminal
-                        and cursor >= int(detail["live_sequence"])
-                        and persistence_settled
-                    ):
-                        yield "event: stream_end\ndata: {}\n\n"
-                        break
-                    now = asyncio.get_running_loop().time()
-                    if now - heartbeat_at >= 15:
-                        yield ": heartbeat\n\n"
-                        heartbeat_at = now
-                    await asyncio.sleep(0.25)
+                        if encoded_detail != previous_detail:
+                            previous_detail = encoded_detail
+                            yield (
+                                "event: invocation_status\n"
+                                f"data: {encoded_detail}\n\n"
+                            )
+                        terminal = detail["state"] in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "interrupted",
+                        }
+                        persistence_settled = detail["persistence_status"] in {
+                            "memory_only",
+                            "durable",
+                            "degraded",
+                            "unserializable",
+                        }
+                        if (
+                            terminal
+                            and cursor >= int(detail["live_sequence"])
+                            and persistence_settled
+                        ):
+                            yield "event: stream_end\ndata: {}\n\n"
+                            break
+                        try:
+                            await asyncio.wait_for(
+                                changed.wait(),
+                                timeout=15,
+                            )
+                        except TimeoutError:
+                            yield ": heartbeat\n\n"
+                finally:
+                    unsubscribe()
 
             await self._trace_call(self.trace.invocation_detail(invocation_id))
             return StreamingResponse(
@@ -1010,7 +1041,8 @@ class AutoAgentServer:
             return
         error = task.exception()
         if error is not None:
-            if len(self._invocation_failures) >= 1_024:
-                oldest = next(iter(self._invocation_failures))
-                del self._invocation_failures[oldest]
-            self._invocation_failures[invocation_id] = error
+            logger.error(
+                "Background Invocation execution failed: invocation_id=%s",
+                invocation_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )

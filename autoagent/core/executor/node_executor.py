@@ -1161,6 +1161,26 @@ async def _execute_unit(
     )
 
 
+async def _await_thread_future(future: Any) -> Any:
+    """Await a worker result with a bounded lost-wakeup compatibility tick."""
+
+    wrapped = asyncio.wrap_future(future)
+    while not wrapped.done():
+        tick = asyncio.create_task(asyncio.sleep(0.005))
+        try:
+            done, _ = await asyncio.wait(
+                (wrapped, tick),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not tick.done():
+                tick.cancel()
+                await asyncio.gather(tick, return_exceptions=True)
+        if wrapped in done:
+            break
+    return wrapped.result()
+
+
 async def _invoke_operator(
     job: ResolvedNodeExecutionJob,
     operator: Operator,
@@ -1202,7 +1222,7 @@ async def _invoke_operator(
             future = job.thread_pool.submit(invoke_sync)
             try:
                 output, worker_started_ns, worker_ended_ns = (
-                    await asyncio.wrap_future(future)
+                    await _await_thread_future(future)
                 )
             except asyncio.CancelledError:
                 future.cancel()
@@ -1303,7 +1323,7 @@ async def _consume_streaming_result(
                 user_events,
             )
             try:
-                streamed, worker_started_ns = await asyncio.wrap_future(future)
+                streamed, worker_started_ns = await _await_thread_future(future)
             except asyncio.CancelledError:
                 future.cancel()
                 raise

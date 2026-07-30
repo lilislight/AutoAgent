@@ -207,6 +207,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
                         messages=(LLMMessage(role="user", content="weather"),),
                     ),
                     "tool_result": ToolExecutionResult(
+                        call_index=0,
                         tool_call_id="call_1",
                         tool_id="mock.city_profile",
                         output=get_city_profile("Tokyo"),

@@ -535,6 +535,35 @@ button {
   text-align: center;
 }
 
+.scope-column-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scope-column-refresh {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.scope-column-refresh:hover:not(:disabled) {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.scope-column-refresh:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .scope-navigator-search {
   display: flex;
   align-items: center;
@@ -592,6 +621,11 @@ button {
 
 .scope-column-status.is-error {
   color: var(--danger);
+}
+
+.scope-column-load-more {
+  justify-content: center;
+  padding: 8px 0 4px;
 }
 
 .scope-navigator-item {

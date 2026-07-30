@@ -344,6 +344,7 @@ class PersistenceCoordinator:
         self._health = PersistenceHealth()
         self._admission_pressure = False
         self._wake_consumer: Callable[[], None] | None = None
+        self._status_change_listeners: set[Callable[[], None]] = set()
 
     def bind_consumer(self, wake_consumer: Callable[[], None]) -> None:
         with self._lock:
@@ -353,6 +354,30 @@ class PersistenceCoordinator:
             ):
                 raise RuntimeError("PersistenceCoordinator already has a consumer.")
             self._wake_consumer = wake_consumer
+
+    def subscribe_status_changes(
+        self,
+        listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        with self._lock:
+            self._status_change_listeners.add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                self._status_change_listeners.discard(listener)
+
+        return unsubscribe
+
+    def _notify_status_change(self) -> None:
+        with self._lock:
+            listeners = tuple(self._status_change_listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                # Persistence status listeners are advisory UI wakeups and must
+                # never affect durability or Workflow execution.
+                continue
 
     @property
     def pending_count(self) -> int:
@@ -494,6 +519,7 @@ class PersistenceCoordinator:
                 # A stopped sink is a durability failure, not an
                 # execution-state rollback.
                 self.mark_unavailable(exc)
+        self._notify_status_change()
 
     def _coalesce_queued_recovery_state(
         self,
@@ -528,6 +554,7 @@ class PersistenceCoordinator:
         with self._lock:
             self._reservations.pop(reservation.id, None)
             self._remove_outstanding(reservation.id)
+        self._notify_status_change()
 
     def take(self, limit: int) -> tuple[PersistenceEnvelope, ...]:
         values: list[PersistenceEnvelope] = []
@@ -558,10 +585,12 @@ class PersistenceCoordinator:
             if previous is not None:
                 self._outstanding_bytes[envelope_id] = exact_bytes
                 self._pending_bytes += exact_bytes - previous
+        self._notify_status_change()
 
     def discard(self, envelope_id: UUID) -> None:
         with self._lock:
             self._remove_outstanding(envelope_id)
+        self._notify_status_change()
 
     def mark_durable(
         self,
@@ -575,6 +604,7 @@ class PersistenceCoordinator:
                 self._durable_sequences.get(invocation_id, 0),
                 sequence,
             )
+        self._notify_status_change()
 
     def mark_user_events_durable(
         self,
@@ -588,6 +618,7 @@ class PersistenceCoordinator:
                 self._durable_user_event_sequences.get(invocation_id, 0),
                 sequence,
             )
+        self._notify_status_change()
 
     def remember_user_events_durable(
         self,
@@ -615,10 +646,26 @@ class PersistenceCoordinator:
         with self._lock:
             self._remove_outstanding(envelope_id)
             self._durable_admissions.add(invocation_id)
+        self._notify_status_change()
 
     def remember_admission_durable(self, invocation_id: UUID) -> None:
         with self._lock:
             self._durable_admissions.add(invocation_id)
+
+    def release_invocation_tracking(self, invocation_id: UUID) -> None:
+        """Drop bounded process-local durability metadata after cache eviction."""
+
+        with self._lock:
+            if invocation_id in self._outstanding_invocations.values():
+                raise RuntimeError(
+                    "Cannot release persistence tracking with outstanding records."
+                )
+            self._durable_sequences.pop(invocation_id, None)
+            self._durable_user_event_sequences.pop(invocation_id, None)
+            self._durable_admissions.discard(invocation_id)
+            self._invocation_errors.pop(invocation_id, None)
+            self._invocation_gaps.pop(invocation_id, None)
+            self._user_event_gaps.pop(invocation_id, None)
 
     def fail_invocation(
         self,
@@ -657,7 +704,8 @@ class PersistenceCoordinator:
                 if session_id in retained
             )
             self._ready_set = set(self._ready_sessions)
-            return existing
+        self._notify_status_change()
+        return existing
 
     def degrade_invocation(
         self,
@@ -671,7 +719,9 @@ class PersistenceCoordinator:
             message,
         )
         with self._lock:
-            return self._invocation_gaps.setdefault(invocation_id, failure)
+            result = self._invocation_gaps.setdefault(invocation_id, failure)
+        self._notify_status_change()
+        return result
 
     def degrade_user_events(
         self,
@@ -685,7 +735,9 @@ class PersistenceCoordinator:
             message,
         )
         with self._lock:
-            return self._user_event_gaps.setdefault(invocation_id, failure)
+            result = self._user_event_gaps.setdefault(invocation_id, failure)
+        self._notify_status_change()
+        return result
 
     def mark_retrying(self, error: BaseException) -> None:
         self._set_health("retrying", error)
@@ -698,6 +750,7 @@ class PersistenceCoordinator:
                 changed_at_ms=now,
                 last_success_at_ms=now,
             )
+        self._notify_status_change()
 
     def mark_unavailable(self, error: BaseException) -> BackendPersistenceError:
         failure = BackendPersistenceError(
@@ -718,6 +771,7 @@ class PersistenceCoordinator:
                 changed_at_ms=utc_timestamp_ms(),
                 last_success_at_ms=self._health.last_success_at_ms,
             )
+        self._notify_status_change()
 
     def _admission_error(
         self,

@@ -38,11 +38,48 @@ class ToolExecutionPlan:
         tool_by_name = {item.name: item for item in self.definitions}
         valid: list[ParsedToolCall] = []
         invalid: list[InvalidToolCall] = []
-        for call in response.message.tool_calls:
+        normalized_calls = []
+        for call_index, original_call in enumerate(response.message.tool_calls):
+            empty_id = not original_call.id.strip()
+            empty_name = not original_call.name.strip()
+            call = original_call.model_copy(
+                update={
+                    "id": (
+                        f"invalid_tool_call_{call_index}"
+                        if empty_id
+                        else original_call.id
+                    ),
+                    "name": (
+                        "__invalid_tool__"
+                        if empty_name
+                        else original_call.name
+                    ),
+                }
+            )
+            normalized_calls.append(call)
+            if empty_id:
+                invalid.append(
+                    InvalidToolCall(
+                        call_index=call_index,
+                        call=call,
+                        error="Tool call id cannot be empty.",
+                    )
+                )
+                continue
+            if empty_name:
+                invalid.append(
+                    InvalidToolCall(
+                        call_index=call_index,
+                        call=call,
+                        error="Tool name cannot be empty.",
+                    )
+                )
+                continue
             definition = tool_by_name.get(call.name)
             if definition is None:
                 invalid.append(
                     InvalidToolCall(
+                        call_index=call_index,
                         call=call,
                         error=f"Unknown tool: {call.name}",
                     )
@@ -52,10 +89,17 @@ class ToolExecutionPlan:
                 decoded = json.loads(call.raw_arguments)
                 arguments = definition.contract.input.validate(decoded)
             except Exception as exc:
-                invalid.append(InvalidToolCall(call=call, error=str(exc)))
+                invalid.append(
+                    InvalidToolCall(
+                        call_index=call_index,
+                        call=call,
+                        error=str(exc),
+                    )
+                )
                 continue
             valid.append(
                 ParsedToolCall(
+                    call_index=call_index,
                     call=call,
                     tool_id=definition.id,
                     arguments=arguments,
@@ -67,8 +111,15 @@ class ToolExecutionPlan:
                 f"{self.max_parse_retries} repair attempt(s): "
                 + "; ".join(item.error for item in invalid)
             )
+        normalized_response = response.model_copy(
+            update={
+                "message": response.message.model_copy(
+                    update={"tool_calls": tuple(normalized_calls)}
+                )
+            }
+        )
         return ToolCallBatch(
-            response=response,
+            response=normalized_response,
             valid_calls=tuple(valid),
             invalid_calls=tuple(invalid),
         )
@@ -78,11 +129,11 @@ class ToolExecutionPlan:
         batch: ToolCallBatch,
         executions: tuple[ToolExecutionResult, ...],
     ) -> ConversationUpdate:
-        results = {item.tool_call_id: item for item in executions}
-        invalid = {item.call.id: item for item in batch.invalid_calls}
+        results = {item.call_index: item for item in executions}
+        invalid = {item.call_index: item for item in batch.invalid_calls}
         messages: list[LLMMessage] = [batch.response.message]
-        for call in batch.response.message.tool_calls:
-            failed = invalid.get(call.id)
+        for call_index, call in enumerate(batch.response.message.tool_calls):
+            failed = invalid.get(call_index)
             if failed is not None:
                 content = json.dumps(
                     {
@@ -96,7 +147,7 @@ class ToolExecutionPlan:
                     separators=(",", ":"),
                 )
             else:
-                executed = results[call.id]
+                executed = results[call_index]
                 if executed.error is None:
                     content = tool_output_json(executed.output)
                 else:

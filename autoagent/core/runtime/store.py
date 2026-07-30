@@ -192,6 +192,10 @@ class RuntimeStore:
             UUID,
             set[Callable[[], None]],
         ] = {}
+        self._runtime_change_listeners: dict[
+            UUID,
+            set[Callable[[], None]],
+        ] = {}
         self._session_user_event_change_listeners: dict[
             UUID,
             set[Callable[[], None]],
@@ -205,7 +209,7 @@ class RuntimeStore:
         self._reduced_states: dict[UUID, dict[str, Any]] = {}
         self._pending_admissions: dict[UUID, Invocation] = {}
         self._durable_terminal_lru: OrderedDict[UUID, None] = OrderedDict()
-        self._evicted_event_sequences: dict[UUID, int] = {}
+        self._evicted_event_sequences: OrderedDict[UUID, int] = OrderedDict()
         if backend is not None:
             backend.bind(self)
 
@@ -666,6 +670,7 @@ class RuntimeStore:
                 self._publish_persistence(envelope)
         if self.backend is not None:
             self._persistence_advanced(invocation.id)
+        self._notify_runtime_change(invocation.id)
         return event
 
     async def apersist_invocation_state(
@@ -679,6 +684,7 @@ class RuntimeStore:
             self.sessions[session.id] = session
             self.invocations[invocation.id] = invocation
         if self.persistence is None:
+            self._notify_runtime_change(invocation.id)
             return
         try:
             envelope = freeze_invocation_state_envelope(
@@ -696,6 +702,7 @@ class RuntimeStore:
             )
         else:
             self._publish_persistence(envelope)
+        self._notify_runtime_change(invocation.id)
 
     def _publish_persistence(self, envelope: PersistenceEnvelope) -> bool:
         persistence = self.persistence
@@ -936,6 +943,7 @@ class RuntimeStore:
                 self._expected_user_event_sequences[invocation.id] = (
                     latest_user_event_sequence
                 )
+                self._evicted_event_sequences.pop(invocation.id, None)
                 if invocation.event_mode == "full":
                     self._reduced_states[invocation.id] = (
                         capture_execution_state(session, invocation)
@@ -1162,6 +1170,41 @@ class RuntimeStore:
 
         return unsubscribe
 
+    def subscribe_runtime_changes(
+        self,
+        invocation_id: UUID,
+        listener: Callable[[], None],
+    ) -> Callable[[], None]:
+        """Notify after RuntimeEvent, Invocation state, or durability changes."""
+
+        with self._lock:
+            if (
+                invocation_id not in self.invocations
+                and invocation_id not in self._evicted_event_sequences
+                and self.backend is None
+            ):
+                raise KeyError(f"Unknown Invocation: {invocation_id}")
+            self._runtime_change_listeners.setdefault(
+                invocation_id,
+                set(),
+            ).add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                listeners = self._runtime_change_listeners.get(
+                    invocation_id
+                )
+                if listeners is None:
+                    return
+                listeners.discard(listener)
+                if not listeners:
+                    self._runtime_change_listeners.pop(
+                        invocation_id,
+                        None,
+                    )
+
+        return unsubscribe
+
     def subscribe_session_user_event_changes(
         self,
         session_id: UUID,
@@ -1255,6 +1298,20 @@ class RuntimeStore:
                     "Session UserEvent change listener failed: "
                     "session_id=%s invocation_id=%s",
                     session_id,
+                    invocation_id,
+                )
+
+    def _notify_runtime_change(self, invocation_id: UUID) -> None:
+        with self._lock:
+            listeners = tuple(
+                self._runtime_change_listeners.get(invocation_id, ())
+            )
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception(
+                    "Runtime change listener failed: invocation_id=%s",
                     invocation_id,
                 )
 
@@ -1462,6 +1519,7 @@ class RuntimeStore:
                     return
             if self.user_event_persistence_status(invocation_id) != "durable":
                 return
+            self._notify_runtime_change(invocation_id)
             release = getattr(self.backend, "release_invocation_cache", None)
             if release is not None:
                 release(invocation_id)
@@ -1484,8 +1542,9 @@ class RuntimeStore:
         invocation = self.invocations.pop(invocation_id, None)
         if invocation is None:
             return
-        self._evicted_event_sequences[invocation_id] = (
-            invocation.event_sequence
+        self._remember_evicted_sequence(
+            invocation_id,
+            invocation.event_sequence,
         )
         session_id = self.invocation_sessions.pop(invocation_id, None)
         if session_id is not None:
@@ -1498,11 +1557,24 @@ class RuntimeStore:
                 ]
                 if session.current_invocation_id == invocation_id:
                     session.current_invocation_id = None
+                if not session.invocations:
+                    self.sessions.pop(session_id, None)
+                    session_key = (
+                        session.workflow_revision_id,
+                        session.session_key,
+                    )
+                    if self.session_keys.get(session_key) == session_id:
+                        self.session_keys.pop(session_key, None)
+                    self._session_notified_invocations.pop(
+                        session_id,
+                        None,
+                    )
         self.runtime_events.pop(invocation_id, None)
         self.user_events.pop(invocation_id, None)
         self._user_event_sequences.pop(invocation_id, None)
         self._expected_user_event_sequences.pop(invocation_id, None)
         self._user_event_change_listeners.pop(invocation_id, None)
+        self._runtime_change_listeners.pop(invocation_id, None)
         self._reduced_states.pop(invocation_id, None)
         for key in [
             key
@@ -1510,3 +1582,16 @@ class RuntimeStore:
             if key[0] == invocation_id
         ]:
             del self._replay_checkpoints[key]
+
+    def _remember_evicted_sequence(
+        self,
+        invocation_id: UUID,
+        sequence: int,
+    ) -> None:
+        self._evicted_event_sequences.pop(invocation_id, None)
+        self._evicted_event_sequences[invocation_id] = sequence
+        limit = max(1, self.retention_policy.max_terminal_invocations)
+        while len(self._evicted_event_sequences) > limit:
+            oldest, _ = self._evicted_event_sequences.popitem(last=False)
+            if self.persistence is not None:
+                self.persistence.release_invocation_tracking(oldest)

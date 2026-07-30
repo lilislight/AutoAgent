@@ -42,6 +42,17 @@ interface ScopeBarProps {
   workflowsLoading: boolean;
   sessionsLoading: boolean;
   invocationsLoading: boolean;
+  workflowsHasMore: boolean;
+  sessionsHasMore: boolean;
+  invocationsHasMore: boolean;
+  workflowsLoadingMore: boolean;
+  sessionsLoadingMore: boolean;
+  invocationsLoadingMore: boolean;
+  refreshingWorkflows: boolean;
+  onLoadMoreWorkflows: () => void;
+  onLoadMoreSessions: () => void;
+  onLoadMoreInvocations: () => void;
+  onRefreshWorkflows: () => void;
   onRefreshInvocation: () => void;
   onCancelInvocation: () => void;
   onInspectInvocation: () => void;
@@ -70,6 +81,17 @@ export function ScopeBar({
   workflowsLoading,
   sessionsLoading,
   invocationsLoading,
+  workflowsHasMore,
+  sessionsHasMore,
+  invocationsHasMore,
+  workflowsLoadingMore,
+  sessionsLoadingMore,
+  invocationsLoadingMore,
+  refreshingWorkflows,
+  onLoadMoreWorkflows,
+  onLoadMoreSessions,
+  onLoadMoreInvocations,
+  onRefreshWorkflows,
   onRefreshInvocation,
   onCancelInvocation,
   onInspectInvocation,
@@ -99,6 +121,17 @@ export function ScopeBar({
           workflowsLoading={workflowsLoading}
           sessionsLoading={sessionsLoading}
           invocationsLoading={invocationsLoading}
+          workflowsHasMore={workflowsHasMore}
+          sessionsHasMore={sessionsHasMore}
+          invocationsHasMore={invocationsHasMore}
+          workflowsLoadingMore={workflowsLoadingMore}
+          sessionsLoadingMore={sessionsLoadingMore}
+          invocationsLoadingMore={invocationsLoadingMore}
+          refreshingWorkflows={refreshingWorkflows}
+          onLoadMoreWorkflows={onLoadMoreWorkflows}
+          onLoadMoreSessions={onLoadMoreSessions}
+          onLoadMoreInvocations={onLoadMoreInvocations}
+          onRefreshWorkflows={onRefreshWorkflows}
           onWorkflowChange={onWorkflowChange}
           onSessionChange={onSessionChange}
           onInvocationChange={onInvocationChange}
@@ -314,6 +347,17 @@ function ScopeNavigator({
   workflowsLoading,
   sessionsLoading,
   invocationsLoading,
+  workflowsHasMore,
+  sessionsHasMore,
+  invocationsHasMore,
+  workflowsLoadingMore,
+  sessionsLoadingMore,
+  invocationsLoadingMore,
+  refreshingWorkflows,
+  onLoadMoreWorkflows,
+  onLoadMoreSessions,
+  onLoadMoreInvocations,
+  onRefreshWorkflows,
   onWorkflowChange,
   onSessionChange,
   onInvocationChange,
@@ -328,6 +372,17 @@ function ScopeNavigator({
   | "workflowsLoading"
   | "sessionsLoading"
   | "invocationsLoading"
+  | "workflowsHasMore"
+  | "sessionsHasMore"
+  | "invocationsHasMore"
+  | "workflowsLoadingMore"
+  | "sessionsLoadingMore"
+  | "invocationsLoadingMore"
+  | "refreshingWorkflows"
+  | "onLoadMoreWorkflows"
+  | "onLoadMoreSessions"
+  | "onLoadMoreInvocations"
+  | "onRefreshWorkflows"
   | "onWorkflowChange"
   | "onSessionChange"
   | "onInvocationChange"
@@ -454,6 +509,11 @@ function ScopeNavigator({
             column="workflow"
             count={sortedWorkflows.length}
             loading={workflowsLoading}
+            loadingMore={workflowsLoadingMore}
+            hasMore={workflowsHasMore}
+            onLoadMore={onLoadMoreWorkflows}
+            onRefresh={onRefreshWorkflows}
+            refreshing={refreshingWorkflows}
             emptyLabel="No workflow history is available."
             query={queries.workflow}
             onQueryChange={(value) => setQuery("workflow", value)}
@@ -489,6 +549,9 @@ function ScopeNavigator({
             count={sortedSessions.length}
             disabled={!draftScope.workflowRevisionId}
             loading={sessionsLoading}
+            loadingMore={sessionsLoadingMore}
+            hasMore={sessionsHasMore}
+            onLoadMore={onLoadMoreSessions}
             emptyLabel={
               draftScope.workflowRevisionId
                 ? "No sessions for this revision."
@@ -519,6 +582,9 @@ function ScopeNavigator({
             count={sortedInvocations.length}
             disabled={!draftScope.sessionId}
             loading={invocationsLoading}
+            loadingMore={invocationsLoadingMore}
+            hasMore={invocationsHasMore}
+            onLoadMore={onLoadMoreInvocations}
             emptyLabel={draftScope.sessionId ? "No invocations in this session." : "Select a session first."}
             query={queries.invocation}
             onQueryChange={(value) => setQuery("invocation", value)}
@@ -574,11 +640,16 @@ function ScopeColumnList({
   count,
   disabled = false,
   loading = false,
+  loadingMore = false,
+  hasMore = false,
+  refreshing = false,
   error = null,
   emptyLabel,
   query,
   onQueryChange,
   onActivate,
+  onLoadMore,
+  onRefresh,
   children,
 }: {
   active: boolean;
@@ -586,11 +657,16 @@ function ScopeColumnList({
   count: number;
   disabled?: boolean;
   loading?: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  refreshing?: boolean;
   error?: Error | null;
   emptyLabel: string;
   query: string;
   onQueryChange: (value: string) => void;
   onActivate: () => void;
+  onLoadMore?: () => void;
+  onRefresh?: () => void;
   children: ReactNode;
 }) {
   const label = column === "workflow" ? "Workflow" : column === "session" ? "Session" : "Invocation";
@@ -602,7 +678,27 @@ function ScopeColumnList({
     >
       <header>
         <span>{label}</span>
-        <small>{count}</small>
+        <div className="scope-column-heading-actions">
+          {onRefresh && (
+            <button
+              className="scope-column-refresh"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRefresh();
+              }}
+              disabled={refreshing}
+              title="Refresh Workflow history"
+              aria-label="Refresh Workflow history"
+            >
+              <RefreshCw
+                className={refreshing ? "spin" : undefined}
+                size={12}
+              />
+            </button>
+          )}
+          <small>{count}{hasMore ? "+" : ""}</small>
+        </div>
       </header>
       <label className="scope-navigator-search">
         <Search size={13} />
@@ -614,7 +710,19 @@ function ScopeColumnList({
           placeholder={`Search ${label.toLowerCase()}s`}
         />
       </label>
-      <div className="scope-navigator-list">
+      <div
+        className="scope-navigator-list"
+        onScroll={(event) => {
+          if (!hasMore || loadingMore || !onLoadMore) return;
+          const list = event.currentTarget;
+          if (
+            list.scrollHeight - list.scrollTop - list.clientHeight
+            <= 48
+          ) {
+            onLoadMore();
+          }
+        }}
+      >
         {loading ? (
           <p className="scope-column-status">
             <LoaderCircle className="spin" size={14} />
@@ -624,7 +732,17 @@ function ScopeColumnList({
           <p className="scope-column-status is-error">
             {error.message}
           </p>
-        ) : visible > 0 ? children : <p>{emptyLabel}</p>}
+        ) : visible > 0 ? (
+          <>
+            {children}
+            {loadingMore && (
+              <p className="scope-column-status scope-column-load-more">
+                <LoaderCircle className="spin" size={13} />
+                Loading more…
+              </p>
+            )}
+          </>
+        ) : <p>{emptyLabel}</p>}
       </div>
     </section>
   );

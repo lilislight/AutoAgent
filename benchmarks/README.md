@@ -23,6 +23,20 @@ Absolute results vary by hardware and system load. Compare commits on the same
 host and configuration; the unittest smoke budgets are meant to catch hangs or
 order-of-magnitude regressions, not small timing changes.
 
+## Runtime scheduling overhead
+
+To measure Runtime compatibility-pulse CPU use, concurrency-slot contention,
+and cross-thread dispatch latency, run:
+
+```bash
+python -m benchmarks.runtime_polling_benchmark
+```
+
+Keep `--operation-ms`, `--waiters`, `--hold-ms`, and `--dispatches` identical
+for before/after comparisons. The cross-thread case also measures the separate
+lost-wakeup fallback, so it should not be used as a proxy for long Operator
+execution overhead.
+
 ## UserEvent overhead
 
 To compare the same streaming Node with no UserEvent, one final UserEvent,

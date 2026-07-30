@@ -73,7 +73,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   }
 }
 
-interface Page<T> {
+export interface Page<T> {
   items: T[];
   next_cursor: string | null;
   has_more: boolean;
@@ -128,10 +128,11 @@ interface ServerTraceBootstrap {
   event_page: ServerEventPage;
 }
 
-export async function listWorkflows(
+export function listWorkflowPage(
+  cursor: string | null = null,
   refreshDatabase = false,
-): Promise<WorkflowSummary[]> {
-  return listAllWorkflowPages(`${API}/workflows`, refreshDatabase);
+): Promise<Page<WorkflowSummary>> {
+  return listPage(`${API}/workflows`, cursor, refreshDatabase);
 }
 
 export async function listRegisteredWorkflows(
@@ -151,7 +152,7 @@ async function listAllWorkflowPages(
   let cursor: string | null = null;
   let firstPage = true;
   do {
-    const query = new URLSearchParams({ limit: "200" });
+    const query = new URLSearchParams({ limit: "20" });
     if (cursor) query.set("cursor", cursor);
     if (firstPage && refreshDatabase) {
       query.set("refresh_database", "true");
@@ -164,6 +165,19 @@ async function listAllWorkflowPages(
     firstPage = false;
   } while (cursor);
   return values;
+}
+
+function listPage<T>(
+  path: string,
+  cursor: string | null,
+  refreshDatabase = false,
+): Promise<Page<T>> {
+  const query = new URLSearchParams({ limit: "20" });
+  if (cursor) query.set("cursor", cursor);
+  if (refreshDatabase && cursor === null) {
+    query.set("refresh_database", "true");
+  }
+  return requestJson<Page<T>>(`${path}?${query.toString()}`);
 }
 
 export function getWorkflowGraph(workflow: WorkflowSummary): Promise<WorkflowGraphView> {
@@ -203,20 +217,26 @@ export async function createAuthenticationSession(token: string): Promise<void> 
   await postJson(`${API}/auth/session`, { token });
 }
 
-export async function listSessions(
+export function listSessionPage(
   workflowRevisionId: string,
-): Promise<SessionSummary[]> {
-  return (await requestJson<Page<SessionSummary>>(
+  cursor: string | null = null,
+): Promise<Page<SessionSummary>> {
+  return listPage(
     `${API}/workflow-revisions/${
       encodeURIComponent(workflowRevisionId)
-    }/sessions?limit=200`,
-  )).items;
+    }/sessions`,
+    cursor,
+  );
 }
 
-export async function listInvocations(sessionId: string): Promise<InvocationSummary[]> {
-  return (await requestJson<Page<InvocationSummary>>(
-    `${API}/sessions/${sessionId}/invocations?limit=200`,
-  )).items;
+export function listInvocationPage(
+  sessionId: string,
+  cursor: string | null = null,
+): Promise<Page<InvocationSummary>> {
+  return listPage(
+    `${API}/sessions/${sessionId}/invocations`,
+    cursor,
+  );
 }
 
 export function listAgentInvocationNeighbors(

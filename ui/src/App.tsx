@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { AlertTriangle, GitBranch, LoaderCircle, Play, X } from "lucide-react";
 
 import {
@@ -13,15 +19,16 @@ import {
   getTraceView,
   getHealth,
   getRuntimeStatus,
-  listInvocations,
+  listInvocationPage,
   listRegisteredWorkflows,
-  listSessions,
-  listWorkflows,
+  listSessionPage,
+  listWorkflowPage,
   resumeInvocation,
   subscribeToInvocation,
   subscribeToSessionUserEventChanges,
   subscribeToSystemUpdates,
   submitInvocation,
+  type Page,
 } from "./api";
 import { ExecutionTimeline } from "./components/ExecutionTimeline";
 import { AgentPanel } from "./components/AgentPanel";
@@ -90,6 +97,7 @@ export default function App() {
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentUnreadCount, setAgentUnreadCount] = useState(0);
+  const [workflowRefreshGeneration, setWorkflowRefreshGeneration] = useState(0);
   const [runtimeStreamConnected, setRuntimeStreamConnected] = useState<boolean | null>(null);
   const [liveDraftGraph, setLiveDraftGraph] = useState<WorkflowGraphView | null>(null);
   const [liveDraftInvocation, setLiveDraftInvocation] = useState<InvocationDetail | null>(null);
@@ -136,30 +144,29 @@ export default function App() {
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => document.removeEventListener("visibilitychange", refreshWhenVisible);
   }, [authenticated, runtimeStatusQuery.refetch]);
-  const workflowQuery = useQuery({
-    queryKey: ["workflows"],
-    queryFn: () => listWorkflows(true),
+  const workflowQuery = useInfiniteQuery({
+    queryKey: ["workflows", workflowRefreshGeneration],
+    queryFn: ({ pageParam }) => listWorkflowPage(
+      pageParam,
+      workflowRefreshGeneration > 0 && pageParam === null,
+    ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.next_cursor : undefined,
     enabled: authenticated,
   });
   const registeredWorkflowQuery = useQuery({
     queryKey: ["registered-workflows"],
-    queryFn: () => listRegisteredWorkflows(true),
+    queryFn: () => listRegisteredWorkflows(false),
     enabled: authenticated,
   });
   const registeredWorkflows = registeredWorkflowQuery.data ?? [];
-  const workflows = workflowQuery.data ?? [];
+  const workflows = workflowQuery.data?.pages.flatMap((page) => page.items) ?? [];
   useEffect(() => {
     if (!authenticated) return;
     return subscribeToSystemUpdates(
       (status) => queryClient.setQueryData<RuntimeStatus>(["runtime-status"], status),
-      () => {
-        void Promise.all([
-          queryClient.invalidateQueries({ queryKey: ["workflows"] }),
-          queryClient.invalidateQueries({
-            queryKey: ["registered-workflows"],
-          }),
-        ]);
-      },
+      () => undefined,
       setRuntimeStreamConnected,
     );
   }, [authenticated, queryClient]);
@@ -184,10 +191,10 @@ export default function App() {
   const invokeGraph = invokeGraphQuery.data;
   const invokeSessionQuery = useQuery({
     queryKey: ["sessions", invokeWorkflow?.revision_id, "invoke"],
-    queryFn: () => listSessions(invokeWorkflow!.revision_id),
+    queryFn: () => listSessionPage(invokeWorkflow!.revision_id),
     enabled: invokeOpen && Boolean(invokeWorkflow),
   });
-  const invokeSessions = invokeSessionQuery.data ?? [];
+  const invokeSessions = invokeSessionQuery.data?.items ?? [];
 
   useEffect(() => {
     if (pendingScope) return;
@@ -208,12 +215,16 @@ export default function App() {
     }
   }, [pendingScope, ui, workflowQuery.isSuccess, workflows]);
 
-  const sessionQuery = useQuery({
+  const sessionQuery = useInfiniteQuery({
     queryKey: ["sessions", ui.workflowRevisionId],
-    queryFn: () => listSessions(ui.workflowRevisionId!),
+    queryFn: ({ pageParam }) =>
+      listSessionPage(ui.workflowRevisionId!, pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.next_cursor : undefined,
     enabled: Boolean(ui.workflowRevisionId),
   });
-  const sessions = sessionQuery.data ?? [];
+  const sessions = sessionQuery.data?.pages.flatMap((page) => page.items) ?? [];
   useEffect(() => {
     if (pendingScope) return;
     if (!sessionQuery.isSuccess) return;
@@ -228,12 +239,17 @@ export default function App() {
     }
   }, [pendingScope, sessionQuery.isSuccess, sessions, ui]);
 
-  const invocationQuery = useQuery({
+  const invocationQuery = useInfiniteQuery({
     queryKey: ["invocations", ui.sessionId],
-    queryFn: () => listInvocations(ui.sessionId!),
+    queryFn: ({ pageParam }) =>
+      listInvocationPage(ui.sessionId!, pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.next_cursor : undefined,
     enabled: Boolean(ui.sessionId),
   });
-  const invocations = invocationQuery.data ?? [];
+  const invocations =
+    invocationQuery.data?.pages.flatMap((page) => page.items) ?? [];
   useEffect(() => {
     if (!ui.sessionId) return;
     return subscribeToSessionUserEventChanges(
@@ -413,9 +429,9 @@ export default function App() {
               }
             : current,
         );
-        queryClient.setQueryData<InvocationSummary[]>(
+        queryClient.setQueryData<InfiniteData<Page<InvocationSummary>>>(
           ["invocations", activeSessionId],
-          (current) => current?.map((item) =>
+          (current) => mapInfiniteItems(current, (item) =>
             item.id === status.id ? { ...item, ...status } : item,
           ),
         );
@@ -599,9 +615,9 @@ export default function App() {
             }
           : current,
       );
-      queryClient.setQueryData<InvocationSummary[]>(
+      queryClient.setQueryData<InfiniteData<Page<InvocationSummary>>>(
         ["invocations", ui.sessionId],
-        (current) => current?.map((item) =>
+        (current) => mapInfiniteItems(current, (item) =>
           item.id === requestedInvocationId
             ? {
                 ...item,
@@ -1012,13 +1028,27 @@ export default function App() {
         agentOpen={agentOpen}
         agentUnreadCount={agentUnreadCount}
         workflowsLoading={
-          workflowQuery.isFetching ||
+          workflowQuery.isLoading ||
           registeredWorkflowQuery.isFetching
         }
-        sessionsLoading={sessionQuery.isLoading || sessionQuery.isFetching}
-        invocationsLoading={
-          invocationQuery.isLoading || invocationQuery.isFetching
+        sessionsLoading={sessionQuery.isLoading}
+        invocationsLoading={invocationQuery.isLoading}
+        workflowsHasMore={Boolean(workflowQuery.hasNextPage)}
+        sessionsHasMore={Boolean(sessionQuery.hasNextPage)}
+        invocationsHasMore={Boolean(invocationQuery.hasNextPage)}
+        workflowsLoadingMore={workflowQuery.isFetchingNextPage}
+        sessionsLoadingMore={sessionQuery.isFetchingNextPage}
+        invocationsLoadingMore={invocationQuery.isFetchingNextPage}
+        refreshingWorkflows={
+          workflowQuery.isFetching && !workflowQuery.isFetchingNextPage
         }
+        onLoadMoreWorkflows={() => void workflowQuery.fetchNextPage()}
+        onLoadMoreSessions={() => void sessionQuery.fetchNextPage()}
+        onLoadMoreInvocations={() => void invocationQuery.fetchNextPage()}
+        onRefreshWorkflows={() => {
+          setWorkflowRefreshGeneration((value) => value + 1);
+          void registeredWorkflowQuery.refetch();
+        }}
         onRefreshInvocation={() => void refreshLatestInvocation()}
         onCancelInvocation={() => void cancelActiveInvocation()}
         onInspectInvocation={() => {
@@ -1704,10 +1734,9 @@ function upsertSubmittedScope(
   },
 ): void {
   const now = Date.now();
-  queryClient.setQueryData<SessionSummary[]>(
+  queryClient.setQueryData<InfiniteData<Page<SessionSummary>>>(
     ["sessions", value.workflowRevisionId],
     (current) => {
-      const existing = current ?? [];
       const nextSession: SessionSummary = {
         id: value.sessionId,
         workflow_id: value.workflowId,
@@ -1718,8 +1747,10 @@ function upsertSubmittedScope(
         created_at_ms: now,
         updated_at_ms: now,
       };
+      if (!current) return current;
+      const existing = current.pages.flatMap((page) => page.items);
       if (existing.some((session) => session.id === value.sessionId)) {
-        return existing.map((session) =>
+        return mapInfiniteItems(current, (session) =>
           session.id === value.sessionId
             ? {
                 ...session,
@@ -1730,13 +1761,12 @@ function upsertSubmittedScope(
             : session,
         );
       }
-      return [...existing, nextSession];
+      return prependInfiniteItem(current, nextSession);
     },
   );
-  queryClient.setQueryData<InvocationSummary[]>(
+  queryClient.setQueryData<InfiniteData<Page<InvocationSummary>>>(
     ["invocations", value.sessionId],
     (current) => {
-      const existing = current ?? [];
       const nextInvocation: InvocationSummary = {
         id: value.invocationId,
         workflow_id: value.workflowId,
@@ -1752,16 +1782,50 @@ function upsertSubmittedScope(
         created_at_ms: now,
         updated_at_ms: now,
       };
+      if (!current) return current;
+      const existing = current.pages.flatMap((page) => page.items);
       if (existing.some((invocation) => invocation.id === value.invocationId)) {
-        return existing.map((invocation) =>
+        return mapInfiniteItems(current, (invocation) =>
           invocation.id === value.invocationId
             ? { ...invocation, state: value.state, updated_at_ms: now }
             : invocation,
         );
       }
-      return [...existing, nextInvocation];
+      return prependInfiniteItem(current, nextInvocation);
     },
   );
+}
+
+function mapInfiniteItems<T>(
+  current: InfiniteData<Page<T>> | undefined,
+  mapper: (item: T) => T,
+): InfiniteData<Page<T>> | undefined {
+  if (!current) return current;
+  return {
+    ...current,
+    pages: current.pages.map((page) => ({
+      ...page,
+      items: page.items.map(mapper),
+    })),
+  };
+}
+
+function prependInfiniteItem<T>(
+  current: InfiniteData<Page<T>>,
+  item: T,
+): InfiniteData<Page<T>> {
+  const [first, ...rest] = current.pages;
+  if (!first) return current;
+  return {
+    ...current,
+    pages: [
+      {
+        ...first,
+        items: [item, ...first.items],
+      },
+      ...rest,
+    ],
+  };
 }
 
 function createDraftProjection(graph: WorkflowGraphView): RuntimeProjection {

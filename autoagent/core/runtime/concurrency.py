@@ -6,6 +6,12 @@ from contextlib import asynccontextmanager
 from threading import Lock
 
 
+class _SlotPool:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.semaphore = asyncio.Semaphore(limit)
+
+
 class RuntimeConcurrencyController:
     """Process-local concurrency limits shared by all Invocation mailboxes.
 
@@ -17,7 +23,7 @@ class RuntimeConcurrencyController:
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._active: dict[str, int] = {}
+        self._pools: dict[str, _SlotPool] = {}
 
     @asynccontextmanager
     async def async_slot(
@@ -25,34 +31,27 @@ class RuntimeConcurrencyController:
         key: str,
         limit: int | None,
     ) -> AsyncIterator[None]:
-        """Acquire a process-wide slot without blocking an event loop.
-
-        AutoAgentApp.invoke() may create separate event loops in caller threads,
-        while ainvoke() may run many sessions on one loop. A threading-backed
-        counter keeps the limit process-wide; cooperative polling avoids binding
-        an asyncio synchronization primitive to only one of those loops.
-        """
+        """Acquire an App-runtime slot without polling its Event Loop."""
 
         if limit is None:
             yield
             return
+        if limit < 1:
+            raise ValueError("Runtime concurrency limit must be at least 1.")
 
-        acquired = False
+        with self._lock:
+            pool = self._pools.get(key)
+            if pool is None:
+                pool = _SlotPool(limit)
+                self._pools[key] = pool
+            elif pool.limit != limit:
+                raise ValueError(
+                    f"Runtime concurrency key {key!r} was configured with "
+                    f"conflicting limits {pool.limit} and {limit}."
+                )
+
+        await pool.semaphore.acquire()
         try:
-            while not acquired:
-                with self._lock:
-                    active = self._active.get(key, 0)
-                    if active < limit:
-                        self._active[key] = active + 1
-                        acquired = True
-                if not acquired:
-                    await asyncio.sleep(0.001)
             yield
         finally:
-            if acquired:
-                with self._lock:
-                    remaining = self._active[key] - 1
-                    if remaining:
-                        self._active[key] = remaining
-                    else:
-                        self._active.pop(key, None)
+            pool.semaphore.release()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import unittest
 
 from autoagent import AutoAgentApp, RuntimeRetentionPolicy, Workflow
@@ -14,10 +16,12 @@ from autoagent.core.runtime import (
     ParallelOperatorExecution,
     reduce_execution_state,
     RuntimeEvent,
+    RuntimeConcurrencyController,
     Session,
     StateOperation,
     UserEventSpec,
 )
+from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.runtime.snapshot import (
     capture_recovery_state,
@@ -27,6 +31,74 @@ from tests.helpers import started_app
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_change_subscription_wakes_on_minimal_state_update(
+        self,
+    ) -> None:
+        store = RuntimeStore()
+        session = await store.aget_or_create_session(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            session_key="runtime-listener",
+        )
+        invocation = Invocation(
+            workflow_id="flow",
+            workflow_revision_id="revision-flow",
+            workflow_version=1,
+            entry_node_id="entry",
+            event_mode="minimal",
+        )
+        await store.aadmit_invocation(session.id, invocation)
+        changes = 0
+
+        def changed() -> None:
+            nonlocal changes
+            changes += 1
+
+        unsubscribe = store.subscribe_runtime_changes(
+            invocation.id,
+            changed,
+        )
+        invocation.mark_running()
+        await store.apersist_invocation_state(session, invocation)
+        unsubscribe()
+        invocation.mark_waiting()
+        await store.apersist_invocation_state(session, invocation)
+
+        self.assertEqual(1, changes)
+
+    async def test_invocation_eviction_bounds_tombstones_and_drops_empty_sessions(
+        self,
+    ) -> None:
+        store = RuntimeStore(
+            retention_policy=RuntimeRetentionPolicy(
+                mode="evict_durable_terminal",
+                max_terminal_invocations=2,
+            )
+        )
+        invocation_ids = []
+        for index in range(5):
+            session = await store.aget_or_create_session(
+                workflow_id="flow",
+                workflow_revision_id="revision-flow",
+                session_key=f"session-{index}",
+            )
+            invocation = Invocation(
+                workflow_id="flow",
+                workflow_revision_id="revision-flow",
+                workflow_version=1,
+                entry_node_id="entry",
+            )
+            await store.aadmit_invocation(session.id, invocation)
+            invocation_ids.append(invocation.id)
+            store._evict_invocation(invocation.id)
+
+        self.assertEqual({}, store.sessions)
+        self.assertEqual({}, store.session_keys)
+        self.assertEqual(
+            invocation_ids[-2:],
+            list(store._evicted_event_sequences),
+        )
+
     def test_record_user_event_keeps_public_defensive_copy_contract(self) -> None:
         def done() -> str:
             return "done"
@@ -443,6 +515,74 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(100, summary.streaming_call_count)
         self.assertEqual(400, summary.stream_chunk_count)
         self.assertNotIn("outputs", summary.to_record())
+
+
+class RuntimeSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_wakeup_watchdog_stops_after_work_is_accepted(
+        self,
+    ) -> None:
+        runtime_loop = RuntimeEventLoop(name="runtime-watchdog-test")
+        started = threading.Event()
+
+        async def long_running() -> None:
+            started.set()
+            await asyncio.sleep(10)
+
+        future = runtime_loop.submit(long_running())
+        try:
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(started.is_set())
+            self.assertFalse(runtime_loop._has_pending_wakeup())
+        finally:
+            future.cancel()
+            for _ in range(20):
+                if future.done():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(future.done())
+            runtime_loop.stop()
+
+    async def test_concurrency_waiter_is_notified_without_polling(self) -> None:
+        controller = RuntimeConcurrencyController()
+        first_acquired = asyncio.Event()
+        release_first = asyncio.Event()
+        order: list[str] = []
+
+        async def first() -> None:
+            async with controller.async_slot("node", 1):
+                order.append("first")
+                first_acquired.set()
+                await release_first.wait()
+
+        async def second() -> None:
+            await first_acquired.wait()
+            async with controller.async_slot("node", 1):
+                order.append("second")
+
+        first_task = asyncio.create_task(first())
+        second_task = asyncio.create_task(second())
+        await first_acquired.wait()
+        await asyncio.sleep(0)
+        self.assertFalse(second_task.done())
+        release_first.set()
+        await asyncio.wait_for(
+            asyncio.gather(first_task, second_task),
+            timeout=1,
+        )
+
+        self.assertEqual(["first", "second"], order)
+
+    async def test_concurrency_key_rejects_conflicting_limits(self) -> None:
+        controller = RuntimeConcurrencyController()
+        async with controller.async_slot("node", 2):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "conflicting limits"):
+            async with controller.async_slot("node", 1):
+                pass
 
 
 if __name__ == "__main__":

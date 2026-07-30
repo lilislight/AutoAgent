@@ -24,8 +24,9 @@ class RuntimeEventLoop:
         self._started = Event()
         self._ready = Event()
         self._lock = Lock()
-        self._active_lock = Lock()
-        self._active_work = 0
+        self._pending_lock = Lock()
+        self._pending_wakeups = 0
+        self._compatibility_waits = 0
 
     def start(self) -> None:
         owner = False
@@ -47,17 +48,44 @@ class RuntimeEventLoop:
         self.start()
         assert self._loop is not None
         completed: Future[None] = Future()
-        self.begin_busy()
+        accepted_lock = Lock()
+        accepted = False
+        self._begin_pending_wakeup()
+
+        def mark_accepted() -> bool:
+            nonlocal accepted
+            with accepted_lock:
+                if accepted:
+                    return False
+                accepted = True
+            self._end_pending_wakeup()
+            return True
 
         async def tracked() -> T:
+            mark_accepted()
             try:
                 return await awaitable
             finally:
-                self.end_busy()
                 if not completed.done():
                     completed.set_result(None)
 
         future = asyncio.run_coroutine_threadsafe(tracked(), self._loop)
+
+        def submission_done(submitted: Future[T]) -> None:
+            # Cancellation can win before ``tracked`` starts. In that case no
+            # coroutine body exists to acknowledge the wakeup or completion.
+            accepted_here = mark_accepted()
+            if (
+                submitted.cancelled()
+                and accepted_here
+                and not completed.done()
+            ):
+                close = getattr(awaitable, "close", None)
+                if callable(close):
+                    close()
+                completed.set_result(None)
+
+        future.add_done_callback(submission_done)
         setattr(future, "_autoagent_completed", completed)
         return future
 
@@ -66,29 +94,40 @@ class RuntimeEventLoop:
 
         self.start()
         assert self._loop is not None
-        self.begin_busy()
+        self._begin_pending_wakeup()
 
         def tracked_callback() -> None:
-            try:
-                callback(*args)
-            finally:
-                self.end_busy()
+            self._end_pending_wakeup()
+            callback(*args)
 
         self._loop.call_soon_threadsafe(tracked_callback)
 
-    def begin_busy(self) -> None:
-        """Request the low-latency compatibility pulse for active work."""
+    def _begin_pending_wakeup(self) -> None:
+        """Request the low-latency watchdog until submitted work is accepted."""
 
-        with self._active_lock:
-            self._active_work += 1
+        with self._pending_lock:
+            self._pending_wakeups += 1
 
-    def end_busy(self) -> None:
-        with self._active_lock:
-            self._active_work = max(0, self._active_work - 1)
+    def _end_pending_wakeup(self) -> None:
+        with self._pending_lock:
+            self._pending_wakeups = max(0, self._pending_wakeups - 1)
 
-    def _is_busy(self) -> bool:
-        with self._active_lock:
-            return self._active_work > 0
+    def _has_pending_wakeup(self) -> bool:
+        with self._pending_lock:
+            return self._pending_wakeups > 0 or self._compatibility_waits > 0
+
+    def begin_compatibility_wait(self) -> None:
+        """Bound a known external callback wait to the 5 ms watchdog."""
+
+        with self._pending_lock:
+            self._compatibility_waits += 1
+
+    def end_compatibility_wait(self) -> None:
+        with self._pending_lock:
+            self._compatibility_waits = max(
+                0,
+                self._compatibility_waits - 1,
+            )
 
     def run(self, awaitable: Awaitable[T]) -> T:
         if self.is_current():
@@ -150,11 +189,14 @@ class RuntimeEventLoop:
         self._thread_id = get_ident()
         self._started.set()
         # Hardened/embedded hosts can intermittently drop asyncio's selector
-        # self-pipe wakeup. Idle loops pulse at 20 Hz; only active cross-thread
-        # work uses the old 1 ms latency bound.
+        # self-pipe wakeup. Keep a low-frequency recovery pulse, and temporarily
+        # shorten it only until cross-thread work has actually entered the loop.
+        # Long-running Workflow work therefore creates no periodic 1 ms timer.
         async def compatibility_pulse() -> None:
             while True:
-                await asyncio.sleep(0.001 if self._is_busy() else 0.05)
+                await asyncio.sleep(
+                    0.005 if self._has_pending_wakeup() else 0.05
+                )
 
         pulse_task = loop.create_task(compatibility_pulse())
         try:

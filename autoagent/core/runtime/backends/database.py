@@ -1549,80 +1549,79 @@ class DatabaseBackend:
                 self._inflight_bytes += batch_bytes
                 self._inflight_count += len(control_items)
             retry_delay = 0.05
-            self._database_loop.begin_busy()
-            while True:
-                try:
-                    await self._persist_batch(batch)
-                except asyncio.CancelledError:
-                    self._database_loop.end_busy()
-                    raise
-                except (OperationalError, DBAPIError) as exc:
-                    if not _is_retryable_database_error(exc):
+            self._database_loop.begin_compatibility_wait()
+            try:
+                while True:
+                    try:
+                        await self._persist_batch(batch)
+                    except asyncio.CancelledError:
+                        raise
+                    except (OperationalError, DBAPIError) as exc:
+                        if not _is_retryable_database_error(exc):
+                            self._halt_unavailable_persistence(batch, exc)
+                            return
+                        self.coordinator.mark_retrying(exc)
+                        logger.warning(
+                            "Database persistence is retrying; Workflow execution "
+                            "continues in memory: %s",
+                            exc,
+                        )
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(5.0, retry_delay * 2)
+                        continue
+                    except Exception as exc:
                         self._halt_unavailable_persistence(batch, exc)
-                        self._database_loop.end_busy()
                         return
-                    self.coordinator.mark_retrying(exc)
-                    logger.warning(
-                        "Database persistence is retrying; Workflow execution "
-                        "continues in memory: %s",
-                        exc,
-                    )
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(5.0, retry_delay * 2)
-                    continue
-                except Exception as exc:
-                    self._halt_unavailable_persistence(batch, exc)
-                    self._database_loop.end_busy()
-                    return
-                else:
-                    self.coordinator.mark_healthy()
-                    advanced: set[UUID] = set()
-                    for item in batch:
-                        if item.kind == "event":
-                            assert item.invocation_id is not None
-                            advanced.add(item.invocation_id)
-                            assert item.coordinator_id is not None
-                            self.coordinator.mark_durable(
-                                item.coordinator_id,
-                                item.invocation_id,
-                                int(item.record["sequence"]),
-                            )
-                        elif item.kind == "user_event_batch":
-                            assert item.invocation_id is not None
-                            assert item.coordinator_id is not None
-                            if item.record.get("persistence_failed"):
-                                self.coordinator.discard(item.coordinator_id)
-                            else:
+                    else:
+                        self.coordinator.mark_healthy()
+                        advanced: set[UUID] = set()
+                        for item in batch:
+                            if item.kind == "event":
+                                assert item.invocation_id is not None
                                 advanced.add(item.invocation_id)
-                                self.coordinator.mark_user_events_durable(
+                                assert item.coordinator_id is not None
+                                self.coordinator.mark_durable(
                                     item.coordinator_id,
                                     item.invocation_id,
-                                    max(
-                                        int(value["sequence"])
-                                        for value in item.record["events"]
-                                    ),
+                                    int(item.record["sequence"]),
                                 )
-                        elif item.kind == "admission":
-                            assert item.invocation_id is not None
-                            assert item.coordinator_id is not None
-                            self.coordinator.mark_admission_durable(
-                                item.coordinator_id,
-                                item.invocation_id,
-                            )
-                        elif item.kind == "invocation_state":
-                            assert item.invocation_id is not None
-                            advanced.add(item.invocation_id)
-                            assert item.coordinator_id is not None
-                            self.coordinator.discard(item.coordinator_id)
-                        else:
-                            assert item.coordinator_id is not None
-                            self.coordinator.discard(item.coordinator_id)
-                        if item.done is not None and not item.done.done():
-                            item.done.set_result(None)
-                    for invocation_id in advanced:
-                        self.store._persistence_advanced(invocation_id)
-                    break
-            self._database_loop.end_busy()
+                            elif item.kind == "user_event_batch":
+                                assert item.invocation_id is not None
+                                assert item.coordinator_id is not None
+                                if item.record.get("persistence_failed"):
+                                    self.coordinator.discard(item.coordinator_id)
+                                else:
+                                    advanced.add(item.invocation_id)
+                                    self.coordinator.mark_user_events_durable(
+                                        item.coordinator_id,
+                                        item.invocation_id,
+                                        max(
+                                            int(value["sequence"])
+                                            for value in item.record["events"]
+                                        ),
+                                    )
+                            elif item.kind == "admission":
+                                assert item.invocation_id is not None
+                                assert item.coordinator_id is not None
+                                self.coordinator.mark_admission_durable(
+                                    item.coordinator_id,
+                                    item.invocation_id,
+                                )
+                            elif item.kind == "invocation_state":
+                                assert item.invocation_id is not None
+                                advanced.add(item.invocation_id)
+                                assert item.coordinator_id is not None
+                                self.coordinator.discard(item.coordinator_id)
+                            else:
+                                assert item.coordinator_id is not None
+                                self.coordinator.discard(item.coordinator_id)
+                            if item.done is not None and not item.done.done():
+                                item.done.set_result(None)
+                        for invocation_id in advanced:
+                            self.store._persistence_advanced(invocation_id)
+                        break
+            finally:
+                self._database_loop.end_compatibility_wait()
             with self._pressure_lock:
                 self._inflight_bytes -= batch_bytes
                 self._inflight_count -= len(control_items)
@@ -1672,6 +1671,9 @@ class DatabaseBackend:
                             envelope.invocation_id,
                             sequence,
                             exc,
+                        )
+                        self.store._notify_runtime_change(
+                            envelope.invocation_id
                         )
                 else:
                     self.coordinator.mark_unavailable(exc)
@@ -2532,7 +2534,11 @@ def _resolve_database_url(value: str | Path) -> str:
         return f"sqlite+aiosqlite:///{value.expanduser().resolve()}"
     text = str(value)
     if "://" not in text:
-        return f"sqlite+aiosqlite:///{Path(text).expanduser().resolve()}"
+        raise ValueError(
+            "Database URL strings require an explicit scheme. Use "
+            "'sqlite:///path/to/runtime.db', a PostgreSQL URL, or pass a "
+            "path through DatabaseBackend.from_path()."
+        )
     if text.startswith("sqlite:///"):
         return "sqlite+aiosqlite:///" + text.removeprefix("sqlite:///")
     if text.startswith("postgresql://"):

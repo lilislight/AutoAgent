@@ -189,14 +189,20 @@ class _ChatCompletionAccumulator:
                 )
                 call_id = raw_call.get("id")
                 if isinstance(call_id, str):
-                    target["id"] += call_id
+                    target["id"] = _merge_stream_identity(
+                        target["id"],
+                        call_id,
+                    )
                 function = raw_call.get("function")
                 name_delta = None
                 arguments_delta = None
                 if isinstance(function, Mapping):
                     if isinstance(function.get("name"), str):
                         name_delta = function["name"]
-                        target["name"] += name_delta
+                        target["name"] = _merge_stream_identity(
+                            target["name"],
+                            name_delta,
+                        )
                     if isinstance(function.get("arguments"), str):
                         arguments_delta = function["arguments"]
                         target["arguments"] += arguments_delta
@@ -242,6 +248,18 @@ class _ChatCompletionAccumulator:
         if self.usage is not None:
             raw["usage"] = self.usage
         return decode_response(raw, provider=self.provider)
+
+
+def _merge_stream_identity(existing: str, incoming: str) -> str:
+    """Accept delta, cumulative, and repeated identity fields from providers."""
+
+    if not existing:
+        return incoming
+    if incoming == existing or existing.startswith(incoming):
+        return existing
+    if incoming.startswith(existing):
+        return incoming
+    return existing + incoming
 
 
 def _model_dump(

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
 from threading import Event as ThreadingEvent
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -209,29 +210,45 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("minimal", invocation.event_mode)
         self.assertEqual([], list(events))
 
-    async def test_background_failure_is_retrieved_and_retained(self) -> None:
-        invocation_id = uuid4()
-
-        async def fail() -> None:
-            raise RuntimeError("background failed")
-
-        task = asyncio.create_task(fail())
-        self.server._invocation_tasks[invocation_id] = task
-        task.add_done_callback(
-            lambda completed: self.server._finish_invocation_task(
-                invocation_id,
-                completed,
+    async def test_background_failure_marks_invocation_failed_and_is_logged(
+        self,
+    ) -> None:
+        with patch.object(
+            self.app.workflow_executor,
+            "ainvoke",
+            new=AsyncMock(side_effect=RuntimeError("background failed")),
+        ):
+            submitted = await self.submit(
+                self.workflow_revision_id,
+                InvocationSubmitRequest(
+                    session_key="background-failure",
+                    input={"wait_key": "unused"},
+                ),
             )
-        )
-        with self.assertRaisesRegex(RuntimeError, "background failed"):
-            await task
-        await asyncio.sleep(0)
+            task = self.server._invocation_tasks[submitted.invocation_id]
+            with self.assertLogs(
+                "autoagent.core.app.app",
+                level="ERROR",
+            ) as captured:
+                result = await task
+                await asyncio.sleep(0)
 
-        self.assertNotIn(invocation_id, self.server._invocation_tasks)
-        self.assertIsInstance(
-            self.server._invocation_failures[invocation_id],
-            RuntimeError,
+        self.assertEqual("failed", result.state)
+        self.assertNotIn(
+            submitted.invocation_id,
+            self.server._invocation_tasks,
         )
+        invocation = self.app.runtime_store.invocations[
+            submitted.invocation_id
+        ]
+        self.assertEqual("failed", invocation.state)
+        assert invocation.error is not None
+        self.assertEqual(
+            "INVOCATION_INFRASTRUCTURE_ERROR",
+            invocation.error.code,
+        )
+        self.assertEqual("RuntimeError", invocation.error.detail["exception_type"])
+        self.assertIn("background failed", "\n".join(captured.output))
 
     async def test_slow_async_operator_does_not_block_server_health(self) -> None:
         started = ThreadingEvent()
@@ -609,9 +626,60 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         first = await anext(response.body_iterator)
 
         self.assertIn("event: runtime_status", first)
+        wake_workflow = Workflow(id="wake_system_stream_disconnect_check")
+        wake_workflow.add_node(lambda: None, node_id="node")
+        self.app.register_workflow(wake_workflow)
+        await asyncio.sleep(0)
         with self.assertRaises(StopAsyncIteration):
             await anext(response.body_iterator)
         self.assertEqual(2, request.poll_count)
+
+    async def test_runtime_stream_waits_for_store_notification(self) -> None:
+        submitted = await self.submit(
+            self.workflow_revision_id,
+            InvocationSubmitRequest(
+                session_key="runtime-stream",
+                input={"wait_key": "approval"},
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+        invocation = self.app.runtime_store.invocations[
+            submitted.invocation_id
+        ]
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "stream_invocation"
+        )
+
+        class ConnectedRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        response = await endpoint(
+            ConnectedRequest(),
+            submitted.invocation_id,
+            after_sequence=invocation.event_sequence,
+            last_event_id=None,
+        )
+        initial = await anext(response.body_iterator)
+        self.assertIn("event: invocation_status", initial)
+        following = asyncio.create_task(anext(response.body_iterator))
+        await asyncio.sleep(0.02)
+        self.assertFalse(following.done())
+
+        await self.resume(
+            self.workflow_revision_id,
+            InvocationResumeRequest(
+                session_key=submitted.session_key,
+                wait_key="approval",
+                output={"approved": True},
+            ),
+        )
+        update = await asyncio.wait_for(following, timeout=0.5)
+        await response.body_iterator.aclose()
+
+        self.assertIn("event: runtime_event", update)
 
     async def test_runtime_status_separates_execution_and_persistence(self) -> None:
         status = self.server._runtime_status()
@@ -684,6 +752,26 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             second["items"][0]["workflow_id"],
         )
         self.assertFalse(second["has_more"])
+
+    async def test_trace_directory_routes_default_to_twenty_items(self) -> None:
+        for route_name in (
+            "list_workflows",
+            "list_registered_workflows",
+            "list_workflow_revisions",
+            "list_sessions",
+            "list_invocations",
+        ):
+            endpoint = next(
+                route.endpoint
+                for route in self.server.router.routes
+                if getattr(route, "name", "") == route_name
+            )
+            default = inspect.signature(endpoint).parameters["limit"].default
+            self.assertEqual(
+                20,
+                default.default,
+                msg=f"{route_name} did not default to a 20-item page",
+            )
 
     async def test_local_workflow_registration_notifies_directory_stream(
         self,

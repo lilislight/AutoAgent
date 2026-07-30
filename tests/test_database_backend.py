@@ -1107,6 +1107,16 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(invocation.id, self.store.invocations)
         self.assertNotIn(invocation.id, self.store.runtime_events)
+        self.assertFalse(
+            any(
+                session.session_key == "retention"
+                for session in self.store.sessions.values()
+            )
+        )
+        self.assertNotIn(
+            (invocation.workflow_revision_id, "retention"),
+            self.store.session_keys,
+        )
         self.assertEqual(
             "durable",
             self.store.persistence_status(invocation.id),
@@ -1271,6 +1281,10 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(backend.database_url.startswith("postgresql+asyncpg://"))
         finally:
             await backend.aclose()
+
+    async def test_database_string_requires_explicit_url_scheme(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit scheme"):
+            DatabaseBackend("runtime.db")
 
     async def test_runtime_serialization_runs_on_persistence_thread(self) -> None:
         class RecordingSerializer(JsonRuntimeSerializer):

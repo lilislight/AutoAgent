@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
 import inspect
+import logging
 from time import perf_counter_ns
 from typing import Any
 from uuid import UUID
@@ -44,6 +45,7 @@ from autoagent.core.workflow.user_event import normalize_user_event_mappings
 
 
 _MISSING = object()
+logger = logging.getLogger(__name__)
 
 
 def _event_identity(event_name: str) -> tuple[RuntimeEventType, str]:
@@ -236,6 +238,64 @@ class WorkflowExecutor:
         except BaseException:
             await self.node_executor.abandon(invocation.execution_mailbox)
             raise
+
+    async def afail_infrastructure(
+        self,
+        *,
+        session: Session,
+        invocation: Invocation,
+        error: Exception,
+    ) -> Invocation:
+        """Turn an escaped framework exception into one terminal Runtime fact."""
+
+        if invocation.state in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
+            return invocation
+        runtime_error = RuntimeErrorInfo(
+            code="INVOCATION_INFRASTRUCTURE_ERROR",
+            message=(
+                "Invocation failed because execution infrastructure raised an "
+                "unexpected error."
+            ),
+            detail={
+                "exception_type": type(error).__name__,
+                "message": str(error),
+            },
+        )
+        invocation.mark_failed(runtime_error)
+        try:
+            await self._record_event(
+                session,
+                invocation,
+                "invocation.failed",
+                detail={
+                    "state": "failed",
+                    "error": runtime_error.to_record(),
+                },
+                force_recovery_checkpoint=True,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record infrastructure RuntimeEvent; persisting the "
+                "terminal Invocation state directly: invocation_id=%s",
+                invocation.id,
+            )
+            try:
+                await self.runtime_store.apersist_invocation_state(
+                    session,
+                    invocation,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist terminal infrastructure failure; the "
+                    "in-memory Invocation remains failed: invocation_id=%s",
+                    invocation.id,
+                )
+        return invocation
 
     async def arecover(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterable
+import logging
 from pathlib import Path
 from threading import RLock
 from typing import Any, TypeVar, get_args, get_origin
@@ -40,6 +41,7 @@ from autoagent.core.workflow import Workflow
 
 F = TypeVar("F", bound=Callable[..., Any])
 _MISSING = object()
+logger = logging.getLogger(__name__)
 
 
 class WorkflowRegistryEntry:
@@ -197,6 +199,9 @@ class AutoAgentApp:
             ): entry
             for entry in entries
         }
+        recoveries: list[
+            tuple[WorkflowRegistryEntry, Session, Invocation]
+        ] = []
         for invocation_id in recoverable_ids:
             session, invocation = await self.runtime_store.arebuild_execution(
                 invocation_id
@@ -210,15 +215,40 @@ class AutoAgentApp:
                 continue
             if not self._claim_invocation_live(invocation.id):
                 raise SessionBusyError(session, invocation)
+            recoveries.append((entry, session, invocation))
+
+        async def recover_one(
+            entry: WorkflowRegistryEntry,
+            session: Session,
+            invocation: Invocation,
+        ) -> None:
             try:
-                await self.workflow_executor.arecover(
-                    workflow_ir=entry.workflow_ir,
-                    workflow_snapshot=entry.workflow_snapshot,
-                    session=session,
-                    invocation=invocation,
-                )
+                try:
+                    await self.workflow_executor.arecover(
+                        workflow_ir=entry.workflow_ir,
+                        workflow_snapshot=entry.workflow_snapshot,
+                        session=session,
+                        invocation=invocation,
+                    )
+                except Exception as exc:
+                    await self.workflow_executor.afail_infrastructure(
+                        session=session,
+                        invocation=invocation,
+                        error=exc,
+                    )
+                    logger.exception(
+                        "Startup recovery failed: invocation_id=%s",
+                        invocation.id,
+                    )
             finally:
                 self._set_invocation_live(invocation.id, False)
+
+        await asyncio.gather(
+            *(
+                recover_one(entry, session, invocation)
+                for entry, session, invocation in recoveries
+            )
+        )
 
     def register_runtime_model(
         self,
@@ -507,14 +537,7 @@ class AutoAgentApp:
             entry_node_id=entry_node_id,
             event_mode=event_mode,
         )
-        try:
-            return await self.workflow_executor.ainvoke(
-                workflow_ir=prepared.workflow_ir,
-                session=prepared.session,
-                invocation=prepared.invocation,
-            )
-        finally:
-            self._set_invocation_live(prepared.invocation.id, False)
+        return await self._aexecute_prepared(prepared)
 
     async def _aadmit_invocation(
         self,
@@ -559,12 +582,31 @@ class AutoAgentApp:
             return await self._runtime_loop.arun(
                 self._aexecute_admitted(prepared, input=input)
             )
+        return await self._aexecute_prepared(prepared)
+
+    async def _aexecute_prepared(
+        self,
+        prepared: _PreparedInvocation,
+    ) -> Invocation:
+        """Execute one admitted Invocation and terminalize escaped failures."""
+
         try:
             return await self.workflow_executor.ainvoke(
                 workflow_ir=prepared.workflow_ir,
                 session=prepared.session,
                 invocation=prepared.invocation,
             )
+        except Exception as exc:
+            logger.exception(
+                "Invocation execution infrastructure failed: invocation_id=%s",
+                prepared.invocation.id,
+            )
+            await self.workflow_executor.afail_infrastructure(
+                session=prepared.session,
+                invocation=prepared.invocation,
+                error=exc,
+            )
+            return prepared.invocation
         finally:
             self._set_invocation_live(prepared.invocation.id, False)
 

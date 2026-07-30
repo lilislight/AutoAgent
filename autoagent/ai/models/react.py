@@ -32,6 +32,7 @@ class PreparedLLMCall(BaseModel):
 class ParsedToolCall(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    call_index: int
     call: LLMToolCall
     tool_id: str
     arguments: dict[str, Any]
@@ -40,6 +41,7 @@ class ParsedToolCall(BaseModel):
 class InvalidToolCall(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    call_index: int
     call: LLMToolCall
     error: str
 
@@ -62,6 +64,7 @@ class ToolExecutionError(BaseModel):
 class ToolExecutionResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", frozen=True)
 
+    call_index: int = 0
     tool_call_id: str
     tool_id: str
     output: Any = None

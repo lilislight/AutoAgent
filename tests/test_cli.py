@@ -4,20 +4,65 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import textwrap
 import unittest
 from collections.abc import Iterator
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from autoagent.cli import build_parser, main
+from autoagent.cli.main import _serve
 from autoagent.cli.settings import app_settings_from_arguments
 from autoagent.core.server import ServerSettings
 from autoagent.project import load_project_environment
 
 
 class AutoAgentCliTests(unittest.TestCase):
+    def test_serve_closes_the_complete_project_host(self) -> None:
+        closed = False
+
+        class Host:
+            app = object()
+
+            async def close(self) -> None:
+                nonlocal closed
+                closed = True
+
+        host = Host()
+        server = Mock()
+        with (
+            patch("autoagent.cli.main.ProjectHost", return_value=host),
+            patch(
+                "autoagent.cli.main.server_settings_from_arguments",
+                return_value=SimpleNamespace(
+                    ui_directory=None,
+                    execution_enabled=True,
+                    access_token=None,
+                    secure_cookies=False,
+                    trace_cache_size=128,
+                    host="127.0.0.1",
+                    port=8765,
+                ),
+            ),
+            patch("autoagent.cli.main.AutoAgentServer", return_value=server),
+        ):
+            code = _serve(
+                SimpleNamespace(root=Path(".")),
+                {},
+                object(),
+                SimpleNamespace(reload=False),
+            )
+
+        self.assertEqual(0, code)
+        self.assertTrue(closed)
+        server.run.assert_called_once_with(
+            host="127.0.0.1",
+            port=8765,
+            reload=False,
+        )
+
     def test_parser_has_one_canonical_output_and_response_names(self) -> None:
         parser = build_parser()
 

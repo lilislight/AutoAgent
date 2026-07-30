@@ -120,6 +120,30 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         assert reservation is not None
         self.coordinator.publish(reservation, envelope)
 
+    async def test_status_subscription_wakes_on_publish_and_durable_advance(
+        self,
+    ) -> None:
+        changes = 0
+
+        def changed() -> None:
+            nonlocal changes
+            changes += 1
+
+        unsubscribe = self.coordinator.subscribe_status_changes(changed)
+        envelope = _envelope()
+        await self._publish(envelope)
+        self.coordinator.take(1)
+        assert envelope.invocation_id is not None
+        self.coordinator.mark_durable(
+            envelope.id,
+            envelope.invocation_id,
+            1,
+        )
+        unsubscribe()
+        self.coordinator.mark_unavailable(RuntimeError("offline"))
+
+        self.assertEqual(2, changes)
+
     async def test_reservation_accounts_memory_before_consumer_prepares(self) -> None:
         envelope = _envelope(estimated_bytes=400)
 

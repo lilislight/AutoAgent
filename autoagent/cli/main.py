@@ -303,7 +303,7 @@ def _serve(
             reload=arguments.reload,
         )
     finally:
-        host.app.close()
+        asyncio.run(host.close())
     return 0
 
 

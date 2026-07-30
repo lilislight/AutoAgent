@@ -364,6 +364,7 @@ def react_workflow(
             return ToolExecutionBatch(
                 results=tuple(
                     ToolExecutionResult(
+                        call_index=item.call_index,
                         tool_call_id=item.call.id,
                         tool_id=selected_id,
                         output=output.output,

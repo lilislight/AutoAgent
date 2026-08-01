@@ -7,9 +7,11 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from threading import RLock
+from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import UUID
 
+import uvicorn
 from fastapi import (
     APIRouter,
     Cookie,
@@ -36,6 +38,22 @@ from autoagent.core.server.trace import TraceService
 
 _AUTH_COOKIE = "autoagent_session"
 logger = logging.getLogger(__name__)
+
+
+class _ShutdownAwareUvicornServer(uvicorn.Server):
+    """Wake application streams as soon as Uvicorn receives a stop signal."""
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        notify_shutdown: Callable[[], None],
+    ) -> None:
+        super().__init__(config)
+        self._notify_shutdown = notify_shutdown
+
+    def handle_exit(self, sig: int, frame: Any) -> None:
+        self._notify_shutdown()
+        super().handle_exit(sig, frame)
 
 
 class _ApiModel(BaseModel):
@@ -94,6 +112,7 @@ class AutoAgentServer:
         secure_cookies: bool = False,
         ui_directory: str | Path | None = None,
         trace_cache_size: int = 128,
+        shutdown_callback: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if access_token is not None and not access_token:
             raise ValueError("access_token cannot be empty.")
@@ -101,6 +120,10 @@ class AutoAgentServer:
         self.execution_enabled = execution_enabled
         self.access_token = access_token
         self.secure_cookies = secure_cookies
+        self._shutdown_callback = shutdown_callback or app.aclose
+        self._shutdown_requested = False
+        self._shutdown_subscribers: set[Callable[[], None]] = set()
+        self._shutdown_lock = RLock()
         packaged_ui = Path(__file__).resolve().parent / "ui"
         repository_ui = Path(__file__).resolve().parents[3] / "ui" / "dist"
         default_ui = (
@@ -124,18 +147,64 @@ class AutoAgentServer:
         port: int = 8765,
         reload: bool = False,
     ) -> None:
-        import uvicorn
-
-        uvicorn.run(
+        timeout_graceful_shutdown = max(
+            0.1,
+            self.agent.settings.shutdown_grace_timeout_ms / 1_000,
+        )
+        if reload:
+            uvicorn.run(
+                self.api,
+                host=host,
+                port=port,
+                reload=True,
+                timeout_graceful_shutdown=timeout_graceful_shutdown,
+            )
+            return
+        config = uvicorn.Config(
             self.api,
             host=host,
             port=port,
-            reload=reload,
-            timeout_graceful_shutdown=max(
-                0.1,
-                self.agent.settings.shutdown_grace_timeout_ms / 1_000,
-            ),
+            reload=False,
+            timeout_graceful_shutdown=timeout_graceful_shutdown,
         )
+        try:
+            _ShutdownAwareUvicornServer(config, self.request_shutdown).run()
+        except KeyboardInterrupt:
+            # Uvicorn restores and re-raises captured signals after completing
+            # graceful shutdown. Its public ``uvicorn.run`` helper suppresses
+            # this final KeyboardInterrupt; keep the same clean CLI behavior
+            # when using our shutdown-aware Server subclass.
+            pass
+
+    def request_shutdown(self) -> None:
+        """Stop long-lived streams before Uvicorn waits for connections."""
+
+        with self._shutdown_lock:
+            if self._shutdown_requested:
+                return
+            self._shutdown_requested = True
+            subscribers = tuple(self._shutdown_subscribers)
+        for notify in subscribers:
+            notify()
+
+    def _subscribe_shutdown(
+        self,
+        notify: Callable[[], None],
+    ) -> Callable[[], None]:
+        with self._shutdown_lock:
+            if self._shutdown_requested:
+                notify_immediately = True
+            else:
+                self._shutdown_subscribers.add(notify)
+                notify_immediately = False
+        if notify_immediately:
+            notify()
+
+        def unsubscribe() -> None:
+            with self._shutdown_lock:
+                self._shutdown_subscribers.discard(notify)
+
+        return unsubscribe
 
     def create_app(self) -> FastAPI:
         api = FastAPI(title="AutoAgent Server API", version="1")
@@ -151,6 +220,7 @@ class AutoAgentServer:
     async def ashutdown(self) -> None:
         """Bound graceful execution shutdown before closing App resources."""
 
+        self.request_shutdown()
         tasks = {
             task for task in self._invocation_tasks.values() if not task.done()
         }
@@ -175,7 +245,7 @@ class AutoAgentServer:
                         "before App shutdown.",
                         len(still_pending),
                     )
-        await self.agent.aclose()
+        await self._shutdown_callback()
 
     def _build_router(self) -> APIRouter:
         @asynccontextmanager
@@ -277,12 +347,18 @@ class AutoAgentServer:
                     if persistence is not None
                     else lambda: None
                 )
+                unsubscribe_shutdown = self._subscribe_shutdown(
+                    notify_runtime_status_changed
+                )
                 try:
                     # Reconnecting is a synchronization boundary for both
                     # channels. The client refreshes the durable Workflow
                     # directory and receives the current Runtime status.
                     changed.set()
-                    while not await request.is_disconnected():
+                    while (
+                        not self._shutdown_requested
+                        and not await request.is_disconnected()
+                    ):
                         changed.clear()
                         chunks: list[str] = []
                         payload = json.dumps(
@@ -310,6 +386,7 @@ class AutoAgentServer:
                         except TimeoutError:
                             yield ": heartbeat\n\n"
                 finally:
+                    unsubscribe_shutdown()
                     unsubscribe_status()
                     unsubscribe_workflows()
 
@@ -444,12 +521,16 @@ class AutoAgentServer:
                         notify,
                     )
                 )
+                unsubscribe_shutdown = self._subscribe_shutdown(notify)
                 try:
                     yield (
                         "event: session_user_events_changed\n"
                         "data: {}\n\n"
                     )
-                    while not await request.is_disconnected():
+                    while (
+                        not self._shutdown_requested
+                        and not await request.is_disconnected()
+                    ):
                         try:
                             await asyncio.wait_for(
                                 changed.wait(),
@@ -464,6 +545,7 @@ class AutoAgentServer:
                             "data: {}\n\n"
                         )
                 finally:
+                    unsubscribe_shutdown()
                     unsubscribe()
 
             await self._trace_call(
@@ -625,9 +707,13 @@ class AutoAgentServer:
                         notify,
                     )
                 )
+                unsubscribe_shutdown = self._subscribe_shutdown(notify)
                 try:
                     changed.set()
-                    while not await request.is_disconnected():
+                    while (
+                        not self._shutdown_requested
+                        and not await request.is_disconnected()
+                    ):
                         changed.clear()
                         page = await self.trace.event_page(
                             invocation_id,
@@ -680,6 +766,7 @@ class AutoAgentServer:
                         except TimeoutError:
                             yield ": heartbeat\n\n"
                 finally:
+                    unsubscribe_shutdown()
                     unsubscribe()
 
             await self._trace_call(self.trace.invocation_detail(invocation_id))
@@ -728,8 +815,12 @@ class AutoAgentServer:
                         notify,
                     )
                 )
+                unsubscribe_shutdown = self._subscribe_shutdown(notify)
                 try:
-                    while not await request.is_disconnected():
+                    while (
+                        not self._shutdown_requested
+                        and not await request.is_disconnected()
+                    ):
                         # Clear before reading. A concurrent notification is
                         # either included in this page or leaves the Event set
                         # for the next iteration, so no wakeup can be lost.
@@ -769,6 +860,7 @@ class AutoAgentServer:
                         except TimeoutError:
                             yield ": heartbeat\n\n"
                 finally:
+                    unsubscribe_shutdown()
                     unsubscribe()
 
             await self._trace_call(self.trace.invocation_detail(invocation_id))

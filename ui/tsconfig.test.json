@@ -13,6 +13,7 @@
     "src/graphRouting.ts",
     "src/agentConversation.ts",
     "src/invocationStatus.ts",
+    "src/submittedScope.ts",
     "src/elkjs.d.ts",
     "src/layout.ts",
     "src/layoutEngine.ts",
@@ -21,6 +22,7 @@
     "src/types.ts",
     "tests/graphRouting.test.ts",
     "tests/agentConversation.test.ts",
-    "tests/invocationStatus.test.ts"
+    "tests/invocationStatus.test.ts",
+    "tests/submittedScope.test.ts"
   ]
 }

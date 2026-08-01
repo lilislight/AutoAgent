@@ -38,6 +38,11 @@ import { WorkflowCanvas } from "./components/WorkflowCanvas";
 import { mergeInvocationStatus } from "./invocationStatus";
 import { projectEvents } from "./projection";
 import { useTraceUi } from "./state";
+import {
+  upsertSubmittedInvocationPage,
+  upsertSubmittedSessionPage,
+  type SubmittedScope,
+} from "./submittedScope";
 import type {
   InvocationDetail,
   InvocationSummary,
@@ -81,7 +86,7 @@ export default function App() {
   const [invokeEntryNodeId, setInvokeEntryNodeId] = useState("");
   const [invokeEventMode, setInvokeEventMode] = useState<
     "minimal" | "standard" | "full"
-  >("standard");
+  >("full");
   const [invokeSubmitting, setInvokeSubmitting] = useState(false);
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const [invokeMessage, setInvokeMessage] = useState<string | null>(null);
@@ -786,7 +791,7 @@ export default function App() {
         workflowRevisionId: response.workflow_revision_id,
         sessionId: response.session_id,
         invocationId: response.invocation_id,
-        sessionKey: invokeSessionKey.trim() || null,
+        sessionKey: response.session_key,
         entryNodeId: invokeEntryNodeId,
         state: response.state,
         eventMode: invokeEventMode,
@@ -1776,77 +1781,16 @@ function formatWorkflowRevision(
 
 function upsertSubmittedScope(
   queryClient: QueryClient,
-  value: {
-    workflowId: string;
-    workflowRevisionId: string;
-    sessionId: string;
-    invocationId: string;
-    sessionKey: string | null;
-    entryNodeId: string;
-    state: string;
-    eventMode?: "minimal" | "standard" | "full";
-  },
+  value: SubmittedScope,
 ): void {
   const now = Date.now();
   queryClient.setQueryData<InfiniteData<Page<SessionSummary>>>(
     ["sessions", value.workflowRevisionId],
-    (current) => {
-      const nextSession: SessionSummary = {
-        id: value.sessionId,
-        workflow_id: value.workflowId,
-        workflow_revision_id: value.workflowRevisionId,
-        session_key: value.sessionKey,
-        current_invocation_id: value.invocationId,
-        invocation_count: 1,
-        created_at_ms: now,
-        updated_at_ms: now,
-      };
-      if (!current) return current;
-      const existing = current.pages.flatMap((page) => page.items);
-      if (existing.some((session) => session.id === value.sessionId)) {
-        return mapInfiniteItems(current, (session) =>
-          session.id === value.sessionId
-            ? {
-                ...session,
-                current_invocation_id: value.invocationId,
-                invocation_count: Math.max(session.invocation_count, 1),
-                updated_at_ms: now,
-              }
-            : session,
-        );
-      }
-      return prependInfiniteItem(current, nextSession);
-    },
+    (current) => upsertSubmittedSessionPage(current, value, now),
   );
   queryClient.setQueryData<InfiniteData<Page<InvocationSummary>>>(
     ["invocations", value.sessionId],
-    (current) => {
-      const nextInvocation: InvocationSummary = {
-        id: value.invocationId,
-        workflow_id: value.workflowId,
-        workflow_revision_id: value.workflowRevisionId,
-        workflow_version: null,
-        definition_hash: null,
-        entry_node_id: value.entryNodeId,
-        state: value.state,
-        event_mode: value.eventMode,
-        live_sequence: 0,
-        durable_sequence: 0,
-        persistence_status: "pending",
-        created_at_ms: now,
-        updated_at_ms: now,
-      };
-      if (!current) return current;
-      const existing = current.pages.flatMap((page) => page.items);
-      if (existing.some((invocation) => invocation.id === value.invocationId)) {
-        return mapInfiniteItems(current, (invocation) =>
-          invocation.id === value.invocationId
-            ? { ...invocation, state: value.state, updated_at_ms: now }
-            : invocation,
-        );
-      }
-      return prependInfiniteItem(current, nextInvocation);
-    },
+    (current) => upsertSubmittedInvocationPage(current, value, now),
   );
 }
 
@@ -1861,24 +1805,6 @@ function mapInfiniteItems<T>(
       ...page,
       items: page.items.map(mapper),
     })),
-  };
-}
-
-function prependInfiniteItem<T>(
-  current: InfiniteData<Page<T>>,
-  item: T,
-): InfiniteData<Page<T>> {
-  const [first, ...rest] = current.pages;
-  if (!first) return current;
-  return {
-    ...current,
-    pages: [
-      {
-        ...first,
-        items: [item, ...first.items],
-      },
-      ...rest,
-    ],
   };
 }
 

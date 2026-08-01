@@ -593,16 +593,79 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_standalone_server_bounds_uvicorn_graceful_shutdown(
         self,
     ) -> None:
-        with patch("uvicorn.run") as run:
+        with (
+            patch("autoagent.core.server.app.uvicorn.Config") as config,
+            patch(
+                "autoagent.core.server.app._ShutdownAwareUvicornServer"
+            ) as uvicorn_server,
+        ):
             self.server.run(host="127.0.0.1", port=8765)
 
-        run.assert_called_once_with(
+        config.assert_called_once_with(
             self.server.api,
             host="127.0.0.1",
             port=8765,
             reload=False,
             timeout_graceful_shutdown=5.0,
         )
+        uvicorn_server.assert_called_once_with(
+            config.return_value,
+            self.server.request_shutdown,
+        )
+        uvicorn_server.return_value.run.assert_called_once_with()
+
+    async def test_standalone_server_suppresses_post_shutdown_sigint(
+        self,
+    ) -> None:
+        with (
+            patch("autoagent.core.server.app.uvicorn.Config"),
+            patch(
+                "autoagent.core.server.app._ShutdownAwareUvicornServer"
+            ) as uvicorn_server,
+        ):
+            uvicorn_server.return_value.run.side_effect = KeyboardInterrupt
+
+            self.server.run(host="127.0.0.1", port=8765)
+
+        uvicorn_server.return_value.run.assert_called_once_with()
+
+    async def test_server_shutdown_callback_runs_on_serving_loop(self) -> None:
+        app = AutoAgentApp()
+        serving_loop = asyncio.get_running_loop()
+        callback_loops: list[asyncio.AbstractEventLoop] = []
+
+        async def close_host() -> None:
+            callback_loops.append(asyncio.get_running_loop())
+            await app.aclose()
+
+        server = AutoAgentServer(app, shutdown_callback=close_host)
+        await server.ashutdown()
+
+        self.assertEqual([serving_loop], callback_loops)
+
+    async def test_system_stream_stops_when_server_shutdown_is_requested(
+        self,
+    ) -> None:
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "stream_system_updates"
+        )
+
+        class ConnectedRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        response = await endpoint(ConnectedRequest())
+        await anext(response.body_iterator)
+        following = asyncio.create_task(anext(response.body_iterator))
+        await asyncio.sleep(0)
+
+        self.server.request_shutdown()
+
+        with self.assertRaises(StopAsyncIteration):
+            await asyncio.wait_for(following, timeout=0.5)
+        await response.body_iterator.aclose()
 
     async def test_system_stream_stops_after_client_disconnect(
         self,

@@ -58,6 +58,7 @@ export interface InvocationSubmitResponse {
   workflow_id: string;
   workflow_revision_id: string;
   session_id: string;
+  session_key: string;
   invocation_id: string;
   state: RuntimeState;
 }
@@ -66,6 +67,7 @@ export interface InvocationResumeResponse {
   workflow_id: string;
   workflow_revision_id: string;
   session_id: string;
+  session_key: string;
   invocation_id: string;
   state: RuntimeState;
 }

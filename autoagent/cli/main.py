@@ -295,6 +295,7 @@ def _serve(
         secure_cookies=server_settings.secure_cookies,
         ui_directory=ui_directory,
         trace_cache_size=server_settings.trace_cache_size,
+        shutdown_callback=host.close,
     )
     try:
         server.run(

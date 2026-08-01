@@ -46,7 +46,10 @@ class AutoAgentCliTests(unittest.TestCase):
                     port=8765,
                 ),
             ),
-            patch("autoagent.cli.main.AutoAgentServer", return_value=server),
+            patch(
+                "autoagent.cli.main.AutoAgentServer",
+                return_value=server,
+            ) as server_type,
         ):
             code = _serve(
                 SimpleNamespace(root=Path(".")),
@@ -57,6 +60,15 @@ class AutoAgentCliTests(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertTrue(closed)
+        server_type.assert_called_once_with(
+            host.app,
+            execution_enabled=True,
+            access_token=None,
+            secure_cookies=False,
+            ui_directory=None,
+            trace_cache_size=128,
+            shutdown_callback=host.close,
+        )
         server.run.assert_called_once_with(
             host="127.0.0.1",
             port=8765,

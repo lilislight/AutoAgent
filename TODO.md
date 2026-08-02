@@ -4,26 +4,26 @@ This file tracks current implementation order. Stable product goals and stage
 acceptance criteria live in [MVP.md](MVP.md). Completed implementation history
 belongs in Git, tests, and benchmark results.
 
-## 0. Close MVP 1 through independent Authoring evaluations
+## 0. Close MVP 1 with one clean release-gate evaluation
 
-The public API, manifest loader, Compiler Diagnostics, CLI, packaged examples,
-Wheel build, and `autoagent-author-workflow` Skill are implemented. MVP 1 now
-needs external validation rather than more speculative framework work.
+The first independent runs of all three Authoring scenarios are complete. Their
+findings have already been applied to the Skill, public Host API, ReAct failure
+guidance, tests, and database startup responsiveness. Do not continue repairing
+the preserved generated projects; they are evidence from the previous Skill
+version.
 
-- [ ] Formally score the generated Scenario 01 purchase-review project against
-  every hard gate and business case in `skill-evals/EVALUATION.md`. Preserve
-  the generated result without repairing it before scoring.
-- [ ] Run Scenario 02 publication approval in a clean project containing only
-  its business requirements, the current Wheel, and the packaged Skill. Verify
-  durable Wait/Resume across a new process and isolation between articles.
-- [ ] Run Scenario 03 inventory assistant under the same clean-project rules.
-  Verify deterministic Tool/ReAct repair paths without paid or network access.
-- [ ] Classify every failure as a public API, Skill, example, Compiler
-  Diagnostic, CLI, or framework defect; fix the owning layer and rerun only the
-  affected scenario from a clean workspace.
-- [ ] Declare MVP 1 complete only when all three scenarios pass every hard gate
-  and required business case using the packaged Wheel rather than repository
-  source.
+- [ ] Build a fresh Wheel from the current commit and copy the current
+  `autoagent-author-workflow` Skill into three empty evaluation workspaces.
+- [ ] Rerun all three scenarios from only their business-only
+  `REQUIREMENTS.md`: conditional orchestration, durable Wait/Resume, and the
+  ReAct inventory assistant. Do not expose `EVALUATION.md`, repository source,
+  or previous generated projects to the Coding Agent.
+- [ ] Record one concise release-gate report outside the generated projects.
+  Score every common hard gate and required business case, include the exact
+  Wheel version/commit and commands used, and classify any failure by owning
+  layer.
+- [ ] Fix only release-blocking findings, rerun the affected scenario from a
+  fresh workspace, and declare MVP 1 complete when all three pass.
 
 ## 1. Finish bounded Runtime and persistence hardening
 
@@ -44,6 +44,11 @@ MVP 1 evaluations unless an evaluation reproduces one of them.
   configurable token budget, recent complete exchanges, and an optional summary
   hook. Until then every Session message is retained and copied into later LLM
   requests.
+- [ ] Decide the next ReAct failure contract before changing it: distinguish
+  infrastructure/transport Tool failures from model-correctable business
+  errors, and decide whether `max_steps` should request one bounded final answer
+  instead of immediately failing the Invocation. Preserve current behavior
+  until that contract and its deterministic tests are agreed.
 - [ ] Document the accepted synchronous Operator timeout limitation. A running
   `ThreadPoolExecutor` function cannot be force-stopped, so Retry/Fallback side
   effects must be idempotent. Process isolation remains deferred.
@@ -53,7 +58,8 @@ MVP 1 evaluations unless an evaluation reproduces one of them.
 
 ## 2. Build MVP 2 in dependency order
 
-- [ ] Define one bounded, deterministic Invocation report for Coding Agents.
+- [ ] After the MVP 1 release gate passes, define one bounded, deterministic
+  Invocation report for Coding Agents.
   Include final state/result/error, actual graph path, Loop counts,
   Retry/Fallback/timeout, Wait/Resume, timing, persistence status, and stable
   execution identifiers without dumping the Event journal.

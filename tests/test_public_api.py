@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 import autoagent
+import autoagent.app
+import autoagent.project
 
 
 EXPECTED_ROOT_AUTHORING_API = {
@@ -70,6 +72,20 @@ class RootPublicApiTests(unittest.TestCase):
         self.assertNotIn("Node", autoagent.__all__)
         self.assertNotIn("Edge", autoagent.__all__)
         self.assertNotIn("OperatorRef", autoagent.__all__)
+
+    def test_hosting_api_has_a_public_module_separate_from_authoring(self) -> None:
+        self.assertEqual(
+            {"AutoAgentApp", "AutoAgentSettings"},
+            set(autoagent.app.__all__),
+        )
+        for name in autoagent.app.__all__:
+            self.assertTrue(hasattr(autoagent.app, name))
+
+    def test_project_loading_and_compilation_are_public(self) -> None:
+        for name in ("ProjectCompiler", "ProjectHost", "ProjectLoader"):
+            with self.subTest(name=name):
+                self.assertIn(name, autoagent.project.__all__)
+                self.assertTrue(hasattr(autoagent.project, name))
 
 
 if __name__ == "__main__":

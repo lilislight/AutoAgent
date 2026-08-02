@@ -68,12 +68,32 @@ class AuthoringSkillTests(unittest.TestCase):
         for target in linked:
             self.assertTrue((REFERENCES_ROOT / target).is_file())
 
-    def test_public_api_reference_tracks_both_authoring_contracts(self) -> None:
+    def test_public_api_reference_tracks_workflow_authoring_contract(self) -> None:
         text = (REFERENCES_ROOT / "public-api.md").read_text(encoding="utf-8")
-        for module in (autoagent, autoagent.ai):
-            for name in module.__all__:
-                with self.subTest(module=module.__name__, name=name):
-                    self.assertIn(f"`{name}`", text)
+        for name in autoagent.__all__:
+            with self.subTest(module=autoagent.__name__, name=name):
+                self.assertIn(f"`{name}`", text)
+
+        ai_authoring_names = {
+            "LLMMessage",
+            "LLMRequest",
+            "LLMResponse",
+            "LLMResponseFormat",
+            "LLMToolCall",
+            "LLMToolDefinition",
+            "LLMUsage",
+            "llm_call_node",
+            "react_workflow",
+            "response_format_from_type",
+            "tool",
+        }
+        for name in ai_authoring_names:
+            with self.subTest(module=autoagent.ai.__name__, name=name):
+                self.assertIn(f"`{name}`", text)
+
+        self.assertNotIn("### Chat Completions Provider", text)
+        self.assertIn("Provider construction and Operator registration", text)
+        self.assertIn("not Workflow-authoring APIs", text)
 
     def test_skill_contains_no_template_placeholders(self) -> None:
         files = [SKILL_ROOT / "SKILL.md", *REFERENCES_ROOT.glob("*.md")]

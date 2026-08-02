@@ -115,8 +115,8 @@ Use:
 Commit `.env.example` with safe placeholders and explanations. Do not commit a
 real `.env` containing secrets.
 
-Only add Provider variables needed by the exported Workflows. The repository
-root `.env.example` is the authoritative list of framework settings.
+Only add Provider variables needed by the exported Workflows. Do not copy
+unrelated host, persistence, or Server settings into a generated project.
 
 ## Minimum project
 

@@ -7,7 +7,7 @@ Workflow authors may use, not how to design a graph or select a policy.
 
 - Contract rule
 - `autoagent` exports
-- `autoagent.ai` exports
+- `autoagent.ai` authoring exports
 - Direct callable contract
 - Streaming callable contract
 - Durable values
@@ -15,9 +15,11 @@ Workflow authors may use, not how to design a graph or select a policy.
 
 ## Contract rule
 
-Only names in `autoagent.__all__` and `autoagent.ai.__all__` are stable
-authoring contracts. A root attribute that exists but is absent from `__all__`
-is not public merely because Python can import it.
+Names in `autoagent.__all__` are the stable general Workflow-authoring
+contract. Use the `autoagent.ai` names documented below for AI authoring;
+that package also exposes host integration APIs which do not belong in
+Workflow modules. A root attribute that exists but is absent from `__all__` is
+not public merely because Python can import it.
 
 Never import `autoagent.core.*` in generated Workflow code.
 
@@ -93,7 +95,7 @@ business value.
 
 - `UserEventMapping`
 
-## `autoagent.ai` exports
+## `autoagent.ai` authoring exports
 
 ### LLM protocol
 
@@ -121,21 +123,10 @@ business value.
 - `ToolArgumentsRepairExhausted`
 - `StructuredOutputRepairExhausted`
 
-### Chat Completions Provider
-
-- `ChatCompletionsConfig`
-- `ChatCompletionsProvider`
-- `LLMProvider`
-- `LLMStreamChunk`
-- `LLMProviderError`
-- `StructuredOutputMode`
-- `create_llm_call_operator`
-- `register_llm_call_operator`
-
 Workflow modules normally use protocol types, `llm_call_node`, `tool`, and
-`react_workflow`.
-CLI/host infrastructure configures the Provider. Do not create an App or
-register the Provider inside a Workflow definition.
+`react_workflow`. Provider construction and Operator registration are public
+host APIs, not Workflow-authoring APIs. Do not use them in a Workflow module;
+the CLI or embedding host owns Provider configuration.
 
 Read [ai-workflows.md](ai-workflows.md) for AI-specific authoring.
 
@@ -198,12 +189,15 @@ independently from Runtime tracing:
 ```python
 from autoagent import UserEventMapping
 
+def answer_event(output: Answer) -> dict[str, object]:
+    return {"answer": output}
+
 workflow.add_node(
     create_answer,
     node_id="create_answer",
     user_event_mapping=UserEventMapping(
         type="answer_completed",
-        transform=lambda output: {"answer": output},
+        transform=answer_event,
     ),
 )
 ```

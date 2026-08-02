@@ -176,6 +176,11 @@ than hiding them in mapping or binding phases.
 
 ## Semantic version
 
+Define every Condition, Input Mapping, Output Binding, item selector, and
+aggregator as a named function. Do not attach a lambda or another anonymous
+callable as a Workflow Hook. Stable names keep Workflow definitions, Revision
+identity, traces, diagnostics, and later AI edits understandable.
+
 Use `@workflow_hook(version=...)` when changing Hook behavior without changing
 its identity or graph structure. Increment the version for a semantic change
 that must produce a new Workflow definition hash.

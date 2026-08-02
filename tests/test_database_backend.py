@@ -69,6 +69,19 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         await self.store.aclose()
         self.directory.cleanup()
 
+    async def test_cross_thread_database_operation_uses_scoped_fast_pulse(
+        self,
+    ) -> None:
+        async def compatibility_waits() -> int:
+            return self.backend._database_loop._compatibility_waits
+
+        active = await self.backend._arun_database_operation(
+            compatibility_waits()
+        )
+
+        self.assertEqual(1, active)
+        self.assertEqual(0, self.backend._database_loop._compatibility_waits)
+
     async def test_sqlite_initialization_creates_missing_parent_directory(
         self,
     ) -> None:

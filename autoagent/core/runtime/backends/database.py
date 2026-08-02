@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Awaitable
 from dataclasses import dataclass
 import logging
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import event, func, select, text, tuple_
@@ -47,6 +48,7 @@ from autoagent.core.runtime.user_event import UserEvent
 
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 @dataclass
@@ -193,9 +195,18 @@ class DatabaseBackend:
         if self._queue_event is not None:
             self._queue_event.set()
 
+    async def _arun_database_operation(self, awaitable: Awaitable[T]) -> T:
+        """Keep worker-thread database callbacks on the low-latency pulse."""
+
+        self._database_loop.begin_compatibility_wait()
+        try:
+            return await self._database_loop.arun(awaitable)
+        finally:
+            self._database_loop.end_compatibility_wait()
+
     async def ainitialize(self) -> None:
         if not self._database_loop.is_current():
-            await self._database_loop.arun(self.ainitialize())
+            await self._arun_database_operation(self.ainitialize())
             return
         if self._initialized:
             self._ensure_worker()
@@ -237,7 +248,7 @@ class DatabaseBackend:
                 )
                 return
             try:
-                await self._database_loop.arun(self.aclose())
+                await self._arun_database_operation(self.aclose())
             finally:
                 self._database_loop.stop(
                     timeout_s=self.shutdown_timeout_ms / 1000
@@ -281,7 +292,7 @@ class DatabaseBackend:
 
     async def aflush(self) -> None:
         if not self._database_loop.is_current():
-            await self._database_loop.arun(self.aflush())
+            await self._arun_database_operation(self.aflush())
             return
         await self.ainitialize()
         while self._total_pending_count():
@@ -347,7 +358,7 @@ class DatabaseBackend:
         session_key: str,
     ) -> Session | None:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.afind_session(
                     workflow_revision_id=workflow_revision_id,
                     session_key=session_key,
@@ -418,7 +429,7 @@ class DatabaseBackend:
         if not workflow_revision_ids:
             return ()
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_recoverable_invocation_ids(
                     workflow_revision_ids=workflow_revision_ids,
                 )
@@ -857,7 +868,7 @@ class DatabaseBackend:
         at_or_before_sequence: int | None = None,
     ) -> ExecutionSnapshot | None:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.aload_execution_snapshot(
                     invocation_id,
                     at_or_before_sequence=at_or_before_sequence,
@@ -911,7 +922,7 @@ class DatabaseBackend:
         """Load a type-neutral snapshot for observation and UI replay."""
 
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.aload_trace_execution_snapshot(
                     invocation_id,
                     at_or_before_sequence=at_or_before_sequence,
@@ -964,7 +975,7 @@ class DatabaseBackend:
         limit: int = 1000,
     ) -> tuple[RuntimeEvent, ...]:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_runtime_events(
                     invocation_id=invocation_id,
                     after_sequence=after_sequence,
@@ -1050,7 +1061,7 @@ class DatabaseBackend:
         """Load type-neutral Events for tracing without runtime registrations."""
 
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_trace_runtime_events(
                     invocation_id=invocation_id,
                     after_sequence=after_sequence,
@@ -1117,7 +1128,7 @@ class DatabaseBackend:
         limit: int = 200,
     ) -> tuple[UserEvent, ...]:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_user_events(
                     invocation_id=invocation_id,
                     after_sequence=after_sequence,
@@ -1177,7 +1188,7 @@ class DatabaseBackend:
         invocation_id: UUID,
     ) -> int:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alatest_user_event_sequence(invocation_id)
             )
         await self.ainitialize()
@@ -1202,7 +1213,7 @@ class DatabaseBackend:
         workflow_id: str | None = None,
     ) -> tuple[tuple[str, WorkflowVersionSnapshot, int], ...]:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_trace_workflow_versions(
                     limit=limit,
                     before=before,
@@ -1256,7 +1267,7 @@ class DatabaseBackend:
         revision_id: str,
     ) -> tuple[str, WorkflowVersionSnapshot, int] | None:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.aload_trace_workflow_version(revision_id)
             )
         await self.ainitialize()
@@ -1284,7 +1295,7 @@ class DatabaseBackend:
         if not revision_ids:
             return ()
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.aload_trace_workflow_versions(revision_ids)
             )
         await self.ainitialize()
@@ -1322,7 +1333,7 @@ class DatabaseBackend:
         before: tuple[int, str] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_trace_sessions(
                     workflow_revision_id=workflow_revision_id,
                     limit=limit,
@@ -1416,7 +1427,7 @@ class DatabaseBackend:
         if before is not None and after is not None:
             raise ValueError("Invocation lookup accepts before or after, not both.")
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.alist_trace_invocations(
                     session_id=session_id,
                     limit=limit,
@@ -1479,7 +1490,7 @@ class DatabaseBackend:
         invocation_id: UUID,
     ) -> dict[str, Any] | None:
         if not self._database_loop.is_current():
-            return await self._database_loop.arun(
+            return await self._arun_database_operation(
                 self.aload_trace_invocation(invocation_id)
             )
         await self.ainitialize()

@@ -3,71 +3,21 @@
 This reference owns deterministic validation of authored Workflow projects. It
 does not define the public API, graph design, or Diagnostic semantics.
 
-## Contents
+## Minimum validation
 
-- Test layers
-- Coverage matrix
-- Fixtures
-- Wait and Resume
-- AI and Tool tests
-- Commands
-- Acceptance
+Use the smallest test set that proves the requested behavior:
 
-## Test layers
+1. run Project Check and Workflow Check for every exported Workflow;
+2. run one successful Invocation;
+3. add one case for each materially different business branch or failure the
+   requester named;
+4. add one boundary test only when the project relies on durability, Loop
+   termination, Retry/fallback, Map/Replication, or another nontrivial policy.
 
-### Project load
-
-Verify:
-
-- `auto-agent.toml` parses;
-- every entrypoint imports;
-- every object is a Workflow;
-- Workflow IDs are unique.
-
-### Compile
-
-Compile every exported Workflow and assert:
-
-- no error Diagnostics;
-- expected entry and exit IDs;
-- expected Node, Edge, and Loop counts;
-- warnings are either absent or explicitly justified.
-
-Prefer testing through the same Project Compiler used by the CLI rather than
-constructing internal Compiler registries in authoring tests.
-
-### Invocation
-
-Run the Workflow through the public host or CLI path and assert:
-
-- terminal or waiting state;
-- typed result;
-- expected business values;
-- expected error code for negative cases.
-
-Do not assert internal Scheduler queue layout or database rows in an authoring
-test.
-
-## Coverage matrix
-
-For each material feature, cover:
-
-- every conditional branch;
-- the combination of selected parallel branches;
-- fan-in after predecessors finish in different orders;
-- Loop continuation and exit;
-- Loop resource limit on a non-terminating case;
-- Map empty, single-item, multi-item, and item failure;
-- Replication aggregation and replica failure;
-- Retry exhaustion and fallback when configured;
-- Timeout;
-- parallel Output Binding conflict when Context is written;
-- Wait result and Resume validation;
-- invalid Invocation input;
-- invalid Operator output.
-
-Test only the rows relevant to the Workflow; do not add artificial framework
-coverage to every project.
+Do not test AutoAgent internals, Scheduler queues, database rows, or framework
+features the project does not use. Do not repeat one behavior through sync and
+async, memory and database, or CLI and direct-host paths unless that difference
+is itself a requirement. Prefer table-driven cases and shared fixtures.
 
 ## Fixtures
 
@@ -78,15 +28,8 @@ inputs/high-risk.json
 expected/high-risk.json
 ```
 
-Fixtures must be:
-
-- deterministic;
-- free of secrets;
-- serializable;
-- small enough to review;
-- representative of the public Invocation contract.
-
-Compare stable public results, not generated UUIDs or timestamps.
+Keep fixtures deterministic, secret-free, serializable, and small. Compare
+stable public results rather than generated IDs or timestamps.
 
 ## Wait and Resume
 
@@ -115,19 +58,38 @@ Use a fake `llm_call` Operator only in test-only host code that already owns
 App construction. Do not introduce App or Operator registration into the
 authored Workflow module solely for testing.
 
-Cover:
+Only when a required test cannot be expressed through the CLI, host it with
+the existing public APIs instead of framework internals:
 
-- normalized request construction;
-- valid Tool sequence;
-- parallel Tool calls where supported;
-- unknown Tool repair;
-- invalid Tool arguments;
-- Tool execution exception returned to the model;
-- structured output repair;
-- repair exhaustion;
-- max-step termination.
+```python
+from autoagent.app import AutoAgentApp, AutoAgentSettings
+from autoagent.project import ProjectCompiler, ProjectLoader
+```
+
+Workflow source still uses only `autoagent` and `autoagent.ai`. Do not import
+`autoagent.core.*` from either source or tests.
+
+For ReAct behavior, select only the cases the request actually uses from this
+matrix:
+
+- one successful Tool and structured-output sequence;
+- one parallel Tool turn when parallel calls are required;
+- one correction case for each required error family (invalid Tool call, Tool
+  execution exception, or invalid structured output);
+- one exhaustion case for each distinct configured repair counter, not one for
+  every error subtype sharing that counter;
+- one `max_steps` termination case for a model-driven Loop.
+
+An invalid-arguments test must fail before the Tool handler runs: use malformed
+JSON, a missing required field, or an incompatible field type. A value that
+passes the input schema and is rejected inside the Tool handler tests a Tool
+execution exception instead. Do not use one fixture as evidence for both
+paths.
 
 Use typed mocked Tool outputs.
+
+Reuse one scripted fake model and a table of response sequences instead of
+copying a new fake and Invocation harness into every test.
 
 ## Commands
 
@@ -146,11 +108,7 @@ development.
 
 ## Acceptance
 
-Do not finish until:
-
-- static checks pass;
-- tests cover every new business path;
-- failure behavior is explicit;
-- no secret is committed;
-- no test depends on a live paid Provider by default;
-- the handoff states any external behavior that could not be verified.
+Require passing static checks, one successful deterministic Invocation, and
+coverage of materially different requested branches or policies. Keep secrets
+out of fixtures, avoid live paid Providers, and label externally dependent
+behavior unverified when it could not be exercised.

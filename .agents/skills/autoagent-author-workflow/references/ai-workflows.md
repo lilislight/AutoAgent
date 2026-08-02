@@ -1,8 +1,8 @@
 # AI Workflows
 
-This reference owns LLM, Tool, structured output, ReActWorkflow, and
-Chat Completions Provider authoring. It does not define general graph or
-Runtime policy.
+This reference owns LLM, Tool, structured output, ReActWorkflow, and the
+Provider environment expected by those Workflows. It does not define general
+graph or Runtime policy.
 
 ## Contents
 
@@ -180,12 +180,19 @@ Parameters:
 - display name and description.
 
 Repair counts are additional LLM repair turns, not transport Retry attempts.
+Keep these three failure paths distinct:
 
-Unknown Tool names and invalid Tool arguments are returned to the model for
-repair until the configured limit is exhausted. Tool execution exceptions are
-represented as Tool-result errors and returned to the model, allowing
-self-correction. Invalid final structured output is likewise returned for a
-bounded repair turn.
+- `max_tool_parse_retries` bounds repair after an unknown Tool, empty Tool
+  identity, malformed JSON arguments, or arguments rejected by the Tool input
+  schema;
+- `max_output_parse_retries` bounds repair after invalid final structured
+  output;
+- a Tool handler exception becomes a `tool_execution_error` result returned to
+  the model, but it has no separate repair counter in V1 and remains bounded
+  only by `max_steps`.
+
+Do not describe `max_tool_parse_retries` as a limit on Tool handler failures.
+Operator transport Retry is also separate from all three paths.
 
 Never leave `max_steps` unbounded.
 

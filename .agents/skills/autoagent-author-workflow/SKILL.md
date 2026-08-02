@@ -27,12 +27,12 @@ API, CLI output, and packaged authoring examples as authoritative.
    project merely to match an example.
 8. Implement typed callables and the Workflow graph through `autoagent` and
    `autoagent.ai` public imports only.
-9. Update `auto-agent.toml`, dependencies, `.env.example`, fixtures, and tests
-   when the change requires them.
+9. Update `auto-agent.toml`, dependencies, `.env.example`, fixtures, and the
+   smallest relevant tests when the change requires them.
 10. Run Project Check, Workflow Check, and deterministic Invocation tests.
 11. Repair diagnostics by stable code and re-run the failing command.
-12. Report the resulting graph, input/output contract, policies, checks, tests,
-    environment requirements, and any unverified external dependency.
+12. Report the result, validation performed, and any unverified external
+    dependency.
 
 Ask one focused question only when an unresolved choice would materially change
 the Workflow graph or public contract. Otherwise make the smallest reasonable
@@ -73,7 +73,7 @@ Read every selected file completely before authoring:
   [policies.md](references/policies.md)
 - LLM, Tool, structured output, or ReActWorkflow:
   [ai-workflows.md](references/ai-workflows.md)
-- CLI checking, running, resuming, serving, or environment overrides:
+- CLI checking, running, resuming, or required environment overrides:
   [cli.md](references/cli.md)
 - Failed project load or compilation:
   [diagnostics.md](references/diagnostics.md)
@@ -123,9 +123,9 @@ autoagent workflow list
 autoagent workflow check <workflow-id>
 ```
 
-Then run a deterministic Invocation and the relevant project tests. Validate
-every material branch, Loop termination, aggregation boundary, Wait/Resume
-contract, and AI schema path introduced by the change.
+Then run a deterministic Invocation and the smallest relevant project tests.
+Validate each materially different business path introduced by the change;
+do not test unrelated framework behavior.
 
 Create these checks and tests even when the requester asks only for business
 behavior. They are part of a complete AutoAgent project, not requirements the
@@ -137,11 +137,5 @@ the exact blocker instead.
 
 ## Return a compact handoff
 
-Include:
-
-- created or modified Workflow IDs;
-- input and output types;
-- graph and policy decisions;
-- Manifest, dependency, or environment changes;
-- commands and tests run with their outcomes;
-- assumptions and unverified external behavior.
+Name the modified Workflow, summarize its public behavior, list checks and
+tests with outcomes, and identify assumptions or unverified external behavior.

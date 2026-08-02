@@ -1,7 +1,7 @@
 # AutoAgent CLI
 
-This reference owns CLI usage and runtime configuration entrypoints. It does
-not explain Workflow APIs or how to repair individual diagnostic codes.
+This reference owns the CLI commands a Coding Agent uses to validate and run
+authored Workflows. It does not document Server administration.
 
 ## Contents
 
@@ -9,8 +9,7 @@ not explain Workflow APIs or how to repair individual diagnostic codes.
 - Recommended authoring cycle
 - Project and Workflow checks
 - Invocation Run and Resume
-- Runtime overrides
-- Serve
+- Relevant runtime overrides
 - Exit status
 
 ## Global form
@@ -107,36 +106,20 @@ Cross-process Resume requires the same Workflow, Session, wait key,
 and database as the waiting Invocation. It also requires `standard` or `full`
 mode on the original Invocation.
 
-## Runtime overrides
+## Relevant runtime overrides
 
-`invocation run`, `invocation resume`, and `serve` accept:
+For durable Wait/Resume, `invocation run` and `invocation resume` accept:
 
 ```text
 --store auto|memory|database
---max-thread-workers
---max-parallel-units
---shutdown-timeout-ms
 ```
 
 `--store database` requires `AUTOAGENT_DATABASE_URL`. `auto` uses the database
 when configured and memory otherwise.
 
-These options control the host, not Workflow semantics.
-
-## Serve
-
-```bash
-autoagent serve \
-  [--host <host>] \
-  [--port <port>] \
-  [--reload] \
-  [--read-only] \
-  [--secure-cookies] \
-  [--ui-directory <path>] \
-  [--trace-cache-size <count>]
-```
-
-Use `--read-only` to disable invoke, resume, and cancel from Server clients.
+This controls the test/run host, not Workflow semantics. Consult CLI help for
+other hosting limits only when a test specifically requires one; do not tune
+hosting infrastructure as part of Workflow authoring.
 
 ## Exit status
 

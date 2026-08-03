@@ -80,6 +80,7 @@ class EvaluationDefinitionTests(unittest.TestCase):
                 "EvaluationContext",
                 "EvaluationEvidence",
                 "EvaluationLoader",
+                "EvaluationRunner",
                 "Evaluator",
                 "EvaluatorResult",
                 "LoadedEvaluation",

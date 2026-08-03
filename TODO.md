@@ -95,7 +95,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   Invocation-state/result Evaluators, and minimal result models.
 - [x] Implement Manifest loading and stable Evaluation diagnostics without
   importing Evaluation modules during normal project or Server startup.
-- [ ] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
+- [x] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
   multi-turn and Wait/Resume support.
 - [ ] Write atomic local Run artifacts and add `autoagent eval list`, `check`,
   `run`, and `inspect`.

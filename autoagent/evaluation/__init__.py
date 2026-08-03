@@ -17,6 +17,7 @@ from autoagent.evaluation.result import (
     EvalStepResult,
     EvaluatorResult,
 )
+from autoagent.evaluation.runner import EvaluationRunner
 from autoagent.evaluation import evaluators
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "EvaluationContext",
     "EvaluationEvidence",
     "EvaluationLoader",
+    "EvaluationRunner",
     "Evaluator",
     "EvaluatorResult",
     "LoadedEvaluation",

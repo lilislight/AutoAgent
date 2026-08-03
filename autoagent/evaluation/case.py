@@ -21,6 +21,7 @@ class EvalCase(ABC):
         self,
         input: dict[str, Any] | None = None,
         *,
+        entry_node_id: str | None = None,
         evaluators: Iterable[Evaluator] = (),
     ) -> EvalStepResult:
         """Run one Full-mode Invocation in the Case Session."""

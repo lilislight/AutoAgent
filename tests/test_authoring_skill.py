@@ -6,6 +6,7 @@ import unittest
 
 import autoagent
 import autoagent.ai
+import autoagent.evaluation
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +96,17 @@ class AuthoringSkillTests(unittest.TestCase):
         self.assertIn("Provider construction and Operator registration", text)
         self.assertIn("not Workflow-authoring APIs", text)
 
+        evaluation_names = {
+            "EvalCase",
+            "Evaluation",
+            "EvaluationContext",
+            "Evaluator",
+            "EvaluatorResult",
+        }
+        for name in evaluation_names:
+            with self.subTest(module=autoagent.evaluation.__name__, name=name):
+                self.assertIn(f"`{name}`", text)
+
     def test_skill_contains_no_template_placeholders(self) -> None:
         files = [SKILL_ROOT / "SKILL.md", *REFERENCES_ROOT.glob("*.md")]
         for path in files:
@@ -107,14 +119,13 @@ class AuthoringSkillTests(unittest.TestCase):
         text = (REFERENCES_ROOT / "sample-index.md").read_text(encoding="utf-8")
         paths = set(
             re.findall(
-                r"^(?:workflows|inputs|expected|tests)/"
-                r"[A-Za-z0-9_./-]+\.(?:py|json|md)$|"
+                r"^(?:workflows|evals)/[A-Za-z0-9_./-]+\.py$|"
                 r"^mock_chat_completions_provider\.py$",
                 text,
                 re.MULTILINE,
             )
         )
-        self.assertGreaterEqual(len(paths), 10)
+        self.assertEqual(len(paths), 7)
         for relative in paths:
             with self.subTest(path=relative):
                 self.assertTrue((AUTHORING_EXAMPLE_ROOT / relative).is_file())
@@ -161,7 +172,20 @@ class AuthoringSkillTests(unittest.TestCase):
         text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("Assume the requester does not know AutoAgent", text)
         self.assertIn("Do not ask the requester to choose Nodes", text)
-        self.assertIn("Create these checks and tests even when", text)
+        self.assertIn("Create the static checks and relevant Eval Cases", text)
+
+    def test_skill_uses_eval_for_business_behavior_without_duplicate_tests(
+        self,
+    ) -> None:
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        testing = (REFERENCES_ROOT / "testing.md").read_text(encoding="utf-8")
+        cli = (REFERENCES_ROOT / "cli.md").read_text(encoding="utf-8")
+
+        self.assertIn("autoagent eval check <suite-id>", skill)
+        self.assertIn("autoagent eval run <suite-id>", skill)
+        self.assertIn("Do not duplicate the same business scenario", testing)
+        self.assertIn("--report-file", cli)
+        self.assertIn("does not persist an Eval Result", cli)
 
     def test_skill_documents_authoring_boundaries_found_by_forward_review(
         self,
@@ -170,8 +194,8 @@ class AuthoringSkillTests(unittest.TestCase):
             "project-contract.md": "Package availability and version",
             "workflow-design.md": "Invocation and Node data flow",
             "public-api.md": "Durable values",
-            "ai-workflows.md": "local Chat Completions mock HTTP service",
-            "testing.md": "registration out of Workflow source",
+            "ai-workflows.md": "local Chat Completions-compatible HTTP service",
+            "testing.md": "Use Evaluation for Workflow behavior",
         }
         for name, expected in required_text.items():
             with self.subTest(reference=name):

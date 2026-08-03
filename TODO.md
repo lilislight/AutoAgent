@@ -105,7 +105,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 - [x] Replace standalone authoring-example input/expected pairs with registered
   Eval Suites and reusable fixtures where appropriate.
-- [ ] Update the Authoring Skill to generate and pass Eval Suites before handoff.
+- [x] Update the Authoring Skill to generate and pass Eval Suites before handoff.
 - [ ] Forward-test requirement -> Workflow + Suite -> compile -> Eval Result in a
   clean project.
 

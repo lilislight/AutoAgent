@@ -8,6 +8,7 @@ authored Workflows. It does not document Server administration.
 - Global form
 - Recommended authoring cycle
 - Project and Workflow checks
+- Evaluation Check and Run
 - Invocation Run and Resume
 - Relevant runtime overrides
 - Exit status
@@ -30,7 +31,9 @@ Global options must appear before the command group.
 autoagent --project . project check
 autoagent --project . workflow list
 autoagent --project . workflow check <workflow-id>
-autoagent --project . invocation run <workflow-id> --input-file input.json
+autoagent --project . eval list
+autoagent --project . eval check <suite-id>
+autoagent --project . eval run <suite-id>
 ```
 
 Run `project check` before requiring Provider secrets. Static compilation
@@ -66,6 +69,31 @@ autoagent workflow check <workflow-id> \
 
 Shows version, compiled Node/Edge counts, entries, exits, Loops, and structured
 diagnostics.
+
+## Evaluation
+
+```bash
+autoagent eval list [--report-file report.txt]
+autoagent eval check <suite-id> [--report-file report.txt]
+autoagent eval run <suite-id> \
+  [--case <eval-method-name>] \
+  [--max-concurrency <count>] \
+  [--store auto|memory|database] \
+  [--timeout-ms <milliseconds>] \
+  [--report-file report.txt]
+```
+
+`list` reads Manifest locators. `check` imports and validates the selected
+`Evaluation` class without running business Cases. `run` compiles the Suite's
+Workflow and executes Cases through the normal App path in Full event mode.
+
+Every Case gets one isolated Session; its `case.invoke(...)` calls may create
+multiple Invocations in that Session, while `case.resume(...)` continues its
+waiting Invocation. Run the complete Suite before handoff. Use `--case` only
+for a short repair iteration, not as evidence that sibling regressions pass.
+
+Eval output is always printed to stdout. `--report-file` writes the same text to
+an ordinary file; it does not persist an Eval Result to the Runtime database.
 
 ## Invocation Run
 
@@ -126,7 +154,8 @@ hosting infrastructure as part of Workflow authoring.
 - `0`: command succeeded or Invocation reached a non-failure result such as
   completed or waiting;
 - `1`: compile check failed, warnings were promoted, Invocation failed, timed
-  out, was interrupted, or was cancelled;
+  out, was interrupted, or was cancelled; for `eval run`, at least one business
+  Evaluator failed;
 - `2`: project load or configuration error;
 - `130`: user interruption.
 

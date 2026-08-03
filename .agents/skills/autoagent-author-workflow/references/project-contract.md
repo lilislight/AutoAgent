@@ -34,10 +34,15 @@ version = "0.1.0"
 description = "Optional human-readable project description."
 
 [[workflows]]
-entrypoint = "workflows.release:workflow"
+entrypoint = "workflows.release_review:workflow"
 
 [[workflows]]
 entrypoint = "workflows.approval:workflow"
+
+[[eval_suites]]
+id = "release_regression"
+workflow_id = "release_review"
+entrypoint = "evals.release_review:ReleaseReviewEvaluation"
 ```
 
 Rules:
@@ -47,6 +52,10 @@ Rules:
 - `project.description` is optional.
 - At least one `[[workflows]]` entry is required.
 - Each entrypoint must be unique.
+- Each `[[eval_suites]]` entry has a unique non-empty `id`, targets one exported
+  `workflow_id`, and points to one `Evaluation` subclass.
+- Eval Suite modules are loaded only by `autoagent eval`, not during ordinary
+  project loading or Server startup.
 - Unknown fields are rejected.
 
 ## Entrypoint format
@@ -135,7 +144,28 @@ project/
 entrypoint = "workflows:workflow"
 ```
 
-Additional folders for models, tools, fixtures, or tests are optional.
+For a complete generated Workflow, register its business Evaluation:
+
+```text
+project/
+├── auto-agent.toml
+├── pyproject.toml
+├── .env.example
+├── workflows.py
+└── evals.py
+```
+
+```toml
+[[eval_suites]]
+id = "order_review"
+workflow_id = "order_review"
+entrypoint = "evals:OrderReviewEvaluation"
+```
+
+Additional folders for models, tools, reusable Eval fixtures, or focused unit
+tests are optional. Do not create separate input/expected directories merely
+to imitate an example; ordinary Python values may live directly in an Eval
+Case when they are small and readable.
 
 ## Package availability and version
 

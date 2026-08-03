@@ -1,4 +1,4 @@
 interface:
   display_name: "AutoAgent Workflow Authoring"
-  short_description: "Create and validate AutoAgent Workflows"
-  default_prompt: "Create or modify an AutoAgent Workflow using only the stable public authoring API, then validate and test it."
+  short_description: "Create and evaluate AutoAgent Workflows"
+  default_prompt: "Use $autoagent-author-workflow to create or modify an AutoAgent Workflow and its business Evaluation, then validate both through the public CLI."

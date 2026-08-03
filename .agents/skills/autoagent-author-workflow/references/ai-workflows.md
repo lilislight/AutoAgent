@@ -11,7 +11,7 @@ graph or Runtime policy.
 - Tool definition
 - ReActWorkflow
 - Provider environment
-- Test without a paid service
+- Evaluate without a paid service
 
 ## One model call
 
@@ -217,11 +217,14 @@ selects a structured-output strategy from the configured endpoint.
 Put placeholders and explanations in `.env.example`; never commit a real API
 key. Compilation and `workflow check` do not require Provider secrets.
 
-## Test without a paid service
+## Evaluate without a paid service
 
-Prefer a local Chat Completions mock HTTP service. Point the CLI host at it
+Use a local Chat Completions-compatible HTTP service when model quality itself
+is not the business assertion. Point the CLI host at it
 through environment variables so the Workflow continues to reference the
 abstract `llm_call` Capability exactly as production does.
 
-Read [testing.md](testing.md) for the fake-Operator boundary and complete AI
-test matrix.
+Write Eval Cases against the public answer and promised business failure
+behavior, not the generated internal ReAct graph. Read
+[testing.md](testing.md) for dependency realism and the boundary between Eval
+and focused unit tests.

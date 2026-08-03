@@ -8,6 +8,7 @@ Workflow authors may use, not how to design a graph or select a policy.
 - Contract rule
 - `autoagent` exports
 - `autoagent.ai` authoring exports
+- `autoagent.evaluation` authoring exports
 - Direct callable contract
 - Streaming callable contract
 - Durable values
@@ -129,6 +130,31 @@ host APIs, not Workflow-authoring APIs. Do not use them in a Workflow module;
 the CLI or embedding host owns Provider configuration.
 
 Read [ai-workflows.md](ai-workflows.md) for AI-specific authoring.
+
+## `autoagent.evaluation` authoring exports
+
+Use this package for project-owned end-to-end business Evaluation:
+
+- `Evaluation`
+- `EvalCase`
+- `Evaluator`
+- `EvaluationContext`
+- `EvaluatorResult`
+- `evaluators.InvocationState`
+- `evaluators.InvocationResult`
+
+One `Evaluation` subclass corresponds to one Manifest Eval Suite and one
+Workflow. Each async `eval_*` method is one isolated Case. The Runner supplies
+the `EvalCase`; authors call `case.invoke(...)` and `case.resume(...)` rather
+than creating an App or RuntimeStore.
+
+Built-in Evaluators strictly compare the terminal Invocation state and the
+complete public Invocation result. Implement `Evaluator.evaluate(...)` only
+when a business assertion cannot be expressed by those exact checks. Result
+models are public for custom Evaluators and integrations, but ordinary Eval
+definitions should not construct Step, Case, or Suite result objects.
+
+Read [testing.md](testing.md) for Evaluation ownership and scenario selection.
 
 ## Direct callable contract
 

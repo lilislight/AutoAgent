@@ -66,6 +66,18 @@ Do not weaken safety constraints merely to compile. Read
 [policies.md](policies.md) or [workflow-design.md](workflow-design.md) for the
 owning behavior.
 
+### Evaluation loading and execution
+
+For `EVAL_SUITE_*`, `EVAL_MODULE_*`, or `EVAL_OBJECT_*` diagnostics, repair the
+Manifest ID, Workflow target, importable `module:EvaluationClass` entrypoint,
+or `Evaluation` subclass. Eval modules are deliberately loaded only by
+`autoagent eval`.
+
+`autoagent eval run` exit status `1` means a business Evaluator failed; inspect
+the Case, Step, Evaluator value, and comment before changing Workflow code.
+Exit status `2` means loading, configuration, Provider, or Evaluator
+infrastructure failed and must not be presented as a business mismatch.
+
 ## Suspected framework defects
 
 Reading framework source is allowed only when reproducible evidence indicates
@@ -89,5 +101,6 @@ suspected cause. Do not hide the defect with an internal API workaround.
 2. Read only the reference that owns that category.
 3. Make the smallest semantic correction.
 4. Rerun the same check.
-5. After compilation succeeds, run the affected Invocation and its smallest
-   relevant test.
+5. After compilation succeeds, run `autoagent eval check` and the affected Eval
+   Case.
+6. Before handoff, run the complete registered Suite.

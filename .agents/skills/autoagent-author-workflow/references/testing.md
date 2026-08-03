@@ -1,114 +1,112 @@
-# Workflow Testing
+# Workflow Evaluation and Unit Testing
 
-This reference owns deterministic validation of authored Workflow projects. It
-does not define the public API, graph design, or Diagnostic semantics.
+This reference separates end-to-end business Evaluation from focused unit
+tests. It does not define graph design or Compiler Diagnostics.
 
-## Minimum validation
+## Use Evaluation for Workflow behavior
 
-Use the smallest test set that proves the requested behavior:
+Each authored Workflow should have one Manifest-registered Eval Suite. Define
+one `Evaluation` subclass and one async `eval_*` method for each materially
+different business outcome that must be protected:
 
-1. run Project Check and Workflow Check for every exported Workflow;
-2. run one successful Invocation;
-3. add one case for each materially different business branch or failure the
-   requester named;
-4. add one boundary test only when the project relies on durability, Loop
-   termination, Retry/fallback, Map/Replication, or another nontrivial policy.
+```python
+from autoagent.evaluation import EvalCase, Evaluation, evaluators
 
-Do not test AutoAgent internals, Scheduler queues, database rows, or framework
-features the project does not use. Do not repeat one behavior through sync and
-async, memory and database, or CLI and direct-host paths unless that difference
-is itself a requirement. Prefer table-driven cases and shared fixtures.
 
-## Fixtures
-
-Keep runnable JSON objects under descriptive paths such as:
-
-```text
-inputs/high-risk.json
-expected/high-risk.json
+class OrderReviewEvaluation(Evaluation):
+    async def eval_rejects_unavailable_inventory(self, case: EvalCase) -> None:
+        await case.invoke(
+            {"sku": "A-001", "quantity": 100},
+            evaluators=(
+                evaluators.InvocationState(expected="completed"),
+                evaluators.InvocationResult(
+                    expected={
+                        "output": {
+                            "accepted": False,
+                            "reason": "out_of_stock",
+                        }
+                    }
+                ),
+            ),
+        )
 ```
 
-Keep fixtures deterministic, secret-free, serializable, and small. Compare
-stable public results rather than generated IDs or timestamps.
+Keep small readable inputs and expected outputs directly in the Case. Use
+fixture files only when values are large, shared, or easier to review outside
+Python. Do not create separate input/expected directories as ceremony.
+
+A Case may call `case.invoke(...)` more than once to test multi-turn Session
+behavior. Use `case.resume(...)` after a waiting Step. Evaluators are optional
+on setup Steps, but the Case must eventually assert the business behavior it is
+intended to protect.
+
+Compare stable public Invocation results, not generated IDs, timestamps,
+internal ReAct Nodes, database rows, or Scheduler state.
+
+## Use unit tests only for isolated logic
+
+Add a focused unit test when a nontrivial Condition, mapping, Tool, Operator, or
+custom Evaluator is easier to prove directly than through a complete
+Invocation. Do not duplicate the same business scenario in both an Eval Case
+and a unit test. Do not build a copied App/Invocation harness in project tests;
+that is the Eval Runner's responsibility.
+
+Use the project's existing test runner. Do not impose a package manager or test
+framework solely because AutoAgent itself uses one.
+
+## Dependency realism
+
+Eval always runs the real Workflow through the normal AutoAgent host. External
+dependencies may still be controlled:
+
+- use the real model when model quality, Tool selection, structured output, or
+  ReAct behavior is the subject of the Evaluation;
+- use a sandbox/staging dependency for integration behavior and side effects;
+- use a local compatible service or recorded deterministic response when the
+  dependency is costly, destructive, unavailable, or not what the Case tests;
+- use redacted production-derived inputs for real distributions and synthetic
+  inputs for missing boundaries.
+
+Make material simulations obvious in source and handoff. Never put live
+credentials or sensitive production values in Eval definitions or fixtures.
 
 ## Wait and Resume
 
-For process-local behavior, one host may invoke and resume.
+An Eval Case may Invoke to `waiting` and Resume in the same Eval process. This
+tests the Workflow's business conversation and uses one Case Session.
 
-For durable behavior:
+Cross-process Resume after host restart is a deployment/runtime property. Test
+it separately only when the request explicitly requires that property; use a
+temporary database and Standard or Full event mode. Do not make every Wait
+business Evaluation repeat the framework's persistence tests.
 
-1. configure a temporary SQLite database;
-2. run until waiting in `standard` or `full` mode;
-3. close the first host;
-4. create a new host with the same Workflow;
-5. resume with the same Session and wait key;
-6. assert the terminal result.
+## LLM and Tool Evaluation
 
-Do not claim cross-process Resume from an in-memory or minimal-mode test.
+Keep Workflow source Provider-neutral. Configure the ordinary CLI host through
+environment variables. A local Chat Completions-compatible service can provide
+deterministic model turns while still exercising the real Provider codec and
+ReAct runtime.
 
-## AI and Tool tests
+Choose Cases from the actual business contract, not a framework repair matrix.
+For example, assert parallel Tool behavior only when the requirement depends on
+parallel calls, and assert a repair path only when that failure behavior is a
+promised part of the Workflow.
 
-Default tests must not call a paid model or depend on model randomness.
+## Commands and completion
 
-Prefer a local Chat Completions mock Provider driven by deterministic
-responses. Configure the ordinary CLI host to use it, keeping Provider
-registration out of Workflow source.
-
-Use a fake `llm_call` Operator only in test-only host code that already owns
-App construction. Do not introduce App or Operator registration into the
-authored Workflow module solely for testing.
-
-Only when a required test cannot be expressed through the CLI, host it with
-the existing public APIs instead of framework internals:
-
-```python
-from autoagent.app import AutoAgentApp, AutoAgentSettings
-from autoagent.project import ProjectCompiler, ProjectLoader
-```
-
-Workflow source still uses only `autoagent` and `autoagent.ai`. Do not import
-`autoagent.core.*` from either source or tests.
-
-For ReAct behavior, select only the cases the request actually uses from this
-matrix:
-
-- one successful Tool and structured-output sequence;
-- one parallel Tool turn when parallel calls are required;
-- one correction case for each required error family (invalid Tool call, Tool
-  execution exception, or invalid structured output);
-- one exhaustion case for each distinct configured repair counter, not one for
-  every error subtype sharing that counter;
-- one `max_steps` termination case for a model-driven Loop.
-
-An invalid-arguments test must fail before the Tool handler runs: use malformed
-JSON, a missing required field, or an incompatible field type. A value that
-passes the input schema and is rejected inside the Tool handler tests a Tool
-execution exception instead. Do not use one fixture as evidence for both
-paths.
-
-Use typed mocked Tool outputs.
-
-Reuse one scripted fake model and a table of response sequences instead of
-copying a new fake and Invocation harness into every test.
-
-## Commands
-
-At minimum run:
+Run:
 
 ```bash
 autoagent project check
 autoagent workflow list
 autoagent workflow check <workflow-id>
-python -m unittest <relevant-test-module>
+autoagent eval check <suite-id>
+autoagent eval run <suite-id>
 ```
 
-Use the project's documented Python test runner when it differs. Do not impose
-a package manager solely because the AutoAgent repository uses one in
-development.
+During repair, `--case <eval-method-name>` may shorten an iteration. Before
+handoff, run the complete Suite. Run focused unit tests only when they exist.
 
-## Acceptance
-
-Require passing static checks, one successful deterministic Invocation, and
-coverage of materially different requested branches or policies. Keep secrets
-out of fixtures, avoid live paid Providers, and label externally dependent
-behavior unverified when it could not be exercised.
+Completion requires passing static checks and the relevant complete Eval Suite.
+If an external dependency could not be exercised, state that exact limitation;
+do not replace evidence with a claim.

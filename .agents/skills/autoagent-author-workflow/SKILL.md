@@ -1,6 +1,6 @@
 ---
 name: autoagent-author-workflow
-description: Create, modify, validate, and test AutoAgent Workflow projects. Use when implementing Workflow, Node, Edge, Condition, Input Mapping, Output Binding, aggregation, Loop, Wait/Resume, Map/Replication, LLM, Tool, or ReActWorkflow behavior; maintaining auto-agent.toml; or fixing AutoAgent project and compiler diagnostics. Do not use for modifying AutoAgent framework internals, RuntimeStore, Server, tracing UI, replay, or fork implementation.
+description: Create, modify, evaluate, and validate AutoAgent Workflow projects. Use when implementing Workflow, Node, Edge, Condition, Input Mapping, Output Binding, aggregation, Loop, Wait/Resume, Map/Replication, LLM, Tool, or ReActWorkflow behavior; maintaining auto-agent.toml or Eval Suites; or fixing AutoAgent project and compiler diagnostics. Do not use for modifying AutoAgent framework internals, RuntimeStore, Server, tracing UI, replay, or fork implementation.
 ---
 
 # Author AutoAgent Workflows
@@ -17,8 +17,8 @@ API, CLI output, and packaged authoring examples as authoritative.
    [project-contract.md](references/project-contract.md).
 3. Locate normative examples inside that installed package. Follow
    [sample-index.md](references/sample-index.md).
-4. Find `auto-agent.toml`, exported Workflow objects, dependency files,
-   `.env.example`, input/output models, fixtures, and tests.
+4. Find `auto-agent.toml`, exported Workflow objects, registered Evaluation
+   classes, dependency files, `.env.example`, and business models.
 5. Translate the request into Workflow input, final output, business steps,
    branches, parallel work, aggregation, loops, waits, external side effects,
    and failure behavior.
@@ -27,11 +27,15 @@ API, CLI output, and packaged authoring examples as authoritative.
    project merely to match an example.
 8. Implement typed callables and the Workflow graph through `autoagent` and
    `autoagent.ai` public imports only.
-9. Update `auto-agent.toml`, dependencies, `.env.example`, fixtures, and the
-   smallest relevant tests when the change requires them.
-10. Run Project Check, Workflow Check, and deterministic Invocation tests.
-11. Repair diagnostics by stable code and re-run the failing command.
-12. Report the result, validation performed, and any unverified external
+9. Define or update the smallest Evaluation Cases that protect the requested
+   end-to-end business behavior. Keep each Suite attached to one Workflow.
+10. Update `auto-agent.toml`, dependencies, and `.env.example` when required.
+    Add unit tests only for nontrivial isolated project functions that are not
+    already exercised as the same business scenario by Evaluation.
+11. Run Project Check, Workflow Check, Eval Check, and the registered Eval
+    Suite. Run the smallest relevant unit tests only when the project has them.
+12. Repair diagnostics by stable code and re-run the failing command.
+13. Report the result, validation performed, and any unverified external
     dependency.
 
 Ask one focused question only when an unresolved choice would materially change
@@ -77,7 +81,7 @@ Read every selected file completely before authoring:
   [cli.md](references/cli.md)
 - Failed project load or compilation:
   [diagnostics.md](references/diagnostics.md)
-- Test design, fixtures, mocks, or acceptance:
+- Business Evaluation, isolated unit tests, fixtures, mocks, or acceptance:
   [testing.md](references/testing.md)
 - Choosing a normative example:
   [sample-index.md](references/sample-index.md)
@@ -123,19 +127,29 @@ autoagent workflow list
 autoagent workflow check <workflow-id>
 ```
 
-Then run a deterministic Invocation and the smallest relevant project tests.
-Validate each materially different business path introduced by the change;
-do not test unrelated framework behavior.
+Then validate and run the Workflow's registered Evaluation:
 
-Create these checks and tests even when the requester asks only for business
-behavior. They are part of a complete AutoAgent project, not requirements the
-requester must know to request.
+```bash
+autoagent eval check <suite-id>
+autoagent eval run <suite-id>
+```
+
+Use Eval Cases for materially different end-to-end business paths introduced
+by the change. Unit-test only nontrivial isolated Conditions, mappings, Tools,
+Operators, or custom Evaluators when that adds evidence not already supplied by
+the Suite. Do not test unrelated framework behavior or duplicate one business
+scenario in both places.
+
+Create the static checks and relevant Eval Cases even when the requester asks
+only for business behavior. They are part of a complete AutoAgent project, not
+requirements the requester must know to request.
 
 Do not claim completion when compilation fails, an Invocation ends in
-`failed`, `interrupted`, or `cancelled`, or required tests have not run. State
-the exact blocker instead.
+`failed`, `interrupted`, or `cancelled`, or the relevant Suite has not run.
+State the exact blocker instead.
 
 ## Return a compact handoff
 
-Name the modified Workflow, summarize its public behavior, list checks and
-tests with outcomes, and identify assumptions or unverified external behavior.
+Name the modified Workflow, summarize its public behavior, list checks and Eval
+outcomes, mention any focused unit tests, and identify assumptions or
+unverified external behavior.

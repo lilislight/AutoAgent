@@ -13,3 +13,18 @@ entrypoint = "workflows.wait_resume:workflow"
 
 [[workflows]]
 entrypoint = "workflows.react_assistant:workflow"
+
+[[eval_suites]]
+id = "release_review"
+workflow_id = "release_review"
+entrypoint = "evals.release_review:ReleaseReviewEvaluation"
+
+[[eval_suites]]
+id = "human_approval"
+workflow_id = "human_approval"
+entrypoint = "evals.human_approval:HumanApprovalEvaluation"
+
+[[eval_suites]]
+id = "weather_assistant"
+workflow_id = "weather_assistant"
+entrypoint = "evals.weather_assistant:WeatherAssistantEvaluation"

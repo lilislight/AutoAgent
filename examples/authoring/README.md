@@ -1,141 +1,115 @@
-# AutoAgent Authoring Samples
+# AutoAgent Authoring Examples
 
-This directory is one runnable AutoAgent project containing three normative
-Workflow examples for Coding Agents. It demonstrates the supported authoring
-style; only `auto-agent.toml` and importable Workflow entrypoints are required.
-Applications may organize their remaining files differently.
+This directory is one runnable project containing three deliberately different
+Workflow examples and their business Evaluations. They are reference designs,
+not project templates. A real project may use another module layout, fewer
+models, or a much smaller graph; `auto-agent.toml` is the discovery contract.
+
+## Read examples by behavior
+
+Choose only the example closest to the requested business behavior:
+
+- `workflows/orchestration.py` models a release decision that genuinely needs
+  conditional routing, parallel specialist work, fan-in, and a bounded review
+  Loop.
+- `workflows/wait_resume.py` models one external approval boundary with only a
+  Wait Node and a typed finalization Node.
+- `workflows/react_assistant.py` delegates a bounded model/Tool interaction to
+  `react_workflow(...)` instead of reconstructing its internal graph.
+
+Do not reproduce a sample's Nodes, models, directories, or policies unless the
+new requirement needs the same behavior. In particular, do not add a Loop,
+parallel branches, Context, or a child Workflow merely because a sample uses
+one.
+
+The matching `evals/*.py` files describe business scenarios. They replace the
+old pattern of separate input JSON, expected JSON, and a copied Invocation test
+harness. Ordinary unit tests remain appropriate only for nontrivial isolated
+project functions that need checks outside the complete Workflow.
 
 ## Project contract
 
-- `auto-agent.toml` explicitly exports three Workflow objects.
-- Workflow source imports authoring types only from `autoagent` and
+- `auto-agent.toml` exports three Workflow objects and three Eval Suites.
+- Workflow modules import authoring types only from `autoagent` and
   `autoagent.ai`.
-- `pyproject.toml` declares the project dependencies.
-- `inputs/` contains runnable JSON inputs.
-- `expected/` contains deterministic public Invocation results.
-- No Workflow creates an App, RuntimeStore, database, or Server.
+- Evaluation modules import `autoagent.evaluation` and the public business
+  output types they compare.
+- No Workflow or Evaluation constructs an App, RuntimeStore, database, Server,
+  or Provider.
+- Provider credentials and runtime settings stay in the environment and CLI.
 
-Run all commands from this example project directory:
+Run static checks before any Provider-dependent command:
 
 ```bash
 autoagent project check
 autoagent workflow list
-autoagent workflow preview release_review
+autoagent eval list
+autoagent eval check release_review
+autoagent eval check human_approval
+autoagent eval check weather_assistant
 ```
 
-Expected compilation summary:
+## Conditional orchestration
 
-```text
-release_review     7 nodes   9 edges   1 loop
-human_approval     2 nodes   1 edge    0 loops
-weather_assistant 11 nodes  14 edges   1 loop
-```
-
-## 1. Conditional orchestration
-
-User requirement: validate a release request, automatically approve low-risk
-changes, and send high-risk changes through parallel Security and Reliability
-reviews. Failed specialist checks cause another bounded review round. Successful
-paths produce one report.
+Requirement: validate a release request, automatically approve low-risk
+changes, and send high-risk changes through independent Security and
+Reliability reviews. A rejected specialist round must be revised, but the
+review cannot repeat indefinitely.
 
 ```mermaid
 flowchart LR
-    input["receive_request"] --> plan["plan_review"]
-    plan -->|"risk = low"| automatic["approve_low_risk"]
-    plan -->|"risk = high"| security["security_review"]
-    plan -->|"risk = high"| reliability["reliability_review"]
+    receive["receive_request"] --> plan["plan_review"]
+    plan -->|"low risk"| automatic["approve_low_risk"]
+    plan -->|"high risk"| security["security_review"]
+    plan -->|"high risk"| reliability["reliability_review"]
     security --> aggregate["aggregate_reviews"]
     reliability --> aggregate
-    aggregate -->|"not approved"| plan
+    aggregate -->|"revise"| plan
     aggregate -->|"approved"| final["finalize_report"]
     automatic --> final
 ```
 
-This example demonstrates:
-
-- typed Invocation input and output;
-- Condition functions;
-- conditional branching;
-- parallel Nodes;
-- fan-in aggregation;
-- a natural Loop with one external entry;
-- an explicit execution limit protecting the Loop.
-- a custom `release_review_completed` UserEvent mapped from the final Node.
-
-Run it:
+The Workflow uses graph structure only where the business dependency requires
+it. Named mappings reshape data; Conditions select routes; specialist Nodes do
+not depend on completion order; `ResourcePolicy` provides a hard Loop bound.
+The Evaluation protects both the specialist and automatic outcomes:
 
 ```bash
-autoagent \
-  invocation run release_review \
-  --input-file inputs/orchestration.json \
-  --event-mode standard \
-  --trace
+autoagent eval run release_review --store memory
 ```
 
-The deterministic result is `expected/orchestration.json`. The supplied
-high-risk request executes two specialist Nodes in each of two rounds. Change
-`risk` to `low` to exercise the automatic branch.
+## External approval
 
-## 2. Durable Wait and Resume
-
-User requirement: stop at an external approval boundary and continue from a
-later CLI process with typed approval data.
+Requirement: pause a release until a later approval response arrives, then
+return one typed decision.
 
 ```mermaid
 flowchart LR
-    wait["approval (SystemCommand wait)"] --> final["finalize_approval"]
+    wait["approval (wait)"] --> final["finalize_approval"]
 ```
 
-Durable Resume requires a database and `standard` or `full` Event mode. Configure
-one explicitly:
+The Evaluation performs Invoke and Resume as two Steps in one isolated Case
+Session and covers approval and rejection:
 
 ```bash
-export AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///./authoring-runtime.db
+autoagent eval run human_approval --store memory
 ```
 
-Start the Invocation:
+This proves Workflow behavior in one Eval process. A production caller that
+must Resume after restart additionally configures a database and uses Standard
+or Full event mode; that deployment concern does not belong in Workflow source.
 
-```bash
-autoagent \
-  invocation run human_approval \
-  --session authoring-demo \
-  --input-file inputs/wait-request.json
-```
+## LLM, Tools, and ReAct
 
-The command returns `STATE waiting`. A new CLI process can then resume the same
-Invocation:
+Requirement: answer a weather question from typed city and weather Tools and
+return validated structured output. The sample Tool data and model endpoint are
+deterministic; they are not live weather services.
 
-```bash
-autoagent \
-  invocation resume human_approval \
-  --session authoring-demo \
-  --wait-key release:42 \
-  --response-file inputs/wait-response.json
-```
+`workflows/react_assistant.py` contains only the business Tool definitions,
+output model, instructions, and explicit repair/step bounds. The framework owns
+the internal ReAct graph and standard UserEvents.
 
-The deterministic terminal result is `expected/wait-resume.json`.
-
-## 3. LLM, Tools, and ReActWorkflow
-
-User requirement: answer a weather question by calling typed city and weather
-Tools, then return validated structured output. Both Tools use deterministic
-mocked data.
-
-The author writes one `react_workflow(...)`; the framework expands its internal
-conversation, LLM call, Tool validation/execution, repair, and output validation
-Nodes:
-
-```mermaid
-flowchart LR
-    input["input"] --> react["ReActWorkflow"]
-    react --> llm["llm_call"]
-    llm --> tools["typed Tools"]
-    tools --> llm
-    llm --> output["WeatherAnswer"]
-```
-
-The project includes a deterministic Chat Completions HTTP mock. Start it in
-one terminal:
+Start the local Chat Completions mock:
 
 ```bash
 uvicorn mock_chat_completions_provider:app \
@@ -144,7 +118,7 @@ uvicorn mock_chat_completions_provider:app \
   --port 8899
 ```
 
-Configure the built-in Provider in the terminal running AutoAgent:
+Configure the normal runtime Provider in the Evaluation terminal:
 
 ```bash
 export AUTOAGENT_LLM_PROVIDER=chat_completions
@@ -154,76 +128,25 @@ export AUTOAGENT_LLM_MODEL=mock-weather-model
 export AUTOAGENT_LLM_STRUCTURED_OUTPUT_MODE=json_schema
 ```
 
-Run the ReAct Workflow:
+Then run the business Evaluation:
 
 ```bash
-autoagent \
-  invocation run weather_assistant \
-  --input-file inputs/react-weather.json \
-  --event-mode full \
-  --trace
+autoagent eval run weather_assistant --store memory
 ```
 
-The input selects ReAct streaming mode. The mock first streams calls to
-`get_city_profile` and `get_current_weather`, then streams the structured answer
-in `expected/react-weather.json`.
+The Evaluation asserts only the public typed answer. It does not assert the
+number or generated IDs of internal ReAct Nodes, because those are framework
+implementation details rather than the business contract.
 
-ReActWorkflow installs its Agent-facing UserEvent mappings automatically:
+## Evaluation output
 
-- `llm_call` emits message, reasoning, and Tool-call deltas, followed by either
-  `message_completed` or `tool_call_requested`;
-- generated Tool Nodes emit `tool_result` after execution;
-- `finish` emits the validated, non-streaming `agent_output`;
-- Tool-call parsing and structured-output validation are internal repair steps
-  and do not emit failure-specific UserEvents. The raw request remains visible
-  as `tool_call_requested`, but no `tool_result` exists unless a Tool runs.
-
-UserEvents are independent of Runtime Event mode and are process-local in this
-version. The final Invocation result remains the same whether the LLM runs in
-`invoke` or `stream` mode.
-
-## Common errors
-
-### Project manifest not found
-
-Run the command from the example root, or pass the project directory explicitly:
+Eval Results are intended for the active Coding Agent and terminal user. They
+are not written to the Runtime database. Use `--report-file` only when a normal
+file is useful for handoff or later review:
 
 ```bash
-autoagent project check
+autoagent eval run release_review --report-file reports/release-review.txt
 ```
 
-### Chat Completions configuration is missing
-
-`project check` never needs Provider secrets. Running `weather_assistant` does.
-Set the four variables shown above or configure another compatible endpoint.
-Running either non-LLM Workflow does not require Provider configuration.
-
-### Resume reports an unknown Wait key
-
-The `--session`, `--wait-key`, database, and Workflow must match the
-waiting Invocation. The sample Wait key is `release:42`.
-
-### Resume cannot find state after restart
-
-Memory mode cannot provide cross-process Resume. Configure
-`AUTOAGENT_DATABASE_URL` before both `run` and `resume`, and do not use
-`minimal` Event mode.
-
-### Loop compilation fails
-
-A natural Loop must have one header and one external entry. Keep the initial
-`receive_request -> plan_review` edge separate from the
-`aggregate_reviews -> plan_review` back edge.
-
-## Automated verification
-
-The packaged project tests check all three examples:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-The tests compile every exported Workflow, compare deterministic results,
-exercise parallel Loop execution and a custom UserEvent, resume a Wait through
-a new CLI host, run the streaming ReAct Tool loop with a fake LLM Operator, and
-validate both regular and streaming HTTP mock responses.
+The report is still printed to stdout. AutoAgent does not maintain a separate
+Eval Result database or require historical result management.

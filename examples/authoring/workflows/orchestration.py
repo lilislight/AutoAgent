@@ -91,6 +91,12 @@ def approve_low_risk(plan: ReviewPlan) -> ReviewSummary:
     )
 
 
+def map_review_plan_from_incoming(
+    ctx: InputMappingContext,
+) -> dict[str, object]:
+    return {"plan": ctx.incoming[0].value}
+
+
 def security_review(plan: ReviewPlan) -> ReviewFinding:
     passed = plan.round_number >= 2
     return ReviewFinding(
@@ -188,17 +194,17 @@ workflow.add_node(
 workflow.add_node(
     approve_low_risk,
     node_id="approve_low_risk",
-    input_mapping=lambda ctx: {"plan": ctx.incoming[0].value},
+    input_mapping=map_review_plan_from_incoming,
 )
 workflow.add_node(
     security_review,
     node_id="security_review",
-    input_mapping=lambda ctx: {"plan": ctx.incoming[0].value},
+    input_mapping=map_review_plan_from_incoming,
 )
 workflow.add_node(
     reliability_review,
     node_id="reliability_review",
-    input_mapping=lambda ctx: {"plan": ctx.incoming[0].value},
+    input_mapping=map_review_plan_from_incoming,
 )
 workflow.add_node(aggregate_reviews, node_id="aggregate_reviews")
 workflow.add_node(

@@ -1,7 +1,0 @@
-{
-  "request": {
-    "service": "payments-api",
-    "risk": "high",
-    "change_summary": "Deploy a new payment authorization path"
-  }
-}

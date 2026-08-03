@@ -1,7 +1,0 @@
-{
-  "output": {
-    "decision": "approved",
-    "reviewer": "release-manager",
-    "comment": "Approved after reviewing the rollout plan."
-  }
-}

@@ -109,9 +109,8 @@ merge code, deploy a Candidate, or mutate an active Workflow Revision.
 - Project-owned Eval Suites, registered in `auto-agent.toml`, that replace
   standalone example input/expected pairs with executable business Cases. The
   initial Case contract checks final Invocation state and final business output.
-- One `autoagent eval` CLI surface for validating, listing, running, inspecting,
-  and comparing Suites and Runs. Eval execution is owned by AutoAgent rather
-  than exposed as a pytest command.
+- One `autoagent eval` CLI surface for validating, listing, and running Suites.
+  Eval execution is owned by AutoAgent rather than exposed as a pytest command.
 - An Eval Runner that returns one Eval Result for one Workflow Revision,
   including per-case results, Invocation IDs, errors, latency, Token/cost data,
   and aggregate outcomes.
@@ -123,18 +122,15 @@ merge code, deploy a Candidate, or mutate an active Workflow Revision.
   and stable execution identities without dumping the Event journal.
 - Progressive local queries for one Invocation, NodeExecution, Edge evaluation,
   Operator Call, Event, and reconstructed Full-mode Runtime state.
-- Baseline/Candidate comparison across correctness, graph path, errors,
-  execution counts, latency, and cost, with explicit regression gates.
 - CLI contracts that let a Coding Agent report and inspect an Invocation,
-  validate/run an Eval Suite, and compare Eval Results without importing framework
-  internals.
+  and validate/run an Eval Suite without importing framework internals.
 - A separate debugging Skill that teaches the evidence-first repair loop rather
   than expanding the Workflow Authoring Skill into a general maintenance guide.
 - Optional capture of an Invocation as a provisional Eval Case after the manual
   Report -> edit -> Eval loop is stable. Correct behavior must still be supplied
-  before the Case can become a regression Gate.
+  before the Case can become a regression requirement.
 - Full-mode Replay/Fork as a later MVP 2 enhancement for expensive or
-  wait-heavy prefixes, after Report, Eval, and Compare are stable. Fork must use
+  wait-heavy prefixes, after Report and Eval are stable. Fork must use
   legal execution boundaries, validate the new Workflow Revision against the
   reconstructed state, and create a new Session and Invocation without changing
   the original trace.
@@ -155,10 +151,12 @@ flowchart LR
 ```
 
 Eval definitions belong to the project and may be versioned with its source.
-Eval Results and diagnostic artifacts are local execution results and are not
-committed by default. Deterministic assertions are the first implementation
-priority; probabilistic scoring and LLM-as-a-judge are optional evaluators, not
-the foundation of the execution model.
+Eval Results are command results: they are printed to stdout and may optionally
+be copied to a normal file with `--report-file`. They are never written to the
+Runtime database and AutoAgent does not maintain Eval history. Deterministic
+assertions are the first implementation priority; probabilistic scoring and
+LLM-as-a-judge are optional evaluators, not the foundation of the execution
+model.
 
 Report explains an observed execution, Fork or rerun supports immediate
 debugging and verification, and Eval preserves regression-worthy business
@@ -181,8 +179,7 @@ MVP 2 is complete when a Coding Agent can:
    the reported requirement;
 4. modify and recompile the Workflow as a new immutable Revision;
 5. pass the registered Eval Suite before proposing the code change;
-6. compare Baseline and Candidate when required and detect both the intended
-   fix and unrelated correctness, latency, or cost
+6. run the complete registered Suite and detect unrelated business
    regressions;
 7. report a reproducible accept/reject conclusion without changing or
    deploying the original Revision;
@@ -193,8 +190,8 @@ MVP 2 is complete when a Coding Agent can:
 
 MVP 2 does not include hosted runners, multi-tenancy, online source editing,
 automatic merge or deployment, production traffic management, automatic
-promotion, or Marketplace behavior. The Tracing UI may expose stable Report,
-Compare, and Fork contracts later, but CLI and Coding Agent workflows define
+promotion, or Marketplace behavior. The Tracing UI may expose stable Report
+and Fork contracts later, but CLI and Coding Agent workflows define
 the MVP before UI integration.
 
 ## MVP 3: Hosted Workflow Platform
@@ -212,7 +209,7 @@ authoring or execution semantics.
 - publishing, rollback, configuration, and Secret management;
 - tenancy, authentication, authorization, quotas, and observability;
 - runner leases, fencing tokens, and idempotent takeover;
-- hosted debugging runners using the MVP 2 report, rerun, compare, and Fork
+- hosted debugging runners using the MVP 2 report, rerun, Eval, and Fork
   contracts;
 - optional AI-assisted design and optimization built on reviewable code
   changes.

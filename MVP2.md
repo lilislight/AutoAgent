@@ -21,9 +21,9 @@ detect a problem
 ```
 
 The Coding Agent edits the existing project and uses its ordinary version
-control. AutoAgent provides read-only execution evidence, evaluation, and
-comparison. It does not edit source, merge code, deploy a Candidate, or mutate
-an immutable Workflow Revision.
+control. AutoAgent provides read-only execution evidence and evaluation. It
+does not edit source, merge code, deploy a Candidate, or mutate an immutable
+Workflow Revision.
 
 ## Product workflows
 
@@ -34,8 +34,8 @@ flowchart TD
     INCIDENT["User finds a bad Invocation<br/>in Tracing UI"] --> ID["Give Invocation ID<br/>to local Coding Agent"]
 
     GENERATE --> IMPLEMENT["Implement or modify Workflow"]
-    UPDATE --> BASELINE["Run Eval and confirm<br/>the new Case exposes the gap"]
-    BASELINE --> IMPLEMENT
+    UPDATE --> CONFIRM["Run Eval and confirm<br/>the new Case exposes the gap"]
+    CONFIRM --> IMPLEMENT
 
     ID --> REPORT["autoagent invocation report"]
     REPORT --> ENOUGH{"Enough evidence?"}
@@ -165,15 +165,12 @@ flowchart LR
     AUTHORED --> SUITE
     QUALITY --> SUITE
 
-    SUITE --> BASELINE["Baseline Eval Result"]
-    SUITE --> CANDIDATE["Candidate Eval Result"]
-    BASELINE --> COMPARE["Eval Comparison"]
-    CANDIDATE --> COMPARE
-
-    COMPARE --> FIX["Target fix"]
-    COMPARE --> REGRESSION["Regression detection"]
-    COMPARE --> PERF["Latency and cost"]
-    COMPARE --> DECISION["Accept / reject / revise"]
+    SUITE --> RUN["autoagent eval run"]
+    RUN --> RESULTS["Ordered Case and Step Results"]
+    RESULTS --> FIX["Target behavior fixed?"]
+    RESULTS --> REGRESSION["Other Cases still pass?"]
+    FIX --> DECISION["Accept / reject / revise"]
+    REGRESSION --> DECISION
 ```
 
 An Eval Suite is the Manifest locator for one Python ``Evaluation`` class and
@@ -191,9 +188,8 @@ eval_* method
 ```
 
 AutoAgent owns Workflow execution, Runtime assertions, Revision identity, and
-Baseline/Candidate comparison. Semantic LLM quality systems such as DeepEval
-may be optional Evaluator adapters; they do not replace the AutoAgent Runtime
-or Eval Runner.
+result rendering. Semantic LLM quality systems such as DeepEval may be optional
+Evaluator adapters; they do not replace the AutoAgent Runtime or Eval Runner.
 
 ## Core data relationships
 
@@ -212,9 +208,6 @@ erDiagram
 
     INVOCATION ||--o| CAPTURED_REPRODUCTION : captured_as
     CAPTURED_REPRODUCTION ||--o| EVAL_CASE : qualified_as
-
-    EVAL_RESULT ||--o{ EVAL_COMPARISON : baseline
-    EVAL_RESULT ||--o{ EVAL_COMPARISON : candidate
 ```
 
 ### Workflow Revision
@@ -244,15 +237,12 @@ model and it does not own App configuration.
 
 ### Eval Result
 
-The result of running one Manifest Suite against one Workflow Revision. It
-contains only ordered Case Results; Case Results contain ordered Step Results;
-Step Results contain Evaluator Results and references to Runtime evidence.
-Counts and aggregate status are derived instead of persisted as duplicate data.
-
-### Eval Comparison
-
-A deterministic comparison between compatible Baseline and Candidate Eval
-Runs.
+The in-process result of running one Manifest Suite against one Workflow
+Revision. It contains only ordered Case Results; Case Results contain ordered
+Step Results; Step Results contain Evaluator Results and references to Runtime
+evidence. Counts and aggregate status are derived rather than duplicated. The
+CLI prints this result and can tee it to an ordinary file; it is not a Runtime
+database record and AutoAgent does not maintain Eval history.
 
 ## Major modules
 
@@ -338,8 +328,8 @@ autoagent eval run inventory_regression
 autoagent eval run inventory_regression --case eval_out_of_stock
 ```
 
-Graph-path, call-count, Retry, Loop, Wait, latency, Token, cost, scoring, and
-aggregate Gate expectations are recorded extensions, not initial requirements.
+Graph-path, call-count, Retry, Loop, Wait, latency, Token, cost, and scoring
+expectations are recorded extensions, not initial requirements.
 
 The project owns Eval definitions. Store them by convention under `evals/` and
 register every Suite explicitly in `auto-agent.toml`; do not silently scan
@@ -347,7 +337,7 @@ arbitrary Python files. The Manifest entrypoint remains the discovery contract,
 so a project may use another importable layout when necessary.
 
 `autoagent eval` is the only public execution surface for project Eval Suites.
-AutoAgent owns Case execution and result artifacts; do not expose Eval
+AutoAgent owns Case execution and result rendering; do not expose Eval
 execution as a pytest command or require users to duplicate Cases as pytest
 functions. The AutoAgent repository may still use ordinary unit tests to verify
 the Eval framework itself.
@@ -413,37 +403,13 @@ Responsibilities:
 - never treat missing Provider credentials or broken test infrastructure as a
   business assertion failure.
 
-Eval definitions may be committed with project source. Persisted Eval Result
-artifacts and ``eval inspect`` are deferred until their actual debugging use is
-defined. The initial CLI renders a structured result before closing the Host;
-Runtime evidence remains available afterward only when a database backend is
-configured.
+Eval definitions may be committed with project source. Each run prints its
+structured result before closing the Host. `--report-file` may copy the same
+output to a normal file for handoff, but no Eval Result is persisted to the
+Runtime database or retained behind a history-query API. Runtime evidence
+remains available afterward only when the normal Runtime database is configured.
 
-### 5. Baseline/Candidate comparison and Gates
-
-Comparison requires compatible Suite identity and definition hash. Align Case
-Results by stable Case ID and classify each as:
-
-- fixed;
-- regressed;
-- unchanged pass;
-- unchanged failure;
-- added or missing;
-- incomparable because execution evidence is incomplete.
-
-Compare:
-
-- terminal state and business output;
-- evaluator outcomes and scores;
-- actual graph path and execution counts;
-- structured errors;
-- latency, Token, and cost with explicit absolute or relative tolerances.
-
-A Gate produces a reproducible `accepted`, `rejected`, or `needs_review`
-decision. It must not silently accept missing required Cases, evaluator errors,
-or a changed Suite definition.
-
-### 6. Optional Reproduction capture and qualification
+### 5. Optional Reproduction capture and qualification
 
 This is a later convenience after the manual Report -> edit -> Eval loop is
 stable. Capture should collect only the evidence needed to reproduce behavior:
@@ -463,19 +429,17 @@ an entire production database, or unbounded user content. When Standard or
 Minimal mode lacks required evidence, report that limitation and request a
 fixture rather than fabricating one.
 
-### 7. Coding Agent CLI and Skill
+### 6. Coding Agent CLI and Skill
 
 CLI capability groups, with final command names still to be designed:
 
 - build and inspect an Invocation Report;
 - query one execution boundary;
 - validate and run an Eval Suite;
-- inspect one persisted Eval Result or Case Result if that later artifact is added;
-- compare Baseline and Candidate Runs;
 - optionally capture an Invocation as a provisional Case later.
 
 Commands must return deterministic, bounded information and preserve normal
-terminal output when also writing an artifact file.
+terminal output when also writing an optional report file.
 
 After the Eval CLI stabilizes, update the Authoring Skill to require generation
 and successful execution of an appropriate Eval Suite before handing off a new
@@ -488,14 +452,14 @@ Workflow. Add a separate debugging Skill that teaches:
 5. add or update a Case when coverage is missing;
 6. modify and compile the Workflow;
 7. run the registered Suite through `autoagent eval`;
-8. compare and report evidence when a Baseline is available.
+8. report the passing and failing Case evidence from the current run.
 
 Do not expand the Authoring Skill into framework debugging or require large
 project-specific test matrices.
 
-### 8. Advanced Full-mode Replay and Fork
+### 7. Advanced Full-mode Replay and Fork
 
-Implement only after Eval Runner, Report, and Comparison are stable. Full-mode
+Implement only after Eval Runner and Report are stable. Full-mode
 Fork is useful when the prefix is expensive, slow, or contains Wait steps; it
 is not required for ordinary regression testing.
 
@@ -507,7 +471,7 @@ Requirements:
 - validate Candidate Workflow compatibility at the selected boundary;
 - create a new Session and Invocation;
 - preserve the original Invocation and trace;
-- compare the Fork result through the same Eval result model.
+- evaluate a regression-worthy Fork outcome through the normal Eval model.
 
 Minimal mode cannot Fork. Standard mode lacks internal state operations needed
 for arbitrary phase reconstruction. Ordinary Rerun from original input remains
@@ -525,10 +489,9 @@ Deliverables:
 - define the first version of Evaluation, EvalCase, internal Step, Runner, and
   Evaluator/Step/Case/Eval Result hierarchy;
 - record Report, Fork, rerun, and Eval ownership, with automatic capture,
-  scoring, Gates, and Comparison kept as later extensions;
+  scoring, and aggregate policies kept as later extensions;
 - extend the Manifest contract with explicit Eval Suite entrypoints and define
   the conventional `evals/` project layout;
-- decide ignored local artifact layout and schema versioning;
 - define size limits, pagination, redaction, and incomplete-evidence behavior;
 - define which fields are available in Minimal, Standard, and Full modes.
 
@@ -628,31 +591,14 @@ Acceptance:
   change -> Eval Result -> user-review handoff entirely through CLI;
 - infrastructure and framework failures are not disguised as Workflow fixes.
 
-### Phase 5: Baseline/Candidate comparison
-
-Implementation steps:
-
-1. Validate Suite compatibility and align stable Case IDs.
-2. Implement correctness, path, error, timing, Token, and cost deltas.
-3. Implement absolute and relative tolerance policies.
-4. Implement aggregate Gates and `accepted`, `rejected`, or `needs_review`.
-5. Expose Run comparison through `autoagent eval compare`.
-6. Add regression tests for fixed, regressed, missing, errored, and noisy metric
-   cases.
-
-Acceptance:
-
-- a Coding Agent can prove the intended fix and identify unrelated regressions;
-- decisions include their evidence and cannot change with execution ordering.
-
-### Phase 6: Optional Invocation-to-Case capture
+### Phase 5: Optional Invocation-to-Case capture
 
 After the manual debugging loop is stable, optionally capture a provisional
 Case from an Invocation with provenance, redaction, size limits, Session/Resume
 state, and available external fixtures. The Coding Agent or user must still
 define correct behavior before installing it into a Suite.
 
-### Phase 7: Optional Full-mode Replay/Fork
+### Phase 6: Optional Full-mode Replay/Fork
 
 Implement legal Full-mode Fork and compatibility validation only after the
 ordinary CLI debugging loop passes independent evaluations. MVP 2 does not add
@@ -669,11 +615,11 @@ Test layers:
 
 - model and diagnostic unit tests;
 - Report projection tests over recorded Runtime facts;
-- Evaluator and Gate truth tables;
+- Evaluator truth tables;
 - Eval Runner integration against real AutoAgentApp execution;
 - persistence restart tests for historical reports and Wait/Resume Cases;
 - CLI end-to-end tests in temporary projects;
-- report-size, large-journal, Suite-concurrency, and result-retention benchmarks;
+- report-size, large-journal, and Suite-concurrency benchmarks;
 - independent Coding Agent Skill evaluations.
 
 Do not duplicate the framework's complete execution-policy test suite inside
@@ -693,23 +639,20 @@ MVP 2 does not include:
 - a mandatory Chat UI or one fixed Agent message model;
 - reimplementation of general-purpose LLM quality metric libraries.
 
-## Open decisions before Phase 1
+## Remaining design decisions
 
 1. What exact `[[eval_suites]]` Manifest fields and `module:object` validation
    rules are required beyond the Suite entrypoint?
 2. Which debugging and evaluation models are stable public Python APIs versus
    CLI-only schemas?
-3. What is the local artifact root, retention policy, and portable file format
-   for persisted Eval Results and Comparisons?
-4. Which value previews and Context paths are safe by default, and how are
+3. Which value previews and Context paths are safe by default, and how are
    project-specific redactors registered?
-5. Which cost model is authoritative when a Provider reports Token usage but
+4. Which cost model is authoritative when a Provider reports Token usage but
    price is configured externally?
-6. Which deterministic Evaluator subset is required before adding a DeepEval or
+5. Which deterministic Evaluator subset is required before adding a DeepEval or
    other semantic-quality adapter?
-7. Which current Runtime Events are insufficient for a complete Standard/Full
+6. Which current Runtime Events are insufficient for a complete Standard/Full
    Invocation Report?
 
 Resolve these decisions in dependency order. Do not begin Replay/Fork or UI
-implementation while Report, persisted Eval Result, and Comparison contracts
-are unstable.
+implementation while the Report contract is unstable.

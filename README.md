@@ -179,7 +179,7 @@ authoring Skill.
 
 The next focus is validating Coding-Agent authoring in independent projects,
 then building Agent-friendly Invocation reports, progressive trace queries,
-rerun/compare, and Fork-based debugging. [MVP.md](MVP.md) defines the product
+rerun/Eval, and Fork-based debugging. [MVP.md](MVP.md) defines the product
 stages and acceptance boundaries; [TODO.md](TODO.md) tracks current work.
 
 ## Development

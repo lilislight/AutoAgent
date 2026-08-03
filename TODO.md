@@ -84,8 +84,8 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [x] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
   uniqueness, Workflow targeting, and stable diagnostics.
 - [x] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
-- [ ] Define ignored local artifact layout, atomic file format, schema
-  versioning, value-size limits, redaction, and incomplete-evidence behavior.
+- [ ] Define Report value-size limits, redaction, and incomplete-evidence
+  behavior. Eval Results remain stdout plus an optional ordinary report file.
 - [ ] Audit current Runtime Events and trace APIs against the Report/Eval models;
   list missing facts before adding new Runtime recording.
 
@@ -99,13 +99,11 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   multi-turn and Wait/Resume support.
 - [x] Add `autoagent eval list`, `check`, and `run` with report-file teeing and
   deterministic status/exit-code rendering.
-- [ ] Decide whether persisted Eval Result artifacts and `eval inspect` are
-  needed after the CLI Report and Runtime evidence workflow is exercised.
 - [ ] Add bounded concurrency, interruption, and Suite-scale performance tests.
 
 ### Phase 2: Authoring integration
 
-- [ ] Replace standalone authoring-example input/expected pairs with registered
+- [x] Replace standalone authoring-example input/expected pairs with registered
   Eval Suites and reusable fixtures where appropriate.
 - [ ] Update the Authoring Skill to generate and pass Eval Suites before handoff.
 - [ ] Forward-test requirement -> Workflow + Suite -> compile -> Eval Result in a
@@ -126,20 +124,12 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [ ] Forward-test Report -> optional Case update -> code change -> compile ->
   Eval Result -> user-review handoff using CLI only.
 
-### Phase 5: Baseline/Candidate comparison
-
-- [ ] Compare compatible Eval Results by stable Case ID across correctness, path,
-  errors, counts, latency, Token, and cost.
-- [ ] Add tolerances, aggregate Gates, and `accepted`, `rejected`, or
-  `needs_review` decisions.
-- [ ] Expose comparison through `autoagent eval compare`.
-
-### Phase 6: Optional Invocation-to-Case capture
+### Phase 5: Optional Invocation-to-Case capture
 
 - [ ] After the manual loop is stable, capture a provisional redacted Case from
   an Invocation; require an explicit business oracle before Suite installation.
 
-### Phase 7: Optional Full-mode Replay/Fork
+### Phase 6: Optional Full-mode Replay/Fork
 
 - [ ] Add legal Full-mode Replay/Fork and Workflow compatibility validation only
   after the ordinary CLI repair loop is stable.
@@ -165,7 +155,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   optimization tools.
 - [ ] Generate reviewable Workflow code patches rather than mutating an active
   Workflow or Invocation.
-- [ ] Evaluate candidate patches with recorded inputs, rerun/compare, and Fork
+- [ ] Evaluate candidate patches with registered Suites, rerun, and Fork
   before promotion.
 - [ ] Promote accepted code as a new immutable Workflow Revision.
 
@@ -178,5 +168,5 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   multiple runners can own the same durable RuntimeStore.
 - [ ] Add Workflow Revision publishing, rollback, tenancy, authentication,
   authorization, Secret management, quotas, and observability.
-- [ ] Reuse the local Skill, Compiler Diagnostics, reports, rerun/compare, and
+- [ ] Reuse the local Skill, Compiler Diagnostics, reports, rerun, Eval, and
   Fork contracts instead of creating platform-only execution semantics.

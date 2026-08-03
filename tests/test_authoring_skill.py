@@ -119,13 +119,13 @@ class AuthoringSkillTests(unittest.TestCase):
         text = (REFERENCES_ROOT / "sample-index.md").read_text(encoding="utf-8")
         paths = set(
             re.findall(
-                r"^(?:workflows|evals)/[A-Za-z0-9_./-]+\.py$|"
+                r"^(?:workflows|evals|tests)/[A-Za-z0-9_./-]+\.py$|"
                 r"^mock_chat_completions_provider\.py$",
                 text,
                 re.MULTILINE,
             )
         )
-        self.assertEqual(len(paths), 7)
+        self.assertEqual(len(paths), 8)
         for relative in paths:
             with self.subTest(path=relative):
                 self.assertTrue((AUTHORING_EXAMPLE_ROOT / relative).is_file())

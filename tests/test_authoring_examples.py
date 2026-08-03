@@ -5,6 +5,7 @@ from io import StringIO
 import importlib.util
 import os
 from pathlib import Path
+import sys
 import unittest
 from collections.abc import Iterator, Mapping
 from unittest.mock import patch
@@ -95,6 +96,28 @@ class AuthoringExamplesTests(unittest.TestCase):
         self.assertIn("CASE eval_tokyo_weather_uses_verified_tool_data", output)
         self.assertIn("EVALUATOR invocation_result passed", output)
         self.assertIn("RESULT passed", output)
+
+    def test_focused_project_unit_tests_pass(self) -> None:
+        test_path = PROJECT_ROOT / "tests" / "test_project_functions.py"
+        spec = importlib.util.spec_from_file_location(
+            "authoring_project_function_tests",
+            test_path,
+        )
+        if spec is None or spec.loader is None:
+            self.fail(f"Cannot import authoring project tests: {test_path}")
+        module = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "path", [str(PROJECT_ROOT), *sys.path]):
+            spec.loader.exec_module(module)
+
+        suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+        result = unittest.TestResult()
+        suite.run(result)
+
+        self.assertEqual(2, result.testsRun)
+        self.assertTrue(
+            result.wasSuccessful(),
+            f"failures={result.failures!r} errors={result.errors!r}",
+        )
 
     def _run_cli(
         self,

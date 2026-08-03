@@ -27,6 +27,24 @@ old pattern of separate input JSON, expected JSON, and a copied Invocation test
 harness. Ordinary unit tests remain appropriate only for nontrivial isolated
 project functions that need checks outside the complete Workflow.
 
+## Example project structure
+
+```text
+authoring/
+├── auto-agent.toml
+├── pyproject.toml
+├── .env.example
+├── workflows/                 # Workflow definitions and project callables
+├── evals/                     # End-to-end business Evaluation Cases
+├── tests/                     # Focused tests for isolated project functions
+└── mock_chat_completions_provider.py
+```
+
+This layout demonstrates separation of responsibilities, not a mandatory
+folder template. A small project may use single `workflows.py` and `evals.py`
+modules. Add `tests/` when project-owned helper logic deserves direct coverage;
+do not recreate an App or duplicate complete Eval scenarios there.
+
 ## Project contract
 
 - `auto-agent.toml` exports three Workflow objects and three Eval Suites.
@@ -150,3 +168,16 @@ autoagent eval run release_review --report-file reports/release-review.txt
 
 The report is still printed to stdout. AutoAgent does not maintain a separate
 Eval Result database or require historical result management.
+
+## Focused unit tests
+
+`tests/test_project_functions.py` demonstrates the narrow role of ordinary
+tests: it checks a custom UserEvent transformation and an unsupported Tool
+input without starting an App or repeating a Workflow business Case.
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Evaluation remains authoritative for end-to-end Workflow behavior. Unit tests
+remain authoritative for the isolated functions they call directly.

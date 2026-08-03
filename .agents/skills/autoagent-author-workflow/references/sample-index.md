@@ -62,6 +62,19 @@ Evaluation checks the public answer. The local Chat Completions endpoint makes
 the example reproducible without putting Provider construction in Workflow or
 Evaluation code.
 
+## Focused project tests
+
+Read this only when the authored project contains nontrivial isolated helper
+logic that warrants a unit test:
+
+```text
+tests/test_project_functions.py
+```
+
+It demonstrates direct tests for a custom UserEvent transformation and Tool
+input handling. It does not construct an App, run an Invocation, or duplicate
+the end-to-end Eval Cases.
+
 ## Selection rule
 
 - Start from the business contract, not from a sample graph.

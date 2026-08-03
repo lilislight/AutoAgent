@@ -54,6 +54,10 @@ that is the Eval Runner's responsibility.
 Use the project's existing test runner. Do not impose a package manager or test
 framework solely because AutoAgent itself uses one.
 
+The installed authoring examples include `tests/test_project_functions.py` as
+the reference shape: a small test module that calls project functions directly
+and does not construct an App or duplicate an Eval Case.
+
 ## Dependency realism
 
 Eval always runs the real Workflow through the normal AutoAgent host. External

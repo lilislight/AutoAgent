@@ -13,6 +13,7 @@ from autoagent.project.loader import (
     load_project_manifest,
 )
 from autoagent.project.manifest import (
+    EvalSuiteLocator,
     ProjectManifest,
     ProjectMetadata,
     WorkflowLocator,
@@ -20,6 +21,7 @@ from autoagent.project.manifest import (
 
 __all__ = [
     "LoadedWorkflow",
+    "EvalSuiteLocator",
     "MANIFEST_FILENAME",
     "ProjectDefinition",
     "ProjectCompiler",

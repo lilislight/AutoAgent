@@ -81,7 +81,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [ ] Define project testing ownership: Eval for end-to-end Workflow business
   behavior, optional unit tests for isolated user code, with no duplicated
   business scenarios.
-- [ ] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
+- [x] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
   uniqueness, Workflow targeting, and stable diagnostics.
 - [ ] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
 - [ ] Define ignored local artifact layout, atomic file format, schema
@@ -93,7 +93,8 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 - [x] Implement the public Evaluation, EvalCase, Evaluator, built-in
   Invocation-state/result Evaluators, and minimal result models.
-- [ ] Implement Manifest loading and stable Evaluation diagnostics.
+- [x] Implement Manifest loading and stable Evaluation diagnostics without
+  importing Evaluation modules during normal project or Server startup.
 - [ ] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
   multi-turn and Wait/Resume support.
 - [ ] Write atomic local Run artifacts and add `autoagent eval list`, `check`,

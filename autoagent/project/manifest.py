@@ -91,6 +91,41 @@ class WorkflowLocator(BaseModel):
         return self.entrypoint.split(":", 1)[1]
 
 
+class EvalSuiteLocator(BaseModel):
+    """Manifest identity and import locator for one Workflow Evaluation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(description="Stable Eval Suite id used by the CLI.")
+    workflow_id: str = Field(description="Workflow id evaluated by this Suite.")
+    entrypoint: str = Field(
+        description="Python Evaluation class in '<module>:<object>' format.",
+    )
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, value: str) -> str:
+        return _non_empty(value, field_name="Eval Suite id")
+
+    @field_validator("workflow_id")
+    @classmethod
+    def validate_workflow_id(cls, value: str) -> str:
+        return _non_empty(value, field_name="Eval Suite Workflow id")
+
+    @field_validator("entrypoint")
+    @classmethod
+    def validate_entrypoint(cls, value: str) -> str:
+        return WorkflowLocator(entrypoint=value).entrypoint
+
+    @property
+    def module_name(self) -> str:
+        return self.entrypoint.split(":", 1)[0]
+
+    @property
+    def object_path(self) -> str:
+        return self.entrypoint.split(":", 1)[1]
+
+
 class ProjectManifest(BaseModel):
     """Strict V1 representation of ``auto-agent.toml``."""
 
@@ -104,6 +139,10 @@ class ProjectManifest(BaseModel):
         min_length=1,
         description="Explicit Workflow objects exported by the project.",
     )
+    eval_suites: tuple[EvalSuiteLocator, ...] = Field(
+        default=(),
+        description="Explicit Evaluation classes exported by the project.",
+    )
 
     @model_validator(mode="after")
     def validate_unique_entrypoints(self) -> ProjectManifest:
@@ -116,4 +155,14 @@ class ProjectManifest(BaseModel):
         if duplicates:
             rendered = ", ".join(sorted(duplicates))
             raise ValueError(f"Duplicate Workflow entrypoint: {rendered}")
+
+        seen_suite_ids: set[str] = set()
+        duplicate_suite_ids: set[str] = set()
+        for locator in self.eval_suites:
+            if locator.id in seen_suite_ids:
+                duplicate_suite_ids.add(locator.id)
+            seen_suite_ids.add(locator.id)
+        if duplicate_suite_ids:
+            rendered = ", ".join(sorted(duplicate_suite_ids))
+            raise ValueError(f"Duplicate Eval Suite id: {rendered}")
         return self

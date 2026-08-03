@@ -7,6 +7,7 @@ from autoagent.evaluation.evaluator import (
     EvaluationEvidence,
     Evaluator,
 )
+from autoagent.evaluation.loader import EvaluationLoader, LoadedEvaluation
 from autoagent.evaluation.result import (
     EvalCaseResult,
     EvalError,
@@ -29,7 +30,9 @@ __all__ = [
     "Evaluation",
     "EvaluationContext",
     "EvaluationEvidence",
+    "EvaluationLoader",
     "Evaluator",
     "EvaluatorResult",
+    "LoadedEvaluation",
     "evaluators",
 ]

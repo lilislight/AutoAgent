@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from autoagent.core.workflow import Workflow
 from autoagent.project.errors import ProjectDiagnostic, ProjectLoadError
 from autoagent.project.manifest import (
+    EvalSuiteLocator,
     ProjectManifest,
     ProjectMetadata,
     WorkflowLocator,
@@ -54,12 +55,19 @@ class ProjectDefinition:
     root: Path
     metadata: ProjectMetadata
     workflows: tuple[LoadedWorkflow, ...]
+    eval_suites: tuple[EvalSuiteLocator, ...] = ()
 
     def workflow_by_id(self, workflow_id: str) -> Workflow:
         for loaded in self.workflows:
             if loaded.workflow.id == workflow_id:
                 return loaded.workflow
         raise KeyError(workflow_id)
+
+    def eval_suite_by_id(self, suite_id: str) -> EvalSuiteLocator:
+        for locator in self.eval_suites:
+            if locator.id == suite_id:
+                return locator
+        raise KeyError(suite_id)
 
 
 def find_project_manifest(start: str | Path | None = None) -> Path:
@@ -211,6 +219,7 @@ class ProjectLoader:
             root=root,
             metadata=manifest.project,
             workflows=tuple(loaded),
+            eval_suites=manifest.eval_suites,
         )
 
     def load_workflow_file(
@@ -273,6 +282,7 @@ class ProjectLoader:
             root=root,
             metadata=ProjectMetadata(name=workflow_path.stem, version="1"),
             workflows=(LoadedWorkflow(locator=locator, workflow=workflow),),
+            eval_suites=(),
         )
 
     def _resolve_manifest_path(self, path: str | Path) -> Path:

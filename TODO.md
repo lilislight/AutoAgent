@@ -58,22 +58,89 @@ MVP 1 evaluations unless an evaluation reproduces one of them.
 
 ## 2. Build MVP 2 in dependency order
 
-- [ ] After the MVP 1 release gate passes, define one bounded, deterministic
-  Invocation report for Coding Agents.
-  Include final state/result/error, actual graph path, Loop counts,
-  Retry/Fallback/timeout, Wait/Resume, timing, persistence status, and stable
-  execution identifiers without dumping the Event journal.
-- [ ] Expose the report through the CLI, then add progressive queries for one
-  Invocation, NodeExecution, Event, and reconstructed Full-mode state.
-- [ ] Add rerun from the original input using a newly loaded immutable Workflow
-  definition and a new Invocation.
-- [ ] Add deterministic old/new Invocation comparison for result, graph path,
-  execution counts, errors, timing, and relevant Context differences.
-- [ ] Define legal Full-mode Fork points and Workflow compatibility checks.
-- [ ] Implement backend Fork by reconstructing state at a legal boundary and
-  creating a new Session and Invocation without mutating the original trace.
-- [ ] Add report, compare, rerun, and Fork entry points to the Tracing UI only
-  after the backend and CLI contracts are stable.
+Detailed contracts and acceptance criteria live in [MVP2.md](MVP2.md). Eval
+definitions use one code-first model, live under `evals/` by convention, and
+are registered explicitly in `auto-agent.toml`. `autoagent eval` is the only
+public Eval execution surface; do not duplicate Cases as pytest functions.
+
+### Phase 0: Freeze local debugging and evaluation contracts
+
+- [ ] Define versioned Invocation Report, value summary, evidence warning, and
+  progressive detail-query models for Minimal, Standard, and Full modes.
+- [ ] Define the first version of Eval Suite, Eval Case, unified Step, Eval
+  Runner, Eval Run, and Case Result around final Invocation state and final
+  business output only.
+- [ ] Record graph path, call counts, Retry/Loop/Wait, performance budgets,
+  scoring, aggregate Gates, and automatic Invocation capture as later
+  extensions rather than Phase 0 requirements.
+- [ ] Define the boundary between Invocation Report, Fork, ordinary rerun, and
+  Eval; do not require every bad Invocation to become an Eval Case.
+- [ ] Define Eval data realism rules: real Workflow execution, redacted or
+  synthetic representative inputs, real models when model behavior is under
+  evaluation, and sandbox/simulated dependencies when appropriate.
+- [ ] Define project testing ownership: Eval for end-to-end Workflow business
+  behavior, optional unit tests for isolated user code, with no duplicated
+  business scenarios.
+- [ ] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
+  uniqueness, Workflow targeting, and stable diagnostics.
+- [ ] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
+- [ ] Define ignored local artifact layout, atomic file format, schema
+  versioning, value-size limits, redaction, and incomplete-evidence behavior.
+- [ ] Audit current Runtime Events and trace APIs against the Report/Eval models;
+  list missing facts before adding new Runtime recording.
+
+### Phase 1: Eval framework and CLI
+
+- [ ] Implement Suite, Case, unified Step, Case Result, and Eval Run models plus
+  Manifest loading and stable diagnostics.
+- [ ] Implement deterministic final-state and exact-output evaluation plus the
+  narrow custom output Evaluator contract.
+- [ ] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
+  multi-turn and Wait/Resume support.
+- [ ] Write atomic local Run artifacts and add `autoagent eval list`, `check`,
+  `run`, and `inspect`.
+- [ ] Add bounded concurrency, interruption, and Suite-scale performance tests.
+
+### Phase 2: Authoring integration
+
+- [ ] Replace standalone authoring-example input/expected pairs with registered
+  Eval Suites and reusable fixtures where appropriate.
+- [ ] Update the Authoring Skill to generate and pass Eval Suites before handoff.
+- [ ] Forward-test requirement -> Workflow + Suite -> compile -> Eval Run in a
+  clean project.
+
+### Phase 3: Invocation Report and progressive queries
+
+- [ ] Add type-neutral read models and a read-only Debug Query service.
+- [ ] Build bounded Reports for active, waiting, completed, failed, and partially
+  durable Invocations.
+- [ ] Add CLI queries for one Invocation, NodeExecution, Edge evaluation,
+  Operator Call, Event, or Full-mode state boundary.
+- [ ] Add large-journal and large-value performance coverage.
+
+### Phase 4: Local debugging Skill
+
+- [ ] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
+- [ ] Forward-test Report -> optional Case update -> code change -> compile ->
+  Eval Run -> user-review handoff using CLI only.
+
+### Phase 5: Baseline/Candidate comparison
+
+- [ ] Compare compatible Eval Runs by stable Case ID across correctness, path,
+  errors, counts, latency, Token, and cost.
+- [ ] Add tolerances, aggregate Gates, and `accepted`, `rejected`, or
+  `needs_review` decisions.
+- [ ] Expose comparison through `autoagent eval compare`.
+
+### Phase 6: Optional Invocation-to-Case capture
+
+- [ ] After the manual loop is stable, capture a provisional redacted Case from
+  an Invocation; require an explicit business oracle before Suite installation.
+
+### Phase 7: Optional Full-mode Replay/Fork
+
+- [ ] Add legal Full-mode Replay/Fork and Workflow compatibility validation only
+  after the ordinary CLI repair loop is stable.
 
 ## 3. Complete local Server and journal ownership
 

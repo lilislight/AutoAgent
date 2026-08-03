@@ -87,30 +87,84 @@ MVP 1 is complete when independent Coding Agents can:
 6. avoid App, persistence, Server, and internal Runtime code in Workflow
    modules.
 
-## MVP 2: Agent Debugging Kit
+## MVP 2: Local Agent Development Loop
+
+The detailed design, data relationships, and implementation sequence live in
+[MVP2.md](MVP2.md).
 
 ### Goal
 
-A Coding Agent can understand a failed, incorrect, or slow Invocation, modify
-the Workflow, and verify whether the change improved behavior.
+A Coding Agent can complete a local, evidence-based debugging loop for a
+failed, incorrect, or inefficient Agent: understand the execution, reproduce
+the problem, modify the Workflow, evaluate the candidate Revision, detect
+regressions, and reach a verifiable conclusion.
+
+MVP 2 remains local. The Coding Agent edits the user's existing source tree and
+uses the project's ordinary version control. AutoAgent supplies execution
+evidence and evaluation infrastructure; it does not create cloud workspaces,
+merge code, deploy a Candidate, or mutate an active Workflow Revision.
 
 ### Deliverables
 
-- A compact Agent-friendly Invocation report containing:
-  - final state, result, and error;
-  - actual graph path and Loop executions;
-  - Retry, fallback, timeout, Wait/Resume, and failure chain;
-  - timing and relevant execution identities.
-- Progressive queries for a NodeExecution, Event, and reconstructed Full-mode
-  Runtime state.
-- Invocation rerun from the original input with a newly loaded Workflow.
-- Deterministic comparison of old and new Invocations.
-- Legal Full-mode Fork points.
-- Workflow compatibility validation at a Fork point.
-- Backend Fork execution that creates a new Session and Invocation without
-  changing the original execution.
-- Tracing UI support for reports, comparison, and Fork after backend contracts
-  stabilize.
+- Project-owned Eval Suites, registered in `auto-agent.toml`, that replace
+  standalone example input/expected pairs with executable business Cases. The
+  initial Case contract checks final Invocation state and final business output.
+- One `autoagent eval` CLI surface for validating, listing, running, inspecting,
+  and comparing Suites and Runs. Eval execution is owned by AutoAgent rather
+  than exposed as a pytest command.
+- An Eval Runner that records an immutable Eval Run for one Workflow Revision,
+  including per-case results, Invocation IDs, errors, latency, Token/cost data,
+  and aggregate outcomes.
+- Authoring guidance requiring a Coding Agent to generate and pass a relevant
+  Eval Suite before proposing a new Workflow Revision.
+- A bounded, deterministic Agent-friendly Invocation Report containing final
+  state/result/error, actual graph path, Loop executions, Retry/Fallback,
+  timeout, Wait/Resume, failure chain, timing, resource use, persistence status,
+  and stable execution identities without dumping the Event journal.
+- Progressive local queries for one Invocation, NodeExecution, Edge evaluation,
+  Operator Call, Event, and reconstructed Full-mode Runtime state.
+- Baseline/Candidate comparison across correctness, graph path, errors,
+  execution counts, latency, and cost, with explicit regression gates.
+- CLI contracts that let a Coding Agent report and inspect an Invocation,
+  validate/run an Eval Suite, and compare Eval Runs without importing framework
+  internals.
+- A separate debugging Skill that teaches the evidence-first repair loop rather
+  than expanding the Workflow Authoring Skill into a general maintenance guide.
+- Optional capture of an Invocation as a provisional Eval Case after the manual
+  Report -> edit -> Eval loop is stable. Correct behavior must still be supplied
+  before the Case can become a regression Gate.
+- Full-mode Replay/Fork as a later MVP 2 enhancement for expensive or
+  wait-heavy prefixes, after Report, Eval, and Compare are stable. Fork must use
+  legal execution boundaries, validate the new Workflow Revision against the
+  reconstructed state, and create a new Session and Invocation without changing
+  the original trace.
+
+### Local debugging loop
+
+```mermaid
+flowchart LR
+    CREATE["Generate or update project"] --> SUITE["Create/update Eval Suite"]
+    SUITE --> EDIT["Implement Workflow"]
+    INCIDENT["User supplies bad Invocation ID"] --> REPORT["CLI Invocation Report"]
+    REPORT --> DEBUG["Fork or rerun for one-off debugging"]
+    DEBUG --> EDIT
+    EDIT --> CHECK["Compile and check"]
+    CHECK --> EVAL["autoagent eval run"]
+    EVAL --> DECISION["Accept, reject, or revise"]
+    DECISION -->|"Revise"| EDIT
+```
+
+Eval definitions belong to the project and may be versioned with its source.
+Eval Runs and diagnostic artifacts are local execution results and are not
+committed by default. Deterministic assertions are the first implementation
+priority; probabilistic scoring and LLM-as-a-judge are optional evaluators, not
+the foundation of the execution model.
+
+Report explains an observed execution, Fork or rerun supports immediate
+debugging and verification, and Eval preserves regression-worthy business
+behavior. A one-off defect does not have to become an Eval Case. Workflow
+projects use Eval for end-to-end business behavior and keep ordinary tests only
+for isolated user code; do not duplicate the same scenario in both.
 
 The framework does not need a source-line database. Stable Workflow, Node,
 Edge, Hook, and Operator identities are enough for a local Coding Agent to find
@@ -121,11 +175,27 @@ the relevant code.
 MVP 2 is complete when a Coding Agent can:
 
 1. obtain a bounded report instead of reading an entire Event journal;
-2. identify the failing or expensive execution boundary;
-3. query additional detail only when needed;
-4. modify and recompile the Workflow;
-5. rerun and compare behavior;
-6. Fork a compatible Full-mode Invocation from a legal boundary.
+2. identify the failing, incorrect, or expensive execution boundary and query
+   additional detail only when needed;
+3. add or update a business Eval Case when the existing Suite does not describe
+   the reported requirement;
+4. modify and recompile the Workflow as a new immutable Revision;
+5. pass the registered Eval Suite before proposing the code change;
+6. compare Baseline and Candidate when required and detect both the intended
+   fix and unrelated correctness, latency, or cost
+   regressions;
+7. report a reproducible accept/reject conclusion without changing or
+   deploying the original Revision;
+8. for the advanced path, Fork a compatible Full-mode Invocation from a legal
+   boundary without modifying its original Session or trace.
+
+### Boundary
+
+MVP 2 does not include hosted runners, multi-tenancy, online source editing,
+automatic merge or deployment, production traffic management, automatic
+promotion, or Marketplace behavior. The Tracing UI may expose stable Report,
+Compare, and Fork contracts later, but CLI and Coding Agent workflows define
+the MVP before UI integration.
 
 ## MVP 3: Hosted Workflow Platform
 

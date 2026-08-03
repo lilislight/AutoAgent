@@ -104,8 +104,17 @@ autoagent project check
 autoagent workflow list
 autoagent workflow check <workflow-id>
 autoagent invocation run <workflow-id> --input-file input.json
-autoagent serve --host 127.0.0.1 --port 8765
+autoagent eval list
+autoagent eval check <suite-id>
+autoagent eval run <suite-id>
+autoagent server --host 127.0.0.1 --port 8765
 ```
+
+项目通过 ``auto-agent.toml`` 中的 ``[[eval_suites]]`` 显式注册 Evaluation。
+``eval list`` 只读取定位信息；``eval check`` 无需 Provider 凭据即可验证选中的
+``Evaluation`` 类和 Workflow；``eval run`` 使用正常 App 执行路径和 Full event
+mode 运行其 ``eval_*`` Cases。业务预期不匹配返回退出码 1，加载、配置或
+Evaluator 基础设施错误返回退出码 2。
 
 完整的条件编排、Wait/Resume 和 LLM/Tool/ReActWorkflow 可以参考随包发布的
 [authoring examples](examples/authoring/README.md)。推荐的 Coding Agent 工作方式

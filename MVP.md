@@ -112,7 +112,7 @@ merge code, deploy a Candidate, or mutate an active Workflow Revision.
 - One `autoagent eval` CLI surface for validating, listing, running, inspecting,
   and comparing Suites and Runs. Eval execution is owned by AutoAgent rather
   than exposed as a pytest command.
-- An Eval Runner that records an immutable Eval Run for one Workflow Revision,
+- An Eval Runner that returns one Eval Result for one Workflow Revision,
   including per-case results, Invocation IDs, errors, latency, Token/cost data,
   and aggregate outcomes.
 - Authoring guidance requiring a Coding Agent to generate and pass a relevant
@@ -126,7 +126,7 @@ merge code, deploy a Candidate, or mutate an active Workflow Revision.
 - Baseline/Candidate comparison across correctness, graph path, errors,
   execution counts, latency, and cost, with explicit regression gates.
 - CLI contracts that let a Coding Agent report and inspect an Invocation,
-  validate/run an Eval Suite, and compare Eval Runs without importing framework
+  validate/run an Eval Suite, and compare Eval Results without importing framework
   internals.
 - A separate debugging Skill that teaches the evidence-first repair loop rather
   than expanding the Workflow Authoring Skill into a general maintenance guide.
@@ -155,7 +155,7 @@ flowchart LR
 ```
 
 Eval definitions belong to the project and may be versioned with its source.
-Eval Runs and diagnostic artifacts are local execution results and are not
+Eval Results and diagnostic artifacts are local execution results and are not
 committed by default. Deterministic assertions are the first implementation
 priority; probabilistic scoring and LLM-as-a-judge are optional evaluators, not
 the foundation of the execution model.

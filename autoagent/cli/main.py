@@ -25,6 +25,11 @@ from autoagent.cli.render import (
     render_workflow_list,
     write_report,
 )
+from autoagent.cli.evaluation import (
+    check_evaluation,
+    list_evaluations,
+    run_evaluation,
+)
 from autoagent.cli.server_client import (
     AutoAgentServerClient,
     ServerClientError,
@@ -149,6 +154,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_execution_arguments(invocation_resume)
 
+    evaluation = commands.add_parser(
+        "eval",
+        help="List, validate, and run project-owned Workflow Evaluations.",
+    )
+    evaluation_commands = evaluation.add_subparsers(
+        dest="command",
+        required=True,
+    )
+    evaluation_list = evaluation_commands.add_parser("list")
+    evaluation_list.add_argument("--report-file")
+    evaluation_check = evaluation_commands.add_parser("check")
+    evaluation_check.add_argument("suite_id")
+    evaluation_check.add_argument("--report-file")
+    evaluation_run = evaluation_commands.add_parser("run")
+    evaluation_run.add_argument("suite_id")
+    evaluation_run.add_argument(
+        "--case",
+        dest="cases",
+        action="append",
+        help="Run one eval_* Case method; repeat to select several Cases.",
+    )
+    evaluation_run.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=1,
+        help="Maximum number of isolated Cases to execute concurrently.",
+    )
+    evaluation_run.add_argument("--timeout-ms", type=int)
+    evaluation_run.add_argument("--report-file")
+    add_runtime_arguments(evaluation_run)
+
     server = commands.add_parser("server")
     server.add_argument("--host")
     server.add_argument("--port", type=int)
@@ -189,8 +225,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     except TimeoutError:
+        subject = (
+            "Evaluation"
+            if getattr(arguments, "group", None) == "eval"
+            else "Invocation"
+        )
         write_report(
-            "EXECUTION ERROR\nMESSAGE Invocation timed out.\n\nRESULT failed",
+            f"EXECUTION ERROR\nMESSAGE {subject} timed out.\n\nRESULT failed",
             getattr(arguments, "report_file", None),
         )
         return 1
@@ -209,6 +250,10 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         return _workflow_check(project, arguments)
     if arguments.group == "workflow" and arguments.command == "preview":
         return _workflow_preview(project, arguments)
+    if arguments.group == "eval" and arguments.command == "list":
+        return list_evaluations(project, arguments)
+    if arguments.group == "eval" and arguments.command == "check":
+        return check_evaluation(project, arguments)
 
     environment = load_project_environment(
         project.root,
@@ -223,6 +268,11 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         app_settings = app_settings_from_arguments(arguments, environment)
         return asyncio.run(
             _invocation_command(project, environment, app_settings, arguments)
+        )
+    if arguments.group == "eval" and arguments.command == "run":
+        app_settings = app_settings_from_arguments(arguments, environment)
+        return asyncio.run(
+            run_evaluation(project, environment, app_settings, arguments)
         )
     if arguments.group == "server":
         app_settings = app_settings_from_arguments(arguments, environment)

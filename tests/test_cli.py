@@ -102,6 +102,259 @@ class AutoAgentCliTests(unittest.TestCase):
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(["server", "--file", "workflow.py"])
 
+    def test_parser_exposes_eval_list_check_and_run(self) -> None:
+        parser = build_parser()
+
+        listed = parser.parse_args(["eval", "list"])
+        checked = parser.parse_args(["eval", "check", "regression"])
+        run = parser.parse_args(
+            [
+                "eval",
+                "run",
+                "regression",
+                "--case",
+                "eval_happy_path",
+                "--max-concurrency",
+                "2",
+                "--store",
+                "memory",
+            ]
+        )
+
+        self.assertEqual("list", listed.command)
+        self.assertEqual("regression", checked.suite_id)
+        self.assertEqual(["eval_happy_path"], run.cases)
+        self.assertEqual(2, run.max_concurrency)
+
+    def test_eval_list_is_lazy_and_check_validates_cases(self) -> None:
+        evaluation_source = """
+            from autoagent.evaluation import EvalCase, Evaluation
+
+            class EchoEvaluation(Evaluation):
+                async def eval_happy_path(self, case: EvalCase) -> None:
+                    pass
+        """
+        with self.project(
+            module_name="cli_eval_workflow",
+            source="""
+                from autoagent import Workflow
+
+                def echo(value: str) -> str:
+                    return value
+
+                workflow = Workflow(id="echo")
+                workflow.add_node(echo, node_id="echo")
+            """,
+            eval_module_name="cli_echo_evaluation",
+            eval_source=evaluation_source,
+            eval_suites=(
+                (
+                    "echo_regression",
+                    "echo",
+                    "cli_echo_evaluation:EchoEvaluation",
+                ),
+            ),
+        ) as root:
+            list_code, listed = self.run_cli(
+                "--project",
+                str(root),
+                "eval",
+                "list",
+            )
+            check_code, checked = self.run_cli(
+                "--project",
+                str(root),
+                "eval",
+                "check",
+                "echo_regression",
+            )
+
+        self.assertEqual(0, list_code, listed)
+        self.assertIn("EVAL echo_regression", listed)
+        self.assertIn("ENTRYPOINT cli_echo_evaluation:EchoEvaluation", listed)
+        self.assertEqual(0, check_code, checked)
+        self.assertIn("CASE eval_happy_path", checked)
+        self.assertIn("EVAL_RESULT valid", checked)
+
+    def test_eval_list_does_not_import_broken_evaluation(self) -> None:
+        with self.project(
+            module_name="cli_lazy_eval_workflow",
+            source="""
+                from autoagent import Workflow
+                workflow = Workflow(id="echo")
+            """,
+            eval_module_name="cli_lazy_broken_evaluation",
+            eval_source="raise RuntimeError('must stay lazy')",
+            eval_suites=(
+                (
+                    "lazy",
+                    "echo",
+                    "cli_lazy_broken_evaluation:Evaluation",
+                ),
+            ),
+        ) as root:
+            list_code, listed = self.run_cli(
+                "--project",
+                str(root),
+                "eval",
+                "list",
+            )
+            check_code, checked = self.run_cli(
+                "--project",
+                str(root),
+                "eval",
+                "check",
+                "lazy",
+            )
+
+        self.assertEqual(0, list_code, listed)
+        self.assertEqual(2, check_code, checked)
+        self.assertIn("EVAL_MODULE_IMPORT_FAILED", checked)
+
+    def test_eval_run_executes_full_mode_and_renders_results(self) -> None:
+        with self.project(
+            module_name="cli_eval_run_workflow",
+            source="""
+                from autoagent import Workflow
+
+                def echo(value: str) -> str:
+                    return value
+
+                workflow = Workflow(id="echo")
+                workflow.add_node(echo, node_id="echo")
+            """,
+            eval_module_name="cli_eval_run_evaluation",
+            eval_source="""
+                from autoagent.evaluation import EvalCase, Evaluation, evaluators
+
+                class EchoEvaluation(Evaluation):
+                    async def eval_happy_path(self, case: EvalCase) -> None:
+                        await case.invoke(
+                            {"value": "hello"},
+                            evaluators=(
+                                evaluators.InvocationState(expected="completed"),
+                                evaluators.InvocationResult(
+                                    expected={"output": "hello"}
+                                ),
+                            ),
+                        )
+
+                    async def eval_not_selected(self, case: EvalCase) -> None:
+                        await case.invoke(
+                            {"value": "unused"},
+                            evaluators=(
+                                evaluators.InvocationState(expected="failed"),
+                            ),
+                        )
+            """,
+            eval_suites=(
+                (
+                    "echo_regression",
+                    "echo",
+                    "cli_eval_run_evaluation:EchoEvaluation",
+                ),
+            ),
+        ) as root:
+            report_path = root / "reports" / "eval.txt"
+            code, output = self.run_cli(
+                "--project",
+                str(root),
+                "--no-env-file",
+                "eval",
+                "run",
+                "echo_regression",
+                "--case",
+                "eval_happy_path",
+                "--store",
+                "memory",
+                "--report-file",
+                str(report_path),
+            )
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertEqual(0, code, output)
+        self.assertEqual(output.strip(), report.strip())
+        self.assertIn("STATUS passed", output)
+        self.assertIn("CASE eval_happy_path", output)
+        self.assertNotIn("CASE eval_not_selected", output)
+        self.assertIn("EVALUATOR invocation_result passed", output)
+        self.assertRegex(output, r"THROUGH_SEQUENCE [1-9][0-9]*")
+
+    def test_eval_business_failure_and_evaluator_error_have_distinct_exit_codes(
+        self,
+    ) -> None:
+        with self.project(
+            module_name="cli_eval_exit_workflow",
+            source="""
+                from autoagent import Workflow
+                workflow = Workflow(id="echo")
+                workflow.add_node(lambda: "ok", node_id="echo")
+            """,
+            eval_module_name="cli_eval_exit_evaluation",
+            eval_source="""
+                from autoagent.evaluation import (
+                    EvalCase,
+                    Evaluation,
+                    EvaluatorResult,
+                    evaluators,
+                )
+
+                class BrokenEvaluator:
+                    async def evaluate(self, context):
+                        raise RuntimeError("judge unavailable")
+
+                class EchoEvaluation(Evaluation):
+                    async def eval_business_failure(self, case: EvalCase) -> None:
+                        await case.invoke(
+                            evaluators=(
+                                evaluators.InvocationResult(
+                                    expected={"output": "wrong"}
+                                ),
+                            ),
+                        )
+
+                    async def eval_evaluator_error(self, case: EvalCase) -> None:
+                        await case.invoke(evaluators=(BrokenEvaluator(),))
+            """,
+            eval_suites=(
+                (
+                    "echo_regression",
+                    "echo",
+                    "cli_eval_exit_evaluation:EchoEvaluation",
+                ),
+            ),
+        ) as root:
+            failed_code, failed = self.run_cli(
+                "--project",
+                str(root),
+                "--no-env-file",
+                "eval",
+                "run",
+                "echo_regression",
+                "--case",
+                "eval_business_failure",
+                "--store",
+                "memory",
+            )
+            error_code, errored = self.run_cli(
+                "--project",
+                str(root),
+                "--no-env-file",
+                "eval",
+                "run",
+                "echo_regression",
+                "--case",
+                "eval_evaluator_error",
+                "--store",
+                "memory",
+            )
+
+        self.assertEqual(1, failed_code, failed)
+        self.assertIn("RESULT failed", failed)
+        self.assertEqual(2, error_code, errored)
+        self.assertIn("EVALUATOR_EXECUTION_ERROR", errored)
+        self.assertIn("RESULT error", errored)
+
     def test_cli_overrides_process_environment_and_project_env(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -863,6 +1116,9 @@ class AutoAgentCliTests(unittest.TestCase):
         module_name: str,
         source: str,
         entrypoints: tuple[str, ...] = ("workflow",),
+        eval_module_name: str | None = None,
+        eval_source: str | None = None,
+        eval_suites: tuple[tuple[str, str, str], ...] = (),
     ) -> Iterator[Path]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -870,6 +1126,13 @@ class AutoAgentCliTests(unittest.TestCase):
                 "[[workflows]]\n"
                 f'entrypoint = "{module_name}:{entrypoint}"'
                 for entrypoint in entrypoints
+            )
+            evaluation_entries = "\n\n".join(
+                "[[eval_suites]]\n"
+                f'id = "{suite_id}"\n'
+                f'workflow_id = "{workflow_id}"\n'
+                f'entrypoint = "{entrypoint}"'
+                for suite_id, workflow_id, entrypoint in eval_suites
             )
             (root / "auto-agent.toml").write_text(
                 textwrap.dedent(
@@ -881,6 +1144,8 @@ class AutoAgentCliTests(unittest.TestCase):
                     version = "1"
 
                     {workflow_entries}
+
+                    {evaluation_entries}
                     """
                 ).strip()
                 + "\n",
@@ -890,6 +1155,11 @@ class AutoAgentCliTests(unittest.TestCase):
                 textwrap.dedent(source).strip() + "\n",
                 encoding="utf-8",
             )
+            if eval_module_name is not None and eval_source is not None:
+                (root / f"{eval_module_name}.py").write_text(
+                    textwrap.dedent(eval_source).strip() + "\n",
+                    encoding="utf-8",
+                )
             original_cwd = Path.cwd()
             try:
                 os.chdir(root)
@@ -897,6 +1167,8 @@ class AutoAgentCliTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
                 sys.modules.pop(module_name, None)
+                if eval_module_name is not None:
+                    sys.modules.pop(eval_module_name, None)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@ from typing import Any
 
 from autoagent.core.compiler import CompileResult
 from autoagent.core.runtime import Invocation, JsonRuntimeSerializer, RuntimeEvent
+from autoagent.evaluation.loader import LoadedEvaluation
+from autoagent.evaluation.result import EvalResult
+from autoagent.project.manifest import EvalSuiteLocator
 from autoagent.project import ProjectDefinition, ProjectDiagnostic
 
 
@@ -90,6 +93,132 @@ def render_workflow_list(
             ]
         )
     lines.append("RESULT listed")
+    return "\n".join(lines)
+
+
+def render_evaluation_list(
+    project: ProjectDefinition,
+    locators: tuple[EvalSuiteLocator, ...],
+) -> str:
+    lines = [
+        f"PROJECT {project.metadata.name}",
+        f"VERSION {project.metadata.version}",
+        f"EVAL_SUITES {len(locators)}",
+    ]
+    for locator in locators:
+        lines.extend(
+            [
+                "",
+                f"EVAL {locator.id}",
+                f"  WORKFLOW {locator.workflow_id}",
+                f"  ENTRYPOINT {locator.entrypoint}",
+            ]
+        )
+    lines.extend(["", "RESULT listed"])
+    return "\n".join(lines)
+
+
+def render_evaluation_check(
+    loaded: LoadedEvaluation,
+    compile_result: CompileResult,
+) -> str:
+    lines = [
+        f"EVAL {loaded.locator.id}",
+        f"WORKFLOW {loaded.locator.workflow_id}",
+        f"ENTRYPOINT {loaded.locator.entrypoint}",
+        f"CASES {len(loaded.case_ids)}",
+    ]
+    lines.extend(f"  CASE {case_id}" for case_id in loaded.case_ids)
+    lines.extend(["", render_compile_result(compile_result)])
+    lines.append(f"EVAL_RESULT {'valid' if compile_result.ok else 'failed'}")
+    return "\n".join(lines)
+
+
+def render_evaluation_result(
+    result: EvalResult,
+    *,
+    serializer: JsonRuntimeSerializer,
+) -> str:
+    lines = [
+        f"EVAL {result.suite_id}",
+        f"WORKFLOW {result.workflow_id}",
+        f"WORKFLOW_REVISION {result.workflow_revision_id}",
+        f"STATUS {result.status}",
+        f"CASES {len(result.case_results)}",
+    ]
+    if result.error is not None:
+        lines.extend(
+            [
+                f"ERROR {result.error.code}",
+                f"MESSAGE {result.error.message}",
+            ]
+        )
+    for case in result.case_results:
+        lines.extend(
+            [
+                "",
+                f"CASE {case.case_id}",
+                f"  STATUS {case.status}",
+                f"  SESSION {case.session_id or '<none>'}",
+                f"  STEPS {len(case.step_results)}",
+            ]
+        )
+        if case.error is not None:
+            lines.extend(
+                [
+                    f"  ERROR {case.error.code}",
+                    f"  MESSAGE {case.error.message}",
+                ]
+            )
+        for step in case.step_results:
+            lines.extend(
+                [
+                    f"  STEP {step.index} {step.action}",
+                    f"    STATUS {step.status}",
+                    f"    INVOCATION {step.invocation_id or '<none>'}",
+                    "    THROUGH_SEQUENCE "
+                    f"{step.through_sequence if step.through_sequence is not None else '<none>'}",
+                ]
+            )
+            if step.error is not None:
+                lines.extend(
+                    [
+                        f"    ERROR {step.error.code}",
+                        f"    MESSAGE {step.error.message}",
+                    ]
+                )
+            for evaluator in step.evaluator_results:
+                evaluator_status = (
+                    "error"
+                    if evaluator.error is not None
+                    else "passed"
+                    if evaluator.passed is True
+                    else "failed"
+                    if evaluator.passed is False
+                    else "completed"
+                )
+                lines.append(
+                    f"    EVALUATOR {evaluator.key} {evaluator_status}"
+                )
+                if evaluator.score is not None:
+                    lines.append(f"      SCORE {evaluator.score}")
+                if evaluator.value is not None:
+                    lines.extend(
+                        [
+                            "      VALUE",
+                            _indent(_json_text(evaluator.value, serializer), 8),
+                        ]
+                    )
+                if evaluator.comment:
+                    lines.append(f"      COMMENT {evaluator.comment}")
+                if evaluator.error is not None:
+                    lines.extend(
+                        [
+                            f"      ERROR {evaluator.error.code}",
+                            f"      MESSAGE {evaluator.error.message}",
+                        ]
+                    )
+    lines.extend(["", f"RESULT {result.status}"])
     return "\n".join(lines)
 
 
@@ -253,3 +382,8 @@ def _json_text(value: Any, serializer: JsonRuntimeSerializer) -> str:
         indent=2,
         sort_keys=True,
     )
+
+
+def _indent(value: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(f"{prefix}{line}" for line in value.splitlines())

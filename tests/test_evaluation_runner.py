@@ -9,11 +9,11 @@ from autoagent.evaluation import (
     EvalCase,
     Evaluation,
     EvaluationContext,
-    EvaluationRunner,
     EvaluatorResult,
-    LoadedEvaluation,
     evaluators,
 )
+from autoagent.evaluation.loader import LoadedEvaluation
+from autoagent.evaluation.runner import EvaluationRunner
 from autoagent.project import (
     EvalSuiteLocator,
     LoadedWorkflow,

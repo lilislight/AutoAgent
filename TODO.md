@@ -83,7 +83,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   business scenarios.
 - [x] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
   uniqueness, Workflow targeting, and stable diagnostics.
-- [ ] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
+- [x] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
 - [ ] Define ignored local artifact layout, atomic file format, schema
   versioning, value-size limits, redaction, and incomplete-evidence behavior.
 - [ ] Audit current Runtime Events and trace APIs against the Report/Eval models;
@@ -97,8 +97,10 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   importing Evaluation modules during normal project or Server startup.
 - [x] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
   multi-turn and Wait/Resume support.
-- [ ] Write atomic local Run artifacts and add `autoagent eval list`, `check`,
-  `run`, and `inspect`.
+- [x] Add `autoagent eval list`, `check`, and `run` with report-file teeing and
+  deterministic status/exit-code rendering.
+- [ ] Decide whether persisted Eval Result artifacts and `eval inspect` are
+  needed after the CLI Report and Runtime evidence workflow is exercised.
 - [ ] Add bounded concurrency, interruption, and Suite-scale performance tests.
 
 ### Phase 2: Authoring integration
@@ -106,7 +108,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [ ] Replace standalone authoring-example input/expected pairs with registered
   Eval Suites and reusable fixtures where appropriate.
 - [ ] Update the Authoring Skill to generate and pass Eval Suites before handoff.
-- [ ] Forward-test requirement -> Workflow + Suite -> compile -> Eval Run in a
+- [ ] Forward-test requirement -> Workflow + Suite -> compile -> Eval Result in a
   clean project.
 
 ### Phase 3: Invocation Report and progressive queries
@@ -122,11 +124,11 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 - [ ] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
 - [ ] Forward-test Report -> optional Case update -> code change -> compile ->
-  Eval Run -> user-review handoff using CLI only.
+  Eval Result -> user-review handoff using CLI only.
 
 ### Phase 5: Baseline/Candidate comparison
 
-- [ ] Compare compatible Eval Runs by stable Case ID across correctness, path,
+- [ ] Compare compatible Eval Results by stable Case ID across correctness, path,
   errors, counts, latency, Token, and cost.
 - [ ] Add tolerances, aggregate Gates, and `accepted`, `rejected`, or
   `needs_review` decisions.

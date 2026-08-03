@@ -8,7 +8,7 @@ import textwrap
 import unittest
 from uuid import uuid4
 
-from autoagent.evaluation import EvaluationLoader
+from autoagent.evaluation.loader import EvaluationLoader
 from autoagent.project import ProjectLoadError, ProjectLoader, load_project_manifest
 
 

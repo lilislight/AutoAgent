@@ -141,7 +141,7 @@ sequenceDiagram
     Eval->>Host: Run Cases through the normal App path
     Host->>Store: Record Case Invocations
     Store-->>Eval: Runtime evidence and results
-    Eval-->>Agent: Eval Run and failed Case Reports
+    Eval-->>Agent: Eval Result and failed Case Reports
 
     alt A Case fails or errors
         Agent->>Source: Continue modifying Workflow or Eval expectation
@@ -165,8 +165,8 @@ flowchart LR
     AUTHORED --> SUITE
     QUALITY --> SUITE
 
-    SUITE --> BASELINE["Baseline Eval Run"]
-    SUITE --> CANDIDATE["Candidate Eval Run"]
+    SUITE --> BASELINE["Baseline Eval Result"]
+    SUITE --> CANDIDATE["Candidate Eval Result"]
     BASELINE --> COMPARE["Eval Comparison"]
     CANDIDATE --> COMPARE
 
@@ -302,6 +302,42 @@ ordinary Python control flow inside the Case method. A ``passed=False`` result
 stops the current Case; a score-only result uses ``passed=None`` and does not
 stop it.
 
+```python
+from autoagent.evaluation import EvalCase, Evaluation, evaluators
+
+
+class InventoryEvaluation(Evaluation):
+    async def eval_out_of_stock(self, case: EvalCase) -> None:
+        await case.invoke(
+            {"sku": "A-001", "quantity": 100},
+            evaluators=(
+                evaluators.InvocationState(expected="completed"),
+                evaluators.InvocationResult(
+                    expected={
+                        "output": {
+                            "accepted": False,
+                            "reason": "out_of_stock",
+                        }
+                    }
+                ),
+            ),
+        )
+```
+
+```toml
+[[eval_suites]]
+id = "inventory_regression"
+workflow_id = "inventory"
+entrypoint = "evals.inventory:InventoryEvaluation"
+```
+
+```bash
+autoagent eval list
+autoagent eval check inventory_regression
+autoagent eval run inventory_regression
+autoagent eval run inventory_regression --case eval_out_of_stock
+```
+
 Graph-path, call-count, Retry, Loop, Wait, latency, Token, cost, scoring, and
 aggregate Gate expectations are recorded extensions, not initial requirements.
 
@@ -434,7 +470,7 @@ CLI capability groups, with final command names still to be designed:
 - build and inspect an Invocation Report;
 - query one execution boundary;
 - validate and run an Eval Suite;
-- inspect one Eval Run or Case Result;
+- inspect one persisted Eval Result or Case Result if that later artifact is added;
 - compare Baseline and Candidate Runs;
 - optionally capture an Invocation as a provisional Case later.
 
@@ -486,8 +522,8 @@ Deliverables:
 - audit current Runtime Event, UserEvent, trace query, recovery-state, CLI, and
   ProjectHost capabilities against this design;
 - choose package ownership for public debugging and evaluation APIs;
-- define the first version of Suite, Case, unified Step, Runner, Case Result,
-  and Eval Run around final Invocation state and final business output;
+- define the first version of Evaluation, EvalCase, internal Step, Runner, and
+  Evaluator/Step/Case/Eval Result hierarchy;
 - record Report, Fork, rerun, and Eval ownership, with automatic capture,
   scoring, Gates, and Comparison kept as later extensions;
 - extend the Manifest contract with explicit Eval Suite entrypoints and define
@@ -589,7 +625,7 @@ Implementation steps:
 Acceptance:
 
 - an independent Coding Agent can complete Invocation ID -> Report -> code
-  change -> Eval Run -> user-review handoff entirely through CLI;
+  change -> Eval Result -> user-review handoff entirely through CLI;
 - infrastructure and framework failures are not disguised as Workflow fixes.
 
 ### Phase 5: Baseline/Candidate comparison
@@ -664,7 +700,7 @@ MVP 2 does not include:
 2. Which debugging and evaluation models are stable public Python APIs versus
    CLI-only schemas?
 3. What is the local artifact root, retention policy, and portable file format
-   for Eval Runs and Comparisons?
+   for persisted Eval Results and Comparisons?
 4. Which value previews and Context paths are safe by default, and how are
    project-specific redactors registered?
 5. Which cost model is authoritative when a Provider reports Token usage but
@@ -675,4 +711,5 @@ MVP 2 does not include:
    Invocation Report?
 
 Resolve these decisions in dependency order. Do not begin Replay/Fork or UI
-implementation while Report, Eval Run, and Comparison contracts are unstable.
+implementation while Report, persisted Eval Result, and Comparison contracts
+are unstable.

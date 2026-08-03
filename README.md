@@ -117,8 +117,18 @@ autoagent workflow preview <workflow-id>
 autoagent workflow preview <workflow-id> --format mermaid --output workflow.mmd
 autoagent workflow preview <workflow-id> --format json
 autoagent invocation run <workflow-id> --input-file input.json
+autoagent eval list
+autoagent eval check <suite-id>
+autoagent eval run <suite-id>
 autoagent server --host 127.0.0.1 --port 8765
 ```
+
+Project-owned Evaluations are declared with ``[[eval_suites]]`` in
+``auto-agent.toml``. ``eval list`` reads only those locators, ``eval check``
+validates the selected ``Evaluation`` class and Workflow without Provider
+credentials, and ``eval run`` executes its ``eval_*`` Cases through the normal
+App path in Full event mode. Business mismatches exit with code 1; loading,
+configuration, or Evaluator infrastructure errors exit with code 2.
 
 For an unregistered Workflow exported directly from a Python file, `check`,
 `preview`, `invocation run`, and local `invocation resume` also accept `--file`.

@@ -176,12 +176,18 @@ flowchart LR
     COMPARE --> DECISION["Accept / reject / revise"]
 ```
 
-An Eval Suite is the named business-regression group, similar to a test module:
+An Eval Suite is the Manifest locator for one Python ``Evaluation`` class and
+one Workflow, similar to a test module:
 
 ```text
-Eval Suite
-= Eval Cases
-+ shared execution configuration when needed
+[[eval_suites]] Manifest entry
+= suite id + Workflow id + Evaluation entrypoint
+
+Evaluation class
+= ordered async eval_* methods
+
+eval_* method
+= one isolated Case Session + its Invoke/Resume Steps
 ```
 
 AutoAgent owns Workflow execution, Runtime assertions, Revision identity, and
@@ -194,20 +200,21 @@ or Eval Runner.
 ```mermaid
 erDiagram
     WORKFLOW_REVISION ||--o{ INVOCATION : executes
-    WORKFLOW_REVISION ||--o{ EVAL_RUN : evaluated_by
+    WORKFLOW_REVISION ||--o{ EVAL_RESULT : evaluated_by
 
-    EVAL_SUITE ||--|{ EVAL_CASE : contains
-    EVAL_SUITE ||--o{ EVAL_RUN : produces
+    EVALUATION ||--|{ EVAL_CASE_METHOD : defines
+    EVALUATION ||--o{ EVAL_RESULT : produces
 
-    EVAL_RUN ||--|{ EVAL_CASE_RESULT : contains
-    EVAL_CASE ||--o{ EVAL_CASE_RESULT : produces
-    EVAL_CASE_RESULT }o--|| INVOCATION : observed_from
+    EVAL_RESULT ||--|{ EVAL_CASE_RESULT : contains
+    EVAL_CASE_METHOD ||--o{ EVAL_CASE_RESULT : produces
+    EVAL_CASE_RESULT ||--|{ EVAL_STEP_RESULT : contains
+    EVAL_STEP_RESULT }o--|| INVOCATION : observed_from
 
     INVOCATION ||--o| CAPTURED_REPRODUCTION : captured_as
     CAPTURED_REPRODUCTION ||--o| EVAL_CASE : qualified_as
 
-    EVAL_RUN ||--o{ EVAL_COMPARISON : baseline
-    EVAL_RUN ||--o{ EVAL_COMPARISON : candidate
+    EVAL_RESULT ||--o{ EVAL_COMPARISON : baseline
+    EVAL_RESULT ||--o{ EVAL_COMPARISON : candidate
 ```
 
 ### Workflow Revision
@@ -224,18 +231,23 @@ automatically a qualified Eval Case.
 
 ### Eval Case
 
-One executable business scenario containing ordered Steps, an expected final
-Invocation state, and an expected final business output.
+One asynchronous ``eval_*`` method. The Runner supplies an ``EvalCase``
+controller. Each call to ``case.invoke`` or ``case.resume`` is one internal
+Step, and all Steps share one isolated Session. A Step may have no Evaluators
+when it exists only to build Session state.
 
 ### Eval Suite
 
-A versioned project definition containing Cases, Evaluators, execution
-configuration, and aggregate Gates for one Workflow.
+A lightweight Manifest locator containing a stable suite id, one Workflow id,
+and one ``module:EvaluationClass`` entrypoint. It is not a separate Python data
+model and it does not own App configuration.
 
-### Eval Run
+### Eval Result
 
-An immutable local result from running one Suite definition against one
-Workflow Revision and environment fingerprint.
+The result of running one Manifest Suite against one Workflow Revision. It
+contains only ordered Case Results; Case Results contain ordered Step Results;
+Step Results contain Evaluator Results and references to Runtime evidence.
+Counts and aggregate status are derived instead of persisted as duplicate data.
 
 ### Eval Comparison
 
@@ -275,15 +287,20 @@ complete journal.
 
 ### 2. Evaluation definition
 
-The initial model should support:
+The initial model supports:
 
-- stable Suite and Case IDs;
-- target Workflow ID;
-- ordered Steps using one Step model whose action may be Invoke or Resume;
-- a new Session by default;
-- terminal-state and output expectations;
-- exact output comparison first, with a narrow custom Evaluator escape hatch
-  for outputs that cannot be compared exactly.
+- one ``Evaluation`` class per Manifest Suite;
+- one async ``eval_*`` method per stable Case id;
+- an ``EvalCase`` controller with ``invoke`` and ``resume`` methods;
+- a new isolated Session per Case and multiple Invocations in that Session;
+- optional Evaluators on every Step;
+- strict built-in Invocation-state and complete Invocation-result Evaluators;
+- a public Evaluator protocol for business-specific checks.
+
+Authors do not construct an explicit Suite, Case, or Step data model. They use
+ordinary Python control flow inside the Case method. A ``passed=False`` result
+stops the current Case; a score-only result uses ``passed=None`` and does not
+stop it.
 
 Graph-path, call-count, Retry, Loop, Wait, latency, Token, cost, scoring, and
 aggregate Gate expectations are recorded extensions, not initial requirements.
@@ -327,13 +344,15 @@ host environments; do not create two incompatible Eval data models.
 
 Implement only the initial deterministic Evaluators first:
 
-- expected final Invocation state;
-- expected final output using exact comparison;
-- a narrow custom output Evaluator for cases where exact comparison is not
-  meaningful.
+- ``evaluators.InvocationState(expected=...)``;
+- ``evaluators.InvocationResult(expected=...)`` using exact comparison;
+- the public ``Evaluator.evaluate(EvaluationContext)`` protocol.
 
-Every result must distinguish `passed`, `failed`, `error`, and `skipped`.
-Evaluator failure is different from a failed business expectation.
+``EvaluatorResult.passed`` is ``True`` for a gating pass, ``False`` for a
+business mismatch, and ``None`` for observational or score-only output.
+Evaluator infrastructure failure is recorded separately from a failed business
+expectation. The imperative Case API does not invent ``skipped`` results for
+Step calls that never happened.
 
 Add semantic or LLM-as-a-judge adapters, including possible DeepEval
 integration, only after the deterministic result contract is stable. AutoAgent
@@ -341,7 +360,7 @@ owns Workflow execution, Revision identity, Invocation evidence, and result
 assembly; external frameworks may provide output Evaluators instead of
 replacing the Eval Runner.
 
-### 4. Eval Runner and local result storage
+### 4. Eval Runner
 
 Responsibilities:
 
@@ -352,16 +371,17 @@ Responsibilities:
 - continue the Suite after an individual Case failure;
 - bound Case and Suite concurrency through existing App limits;
 - produce deterministic result ordering even when Cases execute concurrently;
-- associate every Case Result with its Invocation IDs;
-- record Suite definition hash, Revision ID, environment fingerprint, timing,
-  Token/cost, and evidence completeness;
+- associate every Step Result with its Invocation id and observed sequence;
+- keep Runtime journal data authoritative instead of copying trace, state,
+  output, and timing into Eval Results;
 - never treat missing Provider credentials or broken test infrastructure as a
   business assertion failure.
 
-Eval definitions may be committed with project source. Eval Runs and large
-diagnostic artifacts should live under an ignored local AutoAgent directory by
-default. The first version should use portable versioned files and existing
-Runtime persistence rather than adding platform-oriented database tables.
+Eval definitions may be committed with project source. Persisted Eval Result
+artifacts and ``eval inspect`` are deferred until their actual debugging use is
+defined. The initial CLI renders a structured result before closing the Host;
+Runtime evidence remains available afterward only when a database backend is
+configured.
 
 ### 5. Baseline/Candidate comparison and Gates
 
@@ -486,8 +506,8 @@ Acceptance:
 
 Implementation steps:
 
-1. Implement schema-versioned Suite, Case, unified Step, Case Result, and Eval
-   Run models.
+1. Implement ``Evaluation``, ``EvalCase``, the Evaluator protocol, and the
+   minimal Evaluator/Step/Case/Eval Result hierarchy.
 2. Extend `auto-agent.toml` with explicit `[[eval_suites]]` entrypoints and
    stable loading diagnostics.
 3. Implement deterministic final-state and exact-output evaluation plus the
@@ -496,9 +516,9 @@ Implementation steps:
    ProjectHost and AutoAgentApp.
 5. Isolate Sessions by default and support explicit multi-turn and Wait/Resume
    steps.
-6. Write atomic, versioned local Eval Run artifacts with Invocation references.
-7. Add `autoagent eval list`, `check`, `run`, and `inspect` commands.
-8. Add bounded concurrency, cancellation, timeout, interrupted-run, and large
+6. Add `autoagent eval list`, `check`, and `run` commands with deterministic
+   human-readable output and optional report files.
+7. Add bounded concurrency, cancellation, timeout, interrupted-run, and large
    Suite performance coverage.
 
 Acceptance:

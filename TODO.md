@@ -67,9 +67,9 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 - [ ] Define versioned Invocation Report, value summary, evidence warning, and
   progressive detail-query models for Minimal, Standard, and Full modes.
-- [ ] Define the first version of Eval Suite, Eval Case, unified Step, Eval
-  Runner, Eval Run, and Case Result around final Invocation state and final
-  business output only.
+- [x] Define the first public Evaluation and result contracts: Manifest Suite
+  locator, ``Evaluation`` class, ``eval_*`` Case method, internal Invoke/Resume
+  Step, and the Evaluator/Step/Case/Eval Result hierarchy.
 - [ ] Record graph path, call counts, Retry/Loop/Wait, performance budgets,
   scoring, aggregate Gates, and automatic Invocation capture as later
   extensions rather than Phase 0 requirements.
@@ -91,10 +91,9 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 ### Phase 1: Eval framework and CLI
 
-- [ ] Implement Suite, Case, unified Step, Case Result, and Eval Run models plus
-  Manifest loading and stable diagnostics.
-- [ ] Implement deterministic final-state and exact-output evaluation plus the
-  narrow custom output Evaluator contract.
+- [x] Implement the public Evaluation, EvalCase, Evaluator, built-in
+  Invocation-state/result Evaluators, and minimal result models.
+- [ ] Implement Manifest loading and stable Evaluation diagnostics.
 - [ ] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
   multi-turn and Wait/Resume support.
 - [ ] Write atomic local Run artifacts and add `autoagent eval list`, `check`,

@@ -113,9 +113,43 @@ an embedded host.
 autoagent project check
 autoagent workflow list
 autoagent workflow check <workflow-id>
+autoagent workflow preview <workflow-id>
+autoagent workflow preview <workflow-id> --format mermaid --output workflow.mmd
+autoagent workflow preview <workflow-id> --format json
 autoagent invocation run <workflow-id> --input-file input.json
-autoagent serve --host 127.0.0.1 --port 8765
+autoagent server --host 127.0.0.1 --port 8765
 ```
+
+For an unregistered Workflow exported directly from a Python file, `check`,
+`preview`, `invocation run`, and local `invocation resume` also accept `--file`.
+The exported object defaults to `workflow`; use `--object` when the file exports
+another name:
+
+```bash
+autoagent workflow check --file ./draft_workflow.py
+autoagent workflow preview --file ./draft_workflow.py --object review_workflow
+autoagent invocation run --file ./draft_workflow.py --input-file input.json
+autoagent invocation resume --file ./draft_workflow.py \
+  --session <session-key> --wait-key <wait-key>
+```
+
+`invocation run` and `invocation resume` execute locally by default. Pass
+`--server` to execute through a running AutoAgent Server, or use `submit` when
+the CLI should return immediately after admission:
+
+```bash
+autoagent invocation run <workflow-id> --server --input-file input.json
+autoagent invocation submit <workflow-id> --input-file input.json
+autoagent invocation resume <workflow-id> --server \
+  --session <session-key> --wait-key <wait-key> \
+  --response-file response.json
+```
+
+The client uses `AUTOAGENT_SERVER_URL` when configured and otherwise derives
+`http://127.0.0.1:<AUTOAGENT_SERVER_PORT>`. `--server-url` overrides both. A
+missing or unreachable Server is an error and never falls back to local
+execution. Standalone file loading is intentionally not supported by `server`
+or remote execution.
 
 See the packaged [authoring examples](examples/authoring/README.md) for complete
 conditional, Wait/Resume, and LLM/Tool/ReAct Workflows. The

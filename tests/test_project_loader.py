@@ -200,6 +200,81 @@ class ProjectLoaderTests(unittest.TestCase):
             diagnostic.metadata["entrypoints"],
         )
 
+    def test_loader_loads_standalone_workflow_file_and_nested_object(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "workflow_helper.py").write_text(
+                "WORKFLOW_ID = 'standalone'\n",
+                encoding="utf-8",
+            )
+            workflow_file = root / "draft-workflow.py"
+            workflow_file.write_text(
+                textwrap.dedent(
+                    """
+                    from autoagent import Workflow
+                    from workflow_helper import WORKFLOW_ID
+
+                    def execute(value: str) -> str:
+                        return value.upper()
+
+                    class Exports:
+                        pass
+
+                    exports = Exports()
+                    exports.review = Workflow(id=WORKFLOW_ID)
+                    exports.review.add_node(execute, node_id="execute")
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            try:
+                definition = ProjectLoader().load_workflow_file(
+                    workflow_file,
+                    object_path="exports.review",
+                )
+            finally:
+                sys.modules.pop("workflow_helper", None)
+
+        self.assertIsNone(definition.manifest_path)
+        self.assertEqual(root.resolve(), definition.root)
+        self.assertEqual("standalone", definition.workflows[0].workflow.id)
+        self.assertEqual(
+            f"{workflow_file.resolve()}:exports.review",
+            definition.workflows[0].locator.entrypoint,
+        )
+
+    def test_standalone_workflow_file_reports_import_and_export_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            broken = root / "broken.py"
+            broken.write_text("raise RuntimeError('broken import')\n", encoding="utf-8")
+            with self.assertRaises(ProjectLoadError) as imported:
+                ProjectLoader().load_workflow_file(broken)
+
+            exports = root / "exports.py"
+            exports.write_text("not_workflow = object()\n", encoding="utf-8")
+            with self.assertRaises(ProjectLoadError) as missing:
+                ProjectLoader().load_workflow_file(exports)
+            with self.assertRaises(ProjectLoadError) as invalid:
+                ProjectLoader().load_workflow_file(
+                    exports,
+                    object_path="not_workflow",
+                )
+
+        self.assertEqual(
+            "WORKFLOW_FILE_IMPORT_FAILED",
+            imported.exception.diagnostics[0].code,
+        )
+        self.assertEqual(
+            "WORKFLOW_OBJECT_NOT_FOUND",
+            missing.exception.diagnostics[0].code,
+        )
+        self.assertEqual(
+            "WORKFLOW_OBJECT_INVALID",
+            invalid.exception.diagnostics[0].code,
+        )
+
     def test_manifest_errors_are_machine_readable(self) -> None:
         with self.project(
             """

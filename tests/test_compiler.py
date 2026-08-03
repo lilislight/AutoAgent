@@ -4,7 +4,13 @@ import unittest
 
 from pydantic import ValidationError
 
-from autoagent.core.compiler import CompileResult, Diagnostic, WorkflowCompiler, WorkflowIR
+from autoagent.core.compiler import (
+    CompileResult,
+    Diagnostic,
+    WorkflowAnalysis,
+    WorkflowCompiler,
+    WorkflowIR,
+)
 from autoagent.core.operators import Operator
 from autoagent.core.workflow import (
     BackoffPolicy,
@@ -1055,6 +1061,16 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual("duplicate", result.diagnostics[0].subject)
 
     def test_compile_result_ok_requires_ir_and_no_error_diagnostics(self):
+        analysis = WorkflowAnalysis(
+            workflow_id="workflow_test",
+            workflow_version=1,
+            complete=True,
+            nodes=(),
+            edges=(),
+            entry_node_ids=(),
+            exit_node_ids=(),
+            loop_regions=(),
+        )
         workflow_ir = WorkflowIR(
             ir_version="0.1",
             compiler_version="0.1",
@@ -1063,10 +1079,13 @@ class WorkflowCompilerTests(unittest.TestCase):
             definition_hash="test_definition_hash",
         )
 
-        self.assertTrue(CompileResult(workflow_ir=workflow_ir).ok)
-        self.assertFalse(CompileResult().ok)
+        self.assertTrue(
+            CompileResult(analysis=analysis, workflow_ir=workflow_ir).ok
+        )
+        self.assertFalse(CompileResult(analysis=analysis).ok)
         self.assertTrue(
             CompileResult(
+                analysis=analysis,
                 workflow_ir=workflow_ir,
                 diagnostics=[
                     Diagnostic(
@@ -1079,6 +1098,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         )
         self.assertFalse(
             CompileResult(
+                analysis=analysis,
                 workflow_ir=workflow_ir,
                 diagnostics=[
                     Diagnostic(
@@ -1088,6 +1108,61 @@ class WorkflowCompilerTests(unittest.TestCase):
                     )
                 ],
             ).ok
+        )
+
+    def test_analysis_is_available_for_invalid_unresolved_graph(self):
+        workflow = Workflow(id="analysis_invalid")
+        workflow.add_node(task, node_id="known")
+        workflow.add_edge("known", "missing")
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.analysis.complete)
+        self.assertEqual(("known",), tuple(node.id for node in result.analysis.nodes))
+        self.assertEqual(1, len(result.analysis.edges))
+        edge = result.analysis.edges[0]
+        self.assertTrue(edge.source_resolved)
+        self.assertFalse(edge.target_resolved)
+        self.assertIsNone(result.analysis.entry_node_ids)
+        self.assertIsNone(result.analysis.exit_node_ids)
+        self.assertIsNone(result.analysis.loop_regions)
+
+    def test_analysis_matches_expanded_workflow_ir_and_loop_regions(self):
+        child = Workflow(id="child")
+        child.add_node(task, node_id="entry")
+        child.add_node(other_task, node_id="header")
+        child.add_node(other_task, node_id="body")
+        child.add_node(third_task, node_id="exit")
+        child.add_edge("entry", "header")
+        child.add_edge("header", "body", condition=edge_condition)
+        child.add_edge("body", "header")
+        child.add_edge("header", "exit", condition=edge_condition)
+        parent = Workflow(id="analysis_expanded")
+        parent.add_node(child, node_id="child")
+
+        result = WorkflowCompiler().compile(parent)
+
+        self.assertTrue(result.ok, result.diagnostics)
+        assert result.workflow_ir is not None
+        self.assertTrue(result.analysis.complete)
+        self.assertEqual(
+            tuple(result.workflow_ir.nodes),
+            tuple(node.id for node in result.analysis.nodes),
+        )
+        self.assertEqual(
+            (
+                "child/entry",
+                "child/header",
+                "child/body",
+                "child/exit",
+            ),
+            tuple(node.id for node in result.analysis.nodes),
+        )
+        self.assertEqual(("child",), result.analysis.nodes[0].workflow_path)
+        self.assertEqual(
+            tuple(result.workflow_ir.graph.loop_regions),
+            tuple(region.id for region in result.analysis.loop_regions or ()),
         )
 
     def test_diagnostics_include_agent_facing_location_and_hint(self):

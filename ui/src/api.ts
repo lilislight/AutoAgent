@@ -167,6 +167,7 @@ export function getRuntimeStatus(): Promise<RuntimeStatus> {
 export function subscribeToSystemUpdates(
   onStatus: (status: RuntimeStatus) => void,
   onWorkflowDirectoryChange: () => void,
+  onTraceDirectoryChange: () => void,
   onConnectionChange: (connected: boolean) => void,
 ): () => void {
   const source = new EventSource(`${API}/system/stream`);
@@ -176,6 +177,10 @@ export function subscribeToSystemUpdates(
   source.addEventListener(
     "workflow_catalog_changed",
     onWorkflowDirectoryChange,
+  );
+  source.addEventListener(
+    "trace_directory_changed",
+    onTraceDirectoryChange,
   );
   source.onopen = () => onConnectionChange(true);
   source.onerror = () => onConnectionChange(false);

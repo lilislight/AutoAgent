@@ -15,8 +15,7 @@ from autoagent.core.workflow.policy import EdgePolicy, WorkflowPolicy
 from autoagent.core.workflow.user_event import UserEventMappings
 
 if TYPE_CHECKING:
-    from autoagent.core.compiler import WorkflowCompiler
-    from autoagent.core.workflow.diagram import WorkflowDiagram
+    from autoagent.core.compiler import WorkflowCompiler, WorkflowPreview
 
 
 class Workflow(BaseModel):
@@ -221,12 +220,13 @@ class Workflow(BaseModel):
         self,
         *,
         compiler: WorkflowCompiler | None = None,
-    ) -> WorkflowDiagram:
+    ) -> WorkflowPreview:
         """Build a compiler-assisted static preview without executing Workflow."""
 
-        from autoagent.core.workflow.diagram import WorkflowDiagram
+        from autoagent.core.compiler import WorkflowCompiler, WorkflowPreview
 
-        return WorkflowDiagram.from_workflow(self, compiler=compiler)
+        result = (compiler or WorkflowCompiler()).compile(self)
+        return WorkflowPreview(result)
 
     def to_mermaid(self, *, compiler: WorkflowCompiler | None = None) -> str:
         """Return a Mermaid flowchart with invalid edges highlighted."""
@@ -241,9 +241,9 @@ class Workflow(BaseModel):
     ) -> Path:
         """Write a Mermaid graph preview and return its path."""
 
-        from autoagent.core.workflow.diagram import default_preview_path
+        from autoagent.core.compiler import default_preview_path
 
-        target = path if path is not None else default_preview_path(self)
+        target = path if path is not None else default_preview_path(self.id)
         return self.diagram(compiler=compiler).save(target)
 
 

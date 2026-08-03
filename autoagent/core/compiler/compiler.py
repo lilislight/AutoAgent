@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import Any
 
 from autoagent.core.compiler.constants import COMPILER_VERSION, WORKFLOW_IR_VERSION
+from autoagent.core.compiler.analysis import build_workflow_analysis
 from autoagent.core.compiler.diagnostic import CompileResult, Diagnostic
 from autoagent.core.compiler.expansion import expand_child_workflows
 from autoagent.core.compiler.id_generation import generate_edge_id
@@ -109,16 +110,30 @@ class WorkflowCompiler:
         exit_node_ids = self._infer_exit_node_ids(nodes, graph)
         self._mark_entry_exit_flags(nodes, entry_node_ids, exit_node_ids)
 
-        if self._has_errors(diagnostics):
+        finalized_diagnostics = self._finalize_diagnostics(
+            workflow_id=workflow_id,
+            diagnostics=diagnostics,
+            nodes=nodes,
+            edges=edges,
+        )
+        analysis = build_workflow_analysis(
+            workflow=workflow,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            nodes=nodes,
+            edges=edges,
+            graph=graph,
+            entry_node_ids=entry_node_ids,
+            exit_node_ids=exit_node_ids,
+            complete=not self._has_errors(finalized_diagnostics),
+        )
+
+        if self._has_errors(finalized_diagnostics):
             return CompileResult(
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
-                diagnostics=self._finalize_diagnostics(
-                    workflow_id=workflow_id,
-                    diagnostics=diagnostics,
-                    nodes=nodes,
-                    edges=edges,
-                ),
+                analysis=analysis,
+                diagnostics=finalized_diagnostics,
             )
 
         workflow_ir = WorkflowIR(
@@ -144,14 +159,10 @@ class WorkflowCompiler:
         return CompileResult(
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            analysis=analysis,
             workflow_ir=workflow_ir,
             workflow_snapshot=snapshot,
-            diagnostics=self._finalize_diagnostics(
-                workflow_id=workflow_id,
-                diagnostics=diagnostics,
-                nodes=nodes,
-                edges=edges,
-            ),
+            diagnostics=finalized_diagnostics,
         )
 
     def _compile_node_ids(

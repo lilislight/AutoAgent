@@ -544,6 +544,7 @@ def build_workflow() -> Workflow:
 
     return workflow
 
+workflow = build_workflow()
 
 def main() -> None:
     app = build_app()
@@ -556,6 +557,11 @@ def main() -> None:
     mermaid_path = app.preview(
         workflow,
         Path(__file__).with_name("workflow_validation_preview.mmd"),
+    )
+    mermaid_path.write_text(
+        "%% Generated validation fixture; not a normative authoring example.\n"
+        + mermaid_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
     )
 
     print(f"Mermaid source: {mermaid_path}")

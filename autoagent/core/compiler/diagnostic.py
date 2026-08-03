@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from autoagent.core.compiler.analysis import WorkflowAnalysis
 from autoagent.core.compiler.workflow_ir import WorkflowIR
 from autoagent.core.compiler.snapshot import WorkflowVersionSnapshot
 
@@ -48,7 +49,7 @@ class Diagnostic(BaseModel):
         default=None,
         exclude=True,
         description=(
-            "Internal compatibility alias used by existing diagram code. "
+            "Internal Compiler subject used while diagnostics are assembled. "
             "Agent-facing documents use object_id."
         ),
     )
@@ -70,6 +71,12 @@ class CompileResult(BaseModel):
     workflow_version: str | int | None = Field(
         default=None,
         description="Resolved source Workflow version.",
+    )
+    analysis: WorkflowAnalysis = Field(
+        description=(
+            "Expanded static graph analysis available for valid and invalid "
+            "Workflow definitions."
+        ),
     )
     workflow_ir: WorkflowIR | None = Field(
         default=None,

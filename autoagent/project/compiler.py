@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from autoagent.ai import LLM_CALL_CAPABILITY
-from autoagent.core.compiler import CompileResult, WorkflowCompiler
+from autoagent.core.compiler import CompileResult, WorkflowCompiler, WorkflowPreview
 from autoagent.core.operators import CapabilityRegistry, OperatorRegistry
 from autoagent.core.workflow import Workflow
 
@@ -21,3 +21,8 @@ class ProjectCompiler:
 
     def compile(self, workflow: Workflow) -> CompileResult:
         return self.compiler.compile(workflow)
+
+    def preview(self, workflow: Workflow) -> WorkflowPreview:
+        """Compile once and expose all static Preview renderers."""
+
+        return WorkflowPreview(self.compile(workflow))

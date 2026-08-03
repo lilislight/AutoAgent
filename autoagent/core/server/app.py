@@ -123,6 +123,7 @@ class AutoAgentServer:
         self._shutdown_callback = shutdown_callback or app.aclose
         self._shutdown_requested = False
         self._shutdown_subscribers: set[Callable[[], None]] = set()
+        self._trace_directory_subscribers: set[Callable[[], None]] = set()
         self._shutdown_lock = RLock()
         packaged_ui = Path(__file__).resolve().parent / "ui"
         repository_ui = Path(__file__).resolve().parents[3] / "ui" / "dist"
@@ -205,6 +206,25 @@ class AutoAgentServer:
                 self._shutdown_subscribers.discard(notify)
 
         return unsubscribe
+
+    def _subscribe_trace_directory_changes(
+        self,
+        notify: Callable[[], None],
+    ) -> Callable[[], None]:
+        with self._shutdown_lock:
+            self._trace_directory_subscribers.add(notify)
+
+        def unsubscribe() -> None:
+            with self._shutdown_lock:
+                self._trace_directory_subscribers.discard(notify)
+
+        return unsubscribe
+
+    def _notify_trace_directory_changed(self) -> None:
+        with self._shutdown_lock:
+            subscribers = tuple(self._trace_directory_subscribers)
+        for notify in subscribers:
+            notify()
 
     def create_app(self) -> FastAPI:
         api = FastAPI(title="AutoAgent Server API", version="1")
@@ -324,6 +344,7 @@ class AutoAgentServer:
                 loop = asyncio.get_running_loop()
                 changed = asyncio.Event()
                 workflow_changed = True
+                trace_directory_changed = True
                 previous_status: str | None = None
 
                 def notify_workflow_changed() -> None:
@@ -332,6 +353,11 @@ class AutoAgentServer:
                     loop.call_soon_threadsafe(changed.set)
 
                 def notify_runtime_status_changed() -> None:
+                    loop.call_soon_threadsafe(changed.set)
+
+                def notify_trace_directory_changed() -> None:
+                    nonlocal trace_directory_changed
+                    trace_directory_changed = True
                     loop.call_soon_threadsafe(changed.set)
 
                 unsubscribe_workflows = (
@@ -349,6 +375,11 @@ class AutoAgentServer:
                 )
                 unsubscribe_shutdown = self._subscribe_shutdown(
                     notify_runtime_status_changed
+                )
+                unsubscribe_trace_directory = (
+                    self._subscribe_trace_directory_changes(
+                        notify_trace_directory_changed
+                    )
                 )
                 try:
                     # Reconnecting is a synchronization boundary for both
@@ -376,6 +407,12 @@ class AutoAgentServer:
                                 "event: workflow_catalog_changed\n"
                                 "data: {}\n\n"
                             )
+                        if trace_directory_changed:
+                            trace_directory_changed = False
+                            chunks.append(
+                                "event: trace_directory_changed\n"
+                                "data: {}\n\n"
+                            )
                         if chunks:
                             yield "".join(chunks)
                         try:
@@ -386,6 +423,7 @@ class AutoAgentServer:
                         except TimeoutError:
                             yield ": heartbeat\n\n"
                 finally:
+                    unsubscribe_trace_directory()
                     unsubscribe_shutdown()
                     unsubscribe_status()
                     unsubscribe_workflows()
@@ -922,6 +960,7 @@ class AutoAgentServer:
                     completed,
                 )
             )
+            self._notify_trace_directory_changed()
             session_key = admitted.session.session_key
             if session_key is None:
                 raise RuntimeError("Admitted Server Session has no external key.")
@@ -962,6 +1001,7 @@ class AutoAgentServer:
                 kwargs["output"] = body.output
             try:
                 invocation = await self.agent.aresume(entry.workflow, **kwargs)
+                self._notify_trace_directory_changed()
             except SessionBusyError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except RuntimeSerializationError as exc:
@@ -1026,6 +1066,7 @@ class AutoAgentServer:
             else:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            self._notify_trace_directory_changed()
             return InvocationCancelResponse(
                 invocation_id=invocation_id,
                 state=invocation.state,
@@ -1125,6 +1166,7 @@ class AutoAgentServer:
         task: asyncio.Task[Any],
     ) -> None:
         self._invocation_tasks.pop(invocation_id, None)
+        self._notify_trace_directory_changed()
         if task.cancelled():
             return
         error = task.exception()

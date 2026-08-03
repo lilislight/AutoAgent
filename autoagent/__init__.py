@@ -26,8 +26,6 @@ from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
     CapabilitySelectionPolicy,
-    DiagramEdge,
-    DiagramNode,
     Edge,
     EdgePolicy,
     FailurePolicy,
@@ -47,7 +45,6 @@ from autoagent.core.workflow import (
     UserEventMapping,
     Workflow,
     WorkflowPolicy,
-    WorkflowDiagram,
     workflow_hook,
 )
 from autoagent.core.runtime import (

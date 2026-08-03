@@ -61,7 +61,8 @@ class RootPublicApiTests(unittest.TestCase):
             "OperatorContract",
             "PersistencePolicy",
             "RuntimeStore",
-            "WorkflowDiagram",
+            "WorkflowAnalysis",
+            "WorkflowPreview",
         }
 
         self.assertTrue(internal_names.isdisjoint(autoagent.__all__))

@@ -140,6 +140,82 @@ def render_invocation(
     return "\n".join(lines)
 
 
+def render_remote_invocation(
+    invocation: dict[str, Any],
+    *,
+    events: list[dict[str, Any]],
+    include_trace: bool,
+) -> str:
+    """Render the Server's JSON Invocation contract like a local run."""
+
+    state = str(invocation["state"])
+    duration_ms = max(
+        0,
+        int(invocation["updated_at_ms"]) - int(invocation["created_at_ms"]),
+    )
+    lines = [
+        f"INVOCATION {invocation['id']}",
+        f"WORKFLOW {invocation['workflow_id']}",
+        f"STATE {state}",
+        f"MODE {invocation['event_mode']}",
+        f"ENTRY {invocation['entry_node_id']}",
+        f"DURATION_MS {duration_ms}",
+    ]
+    error = invocation.get("error")
+    if error is not None:
+        lines.extend(
+            [
+                "",
+                "FAILURE",
+                f"CODE {error.get('code')}",
+                f"MESSAGE {error.get('message')}",
+            ]
+        )
+    result = invocation.get("result")
+    if result is not None:
+        lines.extend(
+            [
+                "",
+                "OUTPUT",
+                json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+            ]
+        )
+    if include_trace or state in {"failed", "interrupted", "cancelled"}:
+        lines.extend(["", f"TRACE {len(events)}"])
+        for event in events:
+            elapsed_ns = event.get("elapsed_ns")
+            elapsed = (
+                f" elapsed_ns={elapsed_ns}" if elapsed_ns is not None else ""
+            )
+            status_value = event.get("status")
+            status = f" status={status_value}" if status_value else ""
+            lines.append(
+                f"{event['sequence']} {event['event_name']} "
+                f"{event['subject_type']}:{event['subject_id']}{status}{elapsed}"
+            )
+    lines.append(f"RESULT {state}")
+    return "\n".join(lines)
+
+
+def render_submitted_invocation(submitted: dict[str, Any]) -> str:
+    return "\n".join(
+        (
+            f"INVOCATION {submitted['invocation_id']}",
+            f"WORKFLOW {submitted['workflow_id']}",
+            f"WORKFLOW_REVISION {submitted['workflow_revision_id']}",
+            f"SESSION {submitted['session_id']}",
+            f"SESSION_KEY {submitted['session_key']}",
+            f"STATE {submitted['state']}",
+            "RESULT submitted",
+        )
+    )
+
+
 def write_report(report: str, path: str | None) -> None:
     print(report)
     if path is not None:

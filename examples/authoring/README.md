@@ -20,6 +20,7 @@ Run all commands from this example project directory:
 ```bash
 autoagent project check
 autoagent workflow list
+autoagent workflow preview release_review
 ```
 
 Expected compilation summary:

@@ -23,8 +23,8 @@ def target(value: str) -> str:
     return value.upper()
 
 
-class WorkflowDiagramTests(unittest.TestCase):
-    def test_child_workflow_placeholder_keeps_source_boundary_markers(self) -> None:
+class WorkflowPreviewTests(unittest.TestCase):
+    def test_child_workflow_preview_uses_expanded_execution_graph(self) -> None:
         child = Workflow(
             id="child",
             nodes=[Node(id="work", capability=source)],
@@ -35,10 +35,13 @@ class WorkflowDiagramTests(unittest.TestCase):
         diagram = parent.diagram()
 
         self.assertTrue(diagram.compiled)
-        self.assertEqual(len(diagram.nodes), 1)
-        self.assertTrue(diagram.nodes[0].entry)
-        self.assertTrue(diagram.nodes[0].exit)
-        self.assertEqual(diagram.nodes[0].capability, "Workflow: child")
+        self.assertEqual(len(diagram.analysis.nodes), 1)
+        node = diagram.analysis.nodes[0]
+        self.assertEqual("child/work", node.id)
+        self.assertEqual("work", node.local_id)
+        self.assertEqual(("child",), node.workflow_path)
+        self.assertTrue(node.entry)
+        self.assertTrue(node.exit)
 
     def test_valid_workflow_generates_directed_mermaid(self) -> None:
         workflow = Workflow(
@@ -55,7 +58,10 @@ class WorkflowDiagramTests(unittest.TestCase):
         mermaid = diagram.to_mermaid()
         self.assertTrue(diagram.compiled)
         self.assertEqual(diagram.error_count, 0)
-        self.assertEqual(diagram.edges[0].status, "normal")
+        self.assertEqual(
+            diagram.edge_status(diagram.analysis.edges[0]),
+            "normal",
+        )
         self.assertIn("flowchart LR", mermaid)
         self.assertIn("n0 -->|edge_source_target| n1", mermaid)
 
@@ -81,15 +87,30 @@ class WorkflowDiagramTests(unittest.TestCase):
         )
 
         diagram = workflow.diagram()
-        edge = diagram.edges[0]
+        edge = diagram.analysis.edges[0]
 
         self.assertFalse(diagram.compiled)
         self.assertEqual(edge.id, "edge_source_missing")
-        self.assertEqual(edge.status, "error")
-        self.assertEqual(edge.diagnostics[0].code, "EDGE_UNKNOWN_NODE")
-        self.assertEqual(edge.diagnostics[0].metadata["source_index"], 0)
-        self.assertTrue(any(node.missing for node in diagram.nodes))
+        self.assertEqual(diagram.edge_status(edge), "error")
+        diagnostic = next(
+            item for item in diagram.diagnostics if item.code == "EDGE_UNKNOWN_NODE"
+        )
+        self.assertEqual(0, diagnostic.source_index)
+        self.assertIsNone(diagram.analysis.entry_node_ids)
+        self.assertIn("Missing: missing", diagram.to_mermaid())
         self.assertIn("linkStyle 0 stroke:#dc2626", diagram.to_mermaid())
+
+    def test_terminal_includes_edge_with_unknown_source(self) -> None:
+        workflow = Workflow(
+            id="invalid_source",
+            nodes=[Node(id="target", capability=target)],
+            edges=[Edge(id="broken", from_node="missing", to_node="target")],
+        )
+
+        terminal = workflow.diagram().to_terminal()
+
+        self.assertIn("missing [MISSING SOURCE]", terminal)
+        self.assertIn("broken [error] → target", terminal)
 
     def test_auto_id_edge_with_string_condition_is_located_and_marked_red(self) -> None:
         workflow = Workflow(
@@ -108,12 +129,16 @@ class WorkflowDiagramTests(unittest.TestCase):
         )
 
         diagram = workflow.diagram()
-        edge = diagram.edges[0]
+        edge = diagram.analysis.edges[0]
 
         self.assertEqual(edge.id, "edge_source_target")
-        self.assertEqual(edge.status, "error")
-        self.assertEqual(edge.diagnostics[0].subject, "edge_source_target")
-        self.assertEqual(edge.diagnostics[0].code, "STRING_CONDITION_UNSUPPORTED")
+        self.assertEqual(diagram.edge_status(edge), "error")
+        diagnostic = next(
+            item
+            for item in diagram.diagnostics
+            if item.code == "STRING_CONDITION_UNSUPPORTED"
+        )
+        self.assertEqual("edge_source_target", diagnostic.object_id)
 
     def test_compiler_warning_marks_map_edge_amber(self) -> None:
         def item_source(value: str) -> list[dict[str, str]]:
@@ -143,9 +168,10 @@ class WorkflowDiagramTests(unittest.TestCase):
 
         self.assertTrue(diagram.compiled)
         self.assertEqual(diagram.warning_count, 1)
-        self.assertEqual(diagram.edges[0].status, "warning")
+        edge = diagram.analysis.edges[0]
+        self.assertEqual(diagram.edge_status(edge), "warning")
         self.assertEqual(
-            diagram.edges[0].diagnostics[0].code,
+            diagram.diagnostics[0].code,
             "POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
         )
         self.assertIn("linkStyle 0 stroke:#b45309", diagram.to_mermaid())
@@ -170,12 +196,18 @@ class WorkflowDiagramTests(unittest.TestCase):
         )
 
         diagram = workflow.diagram()
-        forbidden = next(edge for edge in diagram.edges if edge.id == "forbidden_entry")
+        forbidden = next(
+            edge
+            for edge in diagram.analysis.edges
+            if edge.id == "forbidden_entry"
+        )
 
-        self.assertEqual(forbidden.status, "error")
-        self.assertEqual(forbidden.diagnostics[0].code, "LOOP_ENTRY_INVALID")
+        self.assertEqual(diagram.edge_status(forbidden), "error")
+        diagnostic = next(
+            item for item in diagram.diagnostics if item.code == "LOOP_ENTRY_INVALID"
+        )
         self.assertEqual(
-            forbidden.diagnostics[0].metadata["expected_entry_node_id"],
+            diagnostic.metadata["expected_entry_node_id"],
             "review",
         )
 
@@ -208,9 +240,17 @@ class WorkflowDiagramTests(unittest.TestCase):
         app = build_app()
         diagram = build_workflow().diagram(compiler=app.compiler)
         errors = {
-            edge.id: tuple(item.code for item in edge.diagnostics)
-            for edge in diagram.edges
-            if edge.status == "error"
+            edge.id: tuple(
+                item.code
+                for item in diagram.diagnostics
+                if item.object_type == "edge"
+                and (
+                    item.object_id == edge.id
+                    or item.source_index == edge.source_index
+                )
+            )
+            for edge in diagram.analysis.edges
+            if diagram.edge_status(edge) == "error"
         }
 
         self.assertIn(
@@ -224,6 +264,25 @@ class WorkflowDiagramTests(unittest.TestCase):
         schema_error = demonstrate_schema_registration_error(app)
         self.assertIn("does not match Capability incident_log_analysis", schema_error)
         self.assertIn("cannot accept Capability parameter 'incident_id'", schema_error)
+
+    def test_terminal_and_json_renderers_share_compiler_analysis(self) -> None:
+        workflow = Workflow(
+            id="all_formats",
+            nodes=[
+                Node(id="source", capability=source),
+                Node(id="target", capability=target),
+            ],
+            edges=[Edge(from_node="source", to_node="target")],
+        )
+
+        preview = workflow.diagram()
+        terminal = preview.to_terminal()
+        json_text = preview.to_json()
+
+        self.assertIn("STATUS valid", terminal)
+        self.assertIn("edge_source_target", terminal)
+        self.assertIn('"workflow_id": "all_formats"', json_text)
+        self.assertIn('"from_node_id": "source"', json_text)
 
 
 if __name__ == "__main__":

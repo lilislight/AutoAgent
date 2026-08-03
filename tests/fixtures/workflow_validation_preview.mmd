@@ -1,22 +1,22 @@
 %% Generated validation fixture; not a normative authoring example.
 flowchart LR
-    n0["Collect incident signal<br/><small>collect_incident_signal</small>"]
-    n1["Classify incident<br/><small>classify_incident</small>"]
+    n0["Collect incident signal<br/><small>Operator: collect_incident_signal</small>"]
+    n1["Classify incident<br/><small>Operator: classify_incident</small>"]
     n2["Analyze logs<br/><small>Capability: incident_log_analysis</small>"]
-    n3["Assess blast radius<br/><small>assess_blast_radius</small>"]
-    n4["Security review<br/><small>review_security_risk</small>"]
-    n5["Plan remediation<br/><small>plan_remediation</small>"]
-    n6["Execute remediation actions<br/><small>execute_action</small>"]
-    n7["Review remediation<br/><small>review_remediation</small>"]
-    n8["Refine failed remediation<br/><small>refine_remediation</small>"]
-    n9["Close incident<br/><small>close_incident</small>"]
-    n10["Notify stakeholders<br/><small>notify_stakeholders</small>"]
-    n11["Create postmortem<br/><small>create_postmortem</small>"]
+    n3["Assess blast radius<br/><small>Operator: assess_blast_radius</small>"]
+    n4["Security review<br/><small>Operator: review_security_risk</small>"]
+    n5["Plan remediation<br/><small>Operator: plan_remediation</small>"]
+    n6["Execute remediation actions<br/><small>Operator: execute_action</small>"]
+    n7["Review remediation<br/><small>Operator: review_remediation</small>"]
+    n8["Refine failed remediation<br/><small>Operator: refine_remediation</small>"]
+    n9["Close incident<br/><small>Operator: close_incident</small>"]
+    n10["Notify stakeholders<br/><small>Operator: notify_stakeholders</small>"]
+    n11["Create postmortem<br/><small>Operator: create_postmortem</small>"]
     n12["Archive incident<br/><small>Operator: archive_incident_v1</small>"]
     n13["[ERROR] Unregistered pager capability<br/><small>Capability: pager_delivery</small>"]
     n14["[ERROR] Unregistered compliance capability<br/><small>Capability: compliance_ticket_writer</small>"]
-    missing0["Missing: missing_audit_sink<br/><small>Unknown node reference</small>"]
-    missing1["Missing: ghost_manual_trigger<br/><small>Unknown node reference</small>"]
+    missing0["Missing: missing_audit_sink"]
+    missing1["Missing: ghost_manual_trigger"]
     n0 -->|edge_collect_signal_classify_incident| n1
     n1 -->|edge_classify_incident_analyze_logs| n2
     n1 -->|edge_classify_incident_assess_blast_radius| n3
@@ -43,8 +43,10 @@ flowchart LR
     classDef normal fill:#ffffff,stroke:#334155,color:#111827
     classDef entry fill:#ecfdf5,stroke:#047857,color:#111827,stroke-width:2px
     classDef exit fill:#eff6ff,stroke:#1d4ed8,color:#111827,stroke-width:2px
+    classDef warning fill:#fffbeb,stroke:#b45309,color:#92400e,stroke-width:2px
+    classDef error fill:#fef2f2,stroke:#dc2626,color:#991b1b,stroke-width:2px
     classDef missing fill:#fef2f2,stroke:#dc2626,color:#991b1b,stroke-dasharray:5 3
-    class n0 entry
+    class n0 normal
     class n1 normal
     class n2 normal
     class n3 normal
@@ -57,8 +59,8 @@ flowchart LR
     class n10 normal
     class n11 normal
     class n12 normal
-    class n13 exit
-    class n14 exit
+    class n13 error
+    class n14 error
     class missing0 missing
     class missing1 missing
     linkStyle 18 stroke:#dc2626,stroke-width:3px,color:#991b1b
@@ -66,3 +68,10 @@ flowchart LR
     linkStyle 20 stroke:#dc2626,stroke-width:3px,color:#991b1b
     linkStyle 21 stroke:#dc2626,stroke-width:3px,color:#991b1b
     linkStyle 22 stroke:#dc2626,stroke-width:3px,color:#991b1b
+    %% ERROR EDGE_UNKNOWN_NODE edge:error_missing_target
+    %% ERROR EDGE_UNKNOWN_NODE edge:error_missing_source
+    %% ERROR STRING_CONDITION_UNSUPPORTED edge:error_string_condition
+    %% ERROR CAPABILITY_NOT_REGISTERED node:broken_pager_node
+    %% ERROR CAPABILITY_NOT_REGISTERED node:broken_ticket_node
+    %% ERROR LOOP_ENTRY_INVALID edge:edge_classify_incident_refine_remediation
+    %% ERROR POLICY_MAP_FAN_IN_UNSUPPORTED edge:edge_security_review_assess_blast_radius

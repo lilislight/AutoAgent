@@ -359,6 +359,35 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("event: runtime_status", first)
         self.assertIn("event: workflow_catalog_changed", first)
+        self.assertIn("event: trace_directory_changed", first)
+
+    async def test_system_stream_reports_new_server_invocation(self) -> None:
+        endpoint = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "stream_system_updates"
+        )
+
+        class ConnectedRequest:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        response = await endpoint(ConnectedRequest())
+        await anext(response.body_iterator)
+        next_chunk = asyncio.create_task(anext(response.body_iterator))
+        await asyncio.sleep(0)
+
+        await self.submit(
+            self.workflow_revision_id,
+            InvocationSubmitRequest(
+                input={"wait_key": "remote"},
+                session_key="remote-submit",
+            ),
+        )
+        changed = await asyncio.wait_for(next_chunk, timeout=1)
+        await response.body_iterator.aclose()
+
+        self.assertIn("event: trace_directory_changed", changed)
 
     async def test_user_event_page_is_independent_from_runtime_events(
         self,

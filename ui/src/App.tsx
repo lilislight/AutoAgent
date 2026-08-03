@@ -175,6 +175,10 @@ export default function App() {
     return subscribeToSystemUpdates(
       (status) => queryClient.setQueryData<RuntimeStatus>(["runtime-status"], status),
       () => undefined,
+      () => {
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        void queryClient.invalidateQueries({ queryKey: ["invocations"] });
+      },
       setRuntimeStreamConnected,
     );
   }, [authenticated, queryClient]);

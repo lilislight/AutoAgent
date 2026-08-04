@@ -1,0 +1,34 @@
+---
+code_paths:
+  - autoagent/core/server/
+  - ui/
+tags:
+  - tracing
+  - server
+  - ui
+  - runtime-events
+  - sse
+---
+
+# Tracing Server and UI
+
+## Responsibility
+
+Expose execution control and paged trace queries over HTTP, project live and durable Runtime evidence into inspection views, stream change notifications, and provide the embedded tracing UI.
+
+## Current Design
+
+AutoAgentServer wraps one AutoAgentApp as a standalone FastAPI application or embeddable Router. Execution endpoints submit, resume, and cancel registered Workflow revisions. TraceService reads RuntimeStore and optional backend loaders to list Workflow revisions, Sessions, Invocations, Runtime Events, User Events, state, and neighboring records with stable cursor pagination. TraceProjectionReducer derives graph and execution views from ordered Runtime Events, with bounded in-process caching. SSE channels notify clients about runtime health, directory changes, Invocation changes, and User Events. The React UI loads pages and detailed values on demand rather than sending complete Invocation histories at startup.
+
+## Boundaries and Rules
+
+- Server executes only revisions registered in its App and can disable all execution endpoints in read-only mode.
+- TraceService is read-only with respect to Runtime execution; control actions go through App execution APIs.
+- Historical replay is Event-derived and must not leak later live values into earlier cursors.
+- Directory and Event endpoints are paginated; Event detail and Runtime state are loaded only when requested.
+- Authentication is optional bearer/cookie protection owned by the Server, not Workflow source.
+- Server shutdown first wakes long-lived streams, then gives active Invocation tasks a bounded grace period before cancellation.
+
+## Relationships
+
+Runtime Execution supplies live state and notifications. Runtime Persistence supplies historical and evicted data. Workflow Compilation supplies revision graph snapshots. Project and CLI Hosting starts the Server and provides the remote CLI client.

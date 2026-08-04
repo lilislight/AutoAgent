@@ -1,0 +1,7 @@
+interface:
+  display_name: "Project Memory"
+  short_description: "Maintain concise, repo-native project memory"
+  default_prompt: "Use $project-memory to initialize or maintain this repository's project memory."
+
+policy:
+  allow_implicit_invocation: true

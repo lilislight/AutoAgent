@@ -13,7 +13,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 AUTHORING_EXAMPLE_ROOT = REPOSITORY_ROOT / "examples" / "authoring"
 SKILL_ROOT = (
     REPOSITORY_ROOT
-    / ".agents"
     / "skills"
     / "autoagent-author-workflow"
 )

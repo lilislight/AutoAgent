@@ -118,7 +118,7 @@ Evaluator 基础设施错误返回退出码 2。
 
 完整的条件编排、Wait/Resume 和 LLM/Tool/ReActWorkflow 可以参考随包发布的
 [authoring examples](examples/authoring/README.md)。推荐的 Coding Agent 工作方式
-记录在 [authoring Skill](.agents/skills/autoagent-author-workflow/SKILL.md) 中。
+记录在 [authoring Skill](skills/autoagent-author-workflow/SKILL.md) 中。
 
 Runtime 配置通过 CLI 参数和环境变量提供；[.env.example](.env.example) 列出了
 框架支持的全部配置。

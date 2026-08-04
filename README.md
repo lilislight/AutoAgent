@@ -163,7 +163,7 @@ or remote execution.
 
 See the packaged [authoring examples](examples/authoring/README.md) for complete
 conditional, Wait/Resume, and LLM/Tool/ReAct Workflows. The
-[authoring Skill](.agents/skills/autoagent-author-workflow/SKILL.md) describes
+[authoring Skill](skills/autoagent-author-workflow/SKILL.md) describes
 the recommended Coding-Agent workflow.
 
 Runtime configuration is supplied through CLI options and environment

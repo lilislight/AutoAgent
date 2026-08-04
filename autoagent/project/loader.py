@@ -159,6 +159,24 @@ def load_project_manifest(path: str | Path) -> ProjectManifest:
 class ProjectLoader:
     """Load manifest projects or one explicitly selected Workflow file."""
 
+    def _resolve_root(
+        self,
+        path: str | Path | None = None,
+        *,
+        workflow_file: str | Path | None = None,
+    ) -> Path:
+        """Resolve the project root without importing project code."""
+
+        if workflow_file is not None:
+            workflow_path = Path(workflow_file).expanduser().resolve()
+            return _standalone_project_root(path, workflow_path.parent)
+        manifest_path = (
+            find_project_manifest()
+            if path is None
+            else self._resolve_manifest_path(path)
+        )
+        return manifest_path.parent
+
     def load(self, path: str | Path | None = None) -> ProjectDefinition:
         manifest_path = (
             find_project_manifest()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import os
 from pathlib import Path
 from typing import Mapping
@@ -34,3 +36,19 @@ def load_project_environment(
         )
     values.update(os.environ if environ is None else environ)
     return values
+
+
+@contextmanager
+def _project_environment_scope(
+    environment: Mapping[str, str],
+) -> Iterator[None]:
+    """Expose one resolved project environment for a command's lifetime."""
+
+    original = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(environment)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)

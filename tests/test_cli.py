@@ -390,6 +390,183 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIsNone(settings.database_url)
         self.assertEqual(5, settings.executor_max_parallel_units)
 
+    def test_project_env_is_visible_during_import_and_invocation(self) -> None:
+        variable = "CUSTOM_WORKFLOW_REGION"
+        with self.project(
+            module_name="cli_project_environment",
+            source=f"""
+                import os
+                from autoagent import Workflow
+
+                imported_region = os.getenv("{variable}")
+
+                def read_region() -> dict[str, str | None]:
+                    return {{
+                        "imported": imported_region,
+                        "invoked": os.getenv("{variable}"),
+                    }}
+
+                workflow = Workflow(id="environment")
+                workflow.add_node(read_region, node_id="read_region")
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                f"{variable}=from-project-env\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                redirect_stdout(output),
+            ):
+                code = main(
+                    (
+                        "--project",
+                        str(root),
+                        "invocation",
+                        "run",
+                        "environment",
+                        "--store",
+                        "memory",
+                    )
+                )
+                self.assertIsNone(os.getenv(variable))
+
+        self.assertEqual(0, code, output.getvalue())
+        self.assertIn('"imported": "from-project-env"', output.getvalue())
+        self.assertIn('"invoked": "from-project-env"', output.getvalue())
+
+    def test_process_environment_overrides_project_env_and_is_restored(
+        self,
+    ) -> None:
+        variable = "CUSTOM_WORKFLOW_REGION_OVERRIDE"
+        with self.project(
+            module_name="cli_project_environment_override",
+            source=f"""
+                import os
+                from autoagent import Workflow
+
+                def read_region() -> str | None:
+                    return os.getenv("{variable}")
+
+                workflow = Workflow(id="environment_override")
+                workflow.add_node(read_region, node_id="read_region")
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                f"{variable}=from-project-env\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {variable: "from-process-environment"},
+                    clear=True,
+                ),
+                redirect_stdout(output),
+            ):
+                code = main(
+                    (
+                        "--project",
+                        str(root),
+                        "invocation",
+                        "run",
+                        "environment_override",
+                        "--store",
+                        "memory",
+                    )
+                )
+                self.assertEqual(
+                    "from-process-environment",
+                    os.getenv(variable),
+                )
+
+        self.assertEqual(0, code, output.getvalue())
+        self.assertIn('"output": "from-process-environment"', output.getvalue())
+
+    def test_no_env_file_keeps_project_values_out_of_process_environment(
+        self,
+    ) -> None:
+        variable = "CUSTOM_WORKFLOW_DISABLED_ENV"
+        with self.project(
+            module_name="cli_project_environment_disabled",
+            source=f"""
+                import os
+                from autoagent import Workflow
+
+                imported_value = os.getenv("{variable}", "missing")
+                workflow = Workflow(id="environment_disabled")
+                workflow.add_node(
+                    lambda: imported_value,
+                    node_id="read_environment",
+                )
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                f"{variable}=must-not-load\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                redirect_stdout(output),
+            ):
+                code = main(
+                    (
+                        "--project",
+                        str(root),
+                        "--no-env-file",
+                        "invocation",
+                        "run",
+                        "environment_disabled",
+                        "--store",
+                        "memory",
+                    )
+                )
+
+        self.assertEqual(0, code, output.getvalue())
+        self.assertIn('"output": "missing"', output.getvalue())
+
+    def test_server_keeps_project_environment_until_shutdown(self) -> None:
+        variable = "CUSTOM_SERVER_LIFETIME_VALUE"
+        observed: list[str | None] = []
+        server = Mock()
+        server.run.side_effect = lambda **_: observed.append(os.getenv(variable))
+        with self.project(
+            module_name="cli_server_environment",
+            source="""
+                from autoagent import Workflow
+                workflow = Workflow(id="server_environment")
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                f"{variable}=available-while-serving\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch(
+                    "autoagent.cli.main.AutoAgentServer",
+                    return_value=server,
+                ),
+                redirect_stdout(output),
+            ):
+                code = main(
+                    (
+                        "--project",
+                        str(root),
+                        "server",
+                        "--store",
+                        "memory",
+                    )
+                )
+                self.assertIsNone(os.getenv(variable))
+
+        self.assertEqual(0, code, output.getvalue())
+        self.assertEqual(["available-while-serving"], observed)
+
     def test_project_check_does_not_require_llm_provider_secret(self) -> None:
         with self.project(
             module_name="cli_llm_workflow",

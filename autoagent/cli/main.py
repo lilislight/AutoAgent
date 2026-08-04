@@ -16,6 +16,7 @@ from autoagent.project import (
     ProjectLoader,
     load_project_environment,
 )
+from autoagent.project.environment import _project_environment_scope
 from autoagent.cli.render import (
     render_compile_result,
     render_invocation,
@@ -241,7 +242,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _dispatch(arguments: argparse.Namespace) -> int:
-    project = _load_command_project(arguments)
+    _validate_command_project_source(arguments)
+    loader = ProjectLoader()
+    project_root = loader._resolve_root(
+        arguments.project,
+        workflow_file=getattr(arguments, "workflow_file", None),
+    )
+    environment = load_project_environment(
+        project_root,
+        env_file=arguments.env_file,
+        use_env_file=not arguments.no_env_file,
+    )
+    with _project_environment_scope(environment):
+        project = _load_command_project(arguments, loader=loader)
+        return _dispatch_project_command(project, environment, arguments)
+
+
+def _dispatch_project_command(
+    project: Any,
+    environment: dict[str, str],
+    arguments: argparse.Namespace,
+) -> int:
     if arguments.group == "project" and arguments.command == "check":
         return _project_check(project, arguments)
     if arguments.group == "workflow" and arguments.command == "list":
@@ -255,11 +276,6 @@ def _dispatch(arguments: argparse.Namespace) -> int:
     if arguments.group == "eval" and arguments.command == "check":
         return check_evaluation(project, arguments)
 
-    environment = load_project_environment(
-        project.root,
-        env_file=arguments.env_file,
-        use_env_file=not arguments.no_env_file,
-    )
     if arguments.group == "invocation":
         if _uses_server(arguments):
             return asyncio.run(
@@ -280,8 +296,27 @@ def _dispatch(arguments: argparse.Namespace) -> int:
     raise RuntimeError("Unknown CLI command.")
 
 
-def _load_command_project(arguments: argparse.Namespace) -> Any:
-    loader = ProjectLoader()
+def _load_command_project(
+    arguments: argparse.Namespace,
+    *,
+    loader: ProjectLoader | None = None,
+) -> Any:
+    loader = ProjectLoader() if loader is None else loader
+    workflow_file = getattr(arguments, "workflow_file", None)
+    if workflow_file is not None:
+        project = loader.load_workflow_file(
+            workflow_file,
+            object_path=(
+                getattr(arguments, "workflow_object", None) or "workflow"
+            ),
+            project_root=arguments.project,
+        )
+        arguments.workflow_id = project.workflows[0].workflow.id
+        return project
+    return loader.load(arguments.project)
+
+
+def _validate_command_project_source(arguments: argparse.Namespace) -> None:
     workflow_file = getattr(arguments, "workflow_file", None)
     workflow_object = getattr(arguments, "workflow_object", None)
     workflow_id = getattr(arguments, "workflow_id", None)
@@ -290,18 +325,11 @@ def _load_command_project(arguments: argparse.Namespace) -> Any:
             raise ValueError("--file cannot be combined with Server execution.")
         if workflow_id is not None:
             raise ValueError("Pass either workflow_id or --file, not both.")
-        project = loader.load_workflow_file(
-            workflow_file,
-            object_path=workflow_object or "workflow",
-            project_root=arguments.project,
-        )
-        arguments.workflow_id = project.workflows[0].workflow.id
-        return project
+        return
     if workflow_object is not None:
         raise ValueError("--object requires --file.")
     if hasattr(arguments, "workflow_id") and workflow_id is None:
         raise ValueError("Pass a manifest workflow_id or --file.")
-    return loader.load(arguments.project)
 
 
 def _uses_server(arguments: argparse.Namespace) -> bool:

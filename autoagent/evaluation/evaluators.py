@@ -22,7 +22,7 @@ class InvocationState:
 
     expected: str
 
-    async def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
+    def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
         actual = context.invocation_state
         passed = actual == self.expected
         return EvaluatorResult(
@@ -44,7 +44,7 @@ class InvocationResult:
 
     expected: Any
 
-    async def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
+    def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
         actual = context.invocation_result
         passed = actual == self.expected
         return EvaluatorResult(

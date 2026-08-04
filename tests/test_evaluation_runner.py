@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
+from threading import Event
+from time import perf_counter
+import tempfile
 import unittest
 
 from autoagent import SystemCommand, Workflow
@@ -24,6 +29,14 @@ from autoagent.project import (
 )
 
 
+EVAL_MEMORY_SUITE_MAX_SECONDS = float(
+    os.getenv("AUTOAGENT_PERF_EVAL_MEMORY_SUITE_MAX_SECONDS", "10")
+)
+EVAL_SQLITE_SUITE_MAX_SECONDS = float(
+    os.getenv("AUTOAGENT_PERF_EVAL_SQLITE_SUITE_MAX_SECONDS", "20")
+)
+
+
 class _SessionHistory:
     async def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
         actual = list(context.session_context.data.get("history", ()))
@@ -37,6 +50,14 @@ class _SessionHistory:
 class _ObservedQuality:
     async def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
         return EvaluatorResult(key="quality", passed=None, score=0.8)
+
+
+class _SyncOutput:
+    def evaluate(self, context: EvaluationContext) -> EvaluatorResult:
+        return EvaluatorResult(
+            key="sync_output",
+            passed=context.invocation_result == {"output": "first"},
+        )
 
 
 class _BrokenEvaluator:
@@ -59,6 +80,25 @@ class _RuntimeEvidenceAvailable:
 
 
 class EvaluationRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sync_and_async_evaluators_share_one_runner_path(self) -> None:
+        workflow = _history_workflow()
+
+        class MixedEvaluation(Evaluation):
+            async def eval_mixed(self, case: EvalCase) -> None:
+                await case.invoke(
+                    {"value": "first"},
+                    evaluators=(_SyncOutput(), _RuntimeEvidenceAvailable()),
+                )
+
+        result = await _run(workflow, MixedEvaluation)
+
+        evaluator_results = result.case_results[0].step_results[0].evaluator_results
+        self.assertEqual("passed", result.status)
+        self.assertEqual(
+            ["sync_output", "runtime_evidence"],
+            [item.key for item in evaluator_results],
+        )
+
     async def test_multiple_invocations_share_one_case_session(self) -> None:
         workflow = _history_workflow()
 
@@ -217,6 +257,178 @@ class EvaluationRunnerTests(unittest.IsolatedAsyncioTestCase):
             result.case_results[1].session_id,
         )
 
+    async def test_case_concurrency_never_exceeds_configured_limit(self) -> None:
+        workflow = _history_workflow()
+        active = 0
+        maximum_active = 0
+
+        async def exercise(case: EvalCase) -> None:
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            try:
+                await asyncio.sleep(0.02)
+                await case.invoke({"value": "first"})
+            finally:
+                active -= 1
+
+        class ConcurrentEvaluation(Evaluation):
+            async def eval_one(self, case: EvalCase) -> None:
+                await exercise(case)
+
+            async def eval_two(self, case: EvalCase) -> None:
+                await exercise(case)
+
+            async def eval_three(self, case: EvalCase) -> None:
+                await exercise(case)
+
+            async def eval_four(self, case: EvalCase) -> None:
+                await exercise(case)
+
+        result = await _run(
+            workflow,
+            ConcurrentEvaluation,
+            max_concurrency=2,
+        )
+
+        self.assertEqual("completed", result.status)
+        self.assertEqual(2, maximum_active)
+        self.assertEqual(
+            ["eval_one", "eval_two", "eval_three", "eval_four"],
+            [case.case_id for case in result.case_results],
+        )
+
+    async def test_timeout_preserves_completed_case_and_cancels_running_case(
+        self,
+    ) -> None:
+        started = Event()
+        cancelled = Event()
+
+        async def maybe_block(value: str) -> str:
+            if value == "fast":
+                return value
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return value
+
+        workflow = Workflow(id="timeout")
+        workflow.add_node(maybe_block, node_id="work")
+
+        class TimeoutEvaluation(Evaluation):
+            async def eval_fast(self, case: EvalCase) -> None:
+                await case.invoke(
+                    {"value": "fast"},
+                    evaluators=(
+                        evaluators.InvocationState(expected="completed"),
+                    ),
+                )
+
+            async def eval_slow(self, case: EvalCase) -> None:
+                await case.invoke({"value": "slow"})
+
+        host, loaded = _fixture(workflow, TimeoutEvaluation)
+        async with host:
+            result = await EvaluationRunner(host).run(
+                loaded,
+                max_concurrency=2,
+                timeout=0.05,
+            )
+            invocation_states = {
+                invocation.state
+                for invocation in host.app.runtime_store.invocations.values()
+            }
+
+        self.assertTrue(started.is_set())
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual("error", result.status)
+        self.assertEqual("EVAL_TIMEOUT", result.error.code)
+        self.assertEqual("passed", result.case_results[0].status)
+        self.assertEqual("EVAL_CASE_CANCELLED", result.case_results[1].error.code)
+        self.assertEqual(
+            "EVAL_STEP_CANCELLED",
+            result.case_results[1].step_results[0].error.code,
+        )
+        self.assertNotIn("running", invocation_states)
+
+    async def test_external_cancellation_cleans_up_running_cases(self) -> None:
+        started = Event()
+        cancelled = Event()
+
+        async def block() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        workflow = Workflow(id="cancel")
+        workflow.add_node(block, node_id="block")
+
+        class CancelEvaluation(Evaluation):
+            async def eval_running(self, case: EvalCase) -> None:
+                await case.invoke()
+
+        host, loaded = _fixture(workflow, CancelEvaluation)
+        async with host:
+            task = asyncio.create_task(EvaluationRunner(host).run(loaded))
+            await asyncio.wait_for(
+                asyncio.to_thread(started.wait),
+                timeout=1,
+            )
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            invocation_states = {
+                invocation.state
+                for invocation in host.app.runtime_store.invocations.values()
+            }
+
+        self.assertTrue(cancelled.is_set())
+        self.assertNotIn("running", invocation_states)
+
+    async def test_large_suite_completes_within_smoke_budget(self) -> None:
+        workflow = _history_workflow()
+        started = perf_counter()
+        result = await _run(
+            workflow,
+            _large_evaluation(100),
+            max_concurrency=8,
+        )
+        elapsed = perf_counter() - started
+
+        self.assertEqual("completed", result.status)
+        self.assertEqual(100, len(result.case_results))
+        self.assertLess(elapsed, EVAL_MEMORY_SUITE_MAX_SECONDS)
+
+    async def test_sqlite_suite_flushes_within_smoke_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "evaluation.sqlite3"
+            settings = AutoAgentSettings(
+                database_url=(
+                    f"sqlite+aiosqlite:///{database_path.as_posix()}"
+                ),
+                database_batch_max_delay_ms=0,
+            )
+            started = perf_counter()
+            result = await _run(
+                _history_workflow(),
+                _large_evaluation(50),
+                max_concurrency=8,
+                app_settings=settings,
+            )
+            elapsed = perf_counter() - started
+            database_created = database_path.is_file()
+
+        self.assertEqual("completed", result.status)
+        self.assertEqual(50, len(result.case_results))
+        self.assertTrue(database_created)
+        self.assertLess(elapsed, EVAL_SQLITE_SUITE_MAX_SECONDS)
+
 
 def _history_workflow() -> Workflow:
     def remember(ctx) -> None:
@@ -237,7 +449,28 @@ async def _run(
     evaluation_type: type[Evaluation],
     *,
     max_concurrency: int = 1,
+    timeout: float | None = None,
+    app_settings: AutoAgentSettings | None = None,
 ):
+    host, loaded = _fixture(
+        workflow,
+        evaluation_type,
+        app_settings=app_settings,
+    )
+    async with host:
+        return await EvaluationRunner(host).run(
+            loaded,
+            max_concurrency=max_concurrency,
+            timeout=timeout,
+        )
+
+
+def _fixture(
+    workflow: Workflow,
+    evaluation_type: type[Evaluation],
+    *,
+    app_settings: AutoAgentSettings | None = None,
+) -> tuple[ProjectHost, LoadedEvaluation]:
     workflow_locator = WorkflowLocator(entrypoint="tests.fixture:workflow")
     eval_locator = EvalSuiteLocator(
         id="regression",
@@ -262,14 +495,24 @@ async def _run(
     )
     host = ProjectHost(
         project,
-        app_settings=AutoAgentSettings(),
+        app_settings=app_settings or AutoAgentSettings(),
         environment={},
     )
-    async with host:
-        return await EvaluationRunner(host).run(
-            loaded,
-            max_concurrency=max_concurrency,
-        )
+    return host, loaded
+
+
+def _large_evaluation(case_count: int) -> type[Evaluation]:
+    async def evaluate_case(self: Evaluation, case: EvalCase) -> None:
+        await case.invoke({"value": "first"})
+
+    return type(
+        "LargeEvaluation",
+        (Evaluation,),
+        {
+            f"eval_case_{index:03d}": evaluate_case
+            for index in range(case_count)
+        },
+    )
 
 
 if __name__ == "__main__":

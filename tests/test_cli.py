@@ -355,6 +355,57 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIn("EVALUATOR_EXECUTION_ERROR", errored)
         self.assertIn("RESULT error", errored)
 
+    def test_eval_timeout_renders_partial_result_and_returns_error_code(
+        self,
+    ) -> None:
+        with self.project(
+            module_name="cli_eval_timeout_workflow",
+            source="""
+                import asyncio
+                from autoagent import Workflow
+
+                async def wait(seconds: float) -> None:
+                    await asyncio.sleep(seconds)
+
+                workflow = Workflow(id="timeout")
+                workflow.add_node(wait, node_id="wait")
+            """,
+            eval_module_name="cli_eval_timeout_evaluation",
+            eval_source="""
+                from autoagent.evaluation import EvalCase, Evaluation
+
+                class TimeoutEvaluation(Evaluation):
+                    async def eval_slow(self, case: EvalCase) -> None:
+                        await case.invoke({"seconds": 60})
+            """,
+            eval_suites=(
+                (
+                    "timeout_regression",
+                    "timeout",
+                    "cli_eval_timeout_evaluation:TimeoutEvaluation",
+                ),
+            ),
+        ) as root:
+            code, output = self.run_cli(
+                "--project",
+                str(root),
+                "--no-env-file",
+                "eval",
+                "run",
+                "timeout_regression",
+                "--store",
+                "memory",
+                "--timeout-ms",
+                "20",
+            )
+
+        self.assertEqual(2, code, output)
+        self.assertIn("ERROR EVAL_TIMEOUT", output)
+        self.assertIn("CASE eval_slow", output)
+        self.assertIn("ERROR EVAL_CASE_CANCELLED", output)
+        self.assertIn("ERROR EVAL_STEP_CANCELLED", output)
+        self.assertIn("RESULT error", output)
+
     def test_cli_overrides_process_environment_and_project_env(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

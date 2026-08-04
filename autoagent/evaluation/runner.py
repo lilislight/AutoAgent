@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+import inspect
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -139,6 +140,16 @@ class _RunningEvalCase(EvalCase):
         try:
             invocation = await operation
         except asyncio.CancelledError:
+            self._step_results.append(
+                EvalStepResult(
+                    index=index,
+                    action=action,
+                    error=EvalError(
+                        code="EVAL_STEP_CANCELLED",
+                        message="Eval Step was cancelled before it completed.",
+                    ),
+                )
+            )
             raise
         except Exception as exc:
             step = EvalStepResult(
@@ -171,24 +182,45 @@ class _RunningEvalCase(EvalCase):
 
         results: list[EvaluatorResult] = []
         should_stop = False
-        for evaluator in evaluators:
-            try:
-                result = await evaluator.evaluate(context)
-                if not isinstance(result, EvaluatorResult):
-                    raise TypeError(
-                        "Evaluator.evaluate() must return EvaluatorResult."
+        try:
+            for evaluator in evaluators:
+                try:
+                    evaluated = evaluator.evaluate(context)
+                    result = (
+                        await evaluated
+                        if inspect.isawaitable(evaluated)
+                        else evaluated
                     )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                result = EvaluatorResult(
-                    key=_evaluator_key(evaluator),
-                    error=_error("EVALUATOR_EXECUTION_ERROR", exc),
+                    if not isinstance(result, EvaluatorResult):
+                        raise TypeError(
+                            "Evaluator.evaluate() must return EvaluatorResult."
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    result = EvaluatorResult(
+                        key=_evaluator_key(evaluator),
+                        error=_error("EVALUATOR_EXECUTION_ERROR", exc),
+                    )
+                results.append(result)
+                if result.error is not None or result.passed is False:
+                    should_stop = True
+                    break
+        except asyncio.CancelledError:
+            self._step_results.append(
+                EvalStepResult(
+                    index=index,
+                    action=action,
+                    invocation_id=str(invocation.id),
+                    through_sequence=invocation.event_sequence,
+                    evaluator_results=tuple(results),
+                    error=EvalError(
+                        code="EVAL_STEP_CANCELLED",
+                        message="Eval Step was cancelled during evaluation.",
+                    ),
                 )
-            results.append(result)
-            if result.error is not None or result.passed is False:
-                should_stop = True
-                break
+            )
+            raise
 
         step = EvalStepResult(
             index=index,
@@ -260,9 +292,12 @@ class EvaluationRunner:
         *,
         case_ids: Sequence[str] | None = None,
         max_concurrency: int = 1,
+        timeout: float | None = None,
     ) -> EvalResult:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be positive.")
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive.")
         await self.host.start()
         workflow = self.host.workflow(loaded.locator.workflow_id)
         entry = self.host.app.register_workflow(workflow)
@@ -286,14 +321,43 @@ class EvaluationRunner:
                     method=methods[case_id],
                 )
 
-        case_results = await asyncio.gather(
-            *(run_one(case_id) for case_id in selected_ids)
+        tasks = tuple(
+            asyncio.create_task(
+                run_one(case_id),
+                name=f"autoagent-eval:{loaded.locator.id}:{case_id}",
+            )
+            for case_id in selected_ids
+        )
+        try:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+        except asyncio.CancelledError:
+            await _cancel_tasks(tasks)
+            raise
+
+        timed_out = bool(pending)
+        if timed_out:
+            await _cancel_tasks(tuple(pending))
+        case_results = tuple(
+            _case_task_result(case_id, task)
+            for case_id, task in zip(selected_ids, tasks, strict=True)
         )
         return EvalResult(
             suite_id=loaded.locator.id,
             workflow_id=loaded.locator.workflow_id,
             workflow_revision_id=revision_id,
-            case_results=tuple(case_results),
+            case_results=case_results,
+            error=(
+                EvalError(
+                    code="EVAL_TIMEOUT",
+                    message=(
+                        "Evaluation exceeded its configured timeout of "
+                        f"{timeout:g} seconds."
+                    ),
+                    detail={"timeout_seconds": timeout},
+                )
+                if timed_out and timeout is not None
+                else None
+            ),
         )
 
     async def _run_case(
@@ -316,7 +380,15 @@ class EvaluationRunner:
         except _StopCase:
             pass
         except asyncio.CancelledError:
-            raise
+            return EvalCaseResult(
+                case_id=case_id,
+                session_id=session_id,
+                step_results=case.step_results,
+                error=EvalError(
+                    code="EVAL_CASE_CANCELLED",
+                    message="Eval Case was cancelled before it completed.",
+                ),
+            )
         except Exception as exc:
             return EvalCaseResult(
                 case_id=case_id,
@@ -329,6 +401,28 @@ class EvaluationRunner:
             session_id=session_id,
             step_results=case.step_results,
         )
+
+
+async def _cancel_tasks(tasks: Sequence[asyncio.Task[EvalCaseResult]]) -> None:
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _case_task_result(
+    case_id: str,
+    task: asyncio.Task[EvalCaseResult],
+) -> EvalCaseResult:
+    if task.cancelled():
+        return EvalCaseResult(
+            case_id=case_id,
+            error=EvalError(
+                code="EVAL_CASE_CANCELLED",
+                message="Eval Case was cancelled before it started.",
+            ),
+        )
+    return task.result()
 
 
 def _evaluator_key(evaluator: Evaluator) -> str:

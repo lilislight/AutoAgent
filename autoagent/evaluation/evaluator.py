@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -49,6 +50,9 @@ class EvaluationContext:
 
 
 class Evaluator(Protocol):
-    """Extensible business evaluator run after an Eval Step."""
+    """Synchronous or asynchronous business evaluator run after an Eval Step."""
 
-    async def evaluate(self, context: EvaluationContext) -> EvaluatorResult: ...
+    def evaluate(
+        self,
+        context: EvaluationContext,
+    ) -> EvaluatorResult | Awaitable[EvaluatorResult]: ...

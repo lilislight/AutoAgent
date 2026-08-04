@@ -154,9 +154,9 @@ class EvaluationResultTests(unittest.TestCase):
             )
 
 
-class BuiltInEvaluatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_invocation_state_is_strict_and_evidence_backed(self) -> None:
-        result = await evaluators.InvocationState(expected="completed").evaluate(
+class BuiltInEvaluatorTests(unittest.TestCase):
+    def test_invocation_state_is_strict_and_evidence_backed(self) -> None:
+        result = evaluators.InvocationState(expected="completed").evaluate(
             _context(state="failed")
         )
 
@@ -165,13 +165,13 @@ class BuiltInEvaluatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("invocation-1", result.evidence[0].invocation_id)
         self.assertEqual(7, result.evidence[0].through_sequence)
 
-    async def test_invocation_result_uses_exact_complete_value(self) -> None:
+    def test_invocation_result_uses_exact_complete_value(self) -> None:
         expected = {"outputs": {"approved": True, "audit": "ok"}}
 
-        passed = await evaluators.InvocationResult(expected=expected).evaluate(
+        passed = evaluators.InvocationResult(expected=expected).evaluate(
             _context(result=expected)
         )
-        failed = await evaluators.InvocationResult(expected=expected).evaluate(
+        failed = evaluators.InvocationResult(expected=expected).evaluate(
             _context(result={"outputs": {"approved": True}})
         )
 

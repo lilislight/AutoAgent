@@ -4,31 +4,12 @@ This file tracks current implementation order. Stable product goals and stage
 acceptance criteria live in [MVP.md](MVP.md). Completed implementation history
 belongs in Git, tests, and benchmark results.
 
-## 0. Close MVP 1 with one clean release-gate evaluation
-
-The first independent runs of all three Authoring scenarios are complete. Their
-findings have already been applied to the Skill, public Host API, ReAct failure
-guidance, tests, and database startup responsiveness. Do not continue repairing
-the preserved generated projects; they are evidence from the previous Skill
-version.
-
-- [ ] Build a fresh Wheel from the current commit and copy the current
-  `autoagent-author-workflow` Skill into three empty evaluation workspaces.
-- [ ] Rerun all three scenarios from only their business-only
-  `REQUIREMENTS.md`: conditional orchestration, durable Wait/Resume, and the
-  ReAct inventory assistant. Do not expose `EVALUATION.md`, repository source,
-  or previous generated projects to the Coding Agent.
-- [ ] Record one concise release-gate report outside the generated projects.
-  Score every common hard gate and required business case, include the exact
-  Wheel version/commit and commands used, and classify any failure by owning
-  layer.
-- [ ] Fix only release-blocking findings, rerun the affected scenario from a
-  fresh workspace, and declare MVP 1 complete when all three pass.
-
 ## 1. Finish bounded Runtime and persistence hardening
 
-These items are real implementation limits, but they do not block starting the
-MVP 1 evaluations unless an evaluation reproduces one of them.
+These are cross-cutting post-foundation limits. They do not make the MVP 1
+authoring contract incomplete. MVP 1 is closed; continue these items only when
+their owning Runtime work is prioritized or a later evaluation reproduces one
+of them.
 
 - [ ] Split the shared shutdown deadline into independently configurable
   Invocation grace and persistence flush deadlines. Keep both available through
@@ -70,15 +51,15 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [x] Define the first public Evaluation and result contracts: Manifest Suite
   locator, ``Evaluation`` class, ``eval_*`` Case method, internal Invoke/Resume
   Step, and the Evaluator/Step/Case/Eval Result hierarchy.
-- [ ] Record graph path, call counts, Retry/Loop/Wait, performance budgets,
+- [x] Record graph path, call counts, Retry/Loop/Wait, performance budgets,
   scoring, aggregate Gates, and automatic Invocation capture as later
   extensions rather than Phase 0 requirements.
-- [ ] Define the boundary between Invocation Report, Fork, ordinary rerun, and
+- [x] Define the boundary between Invocation Report, Fork, ordinary rerun, and
   Eval; do not require every bad Invocation to become an Eval Case.
-- [ ] Define Eval data realism rules: real Workflow execution, redacted or
+- [x] Define Eval data realism rules: real Workflow execution, redacted or
   synthetic representative inputs, real models when model behavior is under
   evaluation, and sandbox/simulated dependencies when appropriate.
-- [ ] Define project testing ownership: Eval for end-to-end Workflow business
+- [x] Define project testing ownership: Eval for end-to-end Workflow business
   behavior, optional unit tests for isolated user code, with no duplicated
   business scenarios.
 - [x] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
@@ -99,15 +80,26 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
   multi-turn and Wait/Resume support.
 - [x] Add `autoagent eval list`, `check`, and `run` with report-file teeing and
   deterministic status/exit-code rendering.
-- [ ] Add bounded concurrency, interruption, and Suite-scale performance tests.
+- [x] Implement bounded Case concurrency and an optional Suite-level timeout.
+- [x] Add strict concurrency-limit, timeout-cancellation, external task
+  cancellation, Runtime cleanup, and Memory/SQLite Suite-scale smoke tests.
 
 ### Phase 2: Authoring integration
 
 - [x] Replace standalone authoring-example input/expected pairs with registered
   Eval Suites and reusable fixtures where appropriate.
 - [x] Update the Authoring Skill to generate and pass Eval Suites before handoff.
-- [ ] Forward-test requirement -> Workflow + Suite -> compile -> Eval Result in a
-  clean project.
+- [ ] Build a fresh Wheel from the current commit and copy the current
+  `autoagent-author-workflow` Skill into three empty evaluation workspaces.
+- [ ] Rerun conditional orchestration, durable Wait/Resume, and the ReAct
+  inventory assistant from only their business-only `REQUIREMENTS.md`. Do not
+  expose repository source, evaluator oracles, or previous generated projects
+  to the Coding Agent.
+- [ ] Record one concise MVP 2 forward-test report outside the generated
+  projects with the exact Wheel commit, commands, hard gates, business results,
+  and owning layer for every failure.
+- [ ] Fix only blocking findings, rerun affected scenarios from fresh
+  workspaces, and close Phase 2 when all three pass.
 
 ### Phase 3: Invocation Report and progressive queries
 

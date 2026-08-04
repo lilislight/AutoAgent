@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from autoagent.cli.render import (
@@ -53,18 +52,15 @@ async def run_evaluation(
         workflow_ids=(loaded.locator.workflow_id,),
     )
     async with host:
-        operation = EvaluationRunner(host).run(
+        result = await EvaluationRunner(host).run(
             loaded,
             case_ids=selected_cases or None,
             max_concurrency=arguments.max_concurrency,
-        )
-        result = (
-            await operation
-            if arguments.timeout_ms is None
-            else await asyncio.wait_for(
-                operation,
-                timeout=_timeout_seconds(arguments.timeout_ms),
-            )
+            timeout=(
+                None
+                if arguments.timeout_ms is None
+                else _timeout_seconds(arguments.timeout_ms)
+            ),
         )
         write_report(
             render_evaluation_result(

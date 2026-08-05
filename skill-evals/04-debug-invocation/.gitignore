@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.evaluation/
+debug-runtime.db*
+reports/

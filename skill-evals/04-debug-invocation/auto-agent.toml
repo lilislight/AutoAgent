@@ -1,0 +1,14 @@
+schema_version = 1
+
+[project]
+name = "fulfillment-debug-evaluation"
+version = "1.0.0"
+description = "Deterministic starter project for Invocation debugging evaluation."
+
+[[workflows]]
+entrypoint = "workflows.fulfillment:workflow"
+
+[[eval_suites]]
+id = "fulfillment_review"
+workflow_id = "fulfillment_review"
+entrypoint = "evals.fulfillment:FulfillmentEvaluation"

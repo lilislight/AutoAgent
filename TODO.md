@@ -148,6 +148,9 @@ owning Eval Suite without using framework-internal APIs.
   reject Minimal and mixed modes and keep results out of Runtime storage.
 - [x] Update the debugging Skill with side-effect, Wait, Rerun, Comparison, and
   Eval ownership boundaries.
+- [x] Add a deterministic Full-mode Debug Skill Evaluation with an existing
+  project, business-incorrect Invocation input, registered four-Case Eval
+  Suite, and hidden Report/Query/Rerun/Comparison acceptance gates.
 - [ ] Forward-test Report -> optional Case update -> code change -> compile ->
   Rerun -> Comparison -> Eval Result -> user-review handoff using CLI only.
 

@@ -202,7 +202,7 @@ class AuthoringSkillTests(unittest.TestCase):
                 self.assertIn(expected, text)
 
     def test_eval_requests_contain_business_language_only(self) -> None:
-        requirements = sorted(SKILL_EVAL_ROOT.glob("*/REQUIREMENTS.md"))
+        requirements = sorted(SKILL_EVAL_ROOT.glob("0[1-3]-*/REQUIREMENTS.md"))
         self.assertEqual(len(requirements), 3)
         forbidden = re.compile(
             r"\b(?:AutoAgent|Workflow|Node|Edge|Operator|Invocation|Runtime|"

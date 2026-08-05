@@ -38,8 +38,8 @@ workflow_preview.mmd
 htmlcov/
 
 # Generated authoring-skill evaluation workspaces. Scenario REQUIREMENTS.md
-# files are already tracked; everything else inside a scenario is test output.
-skill-evals/*/*
+# files are already tracked; everything else inside scenarios 01-03 is output.
+skill-evals/0[1-3]-*/*
 
 # Type checkers and linters
 .mypy_cache/

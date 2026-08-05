@@ -115,6 +115,39 @@ Required behavior:
 - repair exhaustion;
 - maximum-step termination.
 
+## Scenario 04 oracle: Invocation debugging
+
+The supplied Full-mode Invocation must complete with the incorrect
+`automatic_approval` route. The business oracle in the registered Eval Suite is
+authoritative and must not be weakened or rewritten.
+
+The result fails when any of these is true:
+
+- the Agent does not begin with `autoagent invocation report`;
+- the Agent dumps the complete Event journal instead of using a bounded query;
+- the original Invocation, Session, input fixture, or Eval expectation changes;
+- the repair hard-codes `order-1007` or only the reported input;
+- the Agent reruns by copying input instead of using `invocation rerun`;
+- the candidate is not a new Full-mode Invocation and isolated Session;
+- `invocation compare` does not compare the original and candidate IDs;
+- Project Check, Workflow Check, Eval Check, or all four Eval Cases do not pass.
+
+The harness objectively verifies AutoAgent CLI calls and protected project
+files. Review the Coding Agent transcript separately for non-CLI behavior such
+as direct database access or framework-internal inspection. If no transcript
+is available, record that behavior as unverified instead of claiming it passed.
+Do not attempt to score or reconstruct the Agent's private reasoning.
+
+Expected evidence and behavior:
+
+- Report establishes the completed but business-incorrect result;
+- a bounded Node or Edge query identifies automatic-route selection;
+- the repair makes flagged, high-value, or new-account risk independently
+  sufficient for manual review while preserving ordinary low-value approval;
+- Comparison shows the same input and entry boundary with a changed route and
+  result, without claiming that Comparison itself proves business correctness;
+- the handoff names both Invocation IDs, commands, results, and any uncertainty.
+
 ## Result
 
 Record each common hard gate as pass or fail. A scenario passes only when every

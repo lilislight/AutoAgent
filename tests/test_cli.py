@@ -116,6 +116,7 @@ class AutoAgentCliTests(unittest.TestCase):
                 "eval_happy_path",
                 "--max-concurrency",
                 "2",
+                "--verbose",
                 "--store",
                 "memory",
             ]
@@ -125,6 +126,77 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertEqual("regression", checked.suite_id)
         self.assertEqual(["eval_happy_path"], run.cases)
         self.assertEqual(2, run.max_concurrency)
+        self.assertTrue(run.verbose)
+
+    def test_parser_exposes_progressive_invocation_report(self) -> None:
+        arguments = build_parser().parse_args(
+            [
+                "invocation",
+                "report",
+                "00000000-0000-0000-0000-000000000001",
+                "--source",
+                "database",
+            ]
+        )
+
+        self.assertEqual("report", arguments.command)
+        self.assertEqual("database", arguments.source)
+        self.assertEqual(
+            "00000000-0000-0000-0000-000000000001",
+            arguments.invocation_id,
+        )
+
+    def test_invocation_report_falls_back_to_explicit_database(self) -> None:
+        with self.project(
+            module_name="cli_report_workflow",
+            source="""
+                from autoagent import Workflow
+
+                def echo(value: str) -> str:
+                    return value
+
+                workflow = Workflow(id="echo")
+                workflow.add_node(echo, node_id="echo")
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                "AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///./runtime.db\n",
+                encoding="utf-8",
+            )
+            run_code, run_output = self.run_cli(
+                "--project",
+                str(root),
+                "invocation",
+                "run",
+                "echo",
+                "--store",
+                "database",
+                "--input-json",
+                '{"value":"hello"}',
+            )
+            invocation_line = next(
+                line
+                for line in run_output.splitlines()
+                if line.startswith("INVOCATION ")
+            )
+            invocation_id = invocation_line.split(" ", 1)[1]
+
+            report_code, report_output = self.run_cli(
+                "--project",
+                str(root),
+                "invocation",
+                "report",
+                invocation_id,
+                "--source",
+                "database",
+            )
+
+        self.assertEqual(0, run_code, run_output)
+        self.assertEqual(0, report_code, report_output)
+        self.assertIn("SOURCE database", report_output)
+        self.assertIn("STATE completed", report_output)
+        self.assertIn("NODES 1", report_output)
+        self.assertIn("REPORT_RESULT generated", report_output)
 
     def test_eval_list_is_lazy_and_check_validates_cases(self) -> None:
         evaluation_source = """
@@ -278,7 +350,60 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIn("CASE eval_happy_path", output)
         self.assertNotIn("CASE eval_not_selected", output)
         self.assertIn("EVALUATOR invocation_result passed", output)
+        self.assertNotIn("      VALUE", output)
+        self.assertNotIn('"output": "hello"', output)
         self.assertRegex(output, r"THROUGH_SEQUENCE [1-9][0-9]*")
+
+    def test_eval_verbose_renders_successful_evaluator_details(self) -> None:
+        with self.project(
+            module_name="cli_eval_verbose_workflow",
+            source="""
+                from autoagent import Workflow
+
+                def echo(value: str) -> str:
+                    return value
+
+                workflow = Workflow(id="echo")
+                workflow.add_node(echo, node_id="echo")
+            """,
+            eval_module_name="cli_eval_verbose_evaluation",
+            eval_source="""
+                from autoagent.evaluation import EvalCase, Evaluation, evaluators
+
+                class EchoEvaluation(Evaluation):
+                    async def eval_happy_path(self, case: EvalCase) -> None:
+                        await case.invoke(
+                            {"value": "hello"},
+                            evaluators=(
+                                evaluators.InvocationResult(
+                                    expected={"output": "hello"}
+                                ),
+                            ),
+                        )
+            """,
+            eval_suites=((
+                "echo_regression",
+                "echo",
+                "cli_eval_verbose_evaluation:EchoEvaluation",
+            ),),
+        ) as root:
+            code, output = self.run_cli(
+                "--project",
+                str(root),
+                "--no-env-file",
+                "eval",
+                "run",
+                "echo_regression",
+                "--case",
+                "eval_happy_path",
+                "--store",
+                "memory",
+                "--verbose",
+            )
+
+        self.assertEqual(0, code, output)
+        self.assertIn("      VALUE", output)
+        self.assertIn('"output": "hello"', output)
 
     def test_eval_business_failure_and_evaluator_error_have_distinct_exit_codes(
         self,
@@ -351,6 +476,9 @@ class AutoAgentCliTests(unittest.TestCase):
 
         self.assertEqual(1, failed_code, failed)
         self.assertIn("RESULT failed", failed)
+        self.assertIn("      VALUE", failed)
+        self.assertIn('"output": "ok"', failed)
+        self.assertIn("COMMENT", failed)
         self.assertEqual(2, error_code, errored)
         self.assertIn("EVALUATOR_EXECUTION_ERROR", errored)
         self.assertIn("RESULT error", errored)

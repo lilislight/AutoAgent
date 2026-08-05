@@ -8,6 +8,7 @@ from autoagent.core.compiler import CompileResult
 from autoagent.core.runtime import Invocation, JsonRuntimeSerializer, RuntimeEvent
 from autoagent.evaluation.loader import LoadedEvaluation
 from autoagent.evaluation.result import EvalResult
+from autoagent.debug import InvocationReport
 from autoagent.project.manifest import EvalSuiteLocator
 from autoagent.project import ProjectDefinition, ProjectDiagnostic
 
@@ -29,6 +30,103 @@ def render_project_diagnostics(
         )
     lines.append("RESULT failed")
     return "\n".join(lines)
+
+
+def render_invocation_report(report: InvocationReport) -> str:
+    lines = [
+        f"INVOCATION {report.invocation_id}",
+        f"SOURCE {report.source}",
+        f"WORKFLOW {report.workflow_id}",
+        f"WORKFLOW_REVISION {report.workflow_revision_id}",
+        f"SESSION {report.session_id}",
+        f"STATE {report.state}",
+        f"EVENT_MODE {report.event_mode}",
+        f"OBSERVED_SEQUENCE {report.observed_sequence}",
+        f"DURABLE_SEQUENCE {report.durable_sequence}",
+        f"PERSISTENCE {report.persistence_status}",
+        "",
+        "INPUT " + _value_summary_text(report.input),
+        "RESULT " + (
+            "<none>"
+            if report.result is None
+            else _value_summary_text(report.result)
+        ),
+    ]
+    if report.error is not None:
+        lines.extend(
+            [
+                f"ERROR {report.error.code}",
+                f"MESSAGE {report.error.message}",
+            ]
+        )
+    if report.primary_boundary is not None:
+        boundary = report.primary_boundary
+        lines.extend(
+            [
+                "",
+                f"PRIMARY_BOUNDARY {boundary.kind} {boundary.subject_id}",
+                f"  NODE {boundary.node_id or '<none>'}",
+                f"  STATUS {boundary.status or '<none>'}",
+                "  SEQUENCE "
+                f"{boundary.sequence if boundary.sequence is not None else '<none>'}",
+            ]
+        )
+        if boundary.message:
+            lines.append(f"  MESSAGE {boundary.message}")
+    lines.extend(
+        [
+            "",
+            "COUNTS",
+            f"  NODES {report.node_execution_count}",
+            f"  EDGES {report.edge_evaluation_count}",
+            f"  OPERATOR_CALLS {report.operator_call_count}",
+            f"  RETRIES {report.retry_count}",
+            f"  FALLBACKS {report.fallback_count}",
+            f"  TIMEOUTS {report.timeout_count}",
+            f"  WAITS {report.wait_count}",
+            f"  RECOVERIES {report.recovery_count}",
+        ]
+    )
+    if report.user_event_counts:
+        lines.append("USER_EVENTS")
+        lines.extend(
+            f"  {key.upper()} {value}"
+            for key, value in sorted(report.user_event_counts.items())
+        )
+    if report.warnings:
+        lines.append("")
+        for warning in report.warnings:
+            lines.extend(
+                [
+                    f"WARNING {warning.code}",
+                    f"MESSAGE {warning.message}",
+                ]
+            )
+    lines.extend(
+        [
+            "",
+            "AVAILABLE_EVIDENCE " + ", ".join(report.available_evidence),
+            "REPORT_RESULT generated",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _value_summary_text(value: Any) -> str:
+    summary = (
+        f"type={value.type} bytes={value.serialized_bytes} "
+        f"digest={value.digest}"
+    )
+    if value.preview is not None:
+        summary += " preview=" + json.dumps(
+            value.preview,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    if value.redacted:
+        summary += " redacted=true"
+    return summary
 
 
 def render_compile_result(result: CompileResult) -> str:
@@ -138,6 +236,7 @@ def render_evaluation_result(
     result: EvalResult,
     *,
     serializer: JsonRuntimeSerializer,
+    verbose: bool = False,
 ) -> str:
     lines = [
         f"EVAL {result.suite_id}",
@@ -202,14 +301,19 @@ def render_evaluation_result(
                 )
                 if evaluator.score is not None:
                     lines.append(f"      SCORE {evaluator.score}")
-                if evaluator.value is not None:
+                show_details = (
+                    verbose
+                    or evaluator.passed is False
+                    or evaluator.error is not None
+                )
+                if show_details and evaluator.value is not None:
                     lines.extend(
                         [
                             "      VALUE",
                             _indent(_json_text(evaluator.value, serializer), 8),
                         ]
                     )
-                if evaluator.comment:
+                if show_details and evaluator.comment:
                     lines.append(f"      COMMENT {evaluator.comment}")
                 if evaluator.error is not None:
                     lines.extend(

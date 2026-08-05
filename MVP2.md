@@ -80,7 +80,10 @@ pipeline:
 
 - an Invocation Report explains what happened in one observed execution;
 - Fork preserves a compatible historical Runtime boundary for fast debugging;
-- an ordinary rerun checks the original input from a clean execution path;
+- an ordinary rerun checks the original input against the current project
+  Workflow Revision in a new Session; when recorded evidence permits, it also
+  copies the source Invocation's pre-admission Session Context into that new
+  Session;
 - an Eval Case stores an explicit business expectation for repeatable
   regression checking;
 - an Eval Suite checks that one repair did not break other protected business
@@ -253,10 +256,37 @@ Responsibilities:
 - read current in-memory or historical database-backed execution facts;
 - remain type-neutral when the active App has not registered historical Runtime
   models;
-- produce bounded reports for active, waiting, terminal, and partially durable
+- report recorded facts and deterministic conditions such as Retry, timeout,
+  persistence gaps, and truncation, without inferring a root cause or proposing
+  a code change;
+- produce compact reports for active, waiting, terminal, and partially durable
   Invocations;
+- use stable cursor pagination for every potentially growing execution
+  collection instead of embedding a truncated Event, NodeExecution, Edge, or
+  Operator Call list in the root Report;
+- make the root Report a diagnostic summary and progressive-query index rather
+  than a shortened Trace dump;
+- include one deterministic primary boundary when available, such as the
+  failing NodeExecution, active Wait, or currently running NodeExecution, and
+  expose additional matching boundaries only through counts and paged queries;
+- resolve evidence from a discoverable running Server or an explicitly
+  configured durable database; a separate CLI process cannot query an expired
+  memory-only RuntimeStore;
+- prefer a matching running Server because it owns the latest in-memory state,
+  and use the database only when no matching Server is available or the user
+  explicitly selects it;
 - expose direct lookup and pagination by stable identity;
 - report missing detail and journal gaps instead of inventing state.
+
+For local source discovery, the configured or default local Server address is
+only a candidate. It is selected only when its authenticated Report endpoint
+can resolve the requested Invocation and that Invocation's Workflow is declared
+by the current project. A missing, unreachable, or unrelated candidate falls
+back to `AUTOAGENT_DATABASE_URL` in automatic mode. The database path must be
+explicit and already exist; a read-only Report command never creates a new
+SQLite file. `--source server` and `--source database` make either choice
+strict. When neither source is authoritative, the CLI returns an actionable
+diagnostic rather than starting an App or recovering Runtime state.
 
 The first report contract should include:
 
@@ -268,12 +298,65 @@ The first report contract should include:
 - critical path, phase timing, Token, cost, and call counts when recorded;
 - persistence durability and incomplete-evidence warnings.
 
-Value fields must have size limits. Inline values should expose type, bounded
-preview, stable digest, size, and ArtifactRef when available.
+The accepted V1 read model lives in `autoagent.debug`, shared by CLI, Server,
+and future platform adapters, but is not re-exported from the root Workflow
+authoring API. `InvocationReport` is the only top-level result. It contains
+source, Invocation and Workflow identity, lifecycle timestamps, observed/live/
+durable sequences, persistence status, bounded Input and Result summaries, a
+bounded structured error, one deterministic primary investigation boundary,
+flat execution counts, categorized UserEvent counts, available-evidence names,
+and evidence warnings. Supporting models are limited to `ValueSummary`,
+`ReportError`, `PrimaryBoundary`, and `EvidenceWarning`; there is no separate
+Report Run, Result, or Section hierarchy.
+
+The primary boundary is the most precise recorded subject associated with the
+terminal error, active Wait, or active NodeExecution. It is a fact reference,
+not a root-cause conclusion. Completed Invocations without such a condition do
+not invent one. Aggregate counts must come from current Runtime aggregates,
+type-neutral recovery snapshots plus a bounded tail, or database aggregation;
+root Report generation must not scan an entire large Event journal.
+
+Values must be token-conscious. Small scalar values may be shown inline after
+redaction; larger strings, objects, collections, Context branches, inputs, and
+outputs expose only type, shape, stable digest, serialized size, and ArtifactRef
+when available. Full or path-selected values require an explicit progressive
+detail query.
 
 Detail queries must address one Invocation, NodeExecution, Edge evaluation,
 Operator Call, Event, or Full-mode state boundary without first loading the
-complete journal.
+complete journal. List queries use stable cursors and preserve the Report's
+observed sequence boundary so an active Invocation cannot silently change the
+meaning of later pages.
+
+The first implemented progressive pages are RuntimeEvents and UserEvents.
+Their opaque cursors bind the Invocation, query kind, filters, and observed
+sequence and reject modification or reuse with another query. List items carry
+only bounded metadata; one explicit detail lookup returns bounded summaries of
+payload, input, output, or data. NodeExecution, Edge, Operator Call, and
+historical state pages build on the same cursor contract.
+
+`autoagent invocation report <invocation-id>` has one nonterminal behavior,
+not separate immediate and terminal-wait command variants. A `waiting`
+Invocation is already a stable debugging boundary and returns immediately. If
+the Invocation is `created` or `running`, the command waits through Server
+notifications for at most 10 seconds for `waiting` or a terminal state. When it
+is still running, the command returns the current observed Report with
+`INVOCATION_STILL_RUNNING`; it does not fail or wait indefinitely.
+
+The root Report includes only UserEvent counts grouped into semantic message,
+reasoning, Tool call, Tool result, Agent output, custom, and stream-delta
+categories. It does not inline UserEvent data. The default paged UserEvent query
+returns completed semantic events and custom events; `message_delta`,
+`reasoning_delta`, and `tool_call_delta` require an explicit stream-diagnostic
+query because they are UI transport evidence rather than normal Coding Agent
+debugging context.
+
+Invocation Reports and Invocation comparisons are derived, on-demand results
+like Eval Results. They are never written to the Runtime database and AutoAgent
+does not maintain Report history. The CLI always renders the compact result to
+stdout; `--report-file` may tee the same content to an ordinary file without
+suppressing terminal output. Any in-process cache is disposable, sequence-bound,
+and never authoritative.
 
 ### 2. Evaluation definition
 
@@ -423,6 +506,24 @@ stable. Capture should collect only the evidence needed to reproduce behavior:
 
 Capture cannot infer every business oracle. A new artifact starts as
 `needs_expectation` until a Coding Agent or user defines correct behavior.
+
+Ordinary rerun does not print the source Input for a Coding Agent to copy. It
+resolves the complete value internally by Invocation id, preserves the source
+Invocation, and invokes the current project Workflow Revision in a new Session.
+When the pre-admission Session Context is available, rerun copies that Context
+so stateful and multi-turn behavior is reproducible without continuing the
+original Session. If that evidence is unavailable, rerun may use only the
+original Input but must emit `SESSION_CONTEXT_NOT_REPRODUCED` and must not claim
+strict equivalence. A comparison can describe state, output, path, timing, and
+error differences between source and new Invocations, but only an Eval
+expectation can decide whether the new business result is correct.
+
+Rerun is restricted to the environment that owns the source evidence. A
+Server-sourced Invocation is rerun by that same Server, and a database-sourced
+Invocation is rerun by a ProjectHost configured for that same database and
+project environment. V1 does not transfer raw Input or Session Context from a
+Server into a different local execution environment. Comparison likewise
+requires both Invocations to be visible through the same evidence source.
 
 Provide pluggable redaction with safe defaults. Never copy Secrets, credentials,
 an entire production database, or unbounded user content. When Standard or

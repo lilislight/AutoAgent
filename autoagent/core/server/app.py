@@ -34,6 +34,7 @@ from autoagent.core.runtime import (
     SessionBusyError,
 )
 from autoagent.core.server.trace import TraceService
+from autoagent.debug import DebugQueryService
 
 
 _AUTH_COOKIE = "autoagent_session"
@@ -138,6 +139,7 @@ class AutoAgentServer:
         self._invocation_tasks: dict[UUID, asyncio.Task[Any]] = {}
         self._started_at_ms = time.time_ns() // 1_000_000
         self.trace = TraceService(app, cache_size=trace_cache_size)
+        self.debug = DebugQueryService(app.runtime_store, source="server")
         self.router = self._build_router()
         self.api = self.create_app()
 
@@ -331,6 +333,100 @@ class AutoAgentServer:
                     and not self.agent.runtime_store.admission_paused
                 ),
             }
+
+        @router.get(
+            "/invocations/{invocation_id}/report",
+            dependencies=auth,
+        )
+        async def invocation_report(invocation_id: UUID) -> dict[str, Any]:
+            try:
+                report = await self.debug.report_when_stable(invocation_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return report.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/runtime-events",
+            dependencies=auth,
+        )
+        async def debug_runtime_events(
+            invocation_id: UUID,
+            cursor: str | None = None,
+            through_sequence: int | None = Query(default=None, ge=0),
+            limit: int = Query(default=20, ge=1, le=100),
+        ) -> dict[str, Any]:
+            try:
+                page = await self.debug.runtime_events(
+                    invocation_id,
+                    cursor=cursor,
+                    through_sequence=through_sequence,
+                    limit=limit,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return page.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/runtime-events/{sequence}",
+            dependencies=auth,
+        )
+        async def debug_runtime_event(
+            invocation_id: UUID,
+            sequence: int,
+            through_sequence: int | None = Query(default=None, ge=0),
+        ) -> dict[str, Any]:
+            try:
+                return await self.debug.runtime_event(
+                    invocation_id,
+                    sequence,
+                    through_sequence=through_sequence,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/user-events",
+            dependencies=auth,
+        )
+        async def debug_user_events(
+            invocation_id: UUID,
+            cursor: str | None = None,
+            through_sequence: int | None = Query(default=None, ge=0),
+            limit: int = Query(default=20, ge=1, le=100),
+            include_stream_deltas: bool = False,
+        ) -> dict[str, Any]:
+            try:
+                page = await self.debug.user_events(
+                    invocation_id,
+                    cursor=cursor,
+                    through_sequence=through_sequence,
+                    limit=limit,
+                    include_stream_deltas=include_stream_deltas,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return page.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/user-events/{sequence}",
+            dependencies=auth,
+        )
+        async def debug_user_event(
+            invocation_id: UUID,
+            sequence: int,
+        ) -> dict[str, Any]:
+            try:
+                return await self.debug.user_event(invocation_id, sequence)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         @router.get("/runtime/status", dependencies=auth)
         async def runtime_status() -> dict[str, Any]:

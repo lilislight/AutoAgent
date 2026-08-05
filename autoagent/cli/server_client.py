@@ -11,6 +11,10 @@ import httpx
 class ServerClientError(RuntimeError):
     """The CLI could not reach or use an AutoAgent Server."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def resolve_server_url(
     environment: Mapping[str, str],
@@ -74,6 +78,7 @@ class AutoAgentServerClient:
         *,
         access_token: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = 30.0,
     ) -> None:
         headers = (
             {"Authorization": f"Bearer {access_token}"}
@@ -84,7 +89,7 @@ class AutoAgentServerClient:
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
-            timeout=30.0,
+            timeout=timeout,
             transport=transport,
         )
 
@@ -178,6 +183,82 @@ class AutoAgentServerClient:
             f"/api/v1/invocations/{invocation_id}",
         )
 
+    async def invocation_report(self, invocation_id: str) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/report",
+        )
+
+    async def debug_runtime_events(
+        self,
+        invocation_id: str,
+        *,
+        cursor: str | None = None,
+        through_sequence: int | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if through_sequence is not None:
+            params["through_sequence"] = through_sequence
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/runtime-events",
+            params=params,
+        )
+
+    async def debug_runtime_event(
+        self,
+        invocation_id: str,
+        sequence: int,
+        *,
+        through_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        params = (
+            {}
+            if through_sequence is None
+            else {"through_sequence": through_sequence}
+        )
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/runtime-events/{sequence}",
+            params=params,
+        )
+
+    async def debug_user_events(
+        self,
+        invocation_id: str,
+        *,
+        cursor: str | None = None,
+        through_sequence: int | None = None,
+        limit: int = 20,
+        include_stream_deltas: bool = False,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "limit": limit,
+            "include_stream_deltas": include_stream_deltas,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        if through_sequence is not None:
+            params["through_sequence"] = through_sequence
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/user-events",
+            params=params,
+        )
+
+    async def debug_user_event(
+        self,
+        invocation_id: str,
+        sequence: int,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/user-events/{sequence}",
+        )
+
     async def wait_for_invocation(
         self,
         invocation_id: str,
@@ -235,7 +316,8 @@ class AutoAgentServerClient:
             except ValueError:
                 detail = response.text or response.reason_phrase
             raise ServerClientError(
-                f"Server returned HTTP {response.status_code}: {detail}"
+                f"Server returned HTTP {response.status_code}: {detail}",
+                status_code=response.status_code,
             ) from exc
         value = response.json()
         if not isinstance(value, dict):

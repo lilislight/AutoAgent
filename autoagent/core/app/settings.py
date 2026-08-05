@@ -275,6 +275,7 @@ class AutoAgentSettings:
         self,
         *,
         serializer: JsonRuntimeSerializer | None = None,
+        database_read_only: bool = False,
     ) -> RuntimeStore:
         resolved_serializer = serializer or self.serializer()
         backend = None
@@ -291,6 +292,7 @@ class AutoAgentSettings:
                 artifact_policy=self.artifact_policy(),
                 sqlite_synchronous=self.sqlite_synchronous,
                 shutdown_timeout_ms=self.shutdown_grace_timeout_ms,
+                read_only=database_read_only,
             )
         return RuntimeStore(
             backend=backend,

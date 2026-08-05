@@ -31,6 +31,7 @@ from autoagent.cli.evaluation import (
     list_evaluations,
     run_evaluation,
 )
+from autoagent.cli.debugging import InvocationReportCliError, run_invocation_report
 from autoagent.cli.server_client import (
     AutoAgentServerClient,
     ServerClientError,
@@ -155,6 +156,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_execution_arguments(invocation_resume)
 
+    invocation_report = invocation_commands.add_parser(
+        "report",
+        help="Build a compact progressive-debugging index for one Invocation.",
+    )
+    invocation_report.add_argument("invocation_id")
+    invocation_report.add_argument(
+        "--source",
+        choices=("auto", "server", "database"),
+        default="auto",
+        help="Prefer a matching Server, require Server, or require database.",
+    )
+    invocation_report.add_argument("--server-url")
+    invocation_report.add_argument("--report-file")
+
     evaluation = commands.add_parser(
         "eval",
         help="List, validate, and run project-owned Workflow Evaluations.",
@@ -183,6 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of isolated Cases to execute concurrently.",
     )
     evaluation_run.add_argument("--timeout-ms", type=int)
+    evaluation_run.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Include values and comments for successful Evaluators.",
+    )
     evaluation_run.add_argument("--report-file")
     add_runtime_arguments(evaluation_run)
 
@@ -210,6 +230,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ProjectLoadError as exc:
         write_report(
             render_project_diagnostics(exc.diagnostics),
+            getattr(arguments, "report_file", None),
+        )
+        return 2
+    except InvocationReportCliError as exc:
+        write_report(
+            f"REPORT ERROR\nMESSAGE {exc}\n\nREPORT_RESULT failed",
             getattr(arguments, "report_file", None),
         )
         return 2
@@ -277,6 +303,10 @@ def _dispatch_project_command(
         return check_evaluation(project, arguments)
 
     if arguments.group == "invocation":
+        if arguments.command == "report":
+            return asyncio.run(
+                run_invocation_report(project, environment, arguments)
+            )
         if _uses_server(arguments):
             return asyncio.run(
                 _remote_invocation_command(environment, arguments)

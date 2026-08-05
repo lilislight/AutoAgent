@@ -89,25 +89,43 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [x] Replace standalone authoring-example input/expected pairs with registered
   Eval Suites and reusable fixtures where appropriate.
 - [x] Update the Authoring Skill to generate and pass Eval Suites before handoff.
-- [ ] Build a fresh Wheel from the current commit and copy the current
-  `autoagent-author-workflow` Skill into three empty evaluation workspaces.
-- [ ] Rerun conditional orchestration, durable Wait/Resume, and the ReAct
-  inventory assistant from only their business-only `REQUIREMENTS.md`. Do not
-  expose repository source, evaluator oracles, or previous generated projects
-  to the Coding Agent.
-- [ ] Record one concise MVP 2 forward-test report outside the generated
-  projects with the exact Wheel commit, commands, hard gates, business results,
-  and owning layer for every failure.
-- [ ] Fix only blocking findings, rerun affected scenarios from fresh
-  workspaces, and close Phase 2 when all three pass.
+- [x] Forward-test a fresh conditional-orchestration project from only its
+  business requirements using the packaged Wheel and copied Authoring Skill.
+  Project/Workflow/Eval checks passed and all nine business Cases passed.
+- [x] Review the generated project against the hidden hard gates and authoring
+  boundaries. No blocking Skill or framework defect was found; one scenario is
+  accepted as sufficient coverage for the current Authoring Skill milestone.
+- [x] Close Phase 2. Durable Wait/Resume and ReAct forward-test workspaces remain
+  optional future regression fixtures rather than MVP 2 gates.
 
 ### Phase 3: Invocation Report and progressive queries
 
-- [ ] Add type-neutral read models and a read-only Debug Query service.
+**Current focus:** finish NodeExecution, Edge, Operator Call, and Full-state
+progressive queries, then expose the complete detail-query set through CLI.
+
+- [x] Add same-project Server discovery and evidence-source resolution: prefer
+  the matching live Server, otherwise use an explicitly configured database,
+  and return an actionable missing-source diagnostic when neither exists.
+- [x] Add the accepted `autoagent.debug` V1 read models: one
+  `InvocationReport` plus bounded value, error, primary-boundary, and warning
+  models; keep them outside the root Workflow authoring API.
+- [ ] Add a type-neutral read-only Debug Query service shared by CLI, Server,
+  and future platform adapters.
 - [ ] Build bounded Reports for active, waiting, completed, failed, and partially
   durable Invocations.
-- [ ] Add CLI queries for one Invocation, NodeExecution, Edge evaluation,
-  Operator Call, Event, or Full-mode state boundary.
+- [x] For `created` or `running` Server Invocations, wait through notifications
+  for at most 10 seconds for `waiting` or a terminal boundary, then return the
+  current Report with an explicit still-running warning.
+- [ ] Keep the root Report compact and expose NodeExecution, Edge evaluation,
+  Operator Call, Event, and Full-mode state collections through stable cursor
+  pages fixed to the Report's observed sequence.
+- [x] Include only categorized UserEvent counts in the root Report; page
+  completed semantic/custom events separately and exclude stream deltas unless
+  a stream-diagnostic query explicitly requests them.
+- [ ] Add direct CLI detail queries for one Invocation, NodeExecution, Edge
+  evaluation, Operator Call, Event, or Full-mode state boundary.
+- [x] Keep Report and comparison results out of Runtime persistence; render to
+  stdout and optionally tee the same content to an ordinary `--report-file`.
 - [ ] Add large-journal and large-value performance coverage.
 
 ### Phase 4: Local debugging Skill

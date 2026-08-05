@@ -66,6 +66,7 @@ async def run_evaluation(
             render_evaluation_result(
                 result,
                 serializer=host.app.runtime_serializer,
+                verbose=arguments.verbose,
             ),
             arguments.report_file,
         )

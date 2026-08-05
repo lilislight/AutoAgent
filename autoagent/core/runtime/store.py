@@ -1538,6 +1538,39 @@ class RuntimeStore:
             else 0
         )
 
+    def durable_user_event_sequence(self, invocation_id: UUID) -> int:
+        return (
+            self.persistence.durable_user_event_sequence(invocation_id)
+            if self.persistence is not None
+            else 0
+        )
+
+    async def acount_user_event_types(
+        self,
+        invocation_id: UUID,
+        *,
+        through_sequence: int | None = None,
+    ) -> dict[str, int]:
+        """Count UserEvent types without materializing their data payloads."""
+
+        with self._lock:
+            known_in_memory = invocation_id in self.user_events
+            values = tuple(self.user_events.get(invocation_id, ()))
+        if known_in_memory:
+            counts: dict[str, int] = {}
+            for event in values:
+                if through_sequence is not None and event.sequence > through_sequence:
+                    continue
+                counts[event.type] = counts.get(event.type, 0) + 1
+            return counts
+        loader = getattr(self.backend, "acount_user_event_types", None)
+        if loader is None:
+            return {}
+        return await loader(
+            invocation_id,
+            through_sequence=through_sequence,
+        )
+
     def persistence_health(self) -> PersistenceHealth | None:
         return self.persistence.health if self.persistence is not None else None
 

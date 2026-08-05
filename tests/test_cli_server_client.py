@@ -95,6 +95,18 @@ class AutoAgentServerClientTests(unittest.IsolatedAsyncioTestCase):
                     timeout=2,
                 )
                 events = await client.events(str(submitted["invocation_id"]))
+                report = await client.invocation_report(
+                    str(submitted["invocation_id"])
+                )
+                debug_page = await client.debug_runtime_events(
+                    str(submitted["invocation_id"]),
+                    limit=2,
+                )
+                debug_event = await client.debug_runtime_event(
+                    str(submitted["invocation_id"]),
+                    debug_page["items"][0]["sequence"],
+                    through_sequence=debug_page["through_sequence"],
+                )
         finally:
             await app.aclose()
 
@@ -103,6 +115,30 @@ class AutoAgentServerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("completed", detail["state"])
         self.assertEqual({"output": "hello"}, detail["result"])
         self.assertGreater(len(events), 0)
+        self.assertEqual("server", report["source"])
+        self.assertEqual("completed", report["state"])
+        self.assertEqual(1, report["node_execution_count"])
+        self.assertEqual(2, len(debug_page["items"]))
+        self.assertIn("payload", debug_event)
+
+    async def test_client_preserves_http_status_for_source_resolution(self) -> None:
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        await app.astart()
+        server = AutoAgentServer(app)
+        transport = httpx.ASGITransport(app=server.api)
+        try:
+            async with AutoAgentServerClient(
+                "http://autoagent.test",
+                transport=transport,
+            ) as client:
+                with self.assertRaises(ServerClientError) as captured:
+                    await client.invocation_report(
+                        "00000000-0000-0000-0000-000000000000"
+                    )
+        finally:
+            await app.aclose()
+
+        self.assertEqual(404, captured.exception.status_code)
 
     async def test_client_rejects_missing_access_token(self) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())

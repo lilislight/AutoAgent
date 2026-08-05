@@ -79,6 +79,7 @@ class DatabaseBackend:
         artifact_policy: ArtifactPolicy | None = None,
         sqlite_synchronous: str = "FULL",
         shutdown_timeout_ms: int = 5_000,
+        read_only: bool = False,
     ) -> None:
         if batch_max_items < 1 or batch_max_bytes < 1 or batch_max_delay_ms < 0:
             raise ValueError("Invalid persistence batch limits.")
@@ -106,6 +107,7 @@ class DatabaseBackend:
         self.artifact_policy = artifact_policy or ArtifactPolicy()
         self.sqlite_synchronous = normalized_synchronous
         self.shutdown_timeout_ms = shutdown_timeout_ms
+        self.read_only = read_only
 
         self._database_loop = RuntimeEventLoop(
             name="autoagent-persistence-runtime"
@@ -209,35 +211,46 @@ class DatabaseBackend:
             await self._arun_database_operation(self.ainitialize())
             return
         if self._initialized:
-            self._ensure_worker()
+            if not self.read_only:
+                self._ensure_worker()
             return
         if self._initialize_lock is None:
             self._initialize_lock = asyncio.Lock()
         async with self._initialize_lock:
             if not self._initialized:
-                _ensure_sqlite_parent_directory(self.database_url)
                 self._queue_event = asyncio.Event()
-                # WAL is shared by every SQLite profile. FULL remains the
-                # durable default; NORMAL is an explicit performance choice.
-                @event.listens_for(self.engine.sync_engine, "connect")
-                def _set_sqlite_pragma(
-                    dbapi_connection: Any,
-                    connection_record: Any,
-                ) -> None:
-                    if self.database_url.startswith("sqlite"):
-                        cursor = dbapi_connection.cursor()
-                        cursor.execute("PRAGMA journal_mode=WAL")
-                        cursor.execute(
-                            f"PRAGMA synchronous={self.sqlite_synchronous}"
+                if self.read_only:
+                    # A debug reader must never create or migrate Runtime
+                    # schema. A zero-row query verifies that the configured
+                    # database is already an AutoAgent database.
+                    async with self.engine.connect() as connection:
+                        await connection.execute(
+                            select(InvocationRow.id).limit(0)
                         )
-                        cursor.close()
+                else:
+                    _ensure_sqlite_parent_directory(self.database_url)
+                    # WAL is shared by every SQLite profile. FULL remains the
+                    # durable default; NORMAL is an explicit performance choice.
+                    @event.listens_for(self.engine.sync_engine, "connect")
+                    def _set_sqlite_pragma(
+                        dbapi_connection: Any,
+                        connection_record: Any,
+                    ) -> None:
+                        if self.database_url.startswith("sqlite"):
+                            cursor = dbapi_connection.cursor()
+                            cursor.execute("PRAGMA journal_mode=WAL")
+                            cursor.execute(
+                                f"PRAGMA synchronous={self.sqlite_synchronous}"
+                            )
+                            cursor.close()
 
-                async with self.engine.begin() as connection:
-                    await connection.run_sync(
-                        RuntimeDatabaseBase.metadata.create_all
-                    )
+                    async with self.engine.begin() as connection:
+                        await connection.run_sync(
+                            RuntimeDatabaseBase.metadata.create_all
+                        )
                 self._initialized = True
-        self._ensure_worker()
+        if not self.read_only:
+            self._ensure_worker()
 
     async def aclose(self) -> None:
         if not self._database_loop.is_current():
@@ -1205,6 +1218,33 @@ class DatabaseBackend:
         )
         return sequence
 
+    async def acount_user_event_types(
+        self,
+        invocation_id: UUID,
+        *,
+        through_sequence: int | None = None,
+    ) -> dict[str, int]:
+        """Aggregate persisted UserEvents by type without loading their data."""
+
+        if not self._database_loop.is_current():
+            return await self._arun_database_operation(
+                self.acount_user_event_types(
+                    invocation_id,
+                    through_sequence=through_sequence,
+                )
+            )
+        await self.ainitialize()
+        statement = (
+            select(UserEventRow.type, func.count(UserEventRow.id))
+            .where(UserEventRow.invocation_id == str(invocation_id))
+            .group_by(UserEventRow.type)
+        )
+        if through_sequence is not None:
+            statement = statement.where(UserEventRow.sequence <= through_sequence)
+        async with self._database_sessions() as database:
+            rows = (await database.execute(statement)).all()
+        return {str(event_type): int(count) for event_type, count in rows}
+
     async def alist_trace_workflow_versions(
         self,
         *,
@@ -1594,6 +1634,8 @@ class DatabaseBackend:
         self._queue_event.set()
 
     def _ensure_worker(self) -> None:
+        if self.read_only:
+            return
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(
                 self._persistence_loop(),

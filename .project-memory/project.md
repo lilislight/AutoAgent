@@ -35,5 +35,6 @@ The package version is 0.1.0. The repository contains the end-to-end framework f
 - [Stable Workflow authoring API](../autoagent/__init__.py)
 - [Application hosting entry point](../autoagent/core/app/app.py)
 - [CLI entry point](../autoagent/cli/main.py)
+- [Coding Agent Skills](../skills/)
 - [Normative examples](../examples/authoring/)
 - [Regression and integration tests](../tests/)

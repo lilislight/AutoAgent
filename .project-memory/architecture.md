@@ -14,6 +14,7 @@ AutoAgent separates static Workflow definition from deployment configuration and
 - [AI Building Blocks](modules/ai-building-blocks.md) — provider-neutral LLM models, Providers, Tools, llm_call, and ReAct Workflow construction.
 - [Project and CLI Hosting](modules/project-and-cli-hosting.md) — manifest loading, environment resolution, ProjectHost ownership, local/Server CLI execution, and reporting.
 - [Evaluation](modules/evaluation.md) — manifest-owned Eval Suites, isolated Cases, evidence, Evaluators, and result aggregation.
+- [Coding Agent Skills](modules/coding-agent-skills.md) — concise public-API authoring and Invocation-debugging workflows plus isolated forward evaluations.
 - [Tracing Server and UI](modules/tracing-server-and-ui.md) — execution HTTP API, trace projection/query services, SSE notifications, and the embedded inspection UI.
 
 ## Key Flows
@@ -24,6 +25,7 @@ AutoAgent separates static Workflow definition from deployment configuration and
 4. **Persist:** RuntimeStore hands immutable envelopes to PersistenceCoordinator. DatabaseBackend serializes, batches fairly across Session queues, externalizes large values, and writes on its own runtime loop. Recovery state is periodically compacted while Event sequence remains the latest durable journal position.
 5. **Observe and control:** AutoAgentServer exposes registered Workflow execution and paged trace APIs. TraceService projects Runtime Events and merges live memory with durable history where required. SSE wakes the UI for status, directory, Invocation, and User Event changes.
 6. **Evaluate:** EvaluationLoader resolves a manifest Suite only when requested. EvaluationRunner gives every Case an isolated Session, executes invoke/resume through ProjectHost in Full Event mode, and supplies bounded Runtime evidence to Evaluators.
+7. **Guide and forward-test Coding Agents:** Authoring and debugging Skills route Coding Agents through the public project, Workflow, Evaluation, Report, Query, Rerun, and Comparison contracts. Isolated Skill Evaluations test observable results and CLI behavior without becoming Runtime features.
 
 ## Global Boundaries and Rules
 
@@ -35,6 +37,7 @@ AutoAgent separates static Workflow definition from deployment configuration and
 - App startup and Workflow registration are explicit. A durable Invocation is recovered only when its exact Workflow revision is registered.
 - One Session cannot admit a second active Invocation while its current Invocation is created, running, or waiting.
 - The root package `__all__` is the stable Workflow-authoring contract; hosting, compiler, Runtime, persistence, and Server types remain owned by their modules.
+- Coding Agent Skills describe the supported public workflow; evaluator-only harnesses may observe CLI usage but do not capture private reasoning or enter the shipped Runtime path.
 
 ## Runtime and Deployment Shape
 

@@ -34,7 +34,7 @@ from autoagent.core.runtime import (
     SessionBusyError,
 )
 from autoagent.core.server.trace import TraceService
-from autoagent.debug import DebugQueryService
+from autoagent.debug import DebugQueryService, build_rerun_result
 
 
 _AUTH_COOKIE = "autoagent_session"
@@ -344,6 +344,26 @@ class AutoAgentServer:
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             return report.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{baseline_invocation_id}/comparison/"
+            "{candidate_invocation_id}",
+            dependencies=auth,
+        )
+        async def compare_invocations(
+            baseline_invocation_id: UUID,
+            candidate_invocation_id: UUID,
+        ) -> dict[str, Any]:
+            try:
+                comparison = await self.debug.compare(
+                    baseline_invocation_id,
+                    candidate_invocation_id,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return comparison.model_dump(mode="json")
 
         @router.get(
             "/invocations/{invocation_id}/debug/node-executions",
@@ -1220,6 +1240,54 @@ class AutoAgentServer:
                 invocation_id=invocation_id,
                 state=admitted.invocation.state,
             )
+
+        @router.post(
+            "/workflow-revisions/{workflow_revision_id}/rerun/"
+            "{source_invocation_id}",
+            dependencies=auth,
+        )
+        async def rerun_invocation(
+            workflow_revision_id: str,
+            source_invocation_id: UUID,
+        ) -> dict[str, Any]:
+            if not self.execution_enabled:
+                raise HTTPException(status_code=403, detail="Execution API is disabled.")
+            entry = self._registered_entry_for_revision(workflow_revision_id)
+            if entry is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Workflow revision is not registered for execution: "
+                        f"{workflow_revision_id}"
+                    ),
+                )
+            try:
+                admitted = await self.agent._aadmit_rerun(
+                    entry.workflow,
+                    source_invocation_id=source_invocation_id,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except RuntimeSerializationError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            except (ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            invocation = admitted.prepared.invocation
+            task = asyncio.create_task(
+                self.agent._aexecute_admitted(
+                    admitted.prepared,
+                    input=invocation.input,
+                )
+            )
+            self._invocation_tasks[invocation.id] = task
+            task.add_done_callback(
+                lambda completed: self._finish_invocation_task(
+                    invocation.id,
+                    completed,
+                )
+            )
+            self._notify_trace_directory_changed()
+            return build_rerun_result(admitted, invocation).model_dump(mode="json")
 
         @router.post(
             "/workflow-revisions/{workflow_revision_id}/resume",

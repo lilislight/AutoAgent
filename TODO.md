@@ -100,8 +100,8 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 ### Phase 3: Invocation Report and progressive queries
 
-**Current focus:** Phase 3 is closed. Stabilize the local Invocation-ID
-debugging Skill against the completed Report and progressive-query CLI.
+Phase 3 is closed. Report and progressive-query contracts are stable inputs to
+the local debugging loop.
 
 - [x] Add same-project Server discovery and evidence-source resolution: prefer
   the matching live Server, otherwise use an explicitly configured database,
@@ -135,9 +135,21 @@ debugging Skill against the completed Report and progressive-query CLI.
 
 ### Phase 4: Local debugging Skill
 
+**Current focus:** forward-test the complete CLI-only debugging loop from one
+real failed or business-incorrect Invocation. The test must exercise Report,
+bounded Query, a focused code repair, same-mode Rerun, Comparison, and the
+owning Eval Suite without using framework-internal APIs.
+
 - [x] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
+- [x] Add isolated same-mode Rerun against the current project Revision. Reuse
+  exact Standard/Full Genesis Session Context and reject Minimal evidence.
+- [x] Add read-only Invocation Comparison for matching Standard or matching
+  Full modes with semantic Node, Loop, Edge, and logical Operator alignment;
+  reject Minimal and mixed modes and keep results out of Runtime storage.
+- [x] Update the debugging Skill with side-effect, Wait, Rerun, Comparison, and
+  Eval ownership boundaries.
 - [ ] Forward-test Report -> optional Case update -> code change -> compile ->
-  Eval Result -> user-review handoff using CLI only.
+  Rerun -> Comparison -> Eval Result -> user-review handoff using CLI only.
 
 ### Phase 5: Optional Invocation-to-Case capture
 

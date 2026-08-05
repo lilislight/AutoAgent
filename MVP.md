@@ -124,6 +124,11 @@ merge code, deploy a Candidate, or mutate an active Workflow Revision.
   Operator Call, Event, and reconstructed Full-mode Runtime state.
 - CLI contracts that let a Coding Agent report and inspect an Invocation,
   and validate/run an Eval Suite without importing framework internals.
+- Isolated same-mode Rerun for Standard and Full sources from the original
+  input, entry Node, and Genesis Session Context against the current project
+  Revision. Minimal sources cannot be rerun. Read-only semantic Invocation
+  Comparison requires matching Standard modes or matching Full modes and never
+  assigns a business verdict.
 - A separate debugging Skill that teaches the evidence-first repair loop rather
   than expanding the Workflow Authoring Skill into a general maintenance guide.
 - Optional capture of an Invocation as a provisional Eval Case after the manual
@@ -142,9 +147,10 @@ flowchart LR
     CREATE["Generate or update project"] --> SUITE["Create/update Eval Suite"]
     SUITE --> EDIT["Implement Workflow"]
     INCIDENT["User supplies bad Invocation ID"] --> REPORT["CLI Invocation Report"]
-    REPORT --> DEBUG["Fork or rerun for one-off debugging"]
-    DEBUG --> EDIT
-    EDIT --> CHECK["Compile and check"]
+    REPORT --> EDIT["Implement focused repair"]
+    EDIT --> RERUN["Rerun original start boundary"]
+    RERUN --> COMPARE["Compare baseline and candidate"]
+    COMPARE --> CHECK["Compile and check"]
     CHECK --> EVAL["autoagent eval run"]
     EVAL --> DECISION["Accept, reject, or revise"]
     DECISION -->|"Revise"| EDIT
@@ -158,8 +164,8 @@ assertions are the first implementation priority; probabilistic scoring and
 LLM-as-a-judge are optional evaluators, not the foundation of the execution
 model.
 
-Report explains an observed execution, Fork or rerun supports immediate
-debugging and verification, and Eval preserves regression-worthy business
+Report explains an observed execution, Rerun and Comparison support immediate
+debugging and verification, Fork remains an advanced path, and Eval preserves regression-worthy business
 behavior. A one-off defect does not have to become an Eval Case. Workflow
 projects use Eval for end-to-end business behavior and keep ordinary tests only
 for isolated user code; do not duplicate the same scenario in both.

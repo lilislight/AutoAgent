@@ -47,10 +47,11 @@ coverage. Use real model/provider behavior in Eval only when that behavior is
 the subject under evaluation; otherwise use a deterministic test Provider or
 sandboxed dependency.
 
-The current CLI does not provide automatic Invocation comparison, Fork, Replay,
-or rerun-from-original-input. Do not claim those validations occurred. A new
-Eval Invocation is valid evidence for the repaired business scenario; retain
-the original Invocation ID and sequence in the handoff for provenance.
+Use `invocation rerun` only after side-effect safety is established. Then use
+`invocation compare` to describe observed differences; do not call a changed
+result an improvement until the relevant Eval passes. Fork and Replay remain
+unsupported. Retain both Invocation IDs and their observed sequences in the
+handoff.
 
 ## Handoff fields
 
@@ -61,5 +62,6 @@ Return:
 - owning layer and evidence supporting it;
 - changed Workflow/project files;
 - Project/Workflow/Eval commands and outcomes;
+- Rerun candidate ID, Genesis boundary fidelity, and Comparison differences;
 - any unverified provider, external dependency, partial durability, or missing
   Event-mode evidence.

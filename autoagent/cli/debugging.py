@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -8,8 +9,10 @@ from uuid import UUID
 from sqlalchemy.engine import make_url
 
 from autoagent.cli.render import (
+    render_invocation_comparison,
     render_invocation_query,
     render_invocation_report,
+    render_invocation_rerun,
     write_report,
 )
 from autoagent.cli.server_client import (
@@ -18,11 +21,168 @@ from autoagent.cli.server_client import (
     resolve_server_url,
 )
 from autoagent.core.app import AutoAgentSettings
-from autoagent.debug import DebugQueryService, InvocationReport
+from autoagent.debug import (
+    DebugQueryService,
+    InvocationComparison,
+    InvocationReport,
+    InvocationRerunResult,
+    build_rerun_result,
+)
+from autoagent.project import ProjectHost
 
 
 class InvocationReportCliError(RuntimeError):
     """The CLI could not resolve or query authoritative Invocation evidence."""
+
+
+async def run_invocation_rerun(
+    project: Any,
+    environment: dict[str, str],
+    app_settings: AutoAgentSettings | None,
+    arguments: argparse.Namespace,
+) -> int:
+    """Execute an isolated Invocation from a Standard/Full start boundary."""
+
+    source_id = UUID(arguments.source_invocation_id)
+    timeout = (
+        None if arguments.timeout_ms is None else arguments.timeout_ms / 1_000
+    )
+    if timeout is not None and timeout <= 0:
+        raise ValueError("--timeout-ms must be positive.")
+    if arguments.server or arguments.server_url is not None:
+        server_url = resolve_server_url(environment, explicit_url=arguments.server_url)
+        access_token = environment.get("AUTOAGENT_SERVER_ACCESS_TOKEN") or None
+        async with AutoAgentServerClient(
+            server_url,
+            access_token=access_token,
+        ) as client:
+            source_report = InvocationReport.model_validate(
+                await client.invocation_report(str(source_id))
+            )
+            _ensure_project_workflow(project, source_report)
+            submitted = InvocationRerunResult.model_validate(
+                await client.rerun(
+                    source_report.workflow_id,
+                    source_invocation_id=str(source_id),
+                )
+            )
+            detail = await client.wait_for_invocation(
+                submitted.candidate_invocation_id,
+                timeout=timeout,
+            )
+            result = submitted.model_copy(update={"state": str(detail["state"])})
+    else:
+        if app_settings is None:
+            raise RuntimeError("Local Rerun requires App settings.")
+        host = ProjectHost(
+            project,
+            app_settings=app_settings,
+            environment=environment,
+        )
+        async with host:
+            seed = await host.app.runtime_store.aload_invocation_rerun_seed(
+                source_id
+            )
+            if seed is None:
+                raise InvocationReportCliError(
+                    f"Configured Runtime has no Invocation '{source_id}'."
+                )
+            try:
+                workflow = host.workflow(seed.workflow_id)
+            except KeyError as exc:
+                raise InvocationReportCliError(
+                    f"Invocation belongs to Workflow '{seed.workflow_id}', "
+                    "which is not declared by the current auto-agent.toml."
+                ) from exc
+            operation = host.app._arerun(
+                workflow,
+                source_invocation_id=source_id,
+            )
+            admitted, invocation = (
+                await operation
+                if timeout is None
+                else await asyncio.wait_for(operation, timeout)
+            )
+            result = build_rerun_result(admitted, invocation)
+    write_report(render_invocation_rerun(result), arguments.report_file)
+    return 1 if result.state in {"failed", "interrupted", "cancelled"} else 0
+
+
+async def run_invocation_comparison(
+    project: Any,
+    environment: dict[str, str],
+    arguments: argparse.Namespace,
+) -> int:
+    """Compare two Invocations from one authoritative evidence source."""
+
+    baseline_id = UUID(arguments.baseline_invocation_id)
+    candidate_id = UUID(arguments.candidate_invocation_id)
+    server_error: ServerClientError | None = None
+    if arguments.source in {"auto", "server"}:
+        server_url = resolve_server_url(environment, explicit_url=arguments.server_url)
+        access_token = environment.get("AUTOAGENT_SERVER_ACCESS_TOKEN") or None
+        try:
+            async with AutoAgentServerClient(
+                server_url,
+                access_token=access_token,
+                timeout=2.0,
+            ) as client:
+                comparison = InvocationComparison.model_validate(
+                    await client.compare_invocations(
+                        str(baseline_id),
+                        str(candidate_id),
+                    )
+                )
+        except ServerClientError as exc:
+            if arguments.source == "server":
+                raise
+            server_error = exc
+        else:
+            _ensure_comparison_project_workflow(project, comparison)
+            write_report(
+                render_invocation_comparison(comparison),
+                arguments.report_file,
+            )
+            return 0
+
+    settings = AutoAgentSettings.from_env(env_file=None, environ=environment)
+    if arguments.source in {"auto", "database"} and settings.database_url:
+        store = settings.runtime_store(database_read_only=True)
+        assert store.backend is not None
+        _ensure_database_already_exists(store.backend.database_url)
+        try:
+            await store.ainitialize()
+            comparison = await DebugQueryService(
+                store,
+                source="database",
+            ).compare(baseline_id, candidate_id)
+        except Exception as exc:
+            if isinstance(exc, InvocationReportCliError):
+                raise
+            raise InvocationReportCliError(
+                "Configured database could not compare the requested "
+                f"Invocations: {exc}"
+            ) from exc
+        finally:
+            await store.aclose()
+        _ensure_comparison_project_workflow(project, comparison)
+        write_report(
+            render_invocation_comparison(comparison),
+            arguments.report_file,
+        )
+        return 0
+
+    if arguments.source == "database":
+        raise InvocationReportCliError(
+            "Invocation Comparison requires AUTOAGENT_DATABASE_URL when "
+            "--source database is selected."
+        )
+    server_detail = f" Server probe failed: {server_error}." if server_error else ""
+    raise InvocationReportCliError(
+        "No authoritative evidence source is available for these Invocations."
+        f"{server_detail} Start the matching AutoAgent Server or configure "
+        "AUTOAGENT_DATABASE_URL for its durable database."
+    )
 
 
 async def run_invocation_report(
@@ -362,6 +522,21 @@ def _ensure_project_workflow(project: Any, report: InvocationReport) -> None:
             f"Invocation belongs to Workflow '{report.workflow_id}', which is "
             "not declared by the current auto-agent.toml. Run the command from "
             "the owning project."
+        )
+
+
+def _ensure_comparison_project_workflow(
+    project: Any,
+    comparison: InvocationComparison,
+) -> None:
+    if comparison.workflow_id is None:
+        return
+    workflow_ids = {loaded.workflow.id for loaded in project.workflows}
+    if comparison.workflow_id not in workflow_ids:
+        raise InvocationReportCliError(
+            f"Invocations belong to Workflow '{comparison.workflow_id}', which "
+            "is not declared by the current auto-agent.toml. Run the command "
+            "from the owning project."
         )
 
 

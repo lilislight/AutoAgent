@@ -31,6 +31,7 @@ from autoagent.core.runtime.event import (
 )
 from autoagent.core.runtime.artifact import ArtifactPolicy
 from autoagent.core.runtime.retention import RuntimeRetentionPolicy
+from autoagent.core.runtime.rerun import InvocationRerunSeed
 from autoagent.core.runtime.persistence import (
     BackendPersistenceError,
     InvocationPersistenceError,
@@ -107,6 +108,7 @@ __all__ = [
     "InputMappingContext",
     "IncomingOutput",
     "Invocation",
+    "InvocationRerunSeed",
     "InvocationExecutionMailbox",
     "InvocationContext",
     "InvocationStateValue",

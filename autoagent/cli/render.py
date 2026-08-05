@@ -8,7 +8,7 @@ from autoagent.core.compiler import CompileResult
 from autoagent.core.runtime import Invocation, JsonRuntimeSerializer, RuntimeEvent
 from autoagent.evaluation.loader import LoadedEvaluation
 from autoagent.evaluation.result import EvalResult
-from autoagent.debug import InvocationReport
+from autoagent.debug import InvocationComparison, InvocationReport, InvocationRerunResult
 from autoagent.project.manifest import EvalSuiteLocator
 from autoagent.project import ProjectDefinition, ProjectDiagnostic
 
@@ -110,6 +110,99 @@ def render_invocation_report(report: InvocationReport) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def render_invocation_comparison(comparison: InvocationComparison) -> str:
+    """Render one compact observed comparison without a business verdict."""
+
+    lines = [
+        "INVOCATION_COMPARISON",
+        f"SOURCE {comparison.source}",
+        f"STATUS {comparison.status}",
+        f"WORKFLOW {comparison.workflow_id or '<different>'}",
+        f"BASELINE {comparison.baseline_invocation_id}",
+        f"BASELINE_REVISION {comparison.baseline_workflow_revision_id}",
+        f"CANDIDATE {comparison.candidate_invocation_id}",
+        f"CANDIDATE_REVISION {comparison.candidate_workflow_revision_id}",
+        f"EVIDENCE_MODE {comparison.evidence_mode}",
+        "",
+        "REQUEST",
+        f"  INPUT_EQUAL {str(comparison.input_equal).lower()}",
+        f"  ENTRY_NODE_EQUAL {str(comparison.entry_node_equal).lower()}",
+        "OUTCOME",
+        f"  STATE {comparison.baseline_state} -> {comparison.candidate_state}",
+        f"  RESULT_EQUAL {str(comparison.result_equal).lower()}",
+        f"  ERROR_EQUAL {str(comparison.error_equal).lower()}",
+        "EXECUTION_DELTAS",
+        f"  NODES {comparison.node_execution_delta:+d}",
+        f"  EDGES {comparison.edge_evaluation_delta:+d}",
+        f"  OPERATOR_CALLS {comparison.operator_call_delta:+d}",
+        f"  RETRIES {comparison.retry_delta:+d}",
+        f"  FALLBACKS {comparison.fallback_delta:+d}",
+        f"  TIMEOUTS {comparison.timeout_delta:+d}",
+        "TIMING",
+        f"  TOTAL_MS {comparison.baseline_duration_ms} -> "
+        f"{comparison.candidate_duration_ms}",
+        f"DIFFERENCE_COUNT {comparison.difference_count}",
+    ]
+    for difference in comparison.differences:
+        lines.extend(
+            [
+                "",
+                f"DIFFERENCE {difference.category} {difference.key}",
+                "  BASELINE " + _compact_json(difference.baseline),
+                "  CANDIDATE " + _compact_json(difference.candidate),
+            ]
+        )
+        if difference.baseline_ref is not None:
+            lines.append(f"  BASELINE_REF {difference.baseline_ref}")
+        if difference.candidate_ref is not None:
+            lines.append(f"  CANDIDATE_REF {difference.candidate_ref}")
+    if comparison.differences_truncated:
+        lines.append("DIFFERENCES_TRUNCATED true")
+    for warning in comparison.warnings:
+        lines.extend(
+            [
+                "",
+                f"WARNING {warning.code}",
+                f"MESSAGE {warning.message}",
+            ]
+        )
+    lines.extend(["", "COMPARISON_RESULT generated"])
+    return "\n".join(lines)
+
+
+def render_invocation_rerun(result: InvocationRerunResult) -> str:
+    lines = [
+        f"RERUN_SOURCE {result.source_invocation_id}",
+        f"SOURCE_REVISION {result.source_workflow_revision_id}",
+        f"WORKFLOW {result.workflow_id}",
+        f"CANDIDATE {result.candidate_invocation_id}",
+        f"CANDIDATE_REVISION {result.candidate_workflow_revision_id}",
+        f"SESSION {result.session_id}",
+        f"SESSION_KEY {result.session_key}",
+        f"EVENT_MODE {result.event_mode}",
+        f"STATE {result.state}",
+    ]
+    for warning in result.warnings:
+        lines.extend(
+            [
+                "",
+                f"WARNING {warning.code}",
+                f"MESSAGE {warning.message}",
+            ]
+        )
+    lines.extend(["", "RERUN_RESULT created"])
+    return "\n".join(lines)
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def render_invocation_query(

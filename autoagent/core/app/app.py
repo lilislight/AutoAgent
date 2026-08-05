@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 import logging
 from pathlib import Path
 from threading import RLock
@@ -33,6 +34,7 @@ from autoagent.core.runtime import (
     RuntimeEventMode,
     RuntimeStore,
     Session,
+    SessionContext,
     SessionBusyError,
 )
 from autoagent.core.runtime.hooks import RuntimeEventLoop
@@ -71,6 +73,21 @@ class _PreparedInvocation:
         self.workflow_ir = workflow_ir
         self.session = session
         self.invocation = invocation
+
+
+class _PreparedRerun:
+    """Internal Rerun admission paired with its source boundary."""
+
+    def __init__(
+        self,
+        *,
+        prepared: _PreparedInvocation,
+        source_invocation_id: UUID,
+        source_workflow_revision_id: str,
+    ) -> None:
+        self.prepared = prepared
+        self.source_invocation_id = source_invocation_id
+        self.source_workflow_revision_id = source_workflow_revision_id
 
 
 class AutoAgentApp:
@@ -583,6 +600,103 @@ class AutoAgentApp:
                 self._aexecute_admitted(prepared, input=input)
             )
         return await self._aexecute_prepared(prepared)
+
+    async def _aadmit_rerun(
+        self,
+        workflow: Workflow,
+        *,
+        source_invocation_id: UUID,
+    ) -> _PreparedRerun:
+        """Admit a same-mode Invocation from a Standard/Full start boundary."""
+
+        if not self._runtime_loop.is_current():
+            return await self._runtime_loop.arun(
+                self._aadmit_rerun(
+                    workflow,
+                    source_invocation_id=source_invocation_id,
+                )
+            )
+        self._ensure_open()
+        self._ensure_started()
+        seed = await self.runtime_store.aload_invocation_rerun_seed(
+            source_invocation_id
+        )
+        if seed is None:
+            raise KeyError(f"Unknown Invocation: {source_invocation_id}")
+        if seed.state not in {
+            "waiting",
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
+        }:
+            raise ValueError(
+                "Rerun requires a waiting or terminal source Invocation; "
+                f"current state is {seed.state}."
+            )
+        if seed.event_mode == "minimal":
+            raise ValueError(
+                "Rerun requires a Standard or Full source Invocation; "
+                "Minimal mode has no executable Genesis Session Context."
+            )
+        workflow_ir = self._get_or_compile_workflow(workflow)
+        if workflow_ir.workflow_id != seed.workflow_id:
+            raise ValueError(
+                "Rerun Workflow does not match the source Invocation: "
+                f"source={seed.workflow_id}, candidate={workflow_ir.workflow_id}."
+            )
+        if seed.entry_node_id not in workflow_ir.entry_node_ids:
+            raise ValueError(
+                "Source entry node is not an entry in the candidate Workflow: "
+                f"{seed.entry_node_id}"
+            )
+        workflow_snapshot = self._registered_workflow_snapshot(workflow)
+        await self.runtime_store.asave_workflow_snapshot(workflow_snapshot)
+        if seed.session_context is None:
+            raise RuntimeError(
+                "Source Invocation has no executable Genesis Session Context."
+            )
+        session_context = SessionContext.from_record(
+            deepcopy(seed.session_context.to_record())
+        )
+        session = await self._get_or_create_session(
+            workflow_id=workflow_ir.workflow_id,
+            workflow_revision_id=workflow_revision_id(
+                workflow_snapshot.workflow_id,
+                workflow_snapshot.definition_hash,
+            ),
+            session_id=f"rerun:{source_invocation_id}:{uuid4()}",
+        )
+        session.context = session_context
+        prepared = await self._prepare_fresh_invocation(
+            workflow_ir=workflow_ir,
+            workflow_snapshot=workflow_snapshot,
+            session=session,
+            entry_node_id=seed.entry_node_id,
+            input=deepcopy(seed.input),
+            event_mode=seed.event_mode,
+        )
+        return _PreparedRerun(
+            prepared=prepared,
+            source_invocation_id=source_invocation_id,
+            source_workflow_revision_id=seed.workflow_revision_id,
+        )
+
+    async def _arerun(
+        self,
+        workflow: Workflow,
+        *,
+        source_invocation_id: UUID,
+    ) -> tuple[_PreparedRerun, Invocation]:
+        admitted = await self._aadmit_rerun(
+            workflow,
+            source_invocation_id=source_invocation_id,
+        )
+        invocation = await self._aexecute_admitted(
+            admitted.prepared,
+            input=admitted.prepared.invocation.input,
+        )
+        return admitted, invocation
 
     async def _aexecute_prepared(
         self,

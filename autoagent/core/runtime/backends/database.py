@@ -35,6 +35,7 @@ from autoagent.core.compiler import WorkflowVersionSnapshot, workflow_revision_i
 from autoagent.core.runtime.context import SessionContext
 from autoagent.core.runtime.hooks import RuntimeEventLoop
 from autoagent.core.runtime.persistence import PersistenceEnvelope
+from autoagent.core.runtime.rerun import InvocationRerunSeed
 from autoagent.core.runtime.serialization import ArtifactRef
 from autoagent.core.runtime.session import Session
 from autoagent.core.runtime.snapshot import (
@@ -1675,6 +1676,60 @@ class DatabaseBackend:
             },
         }
 
+    async def aload_invocation_rerun_seed(
+        self,
+        invocation_id: UUID,
+    ) -> InvocationRerunSeed | None:
+        """Load executable start-boundary values for an explicit Rerun."""
+
+        if not self._database_loop.is_current():
+            return await self._arun_database_operation(
+                self.aload_invocation_rerun_seed(invocation_id)
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            row = (
+                await database.execute(
+                    select(InvocationRow, WorkflowVersionRow)
+                    .join(
+                        WorkflowVersionRow,
+                        WorkflowVersionRow.id
+                        == InvocationRow.workflow_version_id,
+                    )
+                    .where(InvocationRow.id == str(invocation_id))
+                )
+            ).first()
+        if row is None:
+            return None
+        invocation, workflow = row
+        input_value = await self._hydrate_runtime_values(
+            self.serializer.loads(invocation.input_json)
+        )
+        if not isinstance(input_value, dict):
+            raise RuntimeError("Persisted Invocation input is not an object.")
+        session_context = None
+        if invocation.event_mode in {"standard", "full"}:
+            if invocation.genesis_state_json is None:
+                raise RuntimeError(
+                    "Invocation has no start-boundary Genesis Snapshot."
+                )
+            state = await self._hydrate_runtime_values(
+                self.serializer.loads(invocation.genesis_state_json)
+            )
+            session_context = SessionContext.from_record(
+                state["session"].get("context", {})
+            )
+        return InvocationRerunSeed(
+            invocation_id=invocation_id,
+            workflow_id=workflow.workflow_id,
+            workflow_revision_id=workflow.id,
+            entry_node_id=invocation.entry_node_id,
+            state=invocation.state,
+            event_mode=invocation.event_mode,
+            input=input_value,
+            session_context=session_context,
+        )
+
     def _trace_invocation_record(
         self,
         invocation: InvocationRow,
@@ -2113,7 +2168,7 @@ class DatabaseBackend:
             "error_json": None,
             "genesis_state_json": (
                 _text(self.serializer.dumps_unchecked(state))
-                if event_mode == "full"
+                if event_mode in {"standard", "full"}
                 else None
             ),
             "created_at_ms": invocation["created_at_ms"],

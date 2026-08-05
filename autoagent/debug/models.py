@@ -6,6 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 DebugSourceKind = Literal["server", "database"]
+ComparisonStatus = Literal[
+    "comparable",
+    "partially_comparable",
+    "incompatible",
+]
 BoundaryKind = Literal[
     "invocation",
     "node",
@@ -118,6 +123,84 @@ class InvocationReport(_DebugModel):
         if any(value < 0 for value in self.user_event_counts.values()):
             raise ValueError("UserEvent counts cannot be negative.")
         return self
+
+
+class InvocationDifference(_DebugModel):
+    """One bounded semantic difference with optional evidence references."""
+
+    category: Literal[
+        "request",
+        "outcome",
+        "node",
+        "edge",
+        "operator_call",
+        "timing",
+        "user_event",
+    ]
+    key: str = Field(min_length=1)
+    baseline: Any | None = None
+    candidate: Any | None = None
+    baseline_ref: str | None = None
+    candidate_ref: str | None = None
+
+
+class InvocationComparison(_DebugModel):
+    """Compact read-only comparison of two observed Invocations.
+
+    A Comparison describes differences; it never decides whether the candidate
+    is a business improvement. Eval owns that decision.
+    """
+
+    schema_version: int = Field(default=1, ge=1)
+    source: DebugSourceKind
+    status: ComparisonStatus
+    baseline_invocation_id: str = Field(min_length=1)
+    candidate_invocation_id: str = Field(min_length=1)
+    workflow_id: str | None = None
+    baseline_workflow_revision_id: str = Field(min_length=1)
+    candidate_workflow_revision_id: str = Field(min_length=1)
+    evidence_mode: Literal["standard", "full"]
+    baseline_observed_sequence: int = Field(ge=0)
+    candidate_observed_sequence: int = Field(ge=0)
+    input_equal: bool
+    entry_node_equal: bool
+    state_equal: bool
+    result_equal: bool
+    error_equal: bool
+    baseline_state: str
+    candidate_state: str
+    baseline_result: ValueSummary | None = None
+    candidate_result: ValueSummary | None = None
+    baseline_error: ReportError | None = None
+    candidate_error: ReportError | None = None
+    baseline_duration_ms: int = Field(ge=0)
+    candidate_duration_ms: int = Field(ge=0)
+    node_execution_delta: int = 0
+    edge_evaluation_delta: int = 0
+    operator_call_delta: int = 0
+    retry_delta: int = 0
+    fallback_delta: int = 0
+    timeout_delta: int = 0
+    difference_count: int = Field(default=0, ge=0)
+    differences: tuple[InvocationDifference, ...] = ()
+    differences_truncated: bool = False
+    warnings: tuple[EvidenceWarning, ...] = ()
+
+
+class InvocationRerunResult(_DebugModel):
+    """Identity and seed fidelity for one newly admitted Rerun Invocation."""
+
+    schema_version: int = Field(default=1, ge=1)
+    source_invocation_id: str = Field(min_length=1)
+    source_workflow_revision_id: str = Field(min_length=1)
+    candidate_invocation_id: str = Field(min_length=1)
+    candidate_workflow_revision_id: str = Field(min_length=1)
+    workflow_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    session_key: str = Field(min_length=1)
+    state: str
+    event_mode: Literal["standard", "full"]
+    warnings: tuple[EvidenceWarning, ...] = ()
 
 
 T = TypeVar("T")

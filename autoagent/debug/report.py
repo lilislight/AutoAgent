@@ -17,6 +17,8 @@ from autoagent.debug.models import (
     DebugPage,
     DebugSourceKind,
     EvidenceWarning,
+    InvocationComparison,
+    InvocationDifference,
     InvocationReport,
     PrimaryBoundary,
     ReportError,
@@ -199,6 +201,189 @@ class DebugQueryService:
             user_event_counts=_user_event_categories(raw_user_counts),
             available_evidence=tuple(available),
             warnings=tuple(warnings),
+        )
+
+    async def compare(
+        self,
+        baseline_invocation_id: UUID,
+        candidate_invocation_id: UUID,
+    ) -> InvocationComparison:
+        """Compare two stable projections without interpreting business value."""
+
+        baseline = await self.report_when_stable(baseline_invocation_id)
+        candidate = await self.report_when_stable(candidate_invocation_id)
+        if baseline.event_mode != candidate.event_mode:
+            raise ValueError(
+                "Invocation Comparison requires matching Event modes: "
+                f"baseline={baseline.event_mode}, candidate={candidate.event_mode}."
+            )
+        if baseline.event_mode == "minimal":
+            raise ValueError(
+                "Invocation Comparison requires Standard or Full mode; "
+                "Minimal mode has no graph execution evidence."
+            )
+        evidence_mode = baseline.event_mode
+        input_equal = _summary_equal(baseline.input, candidate.input)
+        entry_node_equal = baseline.entry_node_id == candidate.entry_node_id
+        workflow_equal = baseline.workflow_id == candidate.workflow_id
+        differences: list[InvocationDifference] = []
+
+        if not input_equal:
+            differences.append(
+                InvocationDifference(
+                    category="request",
+                    key="input",
+                    baseline=_summary_identity(baseline.input),
+                    candidate=_summary_identity(candidate.input),
+                )
+            )
+        if not entry_node_equal:
+            differences.append(
+                InvocationDifference(
+                    category="request",
+                    key="entry_node_id",
+                    baseline=baseline.entry_node_id,
+                    candidate=candidate.entry_node_id,
+                )
+            )
+        if baseline.state != candidate.state:
+            differences.append(
+                InvocationDifference(
+                    category="outcome",
+                    key="state",
+                    baseline=baseline.state,
+                    candidate=candidate.state,
+                )
+            )
+        if not _summary_equal(baseline.result, candidate.result):
+            differences.append(
+                InvocationDifference(
+                    category="outcome",
+                    key="result",
+                    baseline=_summary_identity(baseline.result),
+                    candidate=_summary_identity(candidate.result),
+                )
+            )
+        if not _error_equal(baseline.error, candidate.error):
+            differences.append(
+                InvocationDifference(
+                    category="outcome",
+                    key="error",
+                    baseline=_error_identity(baseline.error),
+                    candidate=_error_identity(candidate.error),
+                )
+            )
+
+        if workflow_equal and evidence_mode != "minimal":
+            baseline_nodes = await self._node_record_map(
+                baseline_invocation_id,
+                observed_sequence=baseline.observed_sequence,
+            )
+            candidate_nodes = await self._node_record_map(
+                candidate_invocation_id,
+                observed_sequence=candidate.observed_sequence,
+            )
+            differences.extend(
+                _execution_differences(
+                    baseline_nodes,
+                    candidate_nodes,
+                    include_values=evidence_mode == "full",
+                )
+            )
+        for event_type in sorted(
+            set(baseline.user_event_counts) | set(candidate.user_event_counts)
+        ):
+            baseline_count = baseline.user_event_counts.get(event_type, 0)
+            candidate_count = candidate.user_event_counts.get(event_type, 0)
+            if baseline_count != candidate_count:
+                differences.append(
+                    InvocationDifference(
+                        category="user_event",
+                        key=event_type,
+                        baseline=baseline_count,
+                        candidate=candidate_count,
+                    )
+                )
+
+        warnings = [*baseline.warnings, *candidate.warnings]
+        if not workflow_equal:
+            warnings.append(
+                EvidenceWarning(
+                    code="WORKFLOW_IDS_DIFFER",
+                    message=(
+                        "Invocations belong to different Workflows; graph "
+                        "execution evidence was not aligned."
+                    ),
+                    detail={
+                        "baseline_workflow_id": baseline.workflow_id,
+                        "candidate_workflow_id": candidate.workflow_id,
+                    },
+                )
+            )
+        if workflow_equal and (not input_equal or not entry_node_equal):
+            warnings.append(
+                EvidenceWarning(
+                    code="REQUESTS_DIFFER",
+                    message=(
+                        "The Invocations did not start from the same input and "
+                        "entry boundary, so differences are not attributable "
+                        "only to the Workflow revision."
+                    ),
+                )
+            )
+
+        status = (
+            "incompatible"
+            if not workflow_equal
+            else "partially_comparable"
+            if not input_equal or not entry_node_equal or warnings
+            else "comparable"
+        )
+        visible = tuple(differences[:12])
+        return InvocationComparison(
+            source=self.source,
+            status=status,
+            baseline_invocation_id=str(baseline_invocation_id),
+            candidate_invocation_id=str(candidate_invocation_id),
+            workflow_id=baseline.workflow_id if workflow_equal else None,
+            baseline_workflow_revision_id=baseline.workflow_revision_id,
+            candidate_workflow_revision_id=candidate.workflow_revision_id,
+            evidence_mode=evidence_mode,
+            baseline_observed_sequence=baseline.observed_sequence,
+            candidate_observed_sequence=candidate.observed_sequence,
+            input_equal=input_equal,
+            entry_node_equal=entry_node_equal,
+            state_equal=baseline.state == candidate.state,
+            result_equal=_summary_equal(baseline.result, candidate.result),
+            error_equal=_error_equal(baseline.error, candidate.error),
+            baseline_state=baseline.state,
+            candidate_state=candidate.state,
+            baseline_result=baseline.result,
+            candidate_result=candidate.result,
+            baseline_error=baseline.error,
+            candidate_error=candidate.error,
+            baseline_duration_ms=max(
+                0, baseline.updated_at_ms - baseline.created_at_ms
+            ),
+            candidate_duration_ms=max(
+                0, candidate.updated_at_ms - candidate.created_at_ms
+            ),
+            node_execution_delta=(
+                candidate.node_execution_count - baseline.node_execution_count
+            ),
+            edge_evaluation_delta=(
+                candidate.edge_evaluation_count - baseline.edge_evaluation_count
+            ),
+            operator_call_delta=(
+                candidate.operator_call_count - baseline.operator_call_count
+            ),
+            retry_delta=candidate.retry_count - baseline.retry_count,
+            fallback_delta=candidate.fallback_count - baseline.fallback_count,
+            timeout_delta=candidate.timeout_count - baseline.timeout_count,
+            difference_count=len(differences),
+            differences=visible,
+            differences_truncated=len(visible) < len(differences),
+            warnings=tuple(_unique_warnings(warnings)),
         )
 
     async def report_when_stable(
@@ -1106,6 +1291,249 @@ def _memory_invocation_record(
         "created_at_ms": invocation.created_at_ms,
         "updated_at_ms": invocation.updated_at_ms,
     }
+
+
+def _summary_equal(left: Any | None, right: Any | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    return left.type == right.type and left.digest == right.digest
+
+
+def _summary_identity(value: Any | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "type": value.type,
+        "digest": value.digest,
+        "shape": value.shape,
+        "serialized_bytes": value.serialized_bytes,
+    }
+
+
+def _error_equal(left: Any | None, right: Any | None) -> bool:
+    return _error_identity(left) == _error_identity(right)
+
+
+def _error_identity(value: Any | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "code": value.code,
+        "message": value.message,
+        "exception_type": value.exception_type,
+    }
+
+
+def _node_semantic_key(record: Mapping[str, Any]) -> str:
+    scope = "/".join(
+        f"{item.get('loop_region_id')}:{item.get('iteration')}"
+        for item in record.get("execution_scope", ())
+    )
+    value = str(record.get("node_id") or "<unknown>")
+    if scope:
+        value = f"{value}@{scope}"
+    recovery_attempt = int(record.get("recovery_attempt", 0))
+    return value if recovery_attempt == 0 else f"{value}#recovery:{recovery_attempt}"
+
+
+def _semantic_node_map(
+    values: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    for record in values.values():
+        key = _node_semantic_key(record)
+        if key in result:
+            # A duplicate should not normally exist, but preserving both makes
+            # comparison deterministic without guessing which execution owns
+            # the semantic coordinate.
+            sequence = int(record.get("sequence", 0))
+            key = f"{key}#execution:{sequence}"
+        result[key] = record
+    return result
+
+
+def _execution_differences(
+    baseline_values: Mapping[str, Mapping[str, Any]],
+    candidate_values: Mapping[str, Mapping[str, Any]],
+    *,
+    include_values: bool,
+) -> list[InvocationDifference]:
+    baseline = _semantic_node_map(baseline_values)
+    candidate = _semantic_node_map(candidate_values)
+    differences: list[InvocationDifference] = []
+    for key in sorted(set(baseline) | set(candidate)):
+        left = baseline.get(key)
+        right = candidate.get(key)
+        left_ref = (
+            None if left is None else f"node_execution:{left.get('id')}"
+        )
+        right_ref = (
+            None if right is None else f"node_execution:{right.get('id')}"
+        )
+        if left is None or right is None:
+            differences.append(
+                InvocationDifference(
+                    category="node",
+                    key=key,
+                    baseline=None if left is None else _node_identity(left),
+                    candidate=None if right is None else _node_identity(right),
+                    baseline_ref=left_ref,
+                    candidate_ref=right_ref,
+                )
+            )
+            continue
+        left_identity = _node_identity(left, include_values=include_values)
+        right_identity = _node_identity(right, include_values=include_values)
+        if left_identity != right_identity:
+            differences.append(
+                InvocationDifference(
+                    category="node",
+                    key=key,
+                    baseline=left_identity,
+                    candidate=right_identity,
+                    baseline_ref=left_ref,
+                    candidate_ref=right_ref,
+                )
+            )
+        differences.extend(_edge_differences(key, left, right))
+        differences.extend(_operator_differences(key, left, right))
+    return differences
+
+
+def _node_identity(
+    record: Mapping[str, Any],
+    *,
+    include_values: bool = False,
+) -> dict[str, Any]:
+    error = record.get("error") or {}
+    value: dict[str, Any] = {
+        "state": record.get("state"),
+        "error_code": error.get("code"),
+        "recovery_attempt": int(record.get("recovery_attempt", 0)),
+    }
+    if include_values:
+        value["output"] = _summary_identity(
+            summarize_value(record.get("output"))
+        )
+    return value
+
+
+def _edge_differences(
+    node_key: str,
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[InvocationDifference]:
+    left = {
+        str(item.get("edge_id")): item
+        for item in baseline.get("edge_evaluations", ())
+    }
+    right = {
+        str(item.get("edge_id")): item
+        for item in candidate.get("edge_evaluations", ())
+    }
+    values: list[InvocationDifference] = []
+    for edge_id in sorted(set(left) | set(right)):
+        left_value = left.get(edge_id)
+        right_value = right.get(edge_id)
+        left_identity = _edge_identity(left_value)
+        right_identity = _edge_identity(right_value)
+        if left_identity != right_identity:
+            values.append(
+                InvocationDifference(
+                    category="edge",
+                    key=f"{node_key}:{edge_id}",
+                    baseline=left_identity,
+                    candidate=right_identity,
+                    baseline_ref=(
+                        None
+                        if left_value is None
+                        else f"edge_evaluation:{left_value.get('id')}"
+                    ),
+                    candidate_ref=(
+                        None
+                        if right_value is None
+                        else f"edge_evaluation:{right_value.get('id')}"
+                    ),
+                )
+            )
+    return values
+
+
+def _edge_identity(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "state": value.get("state"),
+        "selected": bool(value.get("selected", False)),
+        "target_node_id": value.get("target_node_id"),
+        "reason": value.get("reason"),
+    }
+
+
+def _operator_differences(
+    node_key: str,
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[InvocationDifference]:
+    left = list(baseline.get("operator_executions", ()))
+    right = list(candidate.get("operator_executions", ()))
+    values: list[InvocationDifference] = []
+    for index in range(max(len(left), len(right))):
+        left_value = left[index] if index < len(left) else None
+        right_value = right[index] if index < len(right) else None
+        left_identity = _operator_identity(left_value)
+        right_identity = _operator_identity(right_value)
+        if left_identity != right_identity:
+            values.append(
+                InvocationDifference(
+                    category="operator_call",
+                    key=f"{node_key}:call:{index + 1}",
+                    baseline=left_identity,
+                    candidate=right_identity,
+                    baseline_ref=(
+                        None
+                        if left_value is None
+                        else f"operator_call:{left_value.get('id')}"
+                    ),
+                    candidate_ref=(
+                        None
+                        if right_value is None
+                        else f"operator_call:{right_value.get('id')}"
+                    ),
+                )
+            )
+    return values
+
+
+def _operator_identity(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    error = value.get("error") or {}
+    summary = value.get("summary") or {}
+    return {
+        "type": value.get("type", "direct"),
+        "state": value.get("state"),
+        "reason": value.get("reason"),
+        "operator_id": value.get("operator_id"),
+        "operator_ids": tuple(value.get("operator_ids", ())),
+        "error_code": error.get("code"),
+        "call_count": summary.get("call_count"),
+        "attempt_count": summary.get("attempt_count"),
+        "retry_count": summary.get("retry_count"),
+        "fallback_count": summary.get("fallback_count"),
+        "failure_count": summary.get("failure_count"),
+    }
+
+
+def _unique_warnings(values: list[EvidenceWarning]) -> list[EvidenceWarning]:
+    selected: list[EvidenceWarning] = []
+    seen: set[tuple[str, str]] = set()
+    for value in values:
+        key = (value.code, value.message)
+        if key not in seen:
+            seen.add(key)
+            selected.append(value)
+    return selected
 
 
 def _execution_counts(records: tuple[dict[str, Any], ...]) -> dict[str, int]:

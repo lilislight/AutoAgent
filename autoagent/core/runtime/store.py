@@ -27,6 +27,7 @@ from autoagent.core.runtime.persistence import (
 from autoagent.core.runtime.serialization import JsonRuntimeSerializer
 from autoagent.core.runtime.retention import RuntimeRetentionPolicy
 from autoagent.core.runtime.session import Session
+from autoagent.core.runtime.rerun import InvocationRerunSeed
 from autoagent.core.runtime.snapshot import (
     ExecutionSnapshot,
     apply_state_operations,
@@ -137,6 +138,11 @@ class DurableBackend(Protocol):
         *,
         at_or_before_sequence: int | None,
     ) -> ExecutionSnapshot | None: ...
+
+    async def aload_invocation_rerun_seed(
+        self,
+        invocation_id: UUID,
+    ) -> InvocationRerunSeed | None: ...
 
     async def alist_runtime_events(
         self,
@@ -545,7 +551,7 @@ class RuntimeStore:
                 self._reduced_state_estimated_bytes[invocation.id] = (
                     snapshot_estimated_bytes
                 )
-            if invocation.event_mode == "full":
+            if invocation.event_mode in {"standard", "full"}:
                 self._replay_checkpoints[(invocation.id, 0)] = snapshot
         if self.persistence is not None:
             try:
@@ -944,6 +950,41 @@ class RuntimeStore:
             invocation_id,
             at_or_before_sequence=at_or_before_sequence,
         )
+
+    async def aload_invocation_rerun_seed(
+        self,
+        invocation_id: UUID,
+    ) -> InvocationRerunSeed | None:
+        """Load private start-boundary values without passing through Report."""
+
+        with self._lock:
+            invocation = self.invocations.get(invocation_id)
+        if invocation is not None:
+            session_context = None
+            if invocation.event_mode in {"standard", "full"}:
+                snapshot = await self.aload_execution_snapshot(
+                    invocation_id,
+                    at_or_before_sequence=0,
+                )
+                if snapshot is not None and snapshot.through_sequence == 0:
+                    session, _ = snapshot.restore()
+                    session_context = session.context
+            return InvocationRerunSeed(
+                invocation_id=invocation.id,
+                workflow_id=invocation.workflow_id,
+                workflow_revision_id=invocation.workflow_revision_id,
+                entry_node_id=invocation.entry_node_id,
+                state=invocation.state,
+                event_mode=invocation.event_mode,
+                input=deepcopy(invocation.input),
+                session_context=session_context,
+            )
+        if self.backend is None:
+            return None
+        loader = getattr(self.backend, "aload_invocation_rerun_seed", None)
+        if loader is None:
+            return None
+        return await loader(invocation_id)
 
     async def arebuild_execution(
         self,

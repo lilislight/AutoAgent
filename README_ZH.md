@@ -107,6 +107,8 @@ autoagent invocation run <workflow-id> --input-file input.json
 autoagent invocation report <invocation-id>
 autoagent invocation query <invocation-id> nodes
 autoagent invocation query <invocation-id> node <node-execution-id>
+autoagent invocation rerun <invocation-id>
+autoagent invocation compare <baseline-id> <candidate-id>
 autoagent eval list
 autoagent eval check <suite-id>
 autoagent eval run <suite-id>
@@ -123,8 +125,13 @@ Evaluator 基础设施错误返回退出码 2。
 `invocation query` 按需分页读取 Node、Edge、Operator Call、RuntimeEvent、
 UserEvent 或 Full Runtime State 证据。两个命令都会优先连接匹配的运行中 Server，
 也可以只读查询显式配置的持久化数据库，不会恢复或重新执行 Workflow。
+`invocation rerun` 使用原始 input、入口 Node 和 Genesis Session Context 创建与源
+Invocation 相同 Standard 或 Full 模式的隔离候选；Minimal 不支持 Rerun。
+`invocation compare` 只接受两个 Standard 或两个 Full Invocation，按 Node、Loop 和
+Operator 的语义身份对齐，只报告有界差异，不判断业务结果是否更好。
 [Invocation debugging Skill](skills/autoagent-debug-invocation/SKILL.md)
-指导 Coding Agent 按照 Report 优先、渐进读取证据、最小修复和 Eval 验证的流程调查问题。
+指导 Coding Agent 按照 Report 优先、渐进读取证据、最小修复、Rerun/Comparison
+和 Eval 验证的流程调查问题。
 
 完整的条件编排、Wait/Resume 和 LLM/Tool/ReActWorkflow 可以参考随包发布的
 [authoring examples](examples/authoring/README.md)。推荐的 Coding Agent 工作方式
@@ -139,8 +146,9 @@ Runtime 配置通过 CLI 参数和环境变量提供；[.env.example](.env.examp
 SQLite/PostgreSQL 持久化、Recovery、Runtime Event、CLI、Tracing Server/UI、
 AI 基础能力、随包示例和 authoring Skill。
 
-当前正在补齐面向 Coding Agent 的 Invocation Report、渐进式证据查询和本地
-调试 Skill；后续再实现 Rerun/Compare 和基于 Fork 的调试。
+当前面向 Coding Agent 的本地流程已经包括有界 Invocation Report、渐进式证据
+查询、隔离 Rerun、只读 Comparison 和 Eval 验证。下一步会通过纯 CLI 前向测试
+验证完整调试闭环；Fork 仍是后续 Full 模式扩展。
 [MVP.md](MVP.md) 定义稳定的产品阶段和验收边界，[TODO.md](TODO.md) 记录当前
 工作状态。
 

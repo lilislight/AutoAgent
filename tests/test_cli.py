@@ -232,6 +232,75 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIn('"node_id":"echo"', query_output)
         self.assertIn("QUERY_RESULT generated", query_output)
 
+    def test_local_rerun_and_comparison_use_durable_source_boundary(self) -> None:
+        with self.project(
+            module_name="cli_rerun_workflow",
+            source="""
+                from autoagent import Workflow
+
+                def echo(value: str) -> str:
+                    return value
+
+                workflow = Workflow(id="rerun_echo")
+                workflow.add_node(echo, node_id="echo")
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                "AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///./runtime.db\n",
+                encoding="utf-8",
+            )
+            run_code, run_output = self.run_cli(
+                "--project",
+                str(root),
+                "invocation",
+                "run",
+                "rerun_echo",
+                "--store",
+                "database",
+                "--event-mode",
+                "standard",
+                "--input-json",
+                '{"value":"hello"}',
+            )
+            source_id = next(
+                line.split(" ", 1)[1]
+                for line in run_output.splitlines()
+                if line.startswith("INVOCATION ")
+            )
+            rerun_code, rerun_output = self.run_cli(
+                "--project",
+                str(root),
+                "invocation",
+                "rerun",
+                source_id,
+                "--store",
+                "database",
+            )
+            candidate_id = next(
+                line.split(" ", 1)[1]
+                for line in rerun_output.splitlines()
+                if line.startswith("CANDIDATE ")
+            )
+            compare_code, compare_output = self.run_cli(
+                "--project",
+                str(root),
+                "invocation",
+                "compare",
+                source_id,
+                candidate_id,
+                "--source",
+                "database",
+            )
+
+        self.assertEqual(0, run_code, run_output)
+        self.assertEqual(0, rerun_code, rerun_output)
+        self.assertIn("EVENT_MODE standard", rerun_output)
+        self.assertIn("STATE completed", rerun_output)
+        self.assertEqual(0, compare_code, compare_output)
+        self.assertIn("INPUT_EQUAL true", compare_output)
+        self.assertIn("RESULT_EQUAL true", compare_output)
+        self.assertIn("COMPARISON_RESULT generated", compare_output)
+
     def test_eval_list_is_lazy_and_check_validates_cases(self) -> None:
         evaluation_source = """
             from autoagent.evaluation import EvalCase, Evaluation

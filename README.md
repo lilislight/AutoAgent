@@ -120,6 +120,8 @@ autoagent invocation run <workflow-id> --input-file input.json
 autoagent invocation report <invocation-id>
 autoagent invocation query <invocation-id> nodes
 autoagent invocation query <invocation-id> node <node-execution-id>
+autoagent invocation rerun <invocation-id>
+autoagent invocation compare <baseline-id> <candidate-id>
 autoagent eval list
 autoagent eval check <suite-id>
 autoagent eval run <suite-id>
@@ -138,9 +140,14 @@ execution. `invocation query` progressively loads bounded Node, Edge, Operator
 Call, RuntimeEvent, UserEvent, or Full Runtime State evidence. Both commands
 prefer the matching running Server and can use an explicitly configured
 durable database without recovering or executing the Workflow.
+`invocation rerun` creates an isolated candidate in the source Standard or Full
+mode from its input, entry Node, and Genesis Session Context. Minimal sources
+cannot be rerun. `invocation compare` requires two Standard Invocations or two
+Full Invocations, aligns them by semantic Node/Loop/Operator identity, and
+reports bounded differences without assigning a business verdict.
 The [Invocation debugging Skill](skills/autoagent-debug-invocation/SKILL.md)
 guides a Coding Agent through Report-first investigation, progressive evidence,
-a focused repair, and Eval-backed validation.
+a focused repair, Rerun/Comparison, and Eval-backed validation.
 
 For an unregistered Workflow exported directly from a Python file, `check`,
 `preview`, `invocation run`, and local `invocation resume` also accept `--file`.
@@ -189,10 +196,12 @@ runtime execution, SQLite/PostgreSQL persistence, recovery, Runtime Events,
 CLI, tracing Server/UI, AI building blocks, packaged examples, and the
 authoring Skill.
 
-The next focus is validating Coding-Agent authoring in independent projects,
-then building Agent-friendly Invocation reports, progressive trace queries,
-rerun/Eval, and Fork-based debugging. [MVP.md](MVP.md) defines the product
-stages and acceptance boundaries; [TODO.md](TODO.md) tracks current work.
+The local Coding-Agent workflow now includes bounded Invocation reports,
+progressive trace queries, isolated Rerun, read-only Comparison, and Eval-backed
+validation. The next debugging milestone is a CLI-only forward evaluation of
+that complete loop; Fork remains a later Full-mode extension.
+[MVP.md](MVP.md) defines the product stages and acceptance boundaries;
+[TODO.md](TODO.md) tracks current work.
 
 ## Development
 

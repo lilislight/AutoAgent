@@ -1047,7 +1047,12 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             "input_mapping.completed",
             {row.event_name for row in standard_events},
         )
-        self.assertIsNone(standard.genesis_state_json)
+        self.assertIsNotNone(standard.genesis_state_json)
+        standard_genesis = self.store.serializer.loads(
+            standard.genesis_state_json
+        )
+        self.assertEqual("created", standard_genesis["invocation"]["state"])
+        self.assertEqual([], standard_genesis["node_executions"])
 
         full = rows["full"]
         full_events = by_invocation[full.id]

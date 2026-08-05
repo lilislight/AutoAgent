@@ -33,8 +33,10 @@ from autoagent.cli.evaluation import (
 )
 from autoagent.cli.debugging import (
     InvocationReportCliError,
+    run_invocation_comparison,
     run_invocation_query,
     run_invocation_report,
+    run_invocation_rerun,
 )
 from autoagent.cli.server_client import (
     AutoAgentServerClient,
@@ -213,6 +215,30 @@ def build_parser() -> argparse.ArgumentParser:
     invocation_query.add_argument("--server-url")
     invocation_query.add_argument("--report-file")
 
+    invocation_compare = invocation_commands.add_parser(
+        "compare",
+        help="Compare two observed Invocations without assigning a business verdict.",
+    )
+    invocation_compare.add_argument("baseline_invocation_id")
+    invocation_compare.add_argument("candidate_invocation_id")
+    invocation_compare.add_argument(
+        "--source",
+        choices=("auto", "server", "database"),
+        default="auto",
+    )
+    invocation_compare.add_argument("--server-url")
+    invocation_compare.add_argument("--report-file")
+
+    invocation_rerun = invocation_commands.add_parser(
+        "rerun",
+        help="Run the current Workflow revision from an Invocation start boundary.",
+    )
+    invocation_rerun.add_argument("source_invocation_id")
+    _add_server_connection_arguments(invocation_rerun, selectable=True)
+    invocation_rerun.add_argument("--timeout-ms", type=int)
+    invocation_rerun.add_argument("--report-file")
+    add_runtime_arguments(invocation_rerun)
+
     evaluation = commands.add_parser(
         "eval",
         help="List, validate, and run project-owned Workflow Evaluations.",
@@ -353,6 +379,26 @@ def _dispatch_project_command(
         if arguments.command == "query":
             return asyncio.run(
                 run_invocation_query(project, environment, arguments)
+            )
+        if arguments.command == "compare":
+            return asyncio.run(
+                run_invocation_comparison(project, environment, arguments)
+            )
+        if arguments.command == "rerun":
+            if _uses_server(arguments):
+                _validate_remote_runtime_arguments(arguments)
+            app_settings = (
+                None
+                if _uses_server(arguments)
+                else app_settings_from_arguments(arguments, environment)
+            )
+            return asyncio.run(
+                run_invocation_rerun(
+                    project,
+                    environment,
+                    app_settings,
+                    arguments,
+                )
             )
         if _uses_server(arguments):
             return asyncio.run(

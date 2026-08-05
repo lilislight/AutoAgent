@@ -177,6 +177,19 @@ class AutoAgentServerClient:
             json=body,
         )
 
+    async def rerun(
+        self,
+        workflow_id: str,
+        *,
+        source_invocation_id: str,
+    ) -> dict[str, Any]:
+        revision_id = await self.workflow_revision_id(workflow_id)
+        return await self._request(
+            "POST",
+            f"/api/v1/workflow-revisions/{revision_id}/rerun/"
+            f"{source_invocation_id}",
+        )
+
     async def invocation(self, invocation_id: str) -> dict[str, Any]:
         return await self._request(
             "GET",
@@ -187,6 +200,17 @@ class AutoAgentServerClient:
         return await self._request(
             "GET",
             f"/api/v1/invocations/{invocation_id}/report",
+        )
+
+    async def compare_invocations(
+        self,
+        baseline_invocation_id: str,
+        candidate_invocation_id: str,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{baseline_invocation_id}/comparison/"
+            f"{candidate_invocation_id}",
         )
 
     async def debug_node_executions(

@@ -100,3 +100,36 @@ autoagent invocation query <id> runtime-state \
 
 This query is valid only for Full mode. It still returns a bounded, redacted
 `ValueSummary`; it does not print an arbitrarily large raw object.
+
+## Rerun the source boundary
+
+After a focused repair, run the current project Revision with the original
+input, entry Node, and pre-invocation Session Context:
+
+```bash
+autoagent invocation rerun <source-invocation-id>
+```
+
+Rerun creates a new isolated Session and Invocation in the source Standard or
+Full mode. It executes real Operators and Tools. Do not run it without
+authority when external side effects may be repeated. A Rerun stops normally
+at a Wait and never reuses historical Resume responses automatically. Minimal
+mode is rejected because it has no executable Genesis Session boundary.
+
+Use `--server` to execute through the configured Server. Without it, the
+current project and configured durable database provide the candidate Revision
+and source boundary.
+
+## Compare observed Invocations
+
+```bash
+autoagent invocation compare <baseline-id> <candidate-id>
+```
+
+Comparison is read-only and requires two Standard Invocations or two Full
+Invocations. Minimal and mixed-mode comparisons are rejected. It reports
+request, outcome, graph, Operator summary, UserEvent, and timing differences,
+and aligns Loop and parallel work by semantic execution identity rather than
+Event sequence. `comparable`, `partially_comparable`, and `incompatible`
+describe evidence compatibility, not business success. Use the returned
+evidence refs with `invocation query` for the smallest differing boundary.

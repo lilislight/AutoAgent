@@ -127,6 +127,16 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             for route in self.server.router.routes
             if getattr(route, "name", "") == "cancel_invocation"
         )
+        self.rerun = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "rerun_invocation"
+        )
+        self.compare = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "") == "compare_invocations"
+        )
 
     async def asyncTearDown(self) -> None:
         if self.server._invocation_tasks:
@@ -191,6 +201,39 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted.session_key, resumed.session_key)
         self.assertEqual(submitted.invocation_id, resumed.invocation_id)
         self.assertEqual("completed", resumed.state)
+
+    async def test_server_rerun_submits_isolated_same_mode_invocation(self) -> None:
+        submitted = await self.submit(
+            self.workflow_revision_id,
+            InvocationSubmitRequest(
+                input={"wait_key": "approval"},
+                session_key="rerun-source",
+                event_mode="standard",
+            ),
+        )
+        await self._wait_for_state(submitted.invocation_id, "waiting")
+        await self.resume(
+            self.workflow_revision_id,
+            InvocationResumeRequest(
+                session_key="rerun-source",
+                wait_key="approval",
+                output={"approved": True},
+            ),
+        )
+
+        rerun = await self.rerun(
+            self.workflow_revision_id,
+            submitted.invocation_id,
+        )
+        candidate_id = UUID(rerun["candidate_invocation_id"])
+        await self._wait_for_state(candidate_id, "waiting")
+
+        self.assertEqual(str(submitted.invocation_id), rerun["source_invocation_id"])
+        self.assertEqual("standard", rerun["event_mode"])
+        self.assertNotEqual(str(submitted.session_id), rerun["session_id"])
+        comparison = await self.compare(submitted.invocation_id, candidate_id)
+        self.assertTrue(comparison["input_equal"])
+        self.assertEqual("standard", comparison["evidence_mode"])
 
     async def test_submit_selects_event_mode_per_invocation(self) -> None:
         submitted = await self.submit(

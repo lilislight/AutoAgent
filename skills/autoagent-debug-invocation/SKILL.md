@@ -1,6 +1,6 @@
 ---
 name: autoagent-debug-invocation
-description: Investigate, reproduce, repair, and validate an AutoAgent Workflow problem starting from an Invocation ID. Use when a user reports a failed, interrupted, cancelled, waiting, slow, expensive, or business-incorrect Invocation; asks why a Workflow took a route, retried, fell back, timed out, called a Tool, or produced an unexpected result; or wants a focused code repair backed by Invocation Report evidence and project Evaluations. Do not use for general Workflow authoring without an Invocation, AutoAgent framework-internal development, Tracing UI implementation, or unsupported Fork/Replay work.
+description: Investigate, rerun, compare, repair, and validate an AutoAgent Workflow problem starting from an Invocation ID. Use when a user reports a failed, interrupted, cancelled, waiting, slow, expensive, or business-incorrect Invocation; asks why a Workflow took a route, retried, fell back, timed out, called a Tool, or produced an unexpected result; or wants a focused code repair backed by Invocation Report, Rerun, Comparison, and project Evaluation evidence. Do not use for general Workflow authoring without an Invocation, AutoAgent framework-internal development, Tracing UI implementation, or Fork/Replay work.
 ---
 
 # Debug an AutoAgent Invocation
@@ -37,18 +37,22 @@ not a generated root-cause conclusion.
    model/provider setup, or external dependency boundary. Reports do not need
    source-line metadata; use stable Workflow, Node, Edge, and Operator IDs to
    locate current code.
-9. Reproduce with an existing Eval Case when it expresses the business
-   requirement. Add or update the smallest Case only when the requirement is
-   absent and should remain a regression guard. Do not turn every incident into
-   an Eval.
-10. Make the smallest code or configuration repair in the owning layer. Follow
+9. Make the smallest code or configuration repair in the owning layer. Follow
     [repair.md](references/repair.md). When changing Workflow authoring code,
     use the `autoagent-author-workflow` Skill if it is available.
-11. Run Project Check, the affected Workflow Check, Eval Check, and the
+10. When execution is safe, rerun the original start boundary against the
+    current project Revision, then compare the original and candidate
+    Invocations. Rerun executes real Operators and Tools; obtain authority
+    before repeating external side effects. Follow [cli.md](references/cli.md).
+11. Use an existing Eval Case when it expresses the business requirement. Add
+    or update the smallest Case only when the requirement is absent and should
+    remain a regression guard. Do not turn every incident into an Eval.
+12. Run Project Check, the affected Workflow Check, Eval Check, and the
     relevant Eval Suite. Run focused unit tests only for isolated project-owned
     helper logic.
-12. Report the factual cause, changed files, validation, remaining uncertainty,
-    and whether the original Invocation had incomplete or non-durable evidence.
+13. Report the factual cause, changed files, Rerun/Comparison evidence,
+    validation, remaining uncertainty, and whether the original Invocation had
+    incomplete or non-durable evidence.
 
 Ask one focused question only when the missing source, business oracle, or
 external side-effect authority blocks a safe conclusion. Otherwise continue
@@ -70,7 +74,13 @@ with the smallest evidence-driven step.
 
 ## Respect current product boundaries
 
-- `report` and `query` are read-only and are never persisted as Runtime data.
+- `report`, `query`, and `compare` are read-only and are never persisted as
+  Runtime data.
+- `rerun` creates a new isolated Session and Invocation in the source Standard
+  or Full mode; it never mutates the source Session or Invocation. Minimal mode
+  cannot be rerun.
+- `compare` requires matching Standard modes or matching Full modes. Minimal
+  and mixed-mode comparisons are rejected.
 - A waiting Invocation is a stable investigation boundary; do not Resume it
   without user authority and a known response.
 - Minimal mode intentionally lacks Node, Edge, Operator Call, Recovery, and
@@ -79,8 +89,8 @@ with the smallest evidence-driven step.
   values or historical state operations.
 - Full mode supports detailed phases and state reconstruction at recorded Event
   boundaries.
-- Report does not currently perform Fork, Replay, automatic rerun, comparison,
-  code modification, or root-cause inference.
+- Rerun starts at the entry Node; it is not Replay or Fork and does not infer a
+  root cause or business verdict.
 - Do not mutate the original Invocation or database while investigating it.
 
 ## Return a compact handoff

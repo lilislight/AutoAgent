@@ -68,14 +68,15 @@ class DebuggingSkillTests(unittest.TestCase):
             self.assertEqual(kind, parsed.kind)
             self.assertIn(kind, references)
 
-    def test_skill_is_report_first_and_does_not_claim_future_features(self) -> None:
+    def test_skill_is_report_first_and_keeps_rerun_boundary_explicit(self) -> None:
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertLess(
             skill.index("autoagent invocation report"),
             skill.index("Form one evidence question"),
         )
-        self.assertIn("does not currently perform Fork", skill)
+        self.assertIn("Rerun starts at the entry Node", skill)
+        self.assertIn("it is not Replay or Fork", skill)
         self.assertIn("Do not mutate the original Invocation", skill)
 
 

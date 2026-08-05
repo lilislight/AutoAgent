@@ -138,6 +138,9 @@ execution. `invocation query` progressively loads bounded Node, Edge, Operator
 Call, RuntimeEvent, UserEvent, or Full Runtime State evidence. Both commands
 prefer the matching running Server and can use an explicitly configured
 durable database without recovering or executing the Workflow.
+The [Invocation debugging Skill](skills/autoagent-debug-invocation/SKILL.md)
+guides a Coding Agent through Report-first investigation, progressive evidence,
+a focused repair, and Eval-backed validation.
 
 For an unregistered Workflow exported directly from a Python file, `check`,
 `preview`, `invocation run`, and local `invocation resume` also accept `--file`.

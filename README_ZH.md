@@ -123,6 +123,8 @@ Evaluator 基础设施错误返回退出码 2。
 `invocation query` 按需分页读取 Node、Edge、Operator Call、RuntimeEvent、
 UserEvent 或 Full Runtime State 证据。两个命令都会优先连接匹配的运行中 Server，
 也可以只读查询显式配置的持久化数据库，不会恢复或重新执行 Workflow。
+[Invocation debugging Skill](skills/autoagent-debug-invocation/SKILL.md)
+指导 Coding Agent 按照 Report 优先、渐进读取证据、最小修复和 Eval 验证的流程调查问题。
 
 完整的条件编排、Wait/Resume 和 LLM/Tool/ReActWorkflow 可以参考随包发布的
 [authoring examples](examples/authoring/README.md)。推荐的 Coding Agent 工作方式

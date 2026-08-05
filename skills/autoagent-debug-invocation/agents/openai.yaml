@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug AutoAgent Invocation"
+  short_description: "Investigate and repair one AutoAgent Invocation"
+  default_prompt: "Use $autoagent-debug-invocation to investigate this Invocation ID and validate a focused repair."

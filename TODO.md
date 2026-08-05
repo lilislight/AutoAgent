@@ -135,7 +135,7 @@ debugging Skill against the completed Report and progressive-query CLI.
 
 ### Phase 4: Local debugging Skill
 
-- [ ] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
+- [x] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
 - [ ] Forward-test Report -> optional Case update -> code change -> compile ->
   Eval Result -> user-review handoff using CLI only.
 

@@ -513,13 +513,14 @@ Capture cannot infer every business oracle. A new artifact starts as
 Ordinary rerun does not print the source Input for a Coding Agent to copy. It
 resolves the complete value internally by Invocation id, preserves the source
 Invocation, and invokes the current project Workflow Revision in a new Session.
-When the pre-admission Session Context is available, rerun copies that Context
-so stateful and multi-turn behavior is reproducible without continuing the
-original Session. If that evidence is unavailable, rerun may use only the
-original Input but must emit `SESSION_CONTEXT_NOT_REPRODUCED` and must not claim
-strict equivalence. A comparison can describe state, output, path, timing, and
-error differences between source and new Invocations, but only an Eval
-expectation can decide whether the new business result is correct.
+Standard and Full reruns copy the pre-admission Genesis Session Context so
+stateful and multi-turn behavior is reproducible without continuing the
+original Session, and preserve the source Event mode. Minimal rerun is rejected
+because it has no executable Genesis boundary. Comparison requires matching
+Standard modes or matching Full modes; Minimal and mixed-mode comparisons are
+rejected. A comparison can describe state, output, path, timing, and error
+differences, but only an Eval expectation can decide whether the new business
+result is correct.
 
 Rerun is restricted to the environment that owns the source evidence. A
 Server-sourced Invocation is rerun by that same Server, and a database-sourced
@@ -529,9 +530,9 @@ Server into a different local execution environment. Comparison likewise
 requires both Invocations to be visible through the same evidence source.
 
 Provide pluggable redaction with safe defaults. Never copy Secrets, credentials,
-an entire production database, or unbounded user content. When Standard or
-Minimal mode lacks required evidence, report that limitation and request a
-fixture rather than fabricating one.
+an entire production database, or unbounded user content. When an Event mode
+lacks evidence required by a query, report that limitation rather than
+fabricating it.
 
 ### 6. Coding Agent CLI and Skill
 
@@ -684,15 +685,17 @@ Implementation steps:
 2. Teach Report-first progressive queries and owning-layer classification.
 3. Teach the Agent to add or update an Eval Case only when the Suite does not
    already express the reported business requirement.
-4. Require compile -> `autoagent eval run` -> evidence-based handoff before
-   proposing the new Workflow Revision.
-5. Forward-test failed, incorrect, and slow Invocations without exposing
+4. Teach side-effect-safe same-mode Rerun and read-only same-mode Comparison.
+5. Require compile -> Rerun -> Comparison -> `autoagent eval run` ->
+   evidence-based handoff before proposing the new Workflow Revision.
+6. Forward-test failed, incorrect, and slow Invocations without exposing
    AutoAgent internals.
 
 Acceptance:
 
 - an independent Coding Agent can complete Invocation ID -> Report -> code
-  change -> Eval Result -> user-review handoff entirely through CLI;
+  change -> Rerun -> Comparison -> Eval Result -> user-review handoff entirely
+  through CLI;
 - infrastructure and framework failures are not disguised as Workflow fixes.
 
 ### Phase 5: Optional Invocation-to-Case capture

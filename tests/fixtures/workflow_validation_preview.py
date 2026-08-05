@@ -13,7 +13,6 @@ from autoagent import (
     BackoffPolicy,
     CapabilityRef,
     CapabilitySelectionPolicy,
-    EdgePolicy,
     MapPolicy,
     NodePolicy,
     OperatorRef,
@@ -136,7 +135,7 @@ def plan_remediation(
     assess_blast_radius: dict[str, object],
     security_review: dict[str, object] | None = None,
 ) -> list[dict[str, str]]:
-    """Create a dynamic action list that the following Map edge fans out."""
+    """Create a dynamic action list that the mapped Node fans out."""
 
     actions = [
         {
@@ -382,6 +381,9 @@ def build_workflow() -> Workflow:
         assess_blast_radius,
         node_id="assess_blast_radius",
         name="Assess blast radius",
+        # INTENTIONAL ERROR: default Map selection cannot choose between this
+        # Node's classify_incident and security_review inputs.
+        policy=NodePolicy(map=MapPolicy()),
     )
     workflow.add_node(
         review_security_risk,
@@ -397,7 +399,14 @@ def build_workflow() -> Workflow:
         execute_action,
         node_id="execute_action",
         name="Execute remediation actions",
-        policy=NodePolicy(max_concurrency=8),
+        policy=NodePolicy(
+            map=MapPolicy(
+                item_selector=select_action_items,
+                output_aggregator=aggregate_action_results,
+                max_parallelism=4,
+            ),
+            max_concurrency=8,
+        ),
     )
     workflow.add_node(
         review_remediation,
@@ -452,13 +461,6 @@ def build_workflow() -> Workflow:
     workflow.add_edge(
         "plan_remediation",
         "execute_action",
-        policy=EdgePolicy(
-            map=MapPolicy(
-                item_selector=select_action_items,
-                output_aggregator=aggregate_action_results,
-                max_parallelism=4,
-            )
-        ),
     )
     workflow.add_edge("execute_action", "review_remediation")
     workflow.add_edge(
@@ -502,8 +504,8 @@ def build_workflow() -> Workflow:
     # 3. String conditions are reserved for YAML/UI but unsupported in V1.
     # 4. A loop may only have one external entry node. The normal entry is
     #    review_remediation; entering refine_remediation directly is forbidden.
-    # 5. security_review -> assess_blast_radius is a cross-branch Map into a
-    #    target that already has an incoming edge. V1 rejects Map plus fan-in.
+    # 5. assess_blast_radius uses default Map selection with multiple incoming
+    #    Edges, so the Compiler requires an explicit item_selector.
     # ---------------------------------------------------------------------
     workflow.add_edge(
         "archive_incident",
@@ -531,15 +533,7 @@ def build_workflow() -> Workflow:
     workflow.add_edge(
         "security_review",
         "assess_blast_radius",
-        # INTENTIONAL ERROR: Map target already has classify_incident as an
-        # incoming edge, so this violates the V1 Map/fan-in restriction.
         # This edge omits edge_id to demonstrate automatic ID generation.
-        policy=EdgePolicy(
-            map=MapPolicy(
-                item_selector=select_action_items,
-                max_parallelism=2,
-            )
-        ),
     )
 
     return workflow

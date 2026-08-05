@@ -17,7 +17,6 @@ from autoagent.core.workflow import (
     CapabilityRef,
     CapabilitySelectionPolicy,
     Edge,
-    EdgePolicy,
     MapPolicy,
     Node,
     NodePolicy,
@@ -412,21 +411,24 @@ class WorkflowCompilerTests(unittest.TestCase):
             self.diagnostic_codes(result),
         )
 
-    def test_map_policy_cannot_target_child_workflow_placeholder(self):
+    def test_map_policy_cannot_apply_to_child_workflow_placeholder(self):
         child = Workflow(id="child", nodes=[Node(id="work", capability=task)])
         parent = make_workflow(id="parent")
         parent.add_node(task, node_id="start")
-        parent.add_node(child, node_id="child")
-        parent.add_edge(
-            "start",
-            "child",
-            policy=EdgePolicy(map=MapPolicy()),
+        parent.add_node(
+            child,
+            node_id="child",
+            policy=NodePolicy(map=MapPolicy()),
         )
+        parent.add_edge("start", "child")
 
         result = WorkflowCompiler().compile(parent)
 
         self.assertFalse(result.ok)
-        self.assertIn("SUBWORKFLOW_MAP_UNSUPPORTED", self.diagnostic_codes(result))
+        self.assertIn(
+            "SUBWORKFLOW_NODE_BEHAVIOR_UNSUPPORTED",
+            self.diagnostic_codes(result),
+        )
 
     def test_child_boundary_selectors_are_rejected_for_regular_nodes(self):
         workflow = make_workflow(
@@ -680,14 +682,14 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         self.assertIs(policy, workflow_ir.nodes["limited"].policy)
 
-    def test_edge_map_policy_is_carried_into_edge_ir(self):
+    def test_map_policy_is_carried_into_node_ir(self):
         def select_items(ctx):
             return ctx.input["items"]
 
         def aggregate(ctx):
             return {"items": ctx.item_outputs}
 
-        policy = EdgePolicy(
+        policy = NodePolicy(
             map=MapPolicy(
                 item_selector=select_items,
                 output_aggregator=aggregate,
@@ -697,14 +699,24 @@ class WorkflowCompilerTests(unittest.TestCase):
         workflow = make_workflow(
             nodes=[
                 Node(id="source", capability=task),
-                Node(id="target", capability=other_task),
+                Node(id="target", capability=other_task, policy=policy),
             ],
-            edges=[Edge(id="map_edge", from_node="source", to_node="target", policy=policy)],
+            edges=[Edge(id="source_target", from_node="source", to_node="target")],
         )
 
-        workflow_ir = self.compile_ok(workflow)
+        result = WorkflowCompiler().compile(workflow)
+        self.assertTrue(result.ok, result.diagnostics)
+        assert result.workflow_ir is not None
+        assert result.workflow_snapshot is not None
+        workflow_ir = result.workflow_ir
 
-        self.assertIs(policy, workflow_ir.edges["map_edge"].policy)
+        self.assertIs(policy, workflow_ir.nodes["target"].policy)
+        node_definition = next(
+            item
+            for item in result.workflow_snapshot.definition["nodes"]
+            if item["id"] == "target"
+        )
+        self.assertIsNotNone(node_definition["policy"]["map"])
 
     def test_replication_policy_allows_default_ordered_list_aggregation(self):
         result = WorkflowCompiler().compile(
@@ -726,14 +738,17 @@ class WorkflowCompilerTests(unittest.TestCase):
         workflow = make_workflow(
             nodes=[
                 Node(id="source", capability=task),
-                Node(id="target", capability=other_task),
+                Node(
+                    id="target",
+                    capability=other_task,
+                    policy=NodePolicy(map=MapPolicy(max_parallelism=0)),
+                ),
             ],
             edges=[
                 Edge(
-                    id="map_edge",
+                    id="source_target",
                     from_node="source",
                     to_node="target",
-                    policy=EdgePolicy(map=MapPolicy(max_parallelism=0)),
                 )
             ],
         )
@@ -742,7 +757,81 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(["POLICY_MAP_INVALID"], self.diagnostic_codes(result))
-        self.assertEqual("map_edge", result.diagnostics[0].subject)
+        self.assertEqual("target", result.diagnostics[0].subject)
+
+    def test_default_map_requires_one_incoming_edge(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="left", capability=task),
+                Node(id="right", capability=task),
+                Node(
+                    id="target",
+                    capability=other_task,
+                    policy=NodePolicy(map=MapPolicy()),
+                ),
+            ],
+            edges=[
+                Edge(from_node="left", to_node="target"),
+                Edge(from_node="right", to_node="target"),
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        diagnostic = next(
+            item
+            for item in result.diagnostics
+            if item.code == "POLICY_MAP_SELECTOR_REQUIRED"
+        )
+        self.assertEqual("target", diagnostic.subject)
+
+    def test_custom_map_selector_supports_complete_fan_in(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="left", capability=task),
+                Node(id="right", capability=task),
+                Node(
+                    id="target",
+                    capability=other_task,
+                    policy=NodePolicy(
+                        map=MapPolicy(item_selector=lambda ctx: ctx.incoming)
+                    ),
+                ),
+            ],
+            edges=[
+                Edge(from_node="left", to_node="target"),
+                Edge(from_node="right", to_node="target"),
+            ],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertTrue(result.ok, result.diagnostics)
+
+    def test_map_and_replication_are_mutually_exclusive_node_policies(self):
+        workflow = make_workflow(
+            nodes=[
+                Node(id="source", capability=task),
+                Node(
+                    id="target",
+                    capability=other_task,
+                    policy=NodePolicy(
+                        map=MapPolicy(item_selector=lambda ctx: ctx.incoming),
+                        replication=ReplicationPolicy(count=2),
+                    ),
+                ),
+            ],
+            edges=[Edge(from_node="source", to_node="target")],
+        )
+
+        result = WorkflowCompiler().compile(workflow)
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            "POLICY_MAP_REPLICATION_CONFLICT",
+            self.diagnostic_codes(result),
+        )
 
     def test_compiler_derives_natural_loop_region(self):
         workflow = make_workflow(
@@ -1003,17 +1092,20 @@ class WorkflowCompilerTests(unittest.TestCase):
             self.diagnostic_codes(result),
         )
 
-    def test_map_policy_cannot_target_wait_system_command(self):
+    def test_wait_system_command_rejects_map_policy(self):
         workflow = make_workflow(
             nodes=[
                 Node(id="source", capability=lambda: [{"wait_key": "one"}]),
-                Node(id="wait", capability=SystemCommand(id="wait")),
+                Node(
+                    id="wait",
+                    capability=SystemCommand(id="wait"),
+                    policy=NodePolicy(map=MapPolicy()),
+                ),
             ],
             edges=[
                 Edge(
                     from_node="source",
                     to_node="wait",
-                    policy=EdgePolicy(map=MapPolicy()),
                 )
             ],
         )
@@ -1022,7 +1114,7 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn(
-            "SYSTEM_COMMAND_MAP_UNSUPPORTED",
+            "SYSTEM_COMMAND_POLICY_UNSUPPORTED",
             self.diagnostic_codes(result),
         )
 

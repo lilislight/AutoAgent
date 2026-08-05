@@ -3,10 +3,10 @@ flowchart LR
     n0["Collect incident signal<br/><small>Operator: collect_incident_signal</small>"]
     n1["Classify incident<br/><small>Operator: classify_incident</small>"]
     n2["Analyze logs<br/><small>Capability: incident_log_analysis</small>"]
-    n3["Assess blast radius<br/><small>Operator: assess_blast_radius</small>"]
+    n3["Assess blast radius<br/><small>Operator: assess_blast_radius</small><br/><small>Map</small>"]
     n4["Security review<br/><small>Operator: review_security_risk</small>"]
     n5["Plan remediation<br/><small>Operator: plan_remediation</small>"]
-    n6["Execute remediation actions<br/><small>Operator: execute_action</small>"]
+    n6["Execute remediation actions<br/><small>Operator: execute_action</small><br/><small>Map</small>"]
     n7["Review remediation<br/><small>Operator: review_remediation</small>"]
     n8["Refine failed remediation<br/><small>Operator: refine_remediation</small>"]
     n9["Close incident<br/><small>Operator: close_incident</small>"]
@@ -24,7 +24,7 @@ flowchart LR
     n2 -->|edge_analyze_logs_plan_remediation| n5
     n3 -->|edge_assess_blast_radius_plan_remediation| n5
     n4 -->|edge_security_review_plan_remediation| n5
-    n5 -->|edge_plan_remediation_execute_action &#124; map| n6
+    n5 -->|edge_plan_remediation_execute_action| n6
     n6 -->|edge_execute_action_review_remediation| n7
     n7 -->|edge_review_remediation_close_incident &#124; condition| n9
     n7 -->|edge_review_remediation_refine_remediation &#124; condition| n8
@@ -39,7 +39,7 @@ flowchart LR
     missing1 -->|error_missing_source| n0
     n1 -->|error_string_condition &#124; condition| n12
     n1 -->|edge_classify_incident_refine_remediation| n8
-    n4 -->|edge_security_review_assess_blast_radius &#124; map| n3
+    n4 -->|edge_security_review_assess_blast_radius| n3
     classDef normal fill:#ffffff,stroke:#334155,color:#111827
     classDef entry fill:#ecfdf5,stroke:#047857,color:#111827,stroke-width:2px
     classDef exit fill:#eff6ff,stroke:#1d4ed8,color:#111827,stroke-width:2px
@@ -49,7 +49,7 @@ flowchart LR
     class n0 normal
     class n1 normal
     class n2 normal
-    class n3 normal
+    class n3 error
     class n4 normal
     class n5 normal
     class n6 normal
@@ -67,11 +67,10 @@ flowchart LR
     linkStyle 19 stroke:#dc2626,stroke-width:3px,color:#991b1b
     linkStyle 20 stroke:#dc2626,stroke-width:3px,color:#991b1b
     linkStyle 21 stroke:#dc2626,stroke-width:3px,color:#991b1b
-    linkStyle 22 stroke:#dc2626,stroke-width:3px,color:#991b1b
     %% ERROR EDGE_UNKNOWN_NODE edge:error_missing_target
     %% ERROR EDGE_UNKNOWN_NODE edge:error_missing_source
     %% ERROR STRING_CONDITION_UNSUPPORTED edge:error_string_condition
+    %% ERROR POLICY_MAP_SELECTOR_REQUIRED node:assess_blast_radius
     %% ERROR CAPABILITY_NOT_REGISTERED node:broken_pager_node
     %% ERROR CAPABILITY_NOT_REGISTERED node:broken_ticket_node
     %% ERROR LOOP_ENTRY_INVALID edge:edge_classify_incident_refine_remediation
-    %% ERROR POLICY_MAP_FAN_IN_UNSUPPORTED edge:edge_security_review_assess_blast_radius

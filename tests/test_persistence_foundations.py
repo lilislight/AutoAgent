@@ -393,23 +393,19 @@ class PersistenceIdentityTests(unittest.TestCase):
 
 
 class RuntimeSerializerTests(unittest.TestCase):
-    def test_explicit_pydantic_type_id_is_used_for_writes_and_aliases_decode(
+    def test_pydantic_model_uses_one_stable_type_id(
         self,
     ) -> None:
         serializer = JsonRuntimeSerializer()
         serializer.register_pydantic_model(Message, type_id="test.message.v1")
-        serializer.register_pydantic_model(Message, type_id="__main__:Message")
 
         payload = serializer.dumps(Message(role="user", content="stable"))
         self.assertIn(b'"type_id":"test.message.v1"', payload)
-        legacy_payload = (
-            b'{"__autoagent_type__":"pydantic","type_id":"__main__:Message",'
-            b'"value":{"content":"legacy","role":"user"}}'
-        )
-        self.assertEqual(
-            Message(role="user", content="legacy"),
-            serializer.loads(legacy_payload),
-        )
+        with self.assertRaisesRegex(ValueError, "already registered as"):
+            serializer.register_pydantic_model(
+                Message,
+                type_id="test.message.alternate",
+            )
 
     def test_app_owns_runtime_type_registration(self) -> None:
         class Token:

@@ -157,7 +157,7 @@ class Operator:
         explicit operator_id they use module/qualified-name identity. Compiler
         supplies a node-stable binding id so distinct Callable objects become
         distinct Operators while repeated use of one object can reuse it.
-        Direct Operators keep version 1 compatibility metadata.
+        Direct Operators use version 1 identity metadata.
         """
 
         return cls(

@@ -12,7 +12,6 @@ from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
     Edge,
-    EdgePolicy,
     MapPolicy,
     NodePolicy,
     RecoveryPolicy,
@@ -923,14 +922,15 @@ class WorkflowExecutorTests(unittest.TestCase):
             node_id="fast",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
-        workflow.add_node(slow_map_item, node_id="mapped")
+        workflow.add_node(
+            slow_map_item,
+            node_id="mapped",
+            policy=NodePolicy(map=MapPolicy(item_selector=select_items)),
+        )
         workflow.add_edge("start", "fast")
         workflow.add_edge(
             "start",
             "mapped",
-            policy=EdgePolicy(
-                map=MapPolicy(item_selector=select_items),
-            ),
         )
 
         invocation = app.invoke(workflow, event_mode="full")
@@ -1816,11 +1816,10 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_map_policy_aggregates_indexed_operator_executions(self) -> None:
         workflow = Workflow(id="map_execution")
         workflow.add_node(lambda: [1, 2, 3], node_id="source")
-        workflow.add_node(lambda value: value * value, node_id="square")
-        workflow.add_edge(
-            "source",
-            "square",
-            policy=EdgePolicy(
+        workflow.add_node(
+            lambda value: value * value,
+            node_id="square",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": item} for item in ctx.input
@@ -1829,6 +1828,10 @@ class WorkflowExecutorTests(unittest.TestCase):
                     max_parallelism=2,
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "square",
         )
 
         invocation = started_app().invoke(workflow)
@@ -1839,6 +1842,132 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual("map", calls[0].kind)
         self.assertEqual(3, calls[0].summary.call_count)
         self.assertEqual(3, calls[0].summary.success_count)
+
+    def test_default_map_iterates_single_incoming_value(self) -> None:
+        workflow = Workflow(id="default_node_map")
+        workflow.add_node(
+            lambda: [{"value": 1}, {"value": 2}],
+            node_id="source",
+        )
+        workflow.add_node(
+            lambda value: value * 2,
+            node_id="mapped",
+            policy=NodePolicy(map=MapPolicy()),
+        )
+        workflow.add_edge("source", "mapped")
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual(invocation.result, {"output": [2, 4]})
+
+    def test_custom_map_selector_can_map_invocation_input_at_entry(self) -> None:
+        workflow = Workflow(id="entry_node_map")
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="mapped",
+            policy=NodePolicy(
+                map=MapPolicy(
+                    item_selector=lambda ctx: [
+                        {"value": value} for value in ctx.input["items"]
+                    ]
+                )
+            ),
+        )
+
+        invocation = started_app().invoke(
+            workflow,
+            input={"items": [1, 2]},
+        )
+
+        self.assertEqual(invocation.result, {"output": [2, 3]})
+
+    def test_map_selector_receives_complete_fan_in(self) -> None:
+        seen: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+        def select_items(ctx):
+            seen.append(
+                (
+                    tuple(item.edge_id for item in ctx.incoming),
+                    tuple(sorted(ctx.input)),
+                )
+            )
+            return [
+                {"value": value}
+                for incoming in ctx.incoming
+                for value in incoming.value
+            ]
+
+        workflow = Workflow(id="map_complete_fan_in")
+        workflow.add_node(lambda: {"_value": None}, node_id="start")
+        workflow.add_node(lambda _value: [1, 2], node_id="left")
+        workflow.add_node(lambda _value: [10, 20], node_id="right")
+        workflow.add_node(
+            lambda value: value,
+            node_id="mapped",
+            policy=NodePolicy(map=MapPolicy(item_selector=select_items)),
+        )
+        workflow.add_edge("start", "left")
+        workflow.add_edge("start", "right")
+        workflow.add_edge("left", "mapped", edge_id="left_mapped")
+        workflow.add_edge("right", "mapped", edge_id="right_mapped")
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual(invocation.result, {"output": [1, 2, 10, 20]})
+        self.assertEqual(
+            seen,
+            [
+                (
+                    ("left_mapped", "right_mapped"),
+                    ("left", "right"),
+                )
+            ],
+        )
+
+    def test_map_node_can_be_natural_loop_header(self) -> None:
+        incoming_edges: list[str] = []
+
+        def select_items(ctx):
+            incoming_edges.extend(item.edge_id for item in ctx.incoming)
+            return [{"value": value} for value in ctx.input]
+
+        workflow = Workflow(id="map_loop_header")
+        workflow.add_node(lambda: [0], node_id="start")
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="mapped",
+            policy=NodePolicy(
+                map=MapPolicy(item_selector=select_items),
+                resource=ResourcePolicy(max_node_executions_per_invocation=5),
+            ),
+        )
+        workflow.add_node(
+            lambda value: value,
+            node_id="final",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value[0]},
+        )
+        workflow.add_edge("start", "mapped", edge_id="enter_loop")
+        workflow.add_edge(
+            "mapped",
+            "mapped",
+            edge_id="continue_loop",
+            condition=lambda ctx: ctx.source_output[0] < 3,
+        )
+        workflow.add_edge(
+            "mapped",
+            "final",
+            edge_id="exit_loop",
+            condition=lambda ctx: ctx.source_output[0] >= 3,
+        )
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual(invocation.result, {"output": 3})
+        self.assertEqual(
+            incoming_edges,
+            ["enter_loop", "continue_loop", "continue_loop"],
+        )
+        self.assertEqual(invocation.count_node_executions("mapped"), 3)
 
     def test_map_uses_fixed_app_worker_pool_without_policy_limit(self) -> None:
         active = 0
@@ -1858,17 +1987,20 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="bounded_default_map_workers")
         workflow.add_node(lambda: list(range(64)), node_id="source")
-        workflow.add_node(transform, node_id="target")
-        workflow.add_edge(
-            "source",
-            "target",
-            policy=EdgePolicy(
+        workflow.add_node(
+            transform,
+            node_id="target",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": value} for value in ctx.input
                     ]
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "target",
         )
 
         invocation = started_app().invoke(workflow)
@@ -1993,11 +2125,14 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="invalid_map_collection")
         workflow.add_node(lambda: [1], node_id="source")
-        workflow.add_node(target, node_id="target")
+        workflow.add_node(
+            target,
+            node_id="target",
+            policy=NodePolicy(map=MapPolicy(item_selector=lambda _ctx: 1)),
+        )
         workflow.add_edge(
             "source",
             "target",
-            policy=EdgePolicy(map=MapPolicy(item_selector=lambda _ctx: 1)),
         )
 
         invocation = started_app().invoke(workflow)
@@ -2019,14 +2154,14 @@ class WorkflowExecutorTests(unittest.TestCase):
         workflow.add_node(
             target,
             node_id="target",
-            policy=NodePolicy(retry=RetryPolicy(max_attempts=3)),
+            policy=NodePolicy(
+                retry=RetryPolicy(max_attempts=3),
+                map=MapPolicy(item_selector=lambda ctx: list(ctx.input)),
+            ),
         )
         workflow.add_edge(
             "source",
             "target",
-            policy=EdgePolicy(
-                map=MapPolicy(item_selector=lambda ctx: list(ctx.input))
-            ),
         )
 
         invocation = started_app().invoke(workflow)
@@ -2049,17 +2184,20 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="invalid_map_arguments")
         workflow.add_node(lambda: ["wrong"], node_id="source")
-        workflow.add_node(target, node_id="target")
-        workflow.add_edge(
-            "source",
-            "target",
-            policy=EdgePolicy(
+        workflow.add_node(
+            target,
+            node_id="target",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": item} for item in ctx.input
                     ]
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "target",
         )
 
         invocation = started_app().invoke(workflow)
@@ -2094,16 +2232,19 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="async_map_hooks")
         workflow.add_node(lambda request: [1, 2, 3], node_id="source")
-        workflow.add_node(square, node_id="square")
-        workflow.add_edge(
-            "source",
-            "square",
-            policy=EdgePolicy(
+        workflow.add_node(
+            square,
+            node_id="square",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=select_items,
                     output_aggregator=aggregate,
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "square",
         )
 
         invocation = started_app().invoke(
@@ -2136,11 +2277,10 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="map_failure_cancellation")
         workflow.add_node(lambda: [0, 1, 2], node_id="source")
-        workflow.add_node(process, node_id="process")
-        workflow.add_edge(
-            "source",
-            "process",
-            policy=EdgePolicy(
+        workflow.add_node(
+            process,
+            node_id="process",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": item} for item in ctx.input
@@ -2149,6 +2289,10 @@ class WorkflowExecutorTests(unittest.TestCase):
                     max_parallelism=3,
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "process",
         )
 
         started = time.perf_counter()

@@ -7,9 +7,9 @@ from pathlib import Path
 from autoagent import (
     CapabilityRef,
     Edge,
-    EdgePolicy,
     MapPolicy,
     Node,
+    NodePolicy,
     Workflow,
 )
 from tests.helpers import isolated_app
@@ -140,7 +140,7 @@ class WorkflowPreviewTests(unittest.TestCase):
         )
         self.assertEqual("edge_source_target", diagnostic.object_id)
 
-    def test_compiler_warning_marks_map_edge_amber(self) -> None:
+    def test_compiler_warning_marks_map_node_amber(self) -> None:
         def item_source(value: str) -> list[dict[str, str]]:
             return [{"value": value}]
 
@@ -148,18 +148,21 @@ class WorkflowPreviewTests(unittest.TestCase):
             id="warning_edge",
             nodes=[
                 Node(id="source", capability=item_source),
-                Node(id="target", capability=target),
+                Node(
+                    id="target",
+                    capability=target,
+                    policy=NodePolicy(
+                        map=MapPolicy(
+                            output_aggregator=lambda ctx: ctx.item_outputs
+                        )
+                    ),
+                ),
             ],
             edges=[
                 Edge(
                     id="mapped",
                     from_node="source",
                     to_node="target",
-                    policy=EdgePolicy(
-                        map=MapPolicy(
-                            output_aggregator=lambda ctx: ctx.item_outputs
-                        )
-                    ),
                 )
             ],
         )
@@ -168,13 +171,17 @@ class WorkflowPreviewTests(unittest.TestCase):
 
         self.assertTrue(diagram.compiled)
         self.assertEqual(diagram.warning_count, 1)
-        edge = diagram.analysis.edges[0]
-        self.assertEqual(diagram.edge_status(edge), "warning")
+        node = diagram.analysis.nodes[1]
+        self.assertIsNotNone(node.map_policy)
+        assert node.map_policy is not None
+        self.assertFalse(node.map_policy.has_item_selector)
+        self.assertTrue(node.map_policy.has_output_aggregator)
+        self.assertEqual(diagram.node_status(node), "warning")
         self.assertEqual(
             diagram.diagnostics[0].code,
             "POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
         )
-        self.assertIn("linkStyle 0 stroke:#b45309", diagram.to_mermaid())
+        self.assertIn("class n1 warning", diagram.to_mermaid())
 
     def test_forbidden_second_loop_entry_edge_is_marked_red(self) -> None:
         def condition(_ctx) -> bool:
@@ -239,7 +246,7 @@ class WorkflowPreviewTests(unittest.TestCase):
 
         app = build_app()
         diagram = build_workflow().diagram(compiler=app.compiler)
-        errors = {
+        edge_errors = {
             edge.id: tuple(
                 item.code
                 for item in diagram.diagnostics
@@ -254,12 +261,21 @@ class WorkflowPreviewTests(unittest.TestCase):
         }
 
         self.assertIn(
-            "POLICY_MAP_FAN_IN_UNSUPPORTED",
-            errors["edge_security_review_assess_blast_radius"],
-        )
-        self.assertIn(
             "LOOP_ENTRY_INVALID",
-            errors["edge_classify_incident_refine_remediation"],
+            edge_errors["edge_classify_incident_refine_remediation"],
+        )
+        node_errors = {
+            node.id: tuple(
+                item.code
+                for item in diagram.diagnostics
+                if item.object_type == "node" and item.object_id == node.id
+            )
+            for node in diagram.analysis.nodes
+            if diagram.node_status(node) == "error"
+        }
+        self.assertIn(
+            "POLICY_MAP_SELECTOR_REQUIRED",
+            node_errors["assess_blast_radius"],
         )
         schema_error = demonstrate_schema_registration_error(app)
         self.assertIn("does not match Capability incident_log_analysis", schema_error)

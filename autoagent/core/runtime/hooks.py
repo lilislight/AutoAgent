@@ -26,7 +26,7 @@ class RuntimeEventLoop:
         self._lock = Lock()
         self._pending_lock = Lock()
         self._pending_wakeups = 0
-        self._compatibility_waits = 0
+        self._polling_waits = 0
 
     def start(self) -> None:
         owner = False
@@ -114,19 +114,19 @@ class RuntimeEventLoop:
 
     def _has_pending_wakeup(self) -> bool:
         with self._pending_lock:
-            return self._pending_wakeups > 0 or self._compatibility_waits > 0
+            return self._pending_wakeups > 0 or self._polling_waits > 0
 
-    def begin_compatibility_wait(self) -> None:
+    def begin_polling_wait(self) -> None:
         """Bound a known external callback wait to the 5 ms watchdog."""
 
         with self._pending_lock:
-            self._compatibility_waits += 1
+            self._polling_waits += 1
 
-    def end_compatibility_wait(self) -> None:
+    def end_polling_wait(self) -> None:
         with self._pending_lock:
-            self._compatibility_waits = max(
+            self._polling_waits = max(
                 0,
-                self._compatibility_waits - 1,
+                self._polling_waits - 1,
             )
 
     def run(self, awaitable: Awaitable[T]) -> T:
@@ -163,7 +163,7 @@ class RuntimeEventLoop:
             return
         loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
-            # The compatibility pulse itself can take up to 50 ms to recover a
+            # The wake polling task can take up to 50 ms to recover a
             # lost stop wakeup, so reserve that small cleanup floor even when a
             # deployment configures a shorter application grace period.
             effective_timeout_s = max(0.1, timeout_s)
@@ -192,13 +192,13 @@ class RuntimeEventLoop:
         # self-pipe wakeup. Keep a low-frequency recovery pulse, and temporarily
         # shorten it only until cross-thread work has actually entered the loop.
         # Long-running Workflow work therefore creates no periodic 1 ms timer.
-        async def compatibility_pulse() -> None:
+        async def wake_polling() -> None:
             while True:
                 await asyncio.sleep(
                     0.005 if self._has_pending_wakeup() else 0.05
                 )
 
-        pulse_task = loop.create_task(compatibility_pulse())
+        pulse_task = loop.create_task(wake_polling())
         try:
             loop.run_forever()
         finally:
@@ -214,7 +214,7 @@ class RuntimeEventLoop:
 
 
 async def _await_concurrent_future(future: Future[T]) -> T:
-    """Await immediately when wakeups work, with a 50 ms lost-wakeup fallback."""
+    """Await a cross-thread Future with bounded wake polling."""
 
     wrapped = asyncio.wrap_future(future)
     while not wrapped.done():

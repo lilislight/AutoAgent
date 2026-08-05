@@ -6,7 +6,6 @@ from autoagent.core.workflow.node import Node
 from autoagent.core.workflow.policy import (
     BackoffPolicy,
     CapabilitySelectionPolicy,
-    EdgePolicy,
     FailurePolicy,
     MapPolicy,
     NodePolicy,
@@ -25,7 +24,6 @@ __all__ = [
     "CapabilityRef",
     "CapabilitySelectionPolicy",
     "Edge",
-    "EdgePolicy",
     "FailurePolicy",
     "MapPolicy",
     "Node",

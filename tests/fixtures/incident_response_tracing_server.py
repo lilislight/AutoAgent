@@ -19,7 +19,6 @@ from autoagent import (
     AutoAgentSettings,
     CapabilityRef,
     CapabilitySelectionPolicy,
-    EdgePolicy,
     MapPolicy,
     NodePolicy,
     ReplicationPolicy,
@@ -646,7 +645,17 @@ def build_investigation_workflow() -> Workflow:
             )
         },
     )
-    workflow.add_node(gather_evidence, node_id="gather_evidence")
+    workflow.add_node(
+        gather_evidence,
+        node_id="gather_evidence",
+        policy=NodePolicy(
+            map=MapPolicy(
+                item_selector=select_investigation_tasks,
+                output_aggregator=aggregate_evidence,
+                max_parallelism=3,
+            )
+        ),
+    )
     workflow.add_node(
         mock_llm_synthesize_findings,
         node_id="synthesize_findings",
@@ -700,14 +709,7 @@ def build_investigation_workflow() -> Workflow:
     workflow.add_edge(
         "plan_investigation",
         "gather_evidence",
-        edge_id="map_evidence_tasks",
-        policy=EdgePolicy(
-            map=MapPolicy(
-                item_selector=select_investigation_tasks,
-                output_aggregator=aggregate_evidence,
-                max_parallelism=3,
-            )
-        ),
+        edge_id="investigation_tasks",
     )
     workflow.add_edge("gather_evidence", "synthesize_findings")
     workflow.add_edge("synthesize_findings", "quality_gate")

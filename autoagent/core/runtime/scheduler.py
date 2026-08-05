@@ -140,12 +140,6 @@ class NodeExecutionRequest:
     recovery_of_execution_id: UUID | None = None
     recovery_attempt: int = 0
 
-    @property
-    def source_execution_ids(self) -> tuple[UUID, ...]:
-        """Compatibility/readability view derived from incoming activations."""
-
-        return tuple(item.source_execution_id for item in self.activations)
-
     def to_record(self) -> dict[str, Any]:
         return {
             "node_id": self.node_id,

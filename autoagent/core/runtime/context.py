@@ -380,6 +380,8 @@ class MapItemSelectionContext:
     outputs: OutputView
     node_id: str
     input: Any
+    workflow_path: tuple[str, ...] = ()
+    incoming: tuple[IncomingOutput, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

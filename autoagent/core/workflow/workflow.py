@@ -11,7 +11,7 @@ from autoagent.core.workflow.edge import Edge
 from autoagent.core.workflow.capability import CapabilityRef, OperatorRef, SystemCommand
 from autoagent.core.workflow.mapping import InputMapping, OutputBinding
 from autoagent.core.workflow.node import Node
-from autoagent.core.workflow.policy import EdgePolicy, WorkflowPolicy
+from autoagent.core.workflow.policy import WorkflowPolicy
 from autoagent.core.workflow.user_event import UserEventMappings
 
 if TYPE_CHECKING:
@@ -182,7 +182,6 @@ class Workflow(BaseModel):
         *,
         edge_id: str | None = None,
         condition: Callable[..., bool | Awaitable[bool]] | str | None = None,
-        policy: EdgePolicy | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Edge:
         """Create or add an Edge to this Workflow and return it."""
@@ -193,7 +192,6 @@ class Workflow(BaseModel):
                 for value in (
                     edge_id,
                     condition,
-                    policy,
                     metadata,
                 )
             ):
@@ -210,7 +208,6 @@ class Workflow(BaseModel):
             from_node=edge_or_from_node,
             to_node=to_node,
             condition=condition,
-            policy=policy,
             metadata=metadata or {},
         )
         self.edges.append(edge)

@@ -80,35 +80,13 @@ export interface Page<T> {
 }
 
 interface ServerEventPage {
-  items: ServerRuntimeEvent[];
+  items: RuntimeEvent[];
   first_sequence: number | null;
   last_sequence: number | null;
   has_earlier: boolean;
   has_later: boolean;
   live_sequence: number;
   invocation_state: InvocationSummary["state"];
-}
-
-interface ServerRuntimeEvent {
-  id: string;
-  invocation_id: string;
-  sequence: number;
-  schema_version: number;
-  event_type: string;
-  event_name: string;
-  subject_type: string;
-  subject_id: string;
-  occurred_at_ms: number;
-  elapsed_ns: number | null;
-  status: string | null;
-  timing: Record<string, number>;
-  payload: Record<string, unknown>;
-  has_input: boolean;
-  has_output: boolean;
-  has_operations?: boolean;
-  input?: unknown;
-  output?: unknown;
-  operations?: Array<Record<string, unknown>> | null;
 }
 
 interface ServerTraceBootstrap {
@@ -288,7 +266,7 @@ export async function getTraceView(
   const raw = await requestJson<ServerTraceBootstrap>(
     `${API}/invocations/${invocationId}/trace?tail_limit=200`,
   );
-  const events = raw.event_page.items.map(normalizeEvent);
+  const events = raw.event_page.items;
   const projection = raw.checkpoint.projection;
   const invocation = invocationDetail(raw.invocation, projection);
   return {
@@ -338,10 +316,8 @@ export async function getEventDetail(
   invocationId: string,
   sequence: number,
 ): Promise<RuntimeEvent> {
-  return normalizeEvent(
-    await requestJson<ServerRuntimeEvent>(
-      `${API}/invocations/${invocationId}/events/${sequence}`,
-    ),
+  return requestJson<RuntimeEvent>(
+    `${API}/invocations/${invocationId}/events/${sequence}`,
   );
 }
 
@@ -365,7 +341,7 @@ export function subscribeToInvocation(
     `${API}/invocations/${invocationId}/stream?after_sequence=${afterSequence}`,
   );
   source.addEventListener("runtime_event", ((message: MessageEvent<string>) => {
-    onEvent(normalizeEvent(JSON.parse(message.data) as ServerRuntimeEvent));
+    onEvent(JSON.parse(message.data) as RuntimeEvent);
   }) as EventListener);
   source.addEventListener("invocation_status", ((message: MessageEvent<string>) => {
     const status = JSON.parse(message.data) as InvocationSummary;
@@ -447,32 +423,9 @@ export function subscribeToSessionUserEventChanges(
   };
 }
 
-function normalizeEvent(event: ServerRuntimeEvent): RuntimeEvent {
-  const payload = event.payload ?? {};
-  const nodeId =
-    event.subject_type === "node" || event.subject_type === "node_execution"
-      ? String(payload.node_id ?? event.subject_id)
-      : typeof payload.node_id === "string" ? payload.node_id : null;
-  const edgeId =
-    event.subject_type === "edge"
-      ? String(payload.edge_id ?? event.subject_id)
-      : typeof payload.edge_id === "string" ? payload.edge_id : null;
-  return {
-    ...event,
-    type: event.event_name,
-    entity_type: event.subject_type,
-    entity_id: event.subject_id,
-    node_id: nodeId,
-    edge_id: edgeId,
-    channel: "runtime",
-    visibility: "internal",
-  };
-}
-
 function eventPage(raw: ServerEventPage): RuntimeEventPage {
-  const events = raw.items.map(normalizeEvent);
   return {
-    events,
+    events: raw.items,
     next_after_sequence: raw.last_sequence ?? 0,
     previous_before_sequence: raw.first_sequence,
     has_more: raw.has_earlier,

@@ -35,14 +35,6 @@ class WorkflowAnalysisMapPolicy(BaseModel):
     has_output_aggregator: bool = False
 
 
-class WorkflowAnalysisEdgePolicy(BaseModel):
-    """Display-safe EdgePolicy facts."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    map: WorkflowAnalysisMapPolicy | None = None
-
-
 class WorkflowAnalysisNode(BaseModel):
     """One Node in the Compiler's expanded candidate execution graph."""
 
@@ -56,6 +48,7 @@ class WorkflowAnalysisNode(BaseModel):
     description: str | None = None
     binding: WorkflowAnalysisBinding
     resolved: bool
+    map_policy: WorkflowAnalysisMapPolicy | None = None
     entry: bool | None = None
     exit: bool | None = None
 
@@ -74,7 +67,6 @@ class WorkflowAnalysisEdge(BaseModel):
     source_resolved: bool
     target_resolved: bool
     conditional: bool = False
-    policy: WorkflowAnalysisEdgePolicy | None = None
 
 
 class WorkflowAnalysisLoop(BaseModel):
@@ -155,6 +147,7 @@ def build_workflow_analysis(
             description=node.description,
             binding=_binding(node.capability),
             resolved=node.id in nodes,
+            map_policy=_analysis_map_policy(node),
             entry=(node.id in entry_ids) if compiled_graph_complete else None,
             exit=(node.id in exit_ids) if compiled_graph_complete else None,
         )
@@ -212,18 +205,6 @@ def _analysis_edges(
         else:
             edge_id = edge.id
         used_ids.add(edge_id)
-        map_policy = edge.policy.map if edge.policy is not None else None
-        policy = (
-            WorkflowAnalysisEdgePolicy(
-                map=WorkflowAnalysisMapPolicy(
-                    max_parallelism=map_policy.max_parallelism,
-                    has_item_selector=map_policy.item_selector is not None,
-                    has_output_aggregator=map_policy.output_aggregator is not None,
-                )
-            )
-            if map_policy is not None
-            else None
-        )
         values.append(
             WorkflowAnalysisEdge(
                 id=edge_id,
@@ -235,10 +216,21 @@ def _analysis_edges(
                 source_resolved=from_node_id in known_node_ids,
                 target_resolved=to_node_id in known_node_ids,
                 conditional=edge.condition is not None,
-                policy=policy,
             )
         )
     return tuple(values)
+
+
+def _analysis_map_policy(node: Node) -> WorkflowAnalysisMapPolicy | None:
+    policy = node.policy
+    map_policy = policy.map if policy is not None else None
+    if map_policy is None:
+        return None
+    return WorkflowAnalysisMapPolicy(
+        max_parallelism=map_policy.max_parallelism,
+        has_item_selector=map_policy.item_selector is not None,
+        has_output_aggregator=map_policy.output_aggregator is not None,
+    )
 
 
 def _node_ref_id(value: str | Node) -> str:

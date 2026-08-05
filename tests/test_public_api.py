@@ -13,7 +13,6 @@ EXPECTED_ROOT_AUTHORING_API = {
     "CapabilityRef",
     "CapabilitySelectionPolicy",
     "ConditionContext",
-    "EdgePolicy",
     "FailurePolicy",
     "InputMapping",
     "InputMappingContext",

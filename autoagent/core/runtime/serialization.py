@@ -107,8 +107,6 @@ class JsonRuntimeSerializer(RuntimeSerializer):
         self._codecs_by_id: dict[str, RuntimeCodec] = {}
         self._codecs_by_type: dict[type[Any], RuntimeCodec] = {}
         self._models: dict[str, type[BaseModel]] = {}
-        # One model may accept legacy decode aliases, but serialization always
-        # uses the first explicit stable id registered for that Python type.
         self._model_ids_by_type: dict[type[BaseModel], str] = {}
 
     def register_codec(self, codec: RuntimeCodec) -> None:
@@ -134,11 +132,16 @@ class JsonRuntimeSerializer(RuntimeSerializer):
         """Allow a persisted Pydantic value to recover to its original class."""
 
         resolved_id = type_id or _python_type_id(model_type)
+        existing_id = self._model_ids_by_type.get(model_type)
+        if existing_id is not None and existing_id != resolved_id:
+            raise ValueError(
+                f"Pydantic runtime model already registered as: {existing_id}"
+            )
         existing = self._models.get(resolved_id)
         if existing is not None and existing is not model_type:
             raise ValueError(f"Pydantic runtime type id already used: {resolved_id}")
         self._models[resolved_id] = model_type
-        self._model_ids_by_type.setdefault(model_type, resolved_id)
+        self._model_ids_by_type[model_type] = resolved_id
         return resolved_id
 
     def dumps(self, value: Any) -> bytes:

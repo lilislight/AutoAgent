@@ -958,14 +958,17 @@ class WorkflowExecutor:
             mapping_failure_code = "INPUT_MAPPING_FAILED"
             mapping_started_ns = perf_counter_ns()
             try:
-                map_policy = self._map_policy_for_request(workflow_ir, request)
-                node_input = await self._build_node_input(
+                map_policy = (
+                    node_ir.policy.map
+                    if node_ir.policy is not None
+                    else None
+                )
+                node_input, node_incoming = await self._build_node_input(
                     workflow_ir=workflow_ir,
                     session=session,
                     invocation=invocation,
                     node_ir=node_ir,
                     request=request,
-                    map_policy=map_policy,
                 )
                 recovery = (
                     node_ir.policy.recovery
@@ -1062,11 +1065,11 @@ class WorkflowExecutor:
                     node_ir=node_ir,
                     node_execution=node_execution,
                     input=node_input,
+                    incoming=node_incoming,
                     max_operator_attempts=self._remaining_operator_attempts(
                         invocation=invocation,
                         node_ir=node_ir,
                     ),
-                    map_policy=map_policy,
                     concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
                     recovery=invocation.execution_mode == "recovery",
                     event_mode=invocation.event_mode,
@@ -1651,8 +1654,7 @@ class WorkflowExecutor:
         invocation: Invocation,
         node_ir: NodeIR,
         request: NodeExecutionRequest,
-        map_policy: Any | None,
-    ) -> Any:
+    ) -> tuple[Any, tuple[IncomingOutput, ...]]:
         incoming = self._build_incoming_outputs(
             invocation=invocation,
             request=request,
@@ -1662,35 +1664,54 @@ class WorkflowExecutor:
             node_ir=node_ir,
             incoming=incoming,
         )
+        map_policy = node_ir.policy.map if node_ir.policy is not None else None
         if map_policy is not None:
-            if len(incoming) != 1:
-                raise ValueError("MapPolicy requires exactly one incoming activation.")
-            return incoming[0].value
+            if map_policy.item_selector is None:
+                if len(incoming) != 1:
+                    raise ValueError(
+                        "MapPolicy without item_selector requires exactly one "
+                        "incoming activation."
+                    )
+                return incoming[0].value, scoped_incoming
+            if not incoming:
+                return dict(invocation.input), scoped_incoming
+            if len(incoming) == 1:
+                return incoming[0].value, scoped_incoming
+            return (
+                {
+                    item.source_node_id: item.value
+                    for item in scoped_incoming
+                },
+                scoped_incoming,
+            )
         if callable(node_ir.input_plan):
-            return await invoke_hook_async(
-                node_ir.input_plan,
-                InputMappingContext.create(
-                    invocation_input=invocation.input,
-                    invocation_context=invocation.context,
-                    session_context=session.context,
-                    outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
-                    node_id=node_ir.local_id or node_ir.id,
-                    workflow_path=node_ir.workflow_path,
-                    incoming=scoped_incoming,
+            return (
+                await invoke_hook_async(
+                    node_ir.input_plan,
+                    InputMappingContext.create(
+                        invocation_input=invocation.input,
+                        invocation_context=invocation.context,
+                        session_context=session.context,
+                        outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
+                        node_id=node_ir.local_id or node_ir.id,
+                        workflow_path=node_ir.workflow_path,
+                        incoming=scoped_incoming,
+                    ),
                 ),
+                scoped_incoming,
             )
 
         incoming_edge_ids = workflow_ir.graph.incoming_edges.get(node_ir.id, ())
         if not incoming_edge_ids:
-            return dict(invocation.input)
+            return dict(invocation.input), scoped_incoming
 
         if len(incoming) == 1:
-            return incoming[0].value
+            return incoming[0].value, scoped_incoming
 
         values: dict[str, Any] = {}
         for item in scoped_incoming:
             values[item.source_node_id] = item.value
-        return values
+        return values, scoped_incoming
 
     def _scope_incoming_outputs(
         self,
@@ -1828,34 +1849,6 @@ class WorkflowExecutor:
                 node_execution=node_execution,
                 output=output,
             )
-
-    def _map_policy_for_request(
-        self,
-        workflow_ir: WorkflowIR,
-        request: NodeExecutionRequest,
-    ) -> Any | None:
-        policies = []
-        for activation in request.activations:
-            edge = workflow_ir.edges[activation.edge_id]
-            if edge.policy is not None and edge.policy.map is not None:
-                policies.append(edge.policy.map)
-        if len(policies) > 1:
-            raise ValueError("A NodeExecution cannot be triggered by multiple MapPolicy edges.")
-        return policies[0] if policies else None
-
-    def _map_policy_for_execution(
-        self,
-        workflow_ir: WorkflowIR,
-        execution: NodeExecution,
-    ) -> Any | None:
-        return self._map_policy_for_request(
-            workflow_ir,
-            NodeExecutionRequest(
-                node_id=execution.node_id,
-                activations=execution.incoming_activations,
-                execution_scope=execution.execution_scope,
-            ),
-        )
 
     def _check_node_execution_resource(
         self,

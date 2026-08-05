@@ -43,7 +43,7 @@ class Capability(BaseModel):
     )
 
     def _bind_contract(self, contract: OperatorContract) -> None:
-        """Bind a legacy implementation-derived contract once."""
+        """Bind an implementation-derived contract once."""
 
         if self.contract is not None:
             raise ValueError(f"Capability contract is already established: {self.id}")

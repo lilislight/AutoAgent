@@ -56,8 +56,9 @@ For `POLICY_*` codes, inspect the exact policy field, supported enum, positive
 limit, callable contract, and target Node combination. Common conflicts are:
 
 - capability selection on a direct callable;
-- Map combined with target Input Mapping, fan-in, Replication, a child
-  Workflow, or a SystemCommand;
+- Map combined with target Input Mapping, Replication, a child Workflow, or a
+  SystemCommand;
+- selector-less Map on a Node without exactly one incoming Edge;
 - an unbounded Loop;
 - recovery marked idempotent without the required idempotency contract;
 - an aggregator whose return annotation cannot be checked.

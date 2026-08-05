@@ -70,7 +70,6 @@ Read [hook-contracts.md](hook-contracts.md) before implementing these functions.
 - `WorkflowPolicy`
 - `FailurePolicy`
 - `NodePolicy`
-- `EdgePolicy`
 - `CapabilitySelectionPolicy`
 - `RetryPolicy`
 - `BackoffPolicy`

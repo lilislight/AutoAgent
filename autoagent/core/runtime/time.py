@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from time import perf_counter_ns, time_ns
 from typing import Any, TypeAlias
 
@@ -31,20 +30,10 @@ def elapsed_ms(started_ns: int) -> int:
 
 
 def coerce_timestamp_ms(value: Any) -> TimestampMs | None:
-    """Read current millisecond timestamps and legacy datetime/ISO records."""
+    """Validate one optional Unix timestamp in milliseconds."""
 
     if value is None:
         return None
-    if isinstance(value, bool):
-        raise TypeError("Boolean is not a valid timestamp.")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, datetime):
-        timestamp = value
-    else:
-        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
-    return int(timestamp.timestamp() * 1000)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("Timestamp must be an integer number of milliseconds.")
+    return value

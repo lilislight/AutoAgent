@@ -40,7 +40,6 @@ from autoagent.ai.workflows.react.tool_execution import (
 )
 from autoagent.core.operators import Operator
 from autoagent.core.workflow import (
-    EdgePolicy,
     MapPolicy,
     NodePolicy,
     RecoveryPolicy,
@@ -401,6 +400,12 @@ def react_workflow(
                 type="tool_result",
                 transform=tool_results,
             ),
+            policy=NodePolicy(
+                map=MapPolicy(
+                    item_selector=select_calls,
+                    output_aggregator=aggregate_calls,
+                )
+            ),
         )
         workflow.add_edge(
             "validate_tool_calls",
@@ -410,12 +415,6 @@ def react_workflow(
                 lambda ctx, selected_name=definition.name: any(
                     item.call.name == selected_name
                     for item in ctx.source_output.valid_calls
-                )
-            ),
-            policy=EdgePolicy(
-                map=MapPolicy(
-                    item_selector=select_calls,
-                    output_aggregator=aggregate_calls,
                 )
             ),
         )

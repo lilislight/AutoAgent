@@ -7,7 +7,6 @@ from autoagent.core.workflow.user_event import UserEventMappings
 
 from autoagent.core.operators.contract import SchemaContract
 from autoagent.core.workflow.policy import (
-    EdgePolicy,
     NodePolicy,
     WorkflowPolicy,
 )
@@ -208,10 +207,6 @@ class EdgeIR(BaseModel):
     condition: Any | None = Field(
         default=None,
         description="Compiled edge condition. Exact type is defined later.",
-    )
-    policy: EdgePolicy | None = Field(
-        default=None,
-        description="Compiled edge-level policy such as map/fan-out.",
     )
     order: int = Field(
         default=0,

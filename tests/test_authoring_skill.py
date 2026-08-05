@@ -209,6 +209,19 @@ class AuthoringSkillTests(unittest.TestCase):
                 text = (REFERENCES_ROOT / name).read_text(encoding="utf-8")
                 self.assertIn(expected, text)
 
+    def test_skill_documents_node_owned_map_contract(self) -> None:
+        workflow_design = (REFERENCES_ROOT / "workflow-design.md").read_text(
+            encoding="utf-8"
+        )
+        diagnostics = (REFERENCES_ROOT / "diagnostics.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("NodePolicy(map=MapPolicy(", workflow_design)
+        self.assertIn("complete fan-in", workflow_design)
+        self.assertIn("selector-less Map", diagnostics)
+        self.assertIn("exactly one incoming Edge", diagnostics)
+
     def test_eval_requests_contain_business_language_only(self) -> None:
         requirements = sorted(SKILL_EVAL_ROOT.glob("0[1-3]-*/REQUIREMENTS.md"))
         self.assertEqual(len(requirements), 3)

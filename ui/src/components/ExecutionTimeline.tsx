@@ -604,7 +604,7 @@ export function ExecutionTimeline({
                 className={`timeline-event-cluster-item event-category-${eventDisplayCategory(runtimeEvent)}`}
                 type="button"
                 role="menuitem"
-                title={`Event #${runtimeEvent.sequence}: ${runtimeEvent.type}`}
+                title={`Event #${runtimeEvent.sequence}: ${runtimeEvent.event_name}`}
                 onClick={() => {
                   onCursorChange(runtimeEvent.sequence);
                   onSelect({
@@ -615,7 +615,7 @@ export function ExecutionTimeline({
                 }}
               >
                 <span>#{runtimeEvent.sequence}</span>
-                <small>{shortEventType(runtimeEvent.type)}</small>
+                <small>{shortEventType(runtimeEvent.event_name)}</small>
                 <time>{formatTimestamp(runtimeEvent.occurred_at_ms)}</time>
                 <em>
                   {runtimeEvent.status ?? "recorded"}
@@ -924,16 +924,16 @@ function markerForSequence(
 
 function timelineRowIdForEvent(event: RuntimeEvent | undefined): string | null {
   if (!event) return null;
-  if (event.entity_type === "node_execution") {
-    return event.entity_id;
+  if (event.subject_type === "node_execution") {
+    return event.subject_id;
   }
-  if (event.entity_type === "operator_call") {
+  if (event.subject_type === "operator_call") {
     const nodeExecutionId = event.payload.node_execution_id;
     return nodeExecutionId === undefined || nodeExecutionId === null
       ? null
       : String(nodeExecutionId);
   }
-  if (event.entity_type === "edge") {
+  if (event.subject_type === "edge") {
     const sourceExecutionId = event.payload.node_execution_id;
     return sourceExecutionId === undefined || sourceExecutionId === null
       ? null
@@ -953,9 +953,9 @@ function findTimelineRow(scroller: HTMLElement, rowId: string | null): HTMLEleme
 function eventMarkerTitle(marker: RuntimeEventMarkerCluster, eventCount: number): string {
   if (marker.events.length === 1) {
     const event = marker.events[0];
-    return `Event ${marker.firstLocalIndex}/${eventCount}: ${event.type}; session sequence ${event.sequence}`;
+    return `Event ${marker.firstLocalIndex}/${eventCount}: ${event.event_name}; session sequence ${event.sequence}`;
   }
-  const eventTypes = [...new Set(marker.events.map((event) => event.type))].join(", ");
+  const eventTypes = [...new Set(marker.events.map((event) => event.event_name))].join(", ");
   const sequences = `${marker.events[0].sequence}-${marker.events.at(-1)?.sequence}`;
   return `Events ${marker.firstLocalIndex}-${marker.lastLocalIndex}/${eventCount}: ${eventTypes}; session sequences ${sequences}`;
 }
@@ -974,14 +974,14 @@ function clusterEventCategory(events: RuntimeEvent[]): string {
 }
 
 function eventCategory(event: RuntimeEvent): string {
-  if (event.entity_type === "invocation") return "invocation";
-  if (event.entity_type === "node_execution") return "node";
-  if (event.entity_type === "operator_call") return "operator";
-  if (event.entity_type === "edge") return "edge";
-  if (event.entity_type === "output") return "output";
+  if (event.subject_type === "invocation") return "invocation";
+  if (event.subject_type === "node_execution") return "node";
+  if (event.subject_type === "operator_call") return "operator";
+  if (event.subject_type === "edge") return "edge";
+  if (event.subject_type === "output") return "output";
   if (
-    event.entity_type === "invocation_context" ||
-    event.entity_type === "session_context"
+    event.subject_type === "invocation_context" ||
+    event.subject_type === "session_context"
   ) {
     return "context";
   }

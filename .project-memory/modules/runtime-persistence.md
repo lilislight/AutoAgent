@@ -30,6 +30,7 @@ PersistenceCoordinator accepts immutable-by-ownership envelopes for Workflow rev
 - Queue watermarks are byte based: high pressure pauses new admission, low pressure reopens it, and the hard limit degrades persistence rather than blocking already-running execution.
 - Runtime and User Event journals have independent contiguous durability and failure accounting.
 - DatabaseBackend supports the current V1 schema directly; obsolete per-Node and per-Operator tables are not part of the model.
+- Each registered Pydantic Runtime model has one stable type id; persisted values do not carry decode aliases for superseded ids.
 - Recovery combines a genesis or compact recovery snapshot with later ordered Runtime Events.
 
 ## Relationships

@@ -146,18 +146,34 @@ forever.”
 
 ## Map
 
-Use `EdgePolicy(map=MapPolicy(...))` when one selected source output creates a
-dynamic number of target Operator calls.
+Use `NodePolicy(map=MapPolicy(...))` when one logical Node input creates a
+dynamic number of Operator calls.
 
 - Each item must become a mapping of target callable arguments.
-- `item_selector` is optional when source output already contains mappings.
+- `item_selector` is optional when the Node has exactly one incoming Edge and
+  that source output already contains mappings.
+- A custom selector may use all current incoming activations, including
+  complete fan-in or the external/back Edge that activated a Loop header.
 - Results preserve item index order when no aggregator is configured.
 - `max_parallelism` limits this Map below the App-wide ceiling.
 
-Map belongs to an Edge and produces one logical target NodeExecution.
+Map belongs to a Node and produces one logical NodeExecution.
 
-Do not add a second Input Mapping to the mapped target; the compiler rejects
-the conflicting data sources.
+```python
+def select_items(ctx: MapItemSelectionContext) -> list[dict[str, object]]:
+    return [{"value": item} for item in ctx.input]
+
+
+workflow.add_node(
+    process_item,
+    node_id="process_item",
+    policy=NodePolicy(map=MapPolicy(item_selector=select_items)),
+)
+workflow.add_edge("load_items", "process_item")
+```
+
+Do not add Input Mapping to a mapped Node; the selector owns per-item argument
+construction and the compiler rejects the conflicting data sources.
 
 ## Replication
 

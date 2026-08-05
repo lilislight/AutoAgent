@@ -32,6 +32,7 @@ from autoagent.core.operators import (
 from autoagent.core.operators.streaming import is_raw_stream_result
 from autoagent.core.runtime import (
     DirectOperatorExecution,
+    IncomingOutput,
     InvocationExecutionMailbox,
     MapAggregationContext,
     MapItemSelectionContext,
@@ -48,7 +49,7 @@ from autoagent.core.runtime import (
 from autoagent.core.runtime.context import HookContextSnapshot
 from autoagent.core.runtime.hooks import invoke_hook_async
 from autoagent.core.runtime.time import utc_timestamp_ms
-from autoagent.core.workflow import BackoffPolicy, MapPolicy
+from autoagent.core.workflow import BackoffPolicy
 from autoagent.core.workflow.capability import SystemCommand, WAIT_SYSTEM_COMMAND_ID
 from autoagent.core.workflow.user_event import normalize_user_event_mappings
 
@@ -66,8 +67,8 @@ class NodeExecutionJob:
     node_ir: NodeIR
     node_execution: NodeExecution
     input: Any
+    incoming: tuple[IncomingOutput, ...] = ()
     max_operator_attempts: int | None = None
-    map_policy: MapPolicy | None = None
     concurrency_key: str | None = None
     recovery: bool = False
     hook_context: HookContextSnapshot | None = None
@@ -87,8 +88,8 @@ class ResolvedNodeExecutionJob:
     node_execution: NodeExecution
     operators: tuple[Operator, ...]
     input: Any
+    incoming: tuple[IncomingOutput, ...] = ()
     max_operator_attempts: int | None = None
-    map_policy: MapPolicy | None = None
     concurrency_key: str | None = None
     recovery: bool = False
     hook_context: HookContextSnapshot | None = None
@@ -348,8 +349,8 @@ class NodeExecutor:
                 node_execution=job.node_execution,
                 operators=operators,
                 input=job.input,
+                incoming=job.incoming,
                 max_operator_attempts=job.max_operator_attempts,
-                map_policy=job.map_policy,
                 concurrency_key=job.concurrency_key,
                 recovery=job.recovery,
                 hook_context=job.hook_context,
@@ -444,7 +445,7 @@ def _execute_system_command(job: NodeExecutionJob) -> NodeExecutionResult:
                 detail={"node_id": job.node_ir.id},
             ),
         )
-    if job.map_policy is not None or job.node_ir.policy is not None:
+    if job.node_ir.policy is not None:
         return NodeExecutionResult(
             node_execution_id=job.node_execution.id,
             state="failed",
@@ -683,8 +684,9 @@ async def _prepare_units(
     job: ResolvedNodeExecutionJob,
 ) -> _PreparedUnits:
     policy = job.node_ir.policy
+    map_policy = policy.map if policy is not None else None
     replication = policy.replication if policy is not None else None
-    if job.map_policy is not None and replication is not None:
+    if map_policy is not None and replication is not None:
         return _PreparedUnits(
             units=[],
             unit_kind="normal",
@@ -695,15 +697,15 @@ async def _prepare_units(
             ),
         )
 
-    if job.map_policy is not None:
+    if map_policy is not None:
         selection_started_ns = perf_counter_ns()
         try:
             selected = (
                 await invoke_hook_async(
-                    job.map_policy.item_selector,
+                    map_policy.item_selector,
                     _map_selection_context(job),
                 )
-                if job.map_policy.item_selector is not None
+                if map_policy.item_selector is not None
                 else deepcopy(job.input)
             )
             units = _map_units(job, selected)
@@ -718,7 +720,7 @@ async def _prepare_units(
                 )
                 if (
                     job.event_mode == "full"
-                    and job.map_policy.item_selector is not None
+                    and map_policy.item_selector is not None
                 )
                 else None
             )
@@ -743,7 +745,7 @@ async def _prepare_units(
                 )
                 if (
                     job.event_mode == "full"
-                    and job.map_policy.item_selector is not None
+                    and map_policy.item_selector is not None
                 )
                 else None
             )
@@ -773,7 +775,7 @@ async def _prepare_units(
         phase = None
         if (
             job.event_mode == "full"
-            and job.map_policy.item_selector is not None
+            and map_policy.item_selector is not None
         ):
             elapsed_ns = max(0, perf_counter_ns() - selection_started_ns)
             phase = NodePhaseResult(
@@ -871,8 +873,12 @@ def _map_units(
 def _max_parallelism(job: ResolvedNodeExecutionJob, unit_count: int) -> int:
     limits = [max(1, unit_count), job.max_parallel_units]
     policy = job.node_ir.policy
-    if job.map_policy is not None and job.map_policy.max_parallelism is not None:
-        limits.append(job.map_policy.max_parallelism)
+    if (
+        policy is not None
+        and policy.map is not None
+        and policy.map.max_parallelism is not None
+    ):
+        limits.append(policy.map.max_parallelism)
     if (
         policy is not None
         and policy.replication is not None
@@ -905,7 +911,10 @@ def _validate_unit_inputs(
             # an Operator or are retained in runtime execution records.
             units[unit_position] = (unit_index, arguments)
         except (TypeError, ValidationError) as exc:
-            is_map_item = job.map_policy is not None
+            is_map_item = (
+                job.node_ir.policy is not None
+                and job.node_ir.policy.map is not None
+            )
             return RuntimeErrorInfo(
                 code=(
                     "MAP_ITEM_INPUT_INVALID"
@@ -1162,7 +1171,7 @@ async def _execute_unit(
 
 
 async def _await_thread_future(future: Any) -> Any:
-    """Await a worker result with a bounded lost-wakeup compatibility tick."""
+    """Await a worker result with bounded wake polling."""
 
     wrapped = asyncio.wrap_future(future)
     while not wrapped.done():
@@ -1664,13 +1673,14 @@ async def _aggregate_unit_results(
         )
 
     outputs = [deepcopy(item.output) for item in unit_results]
+    map_policy = job.node_ir.policy.map if job.node_ir.policy is not None else None
     aggregation_phase: NodePhaseResult | None = None
     aggregation_started_ns = perf_counter_ns()
     has_custom_aggregator = (
         (
             unit_kind == "map_item"
-            and job.map_policy is not None
-            and job.map_policy.output_aggregator is not None
+            and map_policy is not None
+            and map_policy.output_aggregator is not None
         )
         or (
             unit_kind == "replica"
@@ -1684,11 +1694,11 @@ async def _aggregate_unit_results(
         if unit_kind == "map_item":
             output = (
                 await invoke_hook_async(
-                    job.map_policy.output_aggregator,
+                    map_policy.output_aggregator,
                     _map_aggregation_context(job, outputs),
                 )
-                if job.map_policy is not None
-                and job.map_policy.output_aggregator is not None
+                if map_policy is not None
+                and map_policy.output_aggregator is not None
                 else outputs
             )
         elif unit_kind == "replica":
@@ -1773,6 +1783,16 @@ def _map_selection_context(
         outputs=common.outputs,
         node_id=job.node_ir.local_id or job.node_ir.id,
         input=deepcopy(job.input),
+        workflow_path=job.node_ir.workflow_path,
+        incoming=tuple(
+            IncomingOutput(
+                edge_id=item.edge_id,
+                source_node_id=item.source_node_id,
+                source_execution_id=item.source_execution_id,
+                value=deepcopy(item.value),
+            )
+            for item in job.incoming
+        ),
     )
 
 

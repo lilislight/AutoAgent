@@ -26,6 +26,7 @@ AutoAgentServer wraps one AutoAgentApp as a standalone FastAPI application or em
 - TraceService is read-only with respect to Runtime execution; control actions go through App execution APIs.
 - Historical replay is Event-derived and must not leak later live values into earlier cursors.
 - Directory and Event endpoints are paginated; Event detail and Runtime state are loaded only when requested.
+- The UI consumes the Server Runtime Event contract directly: event_name and subject_type/subject_id are canonical, without client-side compatibility aliases.
 - Authentication is optional bearer/cookie protection owned by the Server, not Workflow source.
 - Server shutdown first wakes long-lived streams, then gives active Invocation tasks a bounded grace period before cancellation.
 

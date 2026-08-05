@@ -71,8 +71,6 @@ def _expand(
     output_endpoints: dict[str, str] = {}
     object_input_endpoints: dict[int, str] = {}
     object_output_endpoints: dict[int, str] = {}
-    source_nodes_by_id = {node.id: node for node in workflow.nodes}
-    source_node_object_ids = {id(node) for node in workflow.nodes}
     used_local_edge_ids = {
         edge.id for edge in workflow.edges if edge.id is not None
     }
@@ -130,29 +128,6 @@ def _expand(
             used_local_edge_ids,
         )
         used_local_edge_ids.add(local_edge_id)
-        target_source_node = _source_node(
-            source_edge.to_node,
-            by_id=source_nodes_by_id,
-            object_ids=source_node_object_ids,
-        )
-        if (
-            target_source_node is not None
-            and isinstance(target_source_node.capability, Workflow)
-            and source_edge.policy is not None
-            and source_edge.policy.map is not None
-        ):
-            diagnostics.append(
-                Diagnostic(
-                    code="SUBWORKFLOW_MAP_UNSUPPORTED",
-                    severity="error",
-                    message=(
-                        "MapPolicy cannot target a child Workflow placeholder in "
-                        "V1 because that would map only its expanded entry node, "
-                        "not one complete child execution per item."
-                    ),
-                    subject=_qualify(path, local_edge_id),
-                )
-            )
         expanded_from = _resolve_endpoint(
             source_edge.from_node,
             by_id=output_endpoints,
@@ -434,17 +409,6 @@ def _resolve_endpoint(
 
 def _node_ref_id(ref: str | Node) -> str:
     return ref.id if isinstance(ref, Node) else ref
-
-
-def _source_node(
-    ref: str | Node,
-    *,
-    by_id: dict[str, Node],
-    object_ids: set[int],
-) -> Node | None:
-    if isinstance(ref, Node):
-        return ref if id(ref) in object_ids else None
-    return by_id.get(ref)
 
 
 def _qualify(path: tuple[str, ...], object_id: str) -> str:

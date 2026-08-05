@@ -86,6 +86,8 @@ class WorkflowPreview:
                 markers.append("EXIT")
             if not node.resolved:
                 markers.append("UNRESOLVED")
+            if node.map_policy is not None:
+                markers.append("MAP")
             status = self.node_status(node)
             if status != "normal":
                 markers.append(status.upper())
@@ -288,8 +290,6 @@ class WorkflowPreview:
             tags: list[str] = []
             if edge.conditional:
                 tags.append("condition")
-            if edge.policy is not None and edge.policy.map is not None:
-                tags.append("map")
             status = self.edge_status(edge)
             if status != "normal":
                 tags.append(status)
@@ -343,8 +343,6 @@ def _edge_label(edge: WorkflowAnalysisEdge) -> str:
     parts = [edge.id]
     if edge.conditional:
         parts.append("condition")
-    if edge.policy is not None and edge.policy.map is not None:
-        parts.append("map")
     return " | ".join(parts)
 
 
@@ -356,7 +354,12 @@ def _mermaid_node(key: str, node: WorkflowAnalysisNode) -> str:
         "system_command": "System",
     }[node.binding.kind]
     binding = _mermaid_text(f"{binding_kind}: {node.binding.id}")
-    return f'    {key}["{label}<br/><small>{binding}</small>"]'
+    policy = (
+        "<br/><small>Map</small>"
+        if node.map_policy is not None
+        else ""
+    )
+    return f'    {key}["{label}<br/><small>{binding}</small>{policy}"]'
 
 
 def _mermaid_text(value: str) -> str:

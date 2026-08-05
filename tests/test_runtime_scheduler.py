@@ -23,7 +23,13 @@ class SchedulerContextTests(unittest.TestCase):
         second_batch = scheduler.drain_ready()
 
         self.assertEqual([request.node_id for request in first_batch], ["a", "b"])
-        self.assertEqual(first_batch[0].source_execution_ids, (upstream,))
+        self.assertEqual(
+            tuple(
+                item.source_execution_id
+                for item in first_batch[0].activations
+            ),
+            (upstream,),
+        )
         self.assertEqual([request.node_id for request in second_batch], ["c"])
         self.assertEqual(scheduler.drain_ready(), [])
 

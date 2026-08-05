@@ -114,7 +114,6 @@ export interface WorkflowEdgeView {
   to_node: string;
   order: number;
   condition: unknown;
-  policy: Record<string, unknown> | null;
 }
 
 export interface WorkflowGroupView {
@@ -274,15 +273,7 @@ export interface RuntimeEvent {
   input?: unknown;
   output?: unknown;
   operations?: Array<Record<string, unknown>> | null;
-  /** Compatibility aliases used by visual components. */
-  type: string;
-  entity_type: string;
-  entity_id: string | null;
-  node_id: string | null;
-  edge_id: string | null;
   occurred_at_ms: number;
-  channel: "runtime" | "output";
-  visibility: "internal" | "user";
   payload: Record<string, unknown>;
 }
 

@@ -126,7 +126,6 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
                 "from_node": edge.from_node,
                 "to_node": edge.to_node,
                 "condition": _hook_definition(edge.condition),
-                "policy": _canonicalize(edge.policy),
                 "order": edge.order,
             }
         )

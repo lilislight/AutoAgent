@@ -106,7 +106,7 @@ class WorkflowCompiler:
             )
             self._validate_policies(nodes, graph_edges, diagnostics)
         if not self._has_errors(diagnostics):
-            self._compile_final_output_contracts(nodes, graph_edges, diagnostics)
+            self._compile_final_output_contracts(nodes, diagnostics)
         exit_node_ids = self._infer_exit_node_ids(nodes, graph)
         self._mark_entry_exit_flags(nodes, entry_node_ids, exit_node_ids)
 
@@ -575,7 +575,6 @@ class WorkflowCompiler:
                 from_node=from_node,
                 to_node=to_node,
                 condition=edge.condition,
-                policy=edge.policy,
                 order=order,
                 metadata=edge.metadata,
             )
@@ -1221,12 +1220,9 @@ class WorkflowCompiler:
                             )
                         )
 
-        for edge_id, edge in edges.items():
-            policy = edge.policy
-            if policy is None or policy.map is None:
-                continue
-
             map_policy = policy.map
+            if map_policy is None:
+                continue
             if map_policy.item_selector is not None and not callable(
                 map_policy.item_selector
             ):
@@ -1235,7 +1231,7 @@ class WorkflowCompiler:
                         code="POLICY_MAP_INVALID",
                         severity="error",
                         message="MapPolicy item_selector must be callable.",
-                        subject=edge_id,
+                        subject=node_id,
                     )
                 )
 
@@ -1247,7 +1243,7 @@ class WorkflowCompiler:
                         code="POLICY_MAP_INVALID",
                         severity="error",
                         message="MapPolicy output_aggregator must be callable.",
-                        subject=edge_id,
+                        subject=node_id,
                     )
                 )
             if map_policy.max_parallelism is not None and map_policy.max_parallelism <= 0:
@@ -1256,109 +1252,79 @@ class WorkflowCompiler:
                         code="POLICY_MAP_INVALID",
                         severity="error",
                         message="MapPolicy max_parallelism must be positive.",
-                        subject=edge_id,
+                        subject=node_id,
                     )
                 )
 
-            target = nodes[edge.to_node]
-            if isinstance(target.capability, SystemCommand):
-                diagnostics.append(
-                    Diagnostic(
-                        code="SYSTEM_COMMAND_MAP_UNSUPPORTED",
-                        severity="error",
-                        message="MapPolicy cannot target a SystemCommand wait node in V1.",
-                        subject=edge_id,
-                    )
-                )
             incoming_count = sum(
-                1 for candidate in edges.values() if candidate.to_node == edge.to_node
+                1 for edge in edges.values() if edge.to_node == node_id
             )
-            if incoming_count != 1:
+            if map_policy.item_selector is None and incoming_count != 1:
                 diagnostics.append(
                     Diagnostic(
-                        code="POLICY_MAP_FAN_IN_UNSUPPORTED",
+                        code="POLICY_MAP_SELECTOR_REQUIRED",
                         severity="error",
                         message=(
-                            "A MapPolicy target must have exactly one incoming edge; "
-                            "map and complete fan-in cannot share one target in V1."
+                            "MapPolicy without an item_selector requires exactly one "
+                            "incoming Edge whose value can be iterated. Entry Nodes, "
+                            "fan-in Nodes, and Loop headers must define item_selector."
                         ),
-                        subject=edge_id,
+                        subject=node_id,
                     )
                 )
-            if target.input_plan is not None:
+            if node.input_plan is not None:
                 diagnostics.append(
                     Diagnostic(
                         code="POLICY_MAP_INPUT_MAPPING_CONFLICT",
                         severity="error",
                         message=(
-                            "A MapPolicy item_selector owns per-item input construction; "
-                            "the target node cannot also define input_mapping."
+                            "MapPolicy owns per-item input construction; the Node "
+                            "cannot also define input_mapping."
                         ),
-                        subject=edge_id,
+                        subject=node_id,
                     )
                 )
-            if target.policy is not None and target.policy.replication is not None:
+            if policy.replication is not None:
                 diagnostics.append(
                     Diagnostic(
                         code="POLICY_MAP_REPLICATION_CONFLICT",
                         severity="error",
-                        message="MapPolicy and ReplicationPolicy cannot target the same node.",
-                        subject=edge_id,
+                        message="MapPolicy and ReplicationPolicy cannot apply to the same Node.",
+                        subject=node_id,
                     )
                 )
 
     def _compile_final_output_contracts(
         self,
         nodes: dict[str, NodeIR],
-        edges: dict[str, EdgeIR],
         diagnostics: list[Diagnostic],
     ) -> None:
         """Derive NodeExecution outputs after map/replication aggregation."""
 
         for node_id, node in nodes.items():
-            replication = node.policy.replication if node.policy is not None else None
-            if replication is None:
+            policy = node.policy
+            if policy is None:
                 continue
-            if replication.output_aggregator is None:
+            parallel_policy = policy.map or policy.replication
+            if parallel_policy is None:
+                continue
+            if parallel_policy.output_aggregator is None:
                 item_annotation = node.operator_output_contract.annotation
                 node.output_contract = value_contract(list[item_annotation])
                 continue
-            contract, _ = callable_contract(replication.output_aggregator)
+            contract, _ = callable_contract(parallel_policy.output_aggregator)
             node.output_contract = contract.output
             if not contract.output.known:
+                kind = "Map" if policy.map is not None else "Replication"
                 diagnostics.append(
                     Diagnostic(
                         code="POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
                         severity="warning",
                         message=(
-                            "Replication output_aggregator has no concrete return "
-                            "annotation; final node output cannot be validated."
+                            f"{kind} output_aggregator has no concrete return "
+                            "annotation; final Node output cannot be validated."
                         ),
                         subject=node_id,
-                    )
-                )
-
-        for edge_id, edge in edges.items():
-            map_policy = edge.policy.map if edge.policy is not None else None
-            if map_policy is None:
-                continue
-            target = nodes[edge.to_node]
-            if map_policy.output_aggregator is None:
-                item_annotation = target.operator_output_contract.annotation
-                target.output_contract = value_contract(list[item_annotation])
-                continue
-            contract, _ = callable_contract(map_policy.output_aggregator)
-            target.output_contract = contract.output
-            if not contract.output.known:
-                diagnostics.append(
-                    Diagnostic(
-                        code="POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
-                        severity="warning",
-                        message=(
-                            "Map output_aggregator has no concrete return annotation; "
-                            "final node output cannot be validated."
-                        ),
-                        subject=edge_id,
                     )
                 )
 
@@ -1437,12 +1403,10 @@ def _diagnostic_object_type(
     if code.startswith("EDGE_") or code in {
         "CONDITION_UNSUPPORTED",
         "STRING_CONDITION_UNSUPPORTED",
-        "SUBWORKFLOW_MAP_UNSUPPORTED",
-        "SYSTEM_COMMAND_MAP_UNSUPPORTED",
     }:
         return "edge"
     if code.startswith("POLICY_MAP_"):
-        return "edge"
+        return "node"
     if object_id is not None and object_id in edge_ids:
         return "edge"
     if object_id is not None and object_id in node_ids:

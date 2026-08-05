@@ -218,6 +218,43 @@ class ReplicationPolicy(BaseModel):
     )
 
 
+class MapPolicy(BaseModel):
+    """Fan out one logical Node input into parallel Operator executions."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    item_selector: Callable[
+        [MapItemSelectionContext],
+        Iterable[Mapping[str, Any]]
+        | Awaitable[Iterable[Mapping[str, Any]]],
+    ] | None = Field(
+        default=None,
+        description=(
+            "Receives one MapItemSelectionContext and maps the current logical "
+            "Node input into iterable Operator argument mappings. Each selected "
+            "mapping is copied to a dict and becomes one map item. When omitted, "
+            "the Node must have exactly one incoming Edge and that source output "
+            "must itself be an iterable of argument mappings."
+        ),
+    )
+    output_aggregator: Callable[
+        [MapAggregationContext],
+        Any | Awaitable[Any],
+    ] | None = Field(
+        default=None,
+        description=(
+            "Receives one MapAggregationContext and aggregates item_outputs "
+            "into the NodeExecution.output. When omitted, outputs are collected "
+            "into a list ordered by item index. If any item fails, remaining "
+            "calls are cancelled when possible and this hook is not called."
+        ),
+    )
+    max_parallelism: int | None = Field(
+        default=None,
+        description="Maximum map items to execute concurrently.",
+    )
+
+
 class NodePolicy(BaseModel):
     """Node-level scheduling and execution policy."""
 
@@ -246,6 +283,14 @@ class NodePolicy(BaseModel):
         default=None,
         description="Resource limits for this node.",
     )
+    map: MapPolicy | None = Field(
+        default=None,
+        description=(
+            "Optional data-parallel execution policy. The item selector sees "
+            "the complete logical Node input and current incoming activations, "
+            "then NodeExecutor aggregates all item outputs into one Node output."
+        ),
+    )
     replication: ReplicationPolicy | None = Field(
         default=None,
         description=(
@@ -260,57 +305,5 @@ class NodePolicy(BaseModel):
             "Maximum concurrent logical NodeExecutions for this node across "
             "sessions in one App process. MapPolicy/ReplicationPolicy "
             "max_parallelism separately limits internal handler units."
-        ),
-    )
-
-
-class MapPolicy(BaseModel):
-    """Fan out one selected edge over items derived from source node output."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    item_selector: Callable[
-        [MapItemSelectionContext],
-        Iterable[Mapping[str, Any]]
-        | Awaitable[Iterable[Mapping[str, Any]]],
-    ] | None = Field(
-        default=None,
-        description=(
-            "Receives one MapItemSelectionContext and maps its input into "
-            "iterable target operator argument mappings. Each selected mapping is copied to a dict and "
-            "becomes one map item. When omitted, the source output "
-            "must itself be an iterable of argument mappings."
-        ),
-    )
-    output_aggregator: Callable[
-        [MapAggregationContext],
-        Any | Awaitable[Any],
-    ] | None = Field(
-        default=None,
-        description=(
-            "Receives one MapAggregationContext and aggregates item_outputs "
-            "into the target NodeExecution.output. "
-            "When omitted, outputs are collected into a list ordered by item "
-            "index. If any item fails, remaining calls are cancelled when "
-            "possible and this hook is not called."
-        ),
-    )
-    max_parallelism: int | None = Field(
-        default=None,
-        description="Maximum map items to execute concurrently.",
-    )
-
-
-class EdgePolicy(BaseModel):
-    """Edge-level data movement policy."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-    map: MapPolicy | None = Field(
-        default=None,
-        description=(
-            "Optional map/fan-out behavior. If present, this edge creates one "
-            "target NodeExecution whose NodeExecutor performs multiple "
-            "map item handler units and aggregates their outputs."
         ),
     )

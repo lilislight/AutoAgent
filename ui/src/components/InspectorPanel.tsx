@@ -392,7 +392,7 @@ function inspectorTabDescription(
       return "Every evaluation of this Edge and whether its condition selected the route.";
     }
     if (tab === "definition") {
-      return "The immutable Edge definition and routing policy used by this Invocation.";
+      return "The immutable Edge definition and routing condition used by this Invocation.";
     }
     return "The latest evaluation at the current replay cursor.";
   }
@@ -805,16 +805,22 @@ function phaseEvents(
   execution: NodeExecutionView | null,
 ): RuntimeEvent[] {
   if (!execution) return events;
-  const scoped = events.filter((event) =>
+  return events.filter((event) =>
     event.payload.node_execution_id === execution.id ||
     event.subject_id === execution.id,
   );
-  // Older traces may not carry node_execution_id on every phase. Fall back to
-  // the Node scope only when the selected execution has no explicit matches;
-  // otherwise a looped Node would load values for all of its executions.
-  return scoped.length > 0
-    ? scoped
-    : events.filter((event) => event.node_id === execution.node_id);
+}
+
+function runtimeEventNodeId(event: RuntimeEvent): string | null {
+  if (typeof event.payload.node_id === "string") return event.payload.node_id;
+  return event.subject_type === "node" || event.subject_type === "node_execution"
+    ? event.subject_id
+    : null;
+}
+
+function runtimeEventEdgeId(event: RuntimeEvent): string | null {
+  if (typeof event.payload.edge_id === "string") return event.payload.edge_id;
+  return event.subject_type === "edge" ? event.subject_id : null;
 }
 
 function phaseLabel(name: string): string {
@@ -1224,7 +1230,7 @@ function EventList({
             {localSequence}
           </span>
           <div>
-            <strong>{event.type}</strong>
+            <strong>{event.event_name}</strong>
             <time>{formatTimestamp(event.occurred_at_ms)}</time>
             <span className="event-runtime-meta">
               {event.status ?? event.event_type}
@@ -1347,10 +1353,10 @@ function inspectSelection(
       .filter((value): value is string => typeof value === "string"),
   );
   const allEvaluations: EdgeEvaluationView[] = visibleEvents
-    .filter((event) => event.event_name === "edge.evaluated" && event.edge_id)
+    .filter((event) => event.event_name === "edge.evaluated")
     .map((event) => ({
       id: event.id,
-      edge_id: event.edge_id!,
+      edge_id: runtimeEventEdgeId(event) ?? event.subject_id,
       source_execution_id: String(event.payload.source_execution_id ?? ""),
       source_node_id: String(event.payload.source_node_id ?? ""),
       target_node_id: String(event.payload.target_node_id ?? ""),
@@ -1409,9 +1415,14 @@ function inspectSelection(
         .map((edge) => edge.id),
     );
     const groupEvents = visibleEvents.filter(
-      (event) =>
-        (event.node_id !== null && groupNodeIds.has(event.node_id)) ||
-        (event.edge_id !== null && groupEdgeIds.has(event.edge_id)),
+      (event) => {
+        const nodeId = runtimeEventNodeId(event);
+        const edgeId = runtimeEventEdgeId(event);
+        return (
+          (nodeId !== null && groupNodeIds.has(nodeId)) ||
+          (edgeId !== null && groupEdgeIds.has(edgeId))
+        );
+      },
     );
     return {
       kind: "Sub-workflow",
@@ -1460,7 +1471,9 @@ function inspectSelection(
         : {},
       executions,
       edgeEvaluations: [],
-      events: allEvents.filter((event) => event.node_id === selection.id),
+      events: allEvents.filter(
+        (event) => runtimeEventNodeId(event) === selection.id,
+      ),
     };
   }
   if (selection.type === "edge") {
@@ -1476,10 +1489,12 @@ function inspectSelection(
       input: evaluations.at(-1) ?? null,
       output: null,
       contracts: {},
-      policies: edge?.policy ? { policy: edge.policy } : {},
+      policies: {},
       executions: [],
       edgeEvaluations: evaluations,
-      events: allEvents.filter((event) => event.edge_id === selection.id),
+      events: allEvents.filter(
+        (event) => runtimeEventEdgeId(event) === selection.id,
+      ),
       overview: projected,
     };
   }
@@ -1495,7 +1510,7 @@ function inspectSelection(
       policies: execution?.resource_usage ? { resource_usage: execution.resource_usage } : {},
       executions: execution ? [execution] : [],
       edgeEvaluations: [],
-      events: allEvents.filter((event) => event.entity_id === selection.id),
+      events: allEvents.filter((event) => event.subject_id === selection.id),
     };
   }
   const call = invocation.node_executions
@@ -1511,7 +1526,7 @@ function inspectSelection(
     policies: call?.resource_usage ? { resource_usage: call.resource_usage } : {},
     executions: [],
     edgeEvaluations: [],
-    events: allEvents.filter((event) => event.entity_id === selection.id),
+    events: allEvents.filter((event) => event.subject_id === selection.id),
   };
 }
 

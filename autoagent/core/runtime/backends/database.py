@@ -201,11 +201,11 @@ class DatabaseBackend:
     async def _arun_database_operation(self, awaitable: Awaitable[T]) -> T:
         """Keep worker-thread database callbacks on the low-latency pulse."""
 
-        self._database_loop.begin_compatibility_wait()
+        self._database_loop.begin_polling_wait()
         try:
             return await self._database_loop.arun(awaitable)
         finally:
-            self._database_loop.end_compatibility_wait()
+            self._database_loop.end_polling_wait()
 
     async def ainitialize(self) -> None:
         if not self._database_loop.is_current():
@@ -1832,7 +1832,7 @@ class DatabaseBackend:
                 self._inflight_bytes += batch_bytes
                 self._inflight_count += len(control_items)
             retry_delay = 0.05
-            self._database_loop.begin_compatibility_wait()
+            self._database_loop.begin_polling_wait()
             try:
                 while True:
                     try:
@@ -1904,7 +1904,7 @@ class DatabaseBackend:
                             self.store._persistence_advanced(invocation_id)
                         break
             finally:
-                self._database_loop.end_compatibility_wait()
+                self._database_loop.end_polling_wait()
                 with self._pressure_lock:
                     self._inflight_bytes -= batch_bytes
                     self._inflight_count -= len(control_items)

@@ -16,7 +16,6 @@ from sqlalchemy.exc import OperationalError
 from autoagent import (
     AutoAgentApp,
     DatabaseBackend,
-    EdgePolicy,
     FailurePolicy,
     JsonRuntimeSerializer,
     MapPolicy,
@@ -72,15 +71,15 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_cross_thread_database_operation_uses_scoped_fast_pulse(
         self,
     ) -> None:
-        async def compatibility_waits() -> int:
-            return self.backend._database_loop._compatibility_waits
+        async def polling_waits() -> int:
+            return self.backend._database_loop._polling_waits
 
         active = await self.backend._arun_database_operation(
-            compatibility_waits()
+            polling_waits()
         )
 
         self.assertEqual(1, active)
-        self.assertEqual(0, self.backend._database_loop._compatibility_waits)
+        self.assertEqual(0, self.backend._database_loop._polling_waits)
 
     async def test_sqlite_initialization_creates_missing_parent_directory(
         self,
@@ -826,14 +825,15 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             node_id="fast",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
-        workflow.add_node(slow_map_item, node_id="mapped")
+        workflow.add_node(
+            slow_map_item,
+            node_id="mapped",
+            policy=NodePolicy(map=MapPolicy(item_selector=select_items)),
+        )
         workflow.add_edge("start", "fast")
         workflow.add_edge(
             "start",
             "mapped",
-            policy=EdgePolicy(
-                map=MapPolicy(item_selector=select_items),
-            ),
         )
 
         app = AutoAgentApp(runtime_store=self.store)
@@ -2257,11 +2257,10 @@ class RuntimeEventTests(unittest.TestCase):
         app = started_app(runtime_store=store)
         workflow = Workflow(id="bounded_map_history")
         workflow.add_node(lambda: list(range(100)), node_id="source")
-        workflow.add_node(lambda value: value * 2, node_id="target")
-        workflow.add_edge(
-            "source",
-            "target",
-            policy=EdgePolicy(
+        workflow.add_node(
+            lambda value: value * 2,
+            node_id="target",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": value} for value in ctx.input
@@ -2269,6 +2268,10 @@ class RuntimeEventTests(unittest.TestCase):
                     max_parallelism=20,
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "target",
         )
 
         invocation = app.invoke(workflow, event_mode="full")

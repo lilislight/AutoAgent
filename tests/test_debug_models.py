@@ -26,7 +26,7 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core.runtime import UserEventSpec
-from autoagent.core.workflow import EdgePolicy, MapPolicy, NodePolicy, RetryPolicy
+from autoagent.core.workflow import MapPolicy, NodePolicy, RetryPolicy
 
 
 def _report(**updates: object) -> InvocationReport:
@@ -185,11 +185,10 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         workflow = Workflow(id="debug_map_report")
         workflow.add_node(lambda: [1, 2, 3], node_id="source")
-        workflow.add_node(lambda value: value * 2, node_id="mapped")
-        workflow.add_edge(
-            "source",
-            "mapped",
-            policy=EdgePolicy(
+        workflow.add_node(
+            lambda value: value * 2,
+            node_id="mapped",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": item} for item in ctx.input
@@ -197,6 +196,10 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
                     output_aggregator=lambda ctx: sum(ctx.item_outputs),
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "mapped",
         )
         app = AutoAgentApp(settings=AutoAgentSettings())
         try:

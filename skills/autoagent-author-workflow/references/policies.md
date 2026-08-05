@@ -122,15 +122,17 @@ for the same target execution.
 
 ## Map
 
-`EdgePolicy(map=MapPolicy(...))` fields:
+`NodePolicy(map=MapPolicy(...))` fields:
 
 - optional `item_selector`;
 - optional `output_aggregator`;
 - optional `max_parallelism`.
 
-Map cannot target a fan-in Node, a SystemCommand, a Node with Input Mapping, or
-a replicated Node. The App-wide parallel-unit setting remains the hard upper
-bound even if Workflow policy requests more.
+A selector-less Map requires exactly one incoming Edge. A custom selector can
+consume complete fan-in and can run on a Loop header. Map cannot apply to a
+SystemCommand, a Node with Input Mapping, or a replicated Node. The App-wide
+parallel-unit setting remains the hard upper bound even if Workflow policy
+requests more.
 
 ## Wait and Event mode
 

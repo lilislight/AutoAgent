@@ -21,7 +21,7 @@ class OperatorResolutionError(Exception):
 class OperatorResolver:
     """Resolve a compiled node binding into one concrete executable Operator.
 
-    Direct Operator and legacy Callable bindings bypass registries. OperatorRef
+    Direct Operator and Callable bindings bypass registries. OperatorRef
     resolves one exact registered implementation. CapabilityRef obtains all
     enabled implementations and applies the node's CapabilitySelectionPolicy
     for every NodeExecution, preserving late binding after compilation.

@@ -17,7 +17,6 @@ from autoagent.core.executor.node_executor import _retry_delay_seconds
 from autoagent.core.workflow import (
     BackoffPolicy,
     CapabilityRef,
-    EdgePolicy,
     MapPolicy,
     NodePolicy,
     ReplicationPolicy,
@@ -871,11 +870,10 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             lambda: [1, 2, 3],
             node_id="source",
         )
-        workflow.add_node(stream, node_id="stream")
-        workflow.add_edge(
-            "source",
-            "stream",
-            policy=EdgePolicy(
+        workflow.add_node(
+            stream,
+            node_id="stream",
+            policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": value} for value in ctx.input
@@ -883,6 +881,10 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
                     max_parallelism=2,
                 )
             ),
+        )
+        workflow.add_edge(
+            "source",
+            "stream",
         )
 
         invocation = started_app().invoke(workflow)

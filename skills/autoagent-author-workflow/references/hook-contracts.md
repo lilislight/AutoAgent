@@ -100,10 +100,14 @@ def select_items(
 Additional fields:
 
 - `node_id`;
-- `input`: source value selected by the mapped Edge.
+- `workflow_path`;
+- `incoming`: the current NodeExecution activations;
+- `input`: Invocation input for an entry Node, the single source value for one
+  activation, or a source-node-id mapping for complete fan-in.
 
 Return an iterable of mappings. Each mapping is one target callable invocation.
-Without a selector, the source value itself must be an iterable of mappings.
+Without a selector, the Node must have exactly one incoming Edge and its source
+value must itself be an iterable of mappings.
 
 ## Map aggregator
 

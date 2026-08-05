@@ -26,6 +26,7 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core.runtime import UserEventSpec
+from autoagent.core.workflow import EdgePolicy, MapPolicy, NodePolicy, RetryPolicy
 
 
 def _report(**updates: object) -> InvocationReport:
@@ -113,6 +114,161 @@ class DebugModelTests(unittest.TestCase):
 
 
 class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_minimal_report_exposes_only_invocation_evidence(self) -> None:
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        workflow = Workflow(id="debug_minimal_report")
+        workflow.add_node(lambda: "done", node_id="work")
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="minimal")
+            service = DebugQueryService(app.runtime_store, source="server")
+            report = await service.report(invocation.id)
+            nodes = await service.node_executions(invocation.id)
+        finally:
+            await app.aclose()
+
+        self.assertEqual(0, report.observed_sequence)
+        self.assertEqual(0, report.node_execution_count)
+        self.assertEqual(("invocation", "values"), report.available_evidence)
+        self.assertEqual((), nodes.items)
+
+    async def test_report_counts_retry_fallback_and_operator_attempts(self) -> None:
+        calls = 0
+
+        def primary() -> str:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("primary failed")
+
+        def fallback() -> str:
+            return "recovered"
+
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        app.register_capability("debug_retry")
+        app.register_operator(
+            primary,
+            operator_id="primary",
+            capability_id="debug_retry",
+            default=True,
+        )
+        app.register_operator(
+            fallback,
+            operator_id="fallback",
+            capability_id="debug_retry",
+        )
+        workflow = Workflow(id="debug_retry_report")
+        workflow.add_node(
+            "debug_retry",
+            node_id="retry",
+            policy=NodePolicy(retry=RetryPolicy(max_attempts=2)),
+        )
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="full")
+            service = DebugQueryService(app.runtime_store, source="server")
+            report = await service.report(invocation.id)
+            operator_calls = await service.operator_calls(invocation.id)
+        finally:
+            await app.aclose()
+
+        self.assertEqual("completed", report.state)
+        self.assertEqual(3, report.operator_call_count)
+        self.assertEqual(1, report.retry_count)
+        self.assertEqual(1, report.fallback_count)
+        self.assertEqual(
+            ("normal", "retry", "fallback"),
+            tuple(item["reason"] for item in operator_calls.items),
+        )
+
+    async def test_map_is_one_logical_operator_call_with_parallel_summary(
+        self,
+    ) -> None:
+        workflow = Workflow(id="debug_map_report")
+        workflow.add_node(lambda: [1, 2, 3], node_id="source")
+        workflow.add_node(lambda value: value * 2, node_id="mapped")
+        workflow.add_edge(
+            "source",
+            "mapped",
+            policy=EdgePolicy(
+                map=MapPolicy(
+                    item_selector=lambda ctx: [
+                        {"value": item} for item in ctx.input
+                    ],
+                    output_aggregator=lambda ctx: sum(ctx.item_outputs),
+                )
+            ),
+        )
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="full")
+            service = DebugQueryService(app.runtime_store, source="server")
+            report = await service.report(invocation.id)
+            calls = await service.operator_calls(invocation.id)
+        finally:
+            await app.aclose()
+
+        mapped = next(item for item in calls.items if item["kind"] == "map")
+        self.assertEqual("completed", report.state)
+        self.assertEqual(2, report.operator_call_count)
+        self.assertEqual(3, mapped["call_count"])
+        self.assertEqual(3, mapped["attempt_count"])
+
+    async def test_loop_report_preserves_each_node_execution_occurrence(
+        self,
+    ) -> None:
+        workflow = Workflow(id="debug_loop_report")
+        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(
+            lambda value: value + 1,
+            node_id="agent",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_node(
+            lambda value: value,
+            node_id="finish",
+            input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+        )
+        workflow.add_edge("start", "agent", edge_id="enter")
+        workflow.add_edge(
+            "agent",
+            "agent",
+            edge_id="continue",
+            condition=lambda ctx: ctx.source_output < 3,
+        )
+        workflow.add_edge(
+            "agent",
+            "finish",
+            edge_id="exit",
+            condition=lambda ctx: ctx.source_output >= 3,
+        )
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="full")
+            service = DebugQueryService(app.runtime_store, source="server")
+            report = await service.report(invocation.id)
+            nodes = await service.node_executions(invocation.id)
+            edges = await service.edge_evaluations(invocation.id)
+        finally:
+            await app.aclose()
+
+        self.assertEqual("completed", report.state)
+        self.assertEqual(5, report.node_execution_count)
+        self.assertEqual(7, report.edge_evaluation_count)
+        self.assertEqual(
+            3,
+            sum(item["node_id"] == "agent" for item in nodes.items),
+        )
+        self.assertEqual(
+            (False, False, True),
+            tuple(
+                item["selected"]
+                for item in edges.items
+                if item["edge_id"] == "exit"
+            ),
+        )
+
     async def test_read_only_database_backend_does_not_create_runtime_schema(
         self,
     ) -> None:
@@ -374,6 +530,45 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.state, "completed")
         self.assertNotIn(
             "INVOCATION_STILL_RUNNING",
+            {warning.code for warning in report.warnings},
+        )
+
+    async def test_report_marks_runtime_events_that_are_not_durable_yet(
+        self,
+    ) -> None:
+        release = ThreadingEvent()
+
+        class BlockedEventBackend(DatabaseBackend):
+            async def _persist_batch(self, batch):
+                if any(item.kind == "event" for item in batch):
+                    await asyncio.to_thread(release.wait)
+                await super()._persist_batch(batch)
+
+        with tempfile.TemporaryDirectory() as directory:
+            backend = BlockedEventBackend.from_path(
+                Path(directory) / "partial.db",
+                batch_max_delay_ms=0,
+            )
+            app = AutoAgentApp(runtime_store=RuntimeStore(backend=backend))
+            workflow = Workflow(id="debug_partial_durability")
+            workflow.add_node(lambda: "done", node_id="work")
+            try:
+                await app.astart()
+                invocation = await app.ainvoke(
+                    workflow,
+                    event_mode="standard",
+                )
+                report = await DebugQueryService(
+                    app.runtime_store,
+                    source="server",
+                ).report(invocation.id)
+            finally:
+                release.set()
+                await app.aclose()
+
+        self.assertGreater(report.observed_sequence, report.durable_sequence)
+        self.assertIn(
+            "RUNTIME_EVENTS_NOT_FULLY_DURABLE",
             {warning.code for warning in report.warnings},
         )
 

@@ -100,9 +100,8 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 ### Phase 3: Invocation Report and progressive queries
 
-**Current focus:** complete the remaining Invocation-mode fixtures and
-large-journal/large-value performance coverage, then stabilize the local
-debugging Skill.
+**Current focus:** Phase 3 is closed. Stabilize the local Invocation-ID
+debugging Skill against the completed Report and progressive-query CLI.
 
 - [x] Add same-project Server discovery and evidence-source resolution: prefer
   the matching live Server, otherwise use an explicitly configured database,
@@ -127,7 +126,7 @@ debugging Skill.
   evaluation, Operator Call, Event, or Full-mode state boundary.
 - [x] Keep Report and comparison results out of Runtime persistence; render to
   stdout and optionally tee the same content to an ordinary `--report-file`.
-- [ ] Complete fixture coverage for Minimal, Standard, Full, partial durability,
+- [x] Complete fixture coverage for Minimal, Standard, Full, partial durability,
   Loop, Retry/Fallback, Map, and ReAct evidence. Core active, waiting,
   completed, failed, memory, and historical-database paths are covered.
 - [x] Add large-journal and large-value performance coverage. The SQLite smoke

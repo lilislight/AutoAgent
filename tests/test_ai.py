@@ -48,6 +48,7 @@ from autoagent.ai.models.user_event import (
     ToolCallRequestedPayload,
     ToolResultPayload,
 )
+from autoagent.debug import DebugQueryService
 from tests.helpers import isolated_app, started_app
 
 
@@ -1554,6 +1555,12 @@ class ReActWorkflowTests(unittest.TestCase):
                 "mode": "stream",
             },
         )
+        report = asyncio.run(
+            DebugQueryService(
+                app.runtime_store,
+                source="server",
+            ).report(invocation.id)
+        )
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(modes, ["stream", "stream"])
@@ -1564,6 +1571,10 @@ class ReActWorkflowTests(unittest.TestCase):
                 {"thinking": {"type": "enabled"}},
             ],
         )
+        self.assertGreaterEqual(report.user_event_counts.get("tool_call", 0), 1)
+        self.assertEqual(1, report.user_event_counts.get("tool_result", 0))
+        self.assertEqual(1, report.user_event_counts.get("agent_output", 0))
+        self.assertIn("user_events", report.available_evidence)
 
     def test_same_session_carries_messages_into_the_next_invocation(self) -> None:
         requests: list[LLMRequest] = []

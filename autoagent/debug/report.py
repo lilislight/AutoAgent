@@ -68,7 +68,9 @@ class DebugQueryService:
         )
 
         warnings: list[EvidenceWarning] = []
-        if not in_memory and record["event_mode"] != "minimal":
+        if record["event_mode"] == "minimal":
+            node_records = ()
+        elif not in_memory:
             try:
                 node_records = tuple(
                     (await self._node_record_map(

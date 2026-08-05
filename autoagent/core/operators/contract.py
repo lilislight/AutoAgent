@@ -6,10 +6,14 @@ import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
 from types import MappingProxyType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin, is_typeddict
+from uuid import UUID
 
-from pydantic import ConfigDict, TypeAdapter, create_model
+from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
 from autoagent.core.operators.streaming import StreamingResult
 
@@ -50,11 +54,10 @@ class SchemaContract:
     construct these contracts: registration and compilation derive them from
     Python callable annotations.
 
-    The generated JSON Schema is descriptive and portable metadata for tool
-    declarations, UI inspection, MCP adapters, and diagnostics. Runtime uses
-    the private Pydantic adapters and signature retained inside this object, so
-    an annotation may remain executable even when it cannot be represented
-    completely as JSON Schema.
+    The generated JSON Schema is portable metadata for tool declarations, UI
+    inspection, adapters, and diagnostics. Runtime retains private Pydantic
+    adapters only to validate live values and restore persisted JSON through
+    the exact Workflow revision's contract.
     """
 
     kind: Literal["arguments", "value"]
@@ -64,6 +67,7 @@ class SchemaContract:
     extra_annotation: Any = Any
     inspectable: bool = True
     portable: bool = True
+    restoration_mode: Literal["typed", "json"] = "typed"
     _json_schema: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({}),
         repr=False,
@@ -104,6 +108,7 @@ class SchemaContract:
             "json_schema": self.json_schema,
             "portable": self.portable,
             "known": self.known,
+            "restoration_mode": self.restoration_mode,
         }
 
     @property
@@ -112,7 +117,7 @@ class SchemaContract:
 
         if self.kind == "arguments":
             return self.inspectable
-        return not _is_unknown(self.annotation)
+        return not _is_missing(self.annotation)
 
     def validate(self, value: Any) -> Any:
         """Validate a named argument Mapping or one output value strictly."""
@@ -120,8 +125,24 @@ class SchemaContract:
         if self.kind == "arguments":
             return self._validate_arguments(value)
         if self._value_adapter is not None:
-            self._value_adapter.validate_python(value, strict=True)
+            validated = self._value_adapter.validate_python(value, strict=True)
+            return (
+                _normalize_dynamic_json(validated)
+                if self.restoration_mode == "json"
+                else _ensure_serializable(validated)
+            )
         return value
+
+    def restore(self, value: Any) -> Any:
+        """Materialize persisted JSON using this executable contract."""
+
+        if self.kind == "arguments":
+            return self._restore_arguments(value)
+        if self.restoration_mode == "json" or self._value_adapter is None:
+            return _normalize_dynamic_json(value)
+        return _ensure_serializable(
+            self._value_adapter.validate_python(value, strict=False)
+        )
 
     def _validate_arguments(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -134,20 +155,68 @@ class SchemaContract:
 
         bound = self._signature.bind(**arguments)
         validated = dict(arguments)
-        named_parameters = {parameter.name for parameter in self.parameters}
+        parameters_by_name = {
+            parameter.name: parameter for parameter in self.parameters
+        }
         for name, argument in bound.arguments.items():
             adapter = self._parameter_adapters.get(name)
             if adapter is not None:
-                validated[name] = adapter.validate_python(argument, strict=True)
+                validated_value = adapter.validate_python(argument, strict=True)
+                parameter = parameters_by_name[name]
+                validated[name] = (
+                    _normalize_dynamic_json(validated_value)
+                    if _is_dynamic_json(parameter.annotation)
+                    else validated_value
+                )
                 continue
-            if name in named_parameters or self._extra_adapter is None:
+            if name in parameters_by_name or self._extra_adapter is None:
                 continue
             for extra_name, extra_value in argument.items():
                 validated[extra_name] = self._extra_adapter.validate_python(
                     extra_value,
                     strict=True,
                 )
-        return validated
+                if _is_dynamic_json(self.extra_annotation):
+                    validated[extra_name] = _normalize_dynamic_json(
+                        validated[extra_name]
+                    )
+        return _ensure_serializable(validated)
+
+    def _restore_arguments(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise TypeError("Operator input must be a mapping.")
+        arguments = dict(value)
+        if not self.inspectable or self._signature is None:
+            return arguments
+
+        bound = self._signature.bind(**arguments)
+        restored = dict(arguments)
+        parameters_by_name = {
+            parameter.name: parameter for parameter in self.parameters
+        }
+        for name, argument in bound.arguments.items():
+            adapter = self._parameter_adapters.get(name)
+            if adapter is not None:
+                restored_value = adapter.validate_python(argument, strict=False)
+                parameter = parameters_by_name[name]
+                restored[name] = (
+                    _normalize_dynamic_json(restored_value)
+                    if _is_dynamic_json(parameter.annotation)
+                    else restored_value
+                )
+                continue
+            if name in parameters_by_name or self._extra_adapter is None:
+                continue
+            for extra_name, extra_value in argument.items():
+                restored[extra_name] = self._extra_adapter.validate_python(
+                    extra_value,
+                    strict=False,
+                )
+                if _is_dynamic_json(self.extra_annotation):
+                    restored[extra_name] = _normalize_dynamic_json(
+                        restored[extra_name]
+                    )
+        return _ensure_serializable(restored)
 
 
 @dataclass(frozen=True)
@@ -165,8 +234,8 @@ def callable_contract(
 
     Node input is always a Mapping whose keys bind to named parameters.
     Positional-only and variadic positional parameters cannot be represented by
-    that protocol and are rejected. Missing annotations and ``Any`` reduce
-    validation quality but do not prevent execution, so they produce warnings.
+    that protocol and are rejected. Every parameter and return value must be
+    annotated. Explicit ``Any`` is a dynamic JSON contract; omission is an error.
     """
 
     signature = _signature(handler)
@@ -178,9 +247,9 @@ def callable_contract(
             ),
             (
                 ContractIssue(
-                    "Callable signature cannot be inspected; input and output "
-                    "compatibility will be checked only when invoked.",
-                    "warning",
+                    "Callable signature cannot be inspected; Workflow callables "
+                    "must declare serializable input and output contracts.",
+                    "error",
                 ),
             ),
         )
@@ -210,17 +279,42 @@ def callable_contract(
             continue
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             allow_extra = True
-            extra_annotation = parameter.annotation
+            extra_annotation = _normalize_annotation(parameter.annotation)
+            if _is_missing(extra_annotation):
+                extra_annotation = Any
+                issues.append(
+                    ContractIssue(
+                        f"Variadic keyword parameter '**{parameter.name}' has no "
+                        "type annotation.",
+                        "error",
+                    )
+                )
+            elif not _annotation_is_serializable(extra_annotation):
+                issues.append(
+                    ContractIssue(
+                        f"Variadic keyword parameter '**{parameter.name}' uses a "
+                        "non-serializable Workflow type: "
+                        f"{_annotation_name(extra_annotation)}.",
+                        "error",
+                    )
+                )
             continue
 
-        annotation = parameter.annotation
-        if _is_unknown(annotation):
+        annotation = _normalize_annotation(parameter.annotation)
+        if _is_missing(annotation):
             annotation = Any
             issues.append(
                 ContractIssue(
-                    f"Parameter '{parameter.name}' has no concrete type annotation; "
-                    "runtime type validation is unavailable for this field.",
-                    "warning",
+                    f"Parameter '{parameter.name}' has no type annotation.",
+                    "error",
+                )
+            )
+        elif not _annotation_is_serializable(annotation):
+            issues.append(
+                ContractIssue(
+                    f"Parameter '{parameter.name}' uses a non-serializable "
+                    f"Workflow type: {_annotation_name(annotation)}.",
+                    "error",
                 )
             )
         required = parameter.default is inspect.Parameter.empty
@@ -234,16 +328,23 @@ def callable_contract(
             )
         )
 
-    output_annotation = _effective_output_annotation(
-        signature.return_annotation
+    output_annotation = _normalize_annotation(
+        _effective_output_annotation(signature.return_annotation)
     )
-    if _is_unknown(output_annotation):
+    if _is_missing(output_annotation):
         output_annotation = Any
         issues.append(
             ContractIssue(
-                "Callable has no concrete return annotation; runtime output "
-                "validation is unavailable.",
-                "warning",
+                "Callable has no return type annotation.",
+                "error",
+            )
+        )
+    elif not _annotation_is_serializable(output_annotation):
+        issues.append(
+            ContractIssue(
+                "Callable return annotation uses a non-serializable Workflow "
+                f"type: {_annotation_name(output_annotation)}.",
+                "error",
             )
         )
 
@@ -259,6 +360,34 @@ def callable_contract(
         ),
         tuple(issues),
     )
+
+
+def callable_output_contract(
+    handler: Any,
+) -> tuple[SchemaContract, tuple[ContractIssue, ...]]:
+    """Derive only the persisted output contract of a framework hook."""
+
+    signature = _signature(handler)
+    if signature is None:
+        return value_contract(Any), (
+            ContractIssue("Callable signature cannot be inspected.", "error"),
+        )
+    annotation = _normalize_annotation(
+        _effective_output_annotation(signature.return_annotation)
+    )
+    if _is_missing(annotation):
+        return value_contract(Any), (
+            ContractIssue("Callable has no return type annotation.", "error"),
+        )
+    if not _annotation_is_serializable(annotation):
+        return value_contract(annotation), (
+            ContractIssue(
+                "Callable return annotation uses a non-serializable Workflow "
+                f"type: {_annotation_name(annotation)}.",
+                "error",
+            ),
+        )
+    return value_contract(annotation), ()
 
 
 def ensure_callable_contract(handler: Any) -> OperatorContract:
@@ -305,13 +434,19 @@ def _effective_output_annotation(annotation: Any) -> Any:
 def value_contract(annotation: Any) -> SchemaContract:
     """Build the canonical contract for one Python output annotation."""
 
-    resolved_annotation = Any if _is_unknown(annotation) else annotation
+    normalized_annotation = _normalize_annotation(annotation)
+    resolved_annotation = (
+        Any if _is_missing(normalized_annotation) else normalized_annotation
+    )
     adapter = _type_adapter(resolved_annotation)
     json_schema, portable = _annotation_json_schema(resolved_annotation)
     return SchemaContract(
         kind="value",
         annotation=resolved_annotation,
         portable=portable,
+        restoration_mode=(
+            "json" if _is_dynamic_json(resolved_annotation) else "typed"
+        ),
         _json_schema=MappingProxyType(json_schema),
         _value_adapter=adapter,
     )
@@ -418,7 +553,9 @@ def _arguments_json_schema(
 
 
 def _annotation_json_schema(annotation: Any) -> tuple[dict[str, Any], bool]:
-    if _is_unknown(annotation):
+    if annotation is Any:
+        return {}, True
+    if _is_missing(annotation) or annotation is object:
         return {}, False
     adapter = _type_adapter(annotation)
     if adapter is None:
@@ -430,18 +567,12 @@ def _annotation_json_schema(annotation: Any) -> tuple[dict[str, Any], bool]:
 
 
 def _type_adapter(annotation: Any) -> TypeAdapter[Any] | None:
-    if _is_unknown(annotation):
+    if _is_missing(annotation) or annotation is object:
         return None
     try:
         return TypeAdapter(annotation)
     except Exception:
-        try:
-            return TypeAdapter(
-                annotation,
-                config=ConfigDict(arbitrary_types_allowed=True),
-            )
-        except Exception:
-            return None
+        return None
 
 
 def _compare_arguments(
@@ -534,6 +665,134 @@ def _is_unknown(annotation: Any) -> bool:
         or annotation is inspect.Signature.empty
         or annotation is Any
     )
+
+
+def _is_missing(annotation: Any) -> bool:
+    return annotation is inspect.Parameter.empty or annotation is inspect.Signature.empty
+
+
+def _normalize_annotation(annotation: Any) -> Any:
+    return type(None) if annotation is None else annotation
+
+
+def _is_dynamic_json(annotation: Any) -> bool:
+    if annotation is Any:
+        return True
+    origin = get_origin(annotation)
+    if annotation in {dict, list}:
+        return True
+    return origin in {dict, list} and any(
+        argument is Any for argument in get_args(annotation)
+    )
+
+
+def _annotation_is_serializable(
+    annotation: Any,
+    *,
+    seen: frozenset[Any] = frozenset(),
+) -> bool:
+    if annotation is Any:
+        return True
+    if annotation in {
+        str,
+        int,
+        float,
+        bool,
+        type(None),
+        UUID,
+        datetime,
+        date,
+        time,
+        Decimal,
+    }:
+        return True
+    if annotation in {bytes, bytearray, memoryview, object} or _is_missing(annotation):
+        return False
+    if annotation in seen:
+        return True
+    nested_seen = seen | {annotation}
+    if inspect.isclass(annotation) and issubclass(annotation, Enum):
+        return all(
+            _runtime_value_is_serializable(member.value)
+            for member in annotation
+        )
+    if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
+        return all(
+            _annotation_is_serializable(
+                field_info.annotation,
+                seen=nested_seen,
+            )
+            for field_info in annotation.model_fields.values()
+        )
+    if is_typeddict(annotation):
+        return all(
+            _annotation_is_serializable(value, seen=nested_seen)
+            for value in annotation.__annotations__.values()
+        )
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is type:
+        return False
+    if origin in {Union, types.UnionType}:
+        return all(
+            _annotation_is_serializable(value, seen=nested_seen)
+            for value in arguments
+        )
+    if origin is Literal:
+        return all(_runtime_value_is_serializable(value) for value in arguments)
+    if origin is Annotated:
+        return bool(arguments) and _annotation_is_serializable(
+            arguments[0],
+            seen=nested_seen,
+        )
+    if annotation in {dict, list, tuple, set, frozenset}:
+        return True
+    if origin is dict:
+        return (
+            len(arguments) == 2
+            and arguments[0] is str
+            and _annotation_is_serializable(arguments[1], seen=nested_seen)
+        )
+    if origin in {list, set, frozenset}:
+        return len(arguments) == 1 and _annotation_is_serializable(
+            arguments[0],
+            seen=nested_seen,
+        )
+    if origin is tuple:
+        values = arguments[:-1] if arguments[-1:] == (Ellipsis,) else arguments
+        return all(
+            _annotation_is_serializable(value, seen=nested_seen)
+            for value in values
+        )
+    return False
+
+
+def _runtime_value_is_serializable(value: Any) -> bool:
+    from autoagent.core.runtime.serialization import RuntimeSerializationError
+    from autoagent.core.runtime.serialization import normalize_json_value
+
+    try:
+        normalize_json_value(value)
+    except RuntimeSerializationError:
+        return False
+    return True
+
+
+def _normalize_dynamic_json(value: Any) -> Any:
+    from autoagent.core.runtime.serialization import normalize_json_value
+
+    return normalize_json_value(value)
+
+
+def _ensure_serializable(value: Any) -> Any:
+    from autoagent.core.runtime.serialization import ensure_serializable_value
+
+    return ensure_serializable_value(value)
+
+
+def _annotation_name(annotation: Any) -> str:
+    return getattr(annotation, "__name__", repr(annotation))
 
 
 def _signature(handler: Any) -> inspect.Signature | None:

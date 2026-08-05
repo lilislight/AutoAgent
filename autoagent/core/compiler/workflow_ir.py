@@ -138,9 +138,9 @@ class NodeIR(BaseModel):
             "replication aggregation."
         ),
     )
-    input_plan: Any | None = Field(
+    input_mapping: Any | None = Field(
         default=None,
-        description="Compiled input plan. Exact type is defined later.",
+        description="Compiled callable Input Mapping.",
     )
     output_binding: Any | None = Field(
         default=None,

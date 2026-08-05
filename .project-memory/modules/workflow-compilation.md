@@ -25,6 +25,7 @@ WorkflowCompiler recursively expands child Workflows, resolves Node and Edge ide
 - Compilation reports independent errors where possible instead of stopping at the first invalid object.
 - Child Workflow expansion preserves local ids and Workflow paths for hook contexts and trace grouping.
 - Map diagnostics and Preview markers belong to the mapped Node. The Compiler requires a selector when graph structure cannot supply one unambiguous default Map input.
+- Callable parameters, Operator outputs, and Map/Replication aggregator outputs require explicit serializable contracts; an omitted annotation or process-local Python type is a compilation error.
 - Revision identity is derived from semantic compiled definition; display metadata and import location do not redefine execution semantics.
 - Compiler diagnostics are shared by project check and Workflow preview.
 

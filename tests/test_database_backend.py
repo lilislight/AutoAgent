@@ -8,8 +8,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
 
@@ -41,7 +43,11 @@ from autoagent.core.runtime import (
 from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.runtime.persistence import UserEventPersistenceError
-from tests.helpers import isolated_app, started_app
+
+
+class ApprovalSeed(BaseModel):
+    message: str
+from tests.helpers import dynamic_json_callable, isolated_app, started_app
 from autoagent.core.runtime.backends.database import (
     _PersistenceItem,
     _is_retryable_database_error,
@@ -241,7 +247,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             serializer=serializer,
         )
         workflow = Workflow(id="atomic_admission")
-        workflow.add_node(lambda value: len(value), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: len(value)), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
 
@@ -286,7 +292,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             serializer=serializer,
         )
         workflow = Workflow(id="atomic_event")
-        workflow.add_node(lambda: "x" * 20_000, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * 20_000), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
 
@@ -323,7 +329,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             await self.store.aflush()
 
         small = Workflow(id="serialization_isolation")
-        small.add_node(lambda: "ok", node_id="node")
+        small.add_node(dynamic_json_callable(lambda: "ok"), node_id="node")
         other = await app.ainvoke(small, session_id="other")
         while self.store.persistence_status(other.id) == "pending":
             await asyncio.sleep(0.001)
@@ -345,7 +351,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = SlowAcceptanceBackend.from_path(self.path)
         self.store = RuntimeStore(backend=self.backend)
         workflow = Workflow(id="one_way_event_submission")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
 
@@ -367,7 +373,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         workflow = Workflow(id="unavailable_event_acceptance")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         entry = app.register_workflow(workflow)
@@ -434,7 +440,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = backend
         self.store = store
         workflow = Workflow(id="permanent_write_failure")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=store)
         await app.astart()
 
@@ -521,7 +527,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_row_timestamp_tracks_committed_events(self) -> None:
         workflow = Workflow(id="session_timestamp")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(workflow, session_id="same")
@@ -554,7 +560,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         workflow = Workflow(id="durable_user_events")
-        workflow.add_node(lambda value: value, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocations = [
@@ -684,7 +690,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = InvalidUserEventBackend.from_path(self.path)
         self.store = RuntimeStore(backend=self.backend)
         workflow = Workflow(id="isolated_user_event_failure")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(workflow, event_mode="full")
@@ -718,7 +724,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         workflow = Workflow(id="bidirectional_trace_invocations")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         created = [
@@ -771,7 +777,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sqlite_round_trip_rebuilds_from_genesis_and_runtime_events(self) -> None:
         workflow = Workflow(id="database_round_trip")
-        workflow.add_node(lambda value: value + 1, node_id="increment")
+        workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(
@@ -809,17 +815,17 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             selector_completed = True
             return [{"value": value} for value in ctx.input]
 
-        async def finish_after_selector(value):
+        async def finish_after_selector(value: list[int]) -> list[int]:
             while not selector_completed:
                 await asyncio.sleep(0)
             return value
 
-        async def slow_map_item(value):
+        async def slow_map_item(value: int) -> int:
             await asyncio.sleep(0.03)
             return value
 
         workflow = Workflow(id="database_parallel_event_sequence")
-        workflow.add_node(lambda: [1], node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: [1]), node_id="start")
         workflow.add_node(
             finish_after_selector,
             node_id="fast",
@@ -882,9 +888,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store = RuntimeStore(backend=self.backend)
         workflow = Workflow(id="artifact_round_trip")
-        workflow.add_node(lambda: "x" * 100_000, node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * 100_000), node_id="source")
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="target",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
@@ -960,7 +966,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store = RuntimeStore(backend=self.backend)
         workflow = Workflow(id="terminal_recovery_state")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(workflow)
@@ -996,7 +1002,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_event_modes_share_schema_but_persist_distinct_detail(self) -> None:
         workflow = Workflow(id="event_mode_storage")
-        workflow.add_node(lambda value: value + 1, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
 
@@ -1161,7 +1167,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         workflow = Workflow(id="durable_retention")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(
@@ -1208,7 +1214,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         workflow = Workflow(id="minimal_retention")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(
@@ -1236,7 +1242,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store = RuntimeStore(backend=self.backend)
         workflow = Workflow(id="snapshot_event_cache")
-        workflow.add_node(lambda value: value + 1, node_id="increment")
+        workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="increment")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
         invocation = await app.ainvoke(
@@ -1288,9 +1294,10 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sequences_restart_at_one_for_each_invocation(self) -> None:
         workflow = Workflow(id="per_invocation_sequence")
-        workflow.add_node(lambda: "ok", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "ok"), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
+        self.addAsyncCleanup(app.aclose)
         first = await app.ainvoke(workflow, session_id="same")
         second = await app.ainvoke(workflow, session_id="same")
         first_events = await self.store.alist_runtime_events(
@@ -1306,7 +1313,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_database_app_can_mix_sync_and_async_entrypoints(self) -> None:
         workflow = Workflow(id="database_mixed_api")
-        workflow.add_node(lambda value: value, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="node")
         app = AutoAgentApp(runtime_store=self.store)
         await app.astart()
 
@@ -1414,6 +1421,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         restarted = AutoAgentApp(runtime_store=reopened)
         restarted.register_workflow(workflow)
         await restarted.astart()
+        self.addAsyncCleanup(restarted.aclose)
         resumed = await restarted.aresume(
             workflow,
             session_id="session",
@@ -1422,6 +1430,65 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("completed", resumed.state)
         self.assertEqual({"output": {"approved": True}}, resumed.result)
+
+    async def test_resume_restores_prior_outputs_from_exact_workflow_contracts(
+        self,
+    ) -> None:
+        def prepare() -> ApprovalSeed:
+            return ApprovalSeed(message="review")
+
+        def map_wait(_ctx: Any) -> dict[str, Any]:
+            return {"wait_key": "typed-approval"}
+
+        def finish(seed: ApprovalSeed, approved: bool) -> str:
+            return f"{seed.message}:{approved}"
+
+        def map_finish(ctx: Any) -> dict[str, Any]:
+            return {
+                "seed": ctx.outputs.latest("prepare"),
+                "approved": ctx.incoming[0].value["approved"],
+            }
+
+        workflow = Workflow(id="database_typed_resume")
+        workflow.add_node(prepare, node_id="prepare")
+        workflow.add_node(
+            SystemCommand(id="wait"),
+            node_id="wait",
+            input_mapping=map_wait,
+        )
+        workflow.add_node(finish, node_id="finish", input_mapping=map_finish)
+        workflow.add_edge("prepare", "wait")
+        workflow.add_edge("wait", "finish")
+
+        first = AutoAgentApp(runtime_store=self.store)
+        await first.astart()
+        waiting = await first.ainvoke(workflow, session_id="typed-resume")
+        await self.store.aflush()
+        await first.aclose()
+
+        self.backend = DatabaseBackend.from_path(self.path)
+        reopened = RuntimeStore(backend=self.backend)
+        self.store = reopened
+        _, observed = await reopened.arebuild_execution(waiting.id)
+        self.assertIsInstance(observed.latest_node_execution("prepare").output, dict)
+
+        restarted = AutoAgentApp(runtime_store=reopened)
+        restarted.register_workflow(workflow)
+        await restarted.astart()
+        resumed = await restarted.aresume(
+            workflow,
+            session_id="typed-resume",
+            wait_key="typed-approval",
+            output={"approved": True},
+        )
+
+        self.assertEqual("completed", resumed.state)
+        self.assertEqual({"output": "review:True"}, resumed.result)
+        self.assertIsInstance(
+            resumed.latest_node_execution("prepare").output,
+            ApprovalSeed,
+        )
+        await restarted.aclose()
 
     async def test_invoke_does_not_lazily_recover_unregistered_workflow(
         self,
@@ -1479,7 +1546,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.store = reopened_store
         reopened = AutoAgentApp(runtime_store=reopened_store)
         registered = Workflow(id="registered_other_revision")
-        registered.add_node(lambda: "ok", node_id="done")
+        registered.add_node(dynamic_json_callable(lambda: "ok"), node_id="done")
         reopened.register_workflow(registered)
         await reopened.astart()
         try:
@@ -1517,7 +1584,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = flaky_backend
         self.store = flaky
         workflow = Workflow(id="database_retry_queue")
-        workflow.add_node(lambda: "ok", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "ok"), node_id="node")
         app = AutoAgentApp(runtime_store=flaky)
         await app.astart()
         invocation = await app.ainvoke(workflow)
@@ -1553,7 +1620,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="nonblocking_terminal")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         await app.astart()
 
@@ -1660,7 +1727,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = unavailable_backend
         self.store = unavailable
         workflow = Workflow(id="unavailable_backlog")
-        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * (32 * 1024)), node_id="node")
         app = AutoAgentApp(runtime_store=unavailable)
         await app.astart()
         assert unavailable.persistence is not None
@@ -1699,7 +1766,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = bounded_backend
         self.store = bounded
         workflow = Workflow(id="hard_queue_execution_priority")
-        workflow.add_node(lambda: "x" * (128 * 1024), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * (128 * 1024)), node_id="node")
         app = AutoAgentApp(runtime_store=bounded)
         await app.astart()
 
@@ -1735,7 +1802,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = unavailable_backend
         self.store = unavailable
         workflow = Workflow(id="startup_database_failure")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=unavailable)
 
         with self.assertRaisesRegex(
@@ -1779,7 +1846,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="byte_backpressure")
-        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * (32 * 1024)), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         await app.astart()
         first = await app.ainvoke(workflow, session_id="first")
@@ -1821,7 +1888,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="timeout_zero")
-        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * (32 * 1024)), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         await app.astart()
         first = await app.ainvoke(workflow, session_id="first")
@@ -1865,7 +1932,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = slow_backend
         self.store = slow
         workflow = Workflow(id="timeout_drain")
-        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * (32 * 1024)), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         await app.astart()
 
@@ -1908,7 +1975,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = blocked
         self.store = slow
         workflow = Workflow(id="admission_timeout")
-        workflow.add_node(lambda: "x" * (32 * 1024), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "x" * (32 * 1024)), node_id="node")
         app = AutoAgentApp(runtime_store=slow)
         await app.astart()
 
@@ -2053,7 +2120,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.backend = recording_backend
         self.store = recording
         workflow = Workflow(id="batch_events")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = AutoAgentApp(runtime_store=recording)
         await app.astart()
 
@@ -2065,10 +2132,15 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RuntimeEventTests(unittest.TestCase):
+    def _started_app(self, **kwargs: Any) -> AutoAgentApp:
+        app = started_app(**kwargs)
+        self.addCleanup(app.close)
+        return app
+
     def test_invalid_event_mode_is_rejected_before_admission(self) -> None:
         workflow = Workflow(id="invalid_event_mode")
-        workflow.add_node(lambda: "done", node_id="node")
-        app = started_app()
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
+        app = self._started_app()
 
         with self.assertRaisesRegex(ValueError, "Invalid event_mode"):
             app.invoke(workflow, event_mode="verbose")  # type: ignore[arg-type]
@@ -2076,9 +2148,9 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_standard_records_graph_events_without_operations(self) -> None:
         store = RuntimeStore()
-        app = started_app(runtime_store=store)
+        app = self._started_app(runtime_store=store)
         workflow = Workflow(id="standard_events")
-        workflow.add_node(lambda value: value, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="node")
         invocation = app.invoke(
             workflow,
             input={"value": 1},
@@ -2102,11 +2174,11 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_standard_records_scheduler_skips_as_node_state_events(self) -> None:
         store = RuntimeStore()
-        app = started_app(runtime_store=store)
+        app = self._started_app(runtime_store=store)
         workflow = Workflow(id="standard_skip_events")
-        workflow.add_node(lambda: "source", node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: "source"), node_id="source")
         workflow.add_node(
-            lambda: "target",
+            dynamic_json_callable(lambda: "target"),
             node_id="target",
             input_mapping=lambda _ctx: {},
         )
@@ -2129,9 +2201,9 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_full_records_internal_phases_and_rebuilds_each_event(self) -> None:
         store = RuntimeStore()
-        app = started_app(runtime_store=store)
+        app = self._started_app(runtime_store=store)
         workflow = Workflow(id="full_events")
-        workflow.add_node(lambda value: value.upper(), node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value.upper()), node_id="node")
         invocation = app.invoke(
             workflow,
             input={"value": "hello"},
@@ -2166,16 +2238,16 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_full_freezes_each_parallel_edge_decision_independently(self) -> None:
         store = RuntimeStore()
-        app = started_app(runtime_store=store)
+        app = self._started_app(runtime_store=store)
         workflow = Workflow(id="atomic_edge_events")
-        workflow.add_node(lambda: "source", node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: "source"), node_id="source")
         workflow.add_node(
-            lambda: "left",
+            dynamic_json_callable(lambda: "left"),
             node_id="left",
             input_mapping=lambda _ctx: {},
         )
         workflow.add_node(
-            lambda: "right",
+            dynamic_json_callable(lambda: "right"),
             node_id="right",
             input_mapping=lambda _ctx: {},
         )
@@ -2219,11 +2291,11 @@ class RuntimeEventTests(unittest.TestCase):
         self,
     ) -> None:
         store = RuntimeStore()
-        app = started_app(runtime_store=store)
+        app = self._started_app(runtime_store=store)
         workflow = Workflow(id="event_timing")
-        workflow.add_node(lambda: "source", node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: "source"), node_id="source")
         workflow.add_node(
-            lambda: "target",
+            dynamic_json_callable(lambda: "target"),
             node_id="target",
             input_mapping=lambda _ctx: {},
         )
@@ -2254,11 +2326,11 @@ class RuntimeEventTests(unittest.TestCase):
 
     def test_map_units_collapse_into_one_logical_operator_event(self) -> None:
         store = RuntimeStore()
-        app = started_app(runtime_store=store)
+        app = self._started_app(runtime_store=store)
         workflow = Workflow(id="bounded_map_history")
-        workflow.add_node(lambda: list(range(100)), node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: list(range(100))), node_id="source")
         workflow.add_node(
-            lambda value: value * 2,
+            dynamic_json_callable(lambda value: value * 2),
             node_id="target",
             policy=NodePolicy(
                 map=MapPolicy(
@@ -2317,7 +2389,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_idempotent_policy_requires_explicit_operator_key_contract(self) -> None:
         invalid = Workflow(id="invalid_idempotency")
         invalid.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="node",
             policy=NodePolicy(recovery=RecoveryPolicy(mode="idempotent")),
         )
@@ -2445,7 +2517,7 @@ class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):
                 failure=FailurePolicy(mode="continue_active_branches")
             ),
         )
-        workflow.add_node(lambda: "blocked", node_id="blocked")
+        workflow.add_node(dynamic_json_callable(lambda: "blocked"), node_id="blocked")
         workflow.add_node(must_skip, node_id="must_skip")
         workflow.add_node(
             allowed,
@@ -2529,7 +2601,7 @@ class PostgreSQLDatabaseBackendIntegrationTests(
     async def test_postgresql_round_trip(self) -> None:
         database_url = os.environ["AUTOAGENT_TEST_POSTGRES_URL"]
         workflow = Workflow(id=f"postgres_{os.getpid()}_{id(self)}")
-        workflow.add_node(lambda value: value + 1, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="node")
         backend = DatabaseBackend(database_url)
         store = RuntimeStore(backend=backend)
         app = AutoAgentApp(runtime_store=store)

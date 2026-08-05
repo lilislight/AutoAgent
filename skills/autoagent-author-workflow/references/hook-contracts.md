@@ -26,6 +26,20 @@ AutoAgent validates named inputs against the signature and validates the
 return value against its annotation. Both synchronous and asynchronous
 callables are supported.
 
+Every parameter and return annotation is required. Use a Pydantic model for a
+typed structured value. Use `dict[str, Any]`, `list[Any]`, or explicit `Any`
+only when the contract is intentionally dynamic JSON. Dynamic values are
+normalized immediately, so tuples become lists and Pydantic values become JSON
+objects. They are not restored to their original Python type later.
+
+Use a named `def` or `async def` for an Operator. A normal lambda cannot declare
+the required parameter and return annotations, so it fails Workflow compilation.
+
+Do not use a database connection, HTTP client, lock, Python class, generator,
+or another process-local object as an annotated input, return value, nested
+Pydantic field, or value hidden inside `Any`. Acquire such resources inside the
+Operator implementation and return a serializable business value.
+
 Operator handler exceptions, timeout, and invalid output may enter Node Retry
 or capability fallback. Mapping, selection, aggregation, Condition, and Output
 Binding failures do not.
@@ -51,7 +65,7 @@ read Hook cannot commit it back to Runtime.
 Signature:
 
 ```python
-def map_input(ctx: InputMappingContext) -> dict[str, object]:
+def map_input(ctx: InputMappingContext) -> dict[str, Any]:
     ...
 ```
 
@@ -93,7 +107,7 @@ Signature:
 ```python
 def select_items(
     ctx: MapItemSelectionContext,
-) -> list[dict[str, object]]:
+) -> list[dict[str, Any]]:
     ...
 ```
 
@@ -125,7 +139,8 @@ Additional fields:
 
 Return the logical Node output. Without an aggregator, the ordered list is the
 Node output. If any item fails, remaining work is cancelled when possible and
-the aggregator is not called.
+the aggregator is not called. The return annotation is mandatory because it is
+the final Node output contract.
 
 ## Replication aggregator
 
@@ -142,7 +157,8 @@ Additional fields:
 - `replica_outputs`: outputs ordered by replica index.
 
 Return the logical Node output. Without an aggregator, the ordered list is
-retained. A failed replica prevents aggregation.
+retained. A failed replica prevents aggregation. The return annotation is
+mandatory because it is the final Node output contract.
 
 ## Output Binding
 

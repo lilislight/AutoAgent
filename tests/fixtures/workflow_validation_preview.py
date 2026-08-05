@@ -36,7 +36,7 @@ def collect_incident_signal(
     service: str,
     severity: int,
     symptoms: list[str],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Normalize an alert or human report into the incident domain."""
 
     return {
@@ -52,7 +52,7 @@ def classify_incident(
     service: str,
     severity: int,
     symptoms: list[str],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Produce routing fields consumed by several independent branches."""
 
     return {
@@ -68,8 +68,8 @@ def classify_incident(
 def local_log_analyzer(
     incident_id: str,
     query: str,
-    **context: object,
-) -> dict[str, object]:
+    **context: Any,
+) -> dict[str, Any]:
     """Default implementation of the abstract incident_log_analysis capability."""
 
     return {
@@ -82,8 +82,8 @@ def local_log_analyzer(
 async def remote_log_analyzer(
     incident_id: str,
     query: str,
-    **context: object,
-) -> dict[str, object]:
+    **context: Any,
+) -> dict[str, Any]:
     """Higher-priority async implementation selected at execution time."""
 
     await asyncio.sleep(0)
@@ -109,8 +109,8 @@ def assess_blast_radius(
     incident_id: str,
     service: str,
     severity: int,
-    **context: object,
-) -> dict[str, object]:
+    **context: Any,
+) -> dict[str, Any]:
     return {
         "incident_id": incident_id,
         "affected_services": [service, "api-gateway"] if severity >= 3 else [service],
@@ -121,8 +121,8 @@ def assess_blast_radius(
 def review_security_risk(
     incident_id: str,
     symptoms: list[str],
-    **context: object,
-) -> dict[str, object]:
+    **context: Any,
+) -> dict[str, Any]:
     return {
         "incident_id": incident_id,
         "security_risk": "high" if "unauthorized" in symptoms else "low",
@@ -131,9 +131,9 @@ def review_security_risk(
 
 
 def plan_remediation(
-    analyze_logs: dict[str, object],
-    assess_blast_radius: dict[str, object],
-    security_review: dict[str, object] | None = None,
+    analyze_logs: dict[str, Any],
+    assess_blast_radius: dict[str, Any],
+    security_review: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Create a dynamic action list that the mapped Node fans out."""
 
@@ -172,7 +172,7 @@ async def execute_action(
     action_id: str,
     command: str,
     owner: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     await asyncio.sleep(0)
     return {
         "action_id": action_id,
@@ -184,11 +184,11 @@ async def execute_action(
 
 def aggregate_action_results(
     ctx: MapAggregationContext,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {"results": ctx.item_outputs}
 
 
-def review_remediation(results: list[dict[str, object]]) -> dict[str, object]:
+def review_remediation(results: list[dict[str, Any]]) -> dict[str, Any]:
     """One replicated review sample; three samples are aggregated below."""
 
     successful = sum(bool(item.get("success")) for item in results)
@@ -202,7 +202,7 @@ def review_remediation(results: list[dict[str, object]]) -> dict[str, object]:
 
 def select_best_review(
     ctx: ReplicationAggregationContext,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Replication aggregator producing the logical review node output."""
 
     return max(ctx.replica_outputs, key=lambda output: int(output["score"]))
@@ -212,7 +212,7 @@ def refine_remediation(
     approved: bool,
     score: int,
     reasons: list[str],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Loop body that prepares another review input when approval fails."""
 
     return {
@@ -231,7 +231,7 @@ def close_incident(
     approved: bool,
     score: int,
     reasons: list[str],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "status": "resolved",
         "review_score": score,
@@ -249,16 +249,16 @@ def remember_resolution(ctx: OutputBindingContext) -> None:
 def notify_stakeholders(
     status: str,
     review_score: int,
-    **context: object,
-) -> dict[str, object]:
+    **context: Any,
+) -> dict[str, Any]:
     return {"notification_sent": True, "status": status, "score": review_score}
 
 
 def create_postmortem(
     status: str,
     review_score: int,
-    **context: object,
-) -> dict[str, object]:
+    **context: Any,
+) -> dict[str, Any]:
     return {
         "postmortem_id": "pm-auto-generated",
         "status": status,
@@ -267,9 +267,9 @@ def create_postmortem(
 
 
 def archive_incident(
-    notify_stakeholders: dict[str, object],
-    create_postmortem: dict[str, object],
-) -> dict[str, object]:
+    notify_stakeholders: dict[str, Any],
+    create_postmortem: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "archived": True,
         "notification": notify_stakeholders,

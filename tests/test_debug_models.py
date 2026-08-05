@@ -27,6 +27,7 @@ from autoagent import (
 )
 from autoagent.core.runtime import UserEventSpec
 from autoagent.core.workflow import MapPolicy, NodePolicy, RetryPolicy
+from tests.helpers import dynamic_json_callable
 
 
 def _report(**updates: object) -> InvocationReport:
@@ -117,7 +118,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_minimal_report_exposes_only_invocation_evidence(self) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_minimal_report")
-        workflow.add_node(lambda: "done", node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         try:
             await app.astart()
             invocation = await app.ainvoke(workflow, event_mode="minimal")
@@ -184,16 +185,18 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         workflow = Workflow(id="debug_map_report")
-        workflow.add_node(lambda: [1, 2, 3], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: [1, 2, 3]), node_id="source")
         workflow.add_node(
-            lambda value: value * 2,
+            dynamic_json_callable(lambda value: value * 2),
             node_id="mapped",
             policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": item} for item in ctx.input
                     ],
-                    output_aggregator=lambda ctx: sum(ctx.item_outputs),
+                    output_aggregator=dynamic_json_callable(
+                        lambda ctx: sum(ctx.item_outputs)
+                    ),
                 )
             ),
         )
@@ -221,14 +224,14 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         workflow = Workflow(id="debug_loop_report")
-        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 0), node_id="start")
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="agent",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="finish",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
@@ -297,7 +300,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_report")
         workflow.add_node(
-            lambda value: {"value": value + 1},
+            dynamic_json_callable(lambda value: {"value": value + 1}),
             node_id="work",
             input_mapping=lambda ctx: {
                 "value": ctx.invocation_input["value"]
@@ -387,7 +390,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             writer_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
             app = AutoAgentApp(runtime_store=writer_store)
             workflow = Workflow(id="historical_debug_report")
-            workflow.add_node(lambda value: value + 1, node_id="work")
+            workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="work")
             try:
                 await app.astart()
                 invocation = await app.ainvoke(
@@ -431,9 +434,9 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             writer_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
             app = AutoAgentApp(runtime_store=writer_store)
             workflow = Workflow(id="historical_debug_details")
-            workflow.add_node(lambda: {"value": 1}, node_id="start")
+            workflow.add_node(dynamic_json_callable(lambda: {"value": 1}), node_id="start")
             workflow.add_node(
-                lambda value: value + 1,
+                dynamic_json_callable(lambda value: value + 1),
                 node_id="finish",
                 input_mapping=lambda ctx: {
                     "value": ctx.incoming[0].value["value"]
@@ -506,7 +509,9 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             invocation_task = asyncio.create_task(
                 app.ainvoke(workflow, event_mode="standard")
             )
-            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            async with asyncio.timeout(1):
+                while not started.is_set():
+                    await asyncio.sleep(0.001)
             invocation = next(iter(app.runtime_store.invocations.values()))
             service = DebugQueryService(app.runtime_store, source="server")
 
@@ -554,7 +559,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             app = AutoAgentApp(runtime_store=RuntimeStore(backend=backend))
             workflow = Workflow(id="debug_partial_durability")
-            workflow.add_node(lambda: "done", node_id="work")
+            workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
             try:
                 await app.astart()
                 invocation = await app.ainvoke(
@@ -578,7 +583,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_event_pages_use_stable_opaque_cursor(self) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_event_pages")
-        workflow.add_node(lambda: "done", node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         try:
             await app.astart()
             invocation = await app.ainvoke(workflow, event_mode="full")
@@ -613,9 +618,9 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_execution_pages")
-        workflow.add_node(lambda: {"value": 1}, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: {"value": 1}), node_id="start")
         workflow.add_node(
-            lambda value: {"value": value + 1},
+            dynamic_json_callable(lambda value: {"value": value + 1}),
             node_id="finish",
             input_mapping=lambda ctx: {
                 "value": ctx.incoming[0].value["value"]
@@ -683,7 +688,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_runtime_state")
-        workflow.add_node(lambda: "done", node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         try:
             await app.astart()
             invocation = await app.ainvoke(workflow, event_mode="full")
@@ -705,7 +710,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_standard_runtime_state_is_explicitly_unavailable(self) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_standard_state")
-        workflow.add_node(lambda: "done", node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         try:
             await app.astart()
             invocation = await app.ainvoke(workflow, event_mode="standard")
@@ -720,7 +725,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())
         workflow = Workflow(id="debug_user_event_pages")
-        workflow.add_node(lambda: "done", node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         try:
             await app.astart()
             invocation = await app.ainvoke(workflow, event_mode="standard")

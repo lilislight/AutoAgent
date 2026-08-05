@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 import unittest
+from typing import Any
 
 from autoagent import AutoAgentApp
 from autoagent.core.compiler import workflow_revision_id
@@ -22,7 +23,7 @@ from autoagent.core.workflow import (
     TimeoutPolicy,
     Workflow,
 )
-from tests.helpers import isolated_app, started_app
+from tests.helpers import dynamic_json_callable, isolated_app, started_app
 
 
 def start_message(message: str) -> dict[str, str]:
@@ -45,7 +46,7 @@ def registered_revision_id(app: AutoAgentApp, workflow: Workflow) -> str:
 class WorkflowExecutorTests(unittest.TestCase):
     def test_app_execution_requires_explicit_start(self) -> None:
         workflow = Workflow(id="explicit_app_start")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         app = isolated_app()
 
         with self.assertRaisesRegex(RuntimeError, "not started"):
@@ -62,7 +63,7 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_start_recovers_registered_created_invocation(self) -> None:
         workflow = Workflow(id="startup_created_recovery")
         workflow.add_node(
-            lambda: "recovered",
+            dynamic_json_callable(lambda: "recovered"),
             node_id="node",
             policy=NodePolicy(
                 recovery=RecoveryPolicy(mode="replay_safe", max_attempts=1)
@@ -170,7 +171,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         app.workflow_executor._apply_progress = observe_progress
         workflow = Workflow(id="minimal_without_operator_progress")
-        workflow.add_node(lambda value: value + 1, node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="node")
 
         invocation = app.invoke(
             workflow,
@@ -275,9 +276,9 @@ class WorkflowExecutorTests(unittest.TestCase):
 
     def test_same_workflow_id_can_register_distinct_revisions(self) -> None:
         first = Workflow(id="shared_workflow_id")
-        first.add_node(lambda: "first", node_id="first")
+        first.add_node(dynamic_json_callable(lambda: "first"), node_id="first")
         second = Workflow(id="shared_workflow_id")
-        second.add_node(lambda: "second", node_id="second")
+        second.add_node(dynamic_json_callable(lambda: "second"), node_id="second")
         app = started_app()
 
         first_entry = app.register_workflow(first)
@@ -392,19 +393,19 @@ class WorkflowExecutorTests(unittest.TestCase):
             }
 
         workflow = Workflow(id="loop_wait_resume")
-        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 0), node_id="start")
         workflow.add_node(
             SystemCommand(id="wait"),
             node_id="wait",
             input_mapping=wait_input,
         )
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="step",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="final",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
@@ -661,7 +662,7 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_sync_and_async_invocation_can_be_mixed(self) -> None:
         async def scenario() -> None:
             workflow = Workflow(id="sync_in_async")
-            workflow.add_node(lambda: "done", node_id="node")
+            workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
             app = started_app()
 
             sync_result = app.invoke(workflow, session_id="sync")
@@ -725,7 +726,7 @@ class WorkflowExecutorTests(unittest.TestCase):
     ) -> None:
         async def scenario() -> None:
             workflow = Workflow(id="infrastructure_terminalization")
-            workflow.add_node(lambda: "done", node_id="worker")
+            workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="worker")
             app = started_app()
             entry = app.register_workflow(workflow)
             revision_id = workflow_revision_id(
@@ -787,9 +788,9 @@ class WorkflowExecutorTests(unittest.TestCase):
             ctx.invocation_context.data["bound"] = ctx.output
 
         workflow = Workflow(id="async_hooks")
-        workflow.add_node(lambda: {"value": 2}, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: {"value": 2}), node_id="start")
         workflow.add_node(
-            lambda value: value * 2,
+            dynamic_json_callable(lambda value: value * 2),
             node_id="target",
             input_mapping=mapping,
             output_binding=binding,
@@ -826,9 +827,9 @@ class WorkflowExecutorTests(unittest.TestCase):
             ctx.session_context.data["saved_output"] = {"value": value}
 
         workflow = Workflow(id="readonly_hooks")
-        workflow.add_node(lambda request: {"items": [1]}, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda request: {"items": [1]}), node_id="start")
         workflow.add_node(
-            lambda value: {"value": value},
+            dynamic_json_callable(lambda value: {"value": value}),
             node_id="target",
             input_mapping=mapping,
             output_binding=binding,
@@ -904,19 +905,19 @@ class WorkflowExecutorTests(unittest.TestCase):
             selector_completed = True
             return [{"value": value} for value in ctx.input]
 
-        async def finish_after_selector(value):
+        async def finish_after_selector(value: list[int]) -> list[int]:
             while not selector_completed:
                 await asyncio.sleep(0)
             return value
 
-        async def slow_map_item(value):
+        async def slow_map_item(value: int) -> int:
             await asyncio.sleep(0.03)
             return value
 
         store = RuntimeStore()
         app = started_app(runtime_store=store)
         workflow = Workflow(id="parallel_internal_event_sequence")
-        workflow.add_node(lambda: [1], node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: [1]), node_id="start")
         workflow.add_node(
             finish_after_selector,
             node_id="fast",
@@ -1022,7 +1023,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
 
     def test_parallel_branches_complete_before_fan_in_executes(self) -> None:
-        def start() -> dict[str, object]:
+        def start() -> dict[str, Any]:
             return {}
 
         def left() -> str:
@@ -1117,7 +1118,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value + 1
 
         workflow = Workflow(id="ambiguous_loop")
-        workflow.add_node(lambda: {}, node_id="start", entry=True)
+        workflow.add_node(dynamic_json_callable(lambda: {}), node_id="start", entry=True)
         workflow.add_node(agent, node_id="agent")
         workflow.add_node(agent, node_id="final")
         workflow.add_edge("start", "agent")
@@ -1149,25 +1150,25 @@ class WorkflowExecutorTests(unittest.TestCase):
             return max(left_tool, right_tool)
 
         workflow = Workflow(id="parallel_tool_loop")
-        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 0), node_id="start")
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="agent",
             input_mapping=map_incoming,
         )
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="left_tool",
             input_mapping=map_incoming,
         )
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="right_tool",
             input_mapping=map_incoming,
         )
         workflow.add_node(collect, node_id="collect")
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="final",
             input_mapping=map_incoming,
         )
@@ -1206,34 +1207,34 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         workflow = Workflow(id="nested_loop")
         workflow.add_node(
-            lambda: {"outer": 0, "inner": 0},
+            dynamic_json_callable(lambda: {"outer": 0, "inner": 0}),
             node_id="start",
         )
         workflow.add_node(
-            lambda state: {"outer": state["outer"], "inner": 0},
+            dynamic_json_callable(lambda state: {"outer": state["outer"], "inner": 0}),
             node_id="outer",
             input_mapping=map_state,
         )
         workflow.add_node(
-            lambda state: dict(state),
+            dynamic_json_callable(lambda state: dict(state)),
             node_id="inner",
             input_mapping=map_state,
         )
         workflow.add_node(
-            lambda state: {**state, "inner": state["inner"] + 1},
+            dynamic_json_callable(lambda state: {**state, "inner": state["inner"] + 1}),
             node_id="inner_body",
             input_mapping=map_state,
         )
         workflow.add_node(
-            lambda state: {
+            dynamic_json_callable(lambda state: {
                 "outer": state["outer"] + 1,
                 "inner": state["inner"],
-            },
+            }),
             node_id="after_inner",
             input_mapping=map_state,
         )
         workflow.add_node(
-            lambda state: dict(state),
+            dynamic_json_callable(lambda state: dict(state)),
             node_id="final",
             input_mapping=map_state,
         )
@@ -1298,19 +1299,19 @@ class WorkflowExecutorTests(unittest.TestCase):
             return max(values)
 
         workflow = Workflow(id="loop_scoped_branch")
-        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 0), node_id="start")
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="header",
             input_mapping=map_value,
         )
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="always",
             input_mapping=map_value,
         )
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="optional",
             input_mapping=map_value,
         )
@@ -1322,7 +1323,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             },
         )
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="final",
             input_mapping=map_value,
         )
@@ -1439,7 +1440,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return True
 
         workflow = Workflow(id="limited_loop")
-        workflow.add_node(lambda: None, node_id="start", entry=True)
+        workflow.add_node(dynamic_json_callable(lambda: None), node_id="start", entry=True)
         workflow.add_node(
             loop_node,
             node_id="loop",
@@ -1620,7 +1621,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(results["two"].result, {"output": "two"})
 
     def test_fail_fast_leftover_worker_cannot_pollute_next_invocation(self) -> None:
-        def start() -> dict[str, object]:
+        def start() -> dict[str, Any]:
             return {}
 
         def fail() -> None:
@@ -1638,7 +1639,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         first.add_edge("start", "slow")
 
         second = Workflow(id="after_isolated_failure")
-        second.add_node(lambda: "new", node_id="new")
+        second.add_node(dynamic_json_callable(lambda: "new"), node_id="new")
         app = started_app()
 
         failed = app.invoke(first)
@@ -1793,12 +1794,14 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_replication_aggregates_indexed_operator_executions(self) -> None:
         workflow = Workflow(id="replication_execution")
         workflow.add_node(
-            lambda: 2,
+            dynamic_json_callable(lambda: 2),
             node_id="sample",
             policy=NodePolicy(
                 replication=ReplicationPolicy(
                     count=3,
-                    output_aggregator=lambda ctx: sum(ctx.replica_outputs),
+                    output_aggregator=dynamic_json_callable(
+                        lambda ctx: sum(ctx.replica_outputs)
+                    ),
                     max_parallelism=2,
                 )
             ),
@@ -1815,16 +1818,18 @@ class WorkflowExecutorTests(unittest.TestCase):
 
     def test_map_policy_aggregates_indexed_operator_executions(self) -> None:
         workflow = Workflow(id="map_execution")
-        workflow.add_node(lambda: [1, 2, 3], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: [1, 2, 3]), node_id="source")
         workflow.add_node(
-            lambda value: value * value,
+            dynamic_json_callable(lambda value: value * value),
             node_id="square",
             policy=NodePolicy(
                 map=MapPolicy(
                     item_selector=lambda ctx: [
                         {"value": item} for item in ctx.input
                     ],
-                    output_aggregator=lambda ctx: tuple(ctx.item_outputs),
+                    output_aggregator=dynamic_json_callable(
+                        lambda ctx: tuple(ctx.item_outputs)
+                    ),
                     max_parallelism=2,
                 )
             ),
@@ -1836,7 +1841,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         invocation = started_app().invoke(workflow)
 
-        self.assertEqual(invocation.result, {"output": (1, 4, 9)})
+        self.assertEqual(invocation.result, {"output": [1, 4, 9]})
         calls = invocation.latest_node_execution("square").operator_executions
         self.assertEqual(1, len(calls))
         self.assertEqual("map", calls[0].kind)
@@ -1846,11 +1851,11 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_default_map_iterates_single_incoming_value(self) -> None:
         workflow = Workflow(id="default_node_map")
         workflow.add_node(
-            lambda: [{"value": 1}, {"value": 2}],
+            dynamic_json_callable(lambda: [{"value": 1}, {"value": 2}]),
             node_id="source",
         )
         workflow.add_node(
-            lambda value: value * 2,
+            dynamic_json_callable(lambda value: value * 2),
             node_id="mapped",
             policy=NodePolicy(map=MapPolicy()),
         )
@@ -1863,7 +1868,7 @@ class WorkflowExecutorTests(unittest.TestCase):
     def test_custom_map_selector_can_map_invocation_input_at_entry(self) -> None:
         workflow = Workflow(id="entry_node_map")
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="mapped",
             policy=NodePolicy(
                 map=MapPolicy(
@@ -1898,11 +1903,11 @@ class WorkflowExecutorTests(unittest.TestCase):
             ]
 
         workflow = Workflow(id="map_complete_fan_in")
-        workflow.add_node(lambda: {"_value": None}, node_id="start")
-        workflow.add_node(lambda _value: [1, 2], node_id="left")
-        workflow.add_node(lambda _value: [10, 20], node_id="right")
+        workflow.add_node(dynamic_json_callable(lambda: {"_value": None}), node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda _value: [1, 2]), node_id="left")
+        workflow.add_node(dynamic_json_callable(lambda _value: [10, 20]), node_id="right")
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="mapped",
             policy=NodePolicy(map=MapPolicy(item_selector=select_items)),
         )
@@ -1932,9 +1937,9 @@ class WorkflowExecutorTests(unittest.TestCase):
             return [{"value": value} for value in ctx.input]
 
         workflow = Workflow(id="map_loop_header")
-        workflow.add_node(lambda: [0], node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: [0]), node_id="start")
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="mapped",
             policy=NodePolicy(
                 map=MapPolicy(item_selector=select_items),
@@ -1942,7 +1947,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="final",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value[0]},
         )
@@ -1986,7 +1991,7 @@ class WorkflowExecutorTests(unittest.TestCase):
                 active -= 1
 
         workflow = Workflow(id="bounded_default_map_workers")
-        workflow.add_node(lambda: list(range(64)), node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: list(range(64))), node_id="source")
         workflow.add_node(
             transform,
             node_id="target",
@@ -2033,7 +2038,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             raise ValueError("bad mapping")
 
         workflow = Workflow(id="mapping_failure")
-        workflow.add_node(lambda: 1, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 1), node_id="start")
         workflow.add_node(
             CapabilityRef(id="mapping_target"),
             node_id="target",
@@ -2070,7 +2075,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value
 
         workflow = Workflow(id="invalid_mapping_output")
-        workflow.add_node(lambda: 1, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 1), node_id="start")
         workflow.add_node(
             CapabilityRef(id="validated_mapping"),
             node_id="target",
@@ -2096,7 +2101,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value
 
         workflow = Workflow(id="non_mapping_input")
-        workflow.add_node(lambda: 1, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 1), node_id="start")
         workflow.add_node(
             target,
             node_id="target",
@@ -2124,7 +2129,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value
 
         workflow = Workflow(id="invalid_map_collection")
-        workflow.add_node(lambda: [1], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: [1]), node_id="source")
         workflow.add_node(
             target,
             node_id="target",
@@ -2150,7 +2155,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value
 
         workflow = Workflow(id="invalid_map_item")
-        workflow.add_node(lambda: [1], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: [1]), node_id="source")
         workflow.add_node(
             target,
             node_id="target",
@@ -2183,7 +2188,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return value
 
         workflow = Workflow(id="invalid_map_arguments")
-        workflow.add_node(lambda: ["wrong"], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: ["wrong"]), node_id="source")
         workflow.add_node(
             target,
             node_id="target",
@@ -2222,7 +2227,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             await asyncio.sleep(0)
             return value * value
 
-        async def aggregate(ctx):
+        async def aggregate(ctx) -> tuple[int, ...]:
             await asyncio.sleep(0)
             seen_contexts.append(
                 ("aggregator", ctx.node_id, ctx.outputs.has("source"))
@@ -2231,7 +2236,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             return tuple(ctx.item_outputs)
 
         workflow = Workflow(id="async_map_hooks")
-        workflow.add_node(lambda request: [1, 2, 3], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda request: [1, 2, 3]), node_id="source")
         workflow.add_node(
             square,
             node_id="square",
@@ -2270,13 +2275,13 @@ class WorkflowExecutorTests(unittest.TestCase):
             await asyncio.sleep(1)
             return value
 
-        async def aggregate(ctx):
+        async def aggregate(ctx) -> list[int]:
             nonlocal aggregated
             aggregated = True
             return ctx.item_outputs
 
         workflow = Workflow(id="map_failure_cancellation")
-        workflow.add_node(lambda: [0, 1, 2], node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda: [0, 1, 2]), node_id="source")
         workflow.add_node(
             process,
             node_id="process",
@@ -2309,7 +2314,7 @@ class WorkflowExecutorTests(unittest.TestCase):
             await asyncio.sleep(0)
             return value
 
-        async def aggregate(ctx):
+        async def aggregate(ctx) -> int:
             await asyncio.sleep(0)
             return sum(ctx.replica_outputs)
 
@@ -2374,6 +2379,33 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(invocation.context.data, {})
         self.assertEqual(session.context.data, {})
 
+    def test_output_binding_rejects_non_serializable_context_atomically(self) -> None:
+        def produce() -> str:
+            return "done"
+
+        def bind_resource(ctx) -> None:
+            ctx.invocation_context.data["resource"] = object()
+            ctx.session_context.data["resource"] = object()
+
+        workflow = Workflow(id="binding_serializable_context")
+        workflow.add_node(
+            produce,
+            node_id="produce",
+            output_binding=bind_resource,
+        )
+        app = started_app()
+
+        invocation = app.invoke(workflow, session_id="session")
+        session = app.runtime_store.find_session(
+            workflow_revision_id=invocation.workflow_revision_id,
+            session_key="session",
+        )
+
+        self.assertEqual("failed", invocation.state)
+        self.assertEqual("OUTPUT_BINDING_FAILED", invocation.error.code)
+        self.assertEqual({}, invocation.context.data)
+        self.assertEqual({}, session.context.data)
+
     def test_condition_and_input_mapping_mutate_only_isolated_contexts(self) -> None:
         def condition(ctx) -> bool:
             with self.assertRaises(TypeError):
@@ -2390,9 +2422,9 @@ class WorkflowExecutorTests(unittest.TestCase):
             return {"value": ctx.incoming[0].value}
 
         workflow = Workflow(id="isolated_read_hooks")
-        workflow.add_node(lambda value: value, node_id="source")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="source")
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="target",
             input_mapping=mapping,
         )
@@ -2425,15 +2457,15 @@ class WorkflowExecutorTests(unittest.TestCase):
             ctx.invocation_context.data["shared"] = "b"
 
         workflow = Workflow(id="parallel_context_conflict")
-        workflow.add_node(lambda: "start", node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: "start"), node_id="start")
         workflow.add_node(
-            lambda: "a",
+            dynamic_json_callable(lambda: "a"),
             node_id="a",
             input_mapping=lambda _ctx: {},
             output_binding=bind_a,
         )
         workflow.add_node(
-            lambda: "b",
+            dynamic_json_callable(lambda: "b"),
             node_id="b",
             input_mapping=lambda _ctx: {},
             output_binding=bind_b,
@@ -2462,15 +2494,15 @@ class WorkflowExecutorTests(unittest.TestCase):
             ctx.invocation_context.data["b"] = ctx.output
 
         workflow = Workflow(id="parallel_context_merge")
-        workflow.add_node(lambda: "start", node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: "start"), node_id="start")
         workflow.add_node(
-            lambda: 1,
+            dynamic_json_callable(lambda: 1),
             node_id="a",
             input_mapping=lambda _ctx: {},
             output_binding=bind_a,
         )
         workflow.add_node(
-            lambda: 2,
+            dynamic_json_callable(lambda: 2),
             node_id="b",
             input_mapping=lambda _ctx: {},
             output_binding=bind_b,
@@ -2488,9 +2520,9 @@ class WorkflowExecutorTests(unittest.TestCase):
             ctx.invocation_context.data["value"] = ctx.output
 
         workflow = Workflow(id="serial_context_overwrite")
-        workflow.add_node(lambda: 1, node_id="first", output_binding=bind)
+        workflow.add_node(dynamic_json_callable(lambda: 1), node_id="first", output_binding=bind)
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="second",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
             output_binding=bind,
@@ -2504,9 +2536,9 @@ class WorkflowExecutorTests(unittest.TestCase):
 
     def test_unselected_entries_are_skipped_before_fan_in(self) -> None:
         workflow = Workflow(id="selected_multi_entry")
-        workflow.add_node(lambda: {"value": "A"}, node_id="a")
-        workflow.add_node(lambda: {"value": "B"}, node_id="b")
-        workflow.add_node(lambda value: value, node_id="join")
+        workflow.add_node(dynamic_json_callable(lambda: {"value": "A"}), node_id="a")
+        workflow.add_node(dynamic_json_callable(lambda: {"value": "B"}), node_id="b")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="join")
         workflow.add_edge("a", "join", edge_id="a_join")
         workflow.add_edge("b", "join", edge_id="b_join")
 

@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-from typing import Any
+import inspect
+from typing import Any, Callable, TypeVar
 
 from autoagent import AutoAgentApp, AutoAgentSettings
+
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def dynamic_json_callable(handler: F) -> F:
+    """Give a test-only lambda an explicit dynamic JSON callable contract."""
+
+    signature = inspect.signature(handler)
+    handler.__annotations__ = {
+        **{name: Any for name in signature.parameters},
+        "return": Any,
+    }
+    return handler
 
 
 def isolated_app(*args: Any, **kwargs: Any) -> AutoAgentApp:

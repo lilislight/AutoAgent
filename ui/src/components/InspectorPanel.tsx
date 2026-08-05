@@ -1465,7 +1465,7 @@ function inspectSelection(
       policies: node
         ? {
             policy: node.policy,
-            input_plan: node.input_plan,
+            input_mapping: node.input_mapping,
             output_binding: node.output_binding,
           }
         : {},

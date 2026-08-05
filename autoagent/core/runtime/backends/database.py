@@ -255,12 +255,6 @@ class DatabaseBackend:
 
     async def aclose(self) -> None:
         if not self._database_loop.is_current():
-            if not self._initialized:
-                await self.engine.dispose()
-                self._database_loop.stop(
-                    timeout_s=self.shutdown_timeout_ms / 1000
-                )
-                return
             try:
                 await self._arun_database_operation(self.aclose())
             finally:
@@ -271,6 +265,9 @@ class DatabaseBackend:
         if self._closing:
             return
         self._closing = True
+        if not self._initialized:
+            await self.engine.dispose()
+            return
         flush_error: Exception | None = None
         try:
             try:
@@ -851,10 +848,8 @@ class DatabaseBackend:
         if event.operations is not None:
             operations = []
             for raw_operation in event.operations:
-                # Do not use model_dump() here. StateOperation.value is typed
-                # as Any, so Pydantic would recursively turn nested Runtime
-                # models into plain dictionaries before the Runtime serializer
-                # has a chance to attach their trusted type identifiers.
+                # Keep StateOperation.value intact so ArtifactRef values remain
+                # discoverable before the persistence serializer emits JSON.
                 operation = {
                     "op": raw_operation.op,
                     "path": raw_operation.path,

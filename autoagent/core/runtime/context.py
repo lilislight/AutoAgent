@@ -7,9 +7,10 @@ from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from autoagent.core.runtime.output import OutputView
+from autoagent.core.runtime.serialization import normalize_json_value
 
 
 class RuntimeContext(BaseModel):
@@ -37,6 +38,14 @@ class RuntimeContext(BaseModel):
     )
     revision: int = Field(default=0, ge=0)
     path_revisions: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("data", "metadata", mode="before")
+    @classmethod
+    def normalize_user_json(cls, value: Any) -> dict[str, Any]:
+        normalized = normalize_json_value(value)
+        if not isinstance(normalized, dict):
+            raise TypeError("Runtime Context fields must be JSON objects.")
+        return normalized
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -67,6 +76,15 @@ class RuntimeContext(BaseModel):
     ) -> tuple[str, ...]:
         """Atomically publish one Output Binding or reject a concurrent overlap."""
 
+        normalized_data = normalize_json_value(working.data)
+        normalized_metadata = normalize_json_value(working.metadata)
+        if not isinstance(normalized_data, dict) or not isinstance(
+            normalized_metadata,
+            dict,
+        ):
+            raise TypeError("Runtime Context fields must be JSON objects.")
+        working.data = normalized_data
+        working.metadata = normalized_metadata
         changed = _changed_paths(
             {"data": self.data, "metadata": self.metadata},
             {"data": working.data, "metadata": working.metadata},

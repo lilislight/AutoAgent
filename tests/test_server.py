@@ -27,6 +27,7 @@ from autoagent.core.server.app import (
     InvocationResumeRequest,
     InvocationSubmitRequest,
 )
+from tests.helpers import dynamic_json_callable
 
 
 class HistoricalTracePayload(BaseModel):
@@ -762,7 +763,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("event: runtime_status", first)
         wake_workflow = Workflow(id="wake_system_stream_disconnect_check")
-        wake_workflow.add_node(lambda: None, node_id="node")
+        wake_workflow.add_node(dynamic_json_callable(lambda: None), node_id="node")
         self.app.register_workflow(wake_workflow)
         await asyncio.sleep(0)
         with self.assertRaises(StopAsyncIteration):
@@ -867,7 +868,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_workflow_directory_uses_stable_cursor_pages(self) -> None:
         other = Workflow(id="second_workflow")
-        other.add_node(lambda: "done", node_id="done")
+        other.add_node(dynamic_json_callable(lambda: "done"), node_id="done")
         self.app.register_workflow(other)
 
         first = await self.server.trace.list_workflows(
@@ -917,7 +918,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             workflow = Workflow(id="registered_after_server_start")
-            workflow.add_node(lambda: "done", node_id="done")
+            workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="done")
             self.app.register_workflow(workflow)
             # Re-registering the same immutable revision is not a directory
             # change and must not produce a duplicate notification.
@@ -931,7 +932,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         workflow = Workflow(id="agent_neighbor_workflow")
-        workflow.add_node(lambda: "done", node_id="done")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="done")
         self.app.register_workflow(workflow)
         created = [
             await self.app.ainvoke(
@@ -1043,7 +1044,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_event_detail_exposes_recorded_operator_input_and_output(self) -> None:
         workflow = Workflow(id="server_event_values")
         workflow.add_node(
-            lambda value: {"answer": value + 1},
+            dynamic_json_callable(lambda value: {"answer": value + 1}),
             node_id="answer",
             input_mapping=lambda context: {
                 "value": context.invocation_input["value"],
@@ -1392,7 +1393,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             )
             reader = AutoAgentApp(runtime_store=reader_store)
             first = Workflow(id="first_revision")
-            first.add_node(lambda: "first", node_id="first")
+            first.add_node(dynamic_json_callable(lambda: "first"), node_id="first")
             reader.register_workflow(first)
             await reader.astart()
             server = AutoAgentServer(reader)
@@ -1412,7 +1413,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
                 writer = AutoAgentApp(runtime_store=writer_store)
                 await writer.astart()
                 second = Workflow(id="later_revision")
-                second.add_node(lambda: "second", node_id="second")
+                second.add_node(dynamic_json_callable(lambda: "second"), node_id="second")
                 writer.register_workflow(second)
                 try:
                     await writer_store.aflush()
@@ -1447,7 +1448,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             app = AutoAgentApp(runtime_store=store)
             for index in range(4):
                 workflow = Workflow(id=f"workflow_{index}")
-                workflow.add_node(lambda: "done", node_id="done")
+                workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="done")
                 app.register_workflow(workflow)
             await app.astart()
             await store.aflush()
@@ -1486,7 +1487,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             )
             writer = AutoAgentApp(runtime_store=writer_store)
             workflow = Workflow(id="direct_lookup")
-            workflow.add_node(lambda: "done", node_id="done")
+            workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="done")
             writer.register_workflow(workflow)
             await writer.astart()
             await writer_store.aflush()
@@ -1521,7 +1522,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await reader.aclose()
 
-    async def test_historical_trace_does_not_require_runtime_model_registration(
+    async def test_historical_trace_reads_pydantic_values_as_json(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1553,11 +1554,6 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             await second.astart()
             server = AutoAgentServer(second)
             try:
-                self.assertNotIn(
-                    f"{HistoricalTracePayload.__module__}:"
-                    f"{HistoricalTracePayload.__qualname__}",
-                    second.runtime_serializer._models,
-                )
                 bootstrap = await server.trace.trace_bootstrap(
                     invocation_id,
                     tail_limit=20,
@@ -1610,7 +1606,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             first_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
             first = AutoAgentApp(runtime_store=first_store)
             first_workflow = Workflow(id="revision_history")
-            first_workflow.add_node(lambda: "first", node_id="first")
+            first_workflow.add_node(dynamic_json_callable(lambda: "first"), node_id="first")
             first.register_workflow(first_workflow)
             await first.astart()
             first_invocation = await first.ainvoke(
@@ -1624,7 +1620,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             second_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
             second = AutoAgentApp(runtime_store=second_store)
             second_workflow = Workflow(id="revision_history")
-            second_workflow.add_node(lambda: "second", node_id="second")
+            second_workflow.add_node(dynamic_json_callable(lambda: "second"), node_id="second")
             second.register_workflow(second_workflow)
             await second.astart()
             try:
@@ -1725,7 +1721,7 @@ class PersistentTraceServerTests(unittest.IsolatedAsyncioTestCase):
             )
             first = AutoAgentApp(runtime_store=first_store)
             workflow = Workflow(id="historical_trace")
-            workflow.add_node(lambda: {"answer": 42}, node_id="answer")
+            workflow.add_node(dynamic_json_callable(lambda: {"answer": 42}), node_id="answer")
             first.register_workflow(workflow)
             await first.astart()
             invocation = await first.ainvoke(

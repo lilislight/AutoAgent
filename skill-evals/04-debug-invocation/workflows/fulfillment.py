@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,7 @@ def allows_automatic_approval(ctx: ConditionContext) -> bool:
     return not requires_manual_review(ctx)
 
 
-def map_request(ctx: InputMappingContext) -> dict[str, object]:
+def map_request(ctx: InputMappingContext) -> dict[str, Any]:
     return {"request": ctx.incoming[0].value}
 
 
@@ -64,7 +64,7 @@ def request_manual_review(
     )
 
 
-def map_decision(ctx: InputMappingContext) -> dict[str, object]:
+def map_decision(ctx: InputMappingContext) -> dict[str, Any]:
     return {"decision": ctx.incoming[0].value}
 
 

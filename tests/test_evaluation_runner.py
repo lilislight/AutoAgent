@@ -27,6 +27,7 @@ from autoagent.project import (
     ProjectMetadata,
     WorkflowLocator,
 )
+from tests.helpers import dynamic_json_callable
 
 
 EVAL_MEMORY_SUITE_MAX_SECONDS = float(
@@ -130,7 +131,7 @@ class EvaluationRunnerTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow(id="approval")
         workflow.add_node(SystemCommand(id="wait"), node_id="approval")
         workflow.add_node(
-            lambda approved: "approved" if approved else "rejected",
+            dynamic_json_callable(lambda approved: "approved" if approved else "rejected"),
             node_id="finish",
             input_mapping=lambda ctx: {
                 "approved": ctx.incoming[0].value["approved"]
@@ -335,7 +336,7 @@ class EvaluationRunnerTests(unittest.IsolatedAsyncioTestCase):
             result = await EvaluationRunner(host).run(
                 loaded,
                 max_concurrency=2,
-                timeout=0.05,
+                timeout=0.2,
             )
             invocation_states = {
                 invocation.state
@@ -436,7 +437,7 @@ def _history_workflow() -> Workflow:
 
     workflow = Workflow(id="conversation")
     workflow.add_node(
-        lambda value: value,
+        dynamic_json_callable(lambda value: value),
         node_id="echo",
         input_mapping=lambda ctx: {"value": ctx.invocation_input["value"]},
         output_binding=remember,

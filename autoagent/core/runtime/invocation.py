@@ -122,6 +122,11 @@ class Invocation:
     def outputs(self) -> OutputView:
         return self._output_index.view()
 
+    def rebuild_output_index(self) -> None:
+        """Reindex outputs after executable contracts materialize persisted JSON."""
+
+        self._output_index = OutputIndex(self.node_executions)
+
     def mark_running(self) -> None:
         self.state = "running"
         self.updated_at_ms = utc_timestamp_ms()

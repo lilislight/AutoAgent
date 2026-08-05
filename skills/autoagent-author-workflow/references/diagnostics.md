@@ -44,7 +44,9 @@ Node or Edge outside the child boundary.
 
 For Condition, mapping, or Operator contract codes, use a supported named
 callable with concrete parameter and return annotations. Make Input Mapping
-keys match the target callable and keep Conditions boolean.
+keys match the target callable and keep Conditions boolean. Replace `object`
+and arbitrary Python resource types with a typed Pydantic value or an explicit
+dynamic JSON contract such as `dict[str, Any]`.
 
 For capability binding codes, prefer a direct typed callable for project-owned
 logic or a public `CapabilityRef` for a host-provided implementation. Do not
@@ -61,7 +63,7 @@ limit, callable contract, and target Node combination. Common conflicts are:
 - selector-less Map on a Node without exactly one incoming Edge;
 - an unbounded Loop;
 - recovery marked idempotent without the required idempotency contract;
-- an aggregator whose return annotation cannot be checked.
+- an aggregator without a serializable return annotation.
 
 Do not weaken safety constraints merely to compile. Read
 [policies.md](policies.md) or [workflow-design.md](workflow-design.md) for the

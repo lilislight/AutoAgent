@@ -160,7 +160,7 @@ dynamic number of Operator calls.
 Map belongs to a Node and produces one logical NodeExecution.
 
 ```python
-def select_items(ctx: MapItemSelectionContext) -> list[dict[str, object]]:
+def select_items(ctx: MapItemSelectionContext) -> list[dict[str, Any]]:
     return [{"value": item} for item in ctx.input]
 
 

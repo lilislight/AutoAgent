@@ -515,8 +515,10 @@ class AutoAgentCliTests(unittest.TestCase):
             module_name="cli_eval_exit_workflow",
             source="""
                 from autoagent import Workflow
+                def echo() -> str:
+                    return "ok"
                 workflow = Workflow(id="echo")
-                workflow.add_node(lambda: "ok", node_id="echo")
+                workflow.add_node(echo, node_id="echo")
             """,
             eval_module_name="cli_eval_exit_evaluation",
             eval_source="""
@@ -778,9 +780,11 @@ class AutoAgentCliTests(unittest.TestCase):
                 from autoagent import Workflow
 
                 imported_value = os.getenv("{variable}", "missing")
+                def read_environment() -> str:
+                    return imported_value
                 workflow = Workflow(id="environment_disabled")
                 workflow.add_node(
-                    lambda: imported_value,
+                    read_environment,
                     node_id="read_environment",
                 )
             """,
@@ -1074,6 +1078,43 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertEqual(0, preview_code, previewed)
         self.assertIn("STATUS valid", previewed)
         self.assertIn("task [ENTRY, EXIT]", previewed)
+
+    def test_workflow_check_rejects_invalid_callable_schemas(self) -> None:
+        with self.project(
+            module_name="cli_invalid_callable_schema",
+            source="""
+                import sqlite3
+
+                from autoagent import Workflow
+
+                def missing_schema(value):
+                    return value
+
+                def process_connection(connection: sqlite3.Connection) -> str:
+                    return str(connection)
+
+                workflow = Workflow(id="invalid_callable_schema")
+                workflow.add_node(missing_schema, node_id="missing_schema")
+                workflow.add_node(
+                    process_connection,
+                    node_id="process_connection",
+                )
+            """,
+        ) as root:
+            code, output = self.run_cli(
+                "--project",
+                str(root),
+                "workflow",
+                "check",
+                "invalid_callable_schema",
+            )
+
+        self.assertEqual(1, code, output)
+        self.assertIn("ERROR OPERATOR_CONTRACT_INVALID", output)
+        self.assertIn("has no type annotation", output)
+        self.assertIn("has no return type annotation", output)
+        self.assertIn("non-serializable Workflow type", output)
+        self.assertIn("RESULT failed", output)
 
     def test_invocation_run_executes_standalone_workflow_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

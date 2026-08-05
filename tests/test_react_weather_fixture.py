@@ -183,7 +183,7 @@ class ReactWeatherFixtureTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.diagnostics)
 
-    def test_fresh_app_deserializes_llm_and_react_runtime_models(self) -> None:
+    def test_fresh_app_reads_llm_and_react_payload_as_json(self) -> None:
         config = ChatCompletionsConfig(
             api_key="test-key",
             default_model="test-model",
@@ -223,12 +223,11 @@ class ReactWeatherFixtureTests(unittest.TestCase):
         finally:
             reader.close()
 
-        self.assertIsInstance(restored["request"], LLMRequest)
-        self.assertIsInstance(restored["response"], LLMResponse)
-        self.assertIsInstance(restored["conversation"], ConversationUpdate)
-        self.assertIsInstance(restored["tool_result"], ToolExecutionResult)
-        self.assertIsInstance(restored["tool_result"].output, CityProfile)
-        self.assertEqual(restored["tool_result"].output.city, "Tokyo")
+        self.assertEqual("weather", restored["request"]["messages"][0]["content"])
+        self.assertEqual("test-model", restored["response"]["model"])
+        self.assertEqual("initial", restored["conversation"]["kind"])
+        self.assertEqual("mock.city_profile", restored["tool_result"]["tool_id"])
+        self.assertEqual("Tokyo", restored["tool_result"]["output"]["city"])
 
     def test_database_restart_rebuilds_full_react_llm_state(self) -> None:
         workflow = build_workflow()
@@ -336,16 +335,17 @@ class ReactWeatherFixtureTests(unittest.TestCase):
         prepared_call = rebuilt.latest_node_execution(
             "weather_agent/prepare_conversation"
         ).output
-        self.assertIsInstance(prepared_call, PreparedLLMCall)
-        self.assertIsInstance(prepared_call.request, LLMRequest)
+        self.assertIsInstance(prepared_call, dict)
+        self.assertIsInstance(prepared_call["request"], dict)
         self.assertIsInstance(
             rebuilt.latest_node_execution("translate_to_chinese").output,
-            LLMResponse,
+            dict,
         )
         tool_batch = rebuilt.latest_node_execution(
             "weather_agent/tool_0_get_city_profile"
         ).output
-        self.assertIsInstance(tool_batch.results[0].output, CityProfile)
+        self.assertIsInstance(tool_batch, dict)
+        self.assertIsInstance(tool_batch["results"][0]["output"], dict)
 
     def test_example_app_registers_workflow_and_llm_operator(self) -> None:
         app, workflow = build_app(

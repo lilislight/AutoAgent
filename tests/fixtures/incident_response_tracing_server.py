@@ -8,7 +8,7 @@ from dataclasses import replace
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Thread
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import dotenv_values
 from pydantic import BaseModel, Field
@@ -201,32 +201,6 @@ class EscalationPacket(BaseModel):
     proposed_actions: list[str]
 
 
-# Runtime values can outlive the Python process. These stable ids avoid using
-# ``__main__`` when this example is started directly.
-_RUNTIME_MODELS: tuple[type[BaseModel], ...] = (
-    ServiceContext,
-    IncidentRequest,
-    ResumeRequest,
-    IncidentHistoryItem,
-    RequestEnvelope,
-    NormalizedIncident,
-    InvestigationTask,
-    InvestigationPlan,
-    EvidenceItem,
-    InvestigationSynthesis,
-    QualityDecision,
-    InvestigationReport,
-    AuditRequest,
-    AuditResult,
-    ReviewRoute,
-    SpecialistReview,
-    CompositeReview,
-    FinalDecision,
-    PublishedResolution,
-    EscalationPacket,
-)
-
-
 def ingest_new_incident(request: IncidentRequest) -> RequestEnvelope:
     time.sleep(5)
     return RequestEnvelope(
@@ -271,7 +245,7 @@ def record_manual_approval(
     approved: bool,
     reviewer: str = "unknown",
     note: str = "",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "approved": approved,
         "reviewer": reviewer,
@@ -335,7 +309,7 @@ def mock_llm_plan_investigation(
 
 def select_investigation_tasks(
     ctx: MapItemSelectionContext,
-) -> list[dict[str, object]]:
+) -> list[dict[str, Any]]:
     plan = ctx.input
     return [
         {"task": task, "incident": plan.incident}
@@ -940,12 +914,6 @@ def build_incident_response_app(
             settings=AutoAgentSettings(),
             runtime_store=runtime_store,
         )
-    for model_type in _RUNTIME_MODELS:
-        stable_type_id = (
-            "tests.fixtures.incident_response_tracing_server:"
-            f"{model_type.__qualname__}"
-        )
-        app.register_runtime_model(model_type, type_id=stable_type_id)
     app.register_capability(
         RELIABILITY_REVIEW_CAPABILITY_ID,
         description="Review incident mitigation from a reliability perspective.",

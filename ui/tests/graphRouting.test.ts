@@ -443,13 +443,6 @@ function runtimeEvent(
     input: null,
     output: null,
     operations: null,
-    type: eventName,
-    entity_type: "node",
-    entity_id: "execution",
-    node_id: "worker",
-    edge_id: null,
-    channel: "runtime",
-    visibility: "internal",
   };
 }
 
@@ -531,7 +524,6 @@ function workflowGraph(): WorkflowGraphView {
         to_node: "target",
         order: 0,
         condition: null,
-        policy: null,
       },
     ],
     groups: [],
@@ -694,7 +686,7 @@ function workflowNode(id: string, entry: boolean, exit: boolean) {
     entry,
     exit,
     policy: null,
-    input_plan: null,
+    input_mapping: null,
     output_binding: null,
     input_contract: {},
     operator_output_contract: {},

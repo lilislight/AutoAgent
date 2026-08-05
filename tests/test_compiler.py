@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -29,29 +30,30 @@ from autoagent.core.workflow import (
     UserEventMapping,
     Workflow,
 )
+from tests.helpers import dynamic_json_callable
 
 
-def task(value=None):
+def task(value: Any = None) -> Any:
     return value
 
 
-def other_task(value=None):
+def other_task(value: Any = None) -> Any:
     return value
 
 
-def third_task(value=None):
+def third_task(value: Any = None) -> Any:
     return value
 
 
-def edge_condition(*args, **kwargs):
+def edge_condition(*args: Any, **kwargs: Any) -> bool:
     return True
 
 
-def input_mapping(*args, **kwargs):
+def input_mapping(*args: Any, **kwargs: Any) -> dict:
     return {"value": 1}
 
 
-def output_binding(result):
+def output_binding(result: Any) -> dict:
     return {"result": result}
 
 
@@ -129,6 +131,26 @@ class WorkflowCompilerTests(unittest.TestCase):
             self.diagnostic_codes(result),
         )
 
+    def test_normal_lambda_without_schema_is_rejected(self) -> None:
+        result = WorkflowCompiler().compile(
+            make_workflow(
+                nodes=[Node(id="lambda", capability=lambda value: value)]
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            ["OPERATOR_CONTRACT_INVALID", "OPERATOR_CONTRACT_INVALID"],
+            self.diagnostic_codes(result),
+        )
+        messages = [diagnostic.message for diagnostic in result.diagnostics]
+        self.assertTrue(
+            any("Parameter 'value' has no type annotation" in item for item in messages)
+        )
+        self.assertTrue(
+            any("Callable has no return type annotation" in item for item in messages)
+        )
+
     def diagnostic_codes(self, result: CompileResult) -> list[str]:
         return [diagnostic.code for diagnostic in result.diagnostics]
 
@@ -195,8 +217,8 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["edge_source_target"], list(workflow_ir.edges))
 
     def test_direct_callable_bindings_reuse_only_the_same_object(self):
-        def factory():
-            def generated(value=None):
+        def factory() -> Any:
+            def generated(value: Any = None) -> Any:
                 return value
 
             return generated
@@ -667,7 +689,7 @@ class WorkflowCompilerTests(unittest.TestCase):
 
         workflow_ir = self.compile_ok(workflow)
 
-        self.assertIs(input_mapping, workflow_ir.nodes["mapped"].input_plan)
+        self.assertIs(input_mapping, workflow_ir.nodes["mapped"].input_mapping)
         self.assertIs(output_binding, workflow_ir.nodes["mapped"].output_binding)
 
     def test_node_policy_is_carried_into_node_ir(self):
@@ -686,7 +708,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         def select_items(ctx):
             return ctx.input["items"]
 
-        def aggregate(ctx):
+        def aggregate(ctx) -> dict[str, Any]:
             return {"items": ctx.item_outputs}
 
         policy = NodePolicy(
@@ -1053,7 +1075,8 @@ class WorkflowCompilerTests(unittest.TestCase):
             set(node.input_contract.json_schema["properties"]),
             {"wait_key", "wait_type", "payload"},
         )
-        self.assertFalse(node.output_contract.known)
+        self.assertTrue(node.output_contract.known)
+        self.assertEqual("json", node.output_contract.restoration_mode)
 
     def test_wait_system_command_rejects_node_policy(self):
         result = WorkflowCompiler().compile(
@@ -1095,7 +1118,7 @@ class WorkflowCompilerTests(unittest.TestCase):
     def test_wait_system_command_rejects_map_policy(self):
         workflow = make_workflow(
             nodes=[
-                Node(id="source", capability=lambda: [{"wait_key": "one"}]),
+                Node(id="source", capability=dynamic_json_callable(lambda: [{"wait_key": "one"}])),
                 Node(
                     id="wait",
                     capability=SystemCommand(id="wait"),
@@ -1259,7 +1282,7 @@ class WorkflowCompilerTests(unittest.TestCase):
 
     def test_diagnostics_include_agent_facing_location_and_hint(self):
         workflow = Workflow(id="diagnostic_context")
-        workflow.add_node(lambda: None, node_id="known")
+        workflow.add_node(dynamic_json_callable(lambda: None), node_id="known")
         workflow.add_edge("known", "missing", edge_id="broken_edge")
 
         result = WorkflowCompiler().compile(workflow)
@@ -1278,8 +1301,12 @@ class WorkflowCompilerTests(unittest.TestCase):
 
     def test_diagnostic_document_is_lightweight_and_deterministic(self):
         workflow = Workflow(id="diagnostic_document")
-        workflow.add_node(lambda: None, node_id="duplicate")
-        workflow.add_node(lambda: None, node_id="duplicate")
+
+        def operation() -> None:
+            return None
+
+        workflow.add_node(operation, node_id="duplicate")
+        workflow.add_node(operation, node_id="duplicate")
 
         first = WorkflowCompiler().compile(workflow)
         second = WorkflowCompiler().compile(workflow)

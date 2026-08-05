@@ -329,6 +329,7 @@ class WorkflowExecutor:
                 message="Current Workflow definition does not match interrupted work.",
             )
             return invocation
+        self._materialize_persisted_outputs(workflow_ir, invocation)
         invocation.execution_mode = "recovery"
         if invocation.state == "created":
             return await self.ainvoke(
@@ -789,6 +790,8 @@ class WorkflowExecutor:
         created.
         """
 
+        self._materialize_persisted_outputs(workflow_ir, invocation)
+
         waiting = invocation.scheduler.waiting_executions.get(wait_key)
         if waiting is None:
             raise KeyError(f"Unknown wait key: {wait_key}")
@@ -846,6 +849,24 @@ class WorkflowExecutor:
             session=session,
             invocation=invocation,
         )
+
+    @staticmethod
+    def _materialize_persisted_outputs(
+        workflow_ir: WorkflowIR,
+        invocation: Invocation,
+    ) -> None:
+        """Restore completed Node JSON through the exact registered revision."""
+
+        for execution in invocation.node_executions:
+            if execution.output is None:
+                continue
+            node_ir = workflow_ir.nodes.get(execution.node_id)
+            if node_ir is None:
+                raise ValueError(
+                    f"Persisted Node is absent from Workflow revision: {execution.node_id}"
+                )
+            execution.output = node_ir.output_contract.restore(execution.output)
+        invocation.rebuild_output_index()
 
     async def _submit_ready_requests(
         self,
@@ -1684,10 +1705,10 @@ class WorkflowExecutor:
                 },
                 scoped_incoming,
             )
-        if callable(node_ir.input_plan):
+        if callable(node_ir.input_mapping):
             return (
                 await invoke_hook_async(
-                    node_ir.input_plan,
+                    node_ir.input_mapping,
                     InputMappingContext.create(
                         invocation_input=invocation.input,
                         invocation_context=invocation.context,
@@ -1818,7 +1839,10 @@ class WorkflowExecutor:
         node_execution: NodeExecution,
         output: Any,
     ) -> None:
+        node_ir = workflow_ir.nodes[node_execution.node_id]
         try:
+            output = node_ir.output_contract.restore(output)
+            output = node_ir.output_contract.validate(output)
             await self._run_output_binding(
                 workflow_ir=workflow_ir,
                 session=session,
@@ -1845,7 +1869,7 @@ class WorkflowExecutor:
             session.mark_context_updated()
             self._record_completed_user_events(
                 invocation=invocation,
-                node_ir=workflow_ir.nodes[node_execution.node_id],
+                node_ir=node_ir,
                 node_execution=node_execution,
                 output=output,
             )

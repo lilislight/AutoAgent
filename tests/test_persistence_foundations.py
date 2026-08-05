@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from autoagent import AutoAgentApp, AutoAgentSettings
 from autoagent.core.compiler import WorkflowCompiler
@@ -14,8 +14,6 @@ from autoagent.core.operators import Operator
 from autoagent.core.runtime import (
     ArtifactRef,
     JsonRuntimeSerializer,
-    RuntimeCodec,
-    RuntimeDeserializationError,
     RuntimeSerializationError,
 )
 from autoagent.core.workflow import (
@@ -36,6 +34,10 @@ def echo(value: str) -> str:
 class Message(BaseModel):
     role: str
     content: str
+
+
+class AliasedMessage(BaseModel):
+    content: str = Field(alias="message")
 
 
 class PersistenceIdentityTests(unittest.TestCase):
@@ -393,47 +395,14 @@ class PersistenceIdentityTests(unittest.TestCase):
 
 
 class RuntimeSerializerTests(unittest.TestCase):
-    def test_pydantic_model_uses_one_stable_type_id(
-        self,
-    ) -> None:
+    def test_pydantic_model_is_stored_as_type_neutral_json(self) -> None:
         serializer = JsonRuntimeSerializer()
-        serializer.register_pydantic_model(Message, type_id="test.message.v1")
-
         payload = serializer.dumps(Message(role="user", content="stable"))
-        self.assertIn(b'"type_id":"test.message.v1"', payload)
-        with self.assertRaisesRegex(ValueError, "already registered as"):
-            serializer.register_pydantic_model(
-                Message,
-                type_id="test.message.alternate",
-            )
-
-    def test_app_owns_runtime_type_registration(self) -> None:
-        class Token:
-            def __init__(self, value: str) -> None:
-                self.value = value
-
-        codec = RuntimeCodec(
-            type_id="tests.token",
-            python_type=Token,
-            encode=lambda value: {"value": value.value},
-            decode=lambda value: Token(value["value"]),
+        self.assertNotIn(b"type_id", payload)
+        self.assertEqual(
+            {"role": "user", "content": "stable"},
+            serializer.loads(payload),
         )
-        app = AutoAgentApp(
-            settings=AutoAgentSettings(),
-            runtime_codecs=(codec,),
-            runtime_models=(Message,),
-        )
-
-        token = app.runtime_serializer.loads(
-            app.runtime_serializer.dumps(Token("registered"))
-        )
-        message = app.runtime_serializer.loads(
-            app.runtime_serializer.dumps(Message(role="user", content="hello"))
-        )
-
-        self.assertIsInstance(token, Token)
-        self.assertEqual("registered", token.value)
-        self.assertEqual(Message(role="user", content="hello"), message)
 
     def test_app_rejects_serializer_different_from_store_owner(self) -> None:
         from autoagent.core.runtime import RuntimeStore
@@ -493,54 +462,44 @@ class RuntimeSerializerTests(unittest.TestCase):
             },
             serializer.json_view(serializer.dumps(artifact)),
         )
-        self.assertIsInstance(restored["message"], Message)
+        self.assertEqual(
+            {"role": "assistant", "content": "done"},
+            restored["message"],
+        )
         self.assertEqual(value["reserved"], restored["reserved"])
 
-    def test_fresh_process_requires_pydantic_registration_but_ui_view_does_not(self) -> None:
+    def test_fresh_process_reads_pydantic_payload_as_json(self) -> None:
         writer = JsonRuntimeSerializer()
         payload = writer.dumps(Message(role="user", content="hello"))
         reader = JsonRuntimeSerializer()
 
-        with self.assertRaisesRegex(
-            RuntimeDeserializationError,
-            "Pydantic runtime type is not registered",
-        ):
-            reader.loads(payload)
         self.assertEqual(
             {"role": "user", "content": "hello"},
-            reader.json_view(payload),
-        )
-
-        reader.register_pydantic_model(Message)
-        self.assertEqual(
-            Message(role="user", content="hello"),
             reader.loads(payload),
         )
 
-    def test_custom_codec_must_be_registered_after_restart(self) -> None:
+    def test_pydantic_alias_round_trip_uses_the_workflow_contract(self) -> None:
+        def echo_alias(value: AliasedMessage) -> AliasedMessage:
+            return value
+
+        serializer = JsonRuntimeSerializer()
+        contract = Operator.from_callable(echo_alias).contract.output
+        persisted = serializer.loads(
+            serializer.dumps(AliasedMessage(message="hello"))
+        )
+        restored = contract.restore(persisted)
+
+        self.assertEqual({"message": "hello"}, persisted)
+        self.assertIsInstance(restored, AliasedMessage)
+        self.assertEqual("hello", restored.content)
+
+    def test_arbitrary_python_object_is_rejected(self) -> None:
         class Token:
             def __init__(self, value: str) -> None:
                 self.value = value
 
-            def __eq__(self, other: object) -> bool:
-                return isinstance(other, Token) and self.value == other.value
-
-        codec = RuntimeCodec(
-            type_id="test.token.v1",
-            python_type=Token,
-            encode=lambda token: {"value": token.value},
-            decode=lambda value: Token(value["value"]),
-        )
-        writer = JsonRuntimeSerializer()
-        writer.register_codec(codec)
-        payload = writer.dumps(Token("secret"))
-
-        with self.assertRaisesRegex(RuntimeDeserializationError, "not registered"):
-            JsonRuntimeSerializer().loads(payload)
-
-        reader = JsonRuntimeSerializer()
-        reader.register_codec(codec)
-        self.assertEqual(Token("secret"), reader.loads(payload))
+        with self.assertRaisesRegex(RuntimeSerializationError, "Unsupported"):
+            JsonRuntimeSerializer().dumps(Token("secret"))
 
     def test_unsafe_or_oversized_values_are_rejected(self) -> None:
         serializer = JsonRuntimeSerializer(max_inline_bytes=32)

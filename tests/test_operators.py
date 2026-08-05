@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from typing import Any
 
 import autoagent
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from autoagent import (
     CapabilityRef,
     CapabilitySelectionPolicy,
+    ArtifactRef,
     Node,
     NodePolicy,
     Operator,
@@ -23,6 +25,20 @@ from tests.helpers import isolated_app, started_app
 class SearchRequest(BaseModel):
     query: str
     limit: int = 10
+
+
+class DatabaseConnection:
+    pass
+
+
+class InvalidRuntimeModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    connection: DatabaseConnection
+
+
+class DynamicRuntimeModel(BaseModel):
+    value: Any
 
 
 class OperatorRegistrationTests(unittest.TestCase):
@@ -42,6 +58,20 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertFalse(hasattr(autoagent, "get_default_app"))
         self.assertFalse(hasattr(autoagent, "operator"))
         self.assertFalse(hasattr(autoagent, "capability"))
+
+    def test_operator_requires_parameter_and_return_annotations(self) -> None:
+        app = isolated_app()
+
+        def missing_parameter(value) -> str:
+            return str(value)
+
+        def missing_return(value: str):
+            return value
+
+        with self.assertRaisesRegex(ValueError, "Parameter 'value'.*annotation"):
+            app.register_operator(missing_parameter, operator_id="missing_parameter")
+        with self.assertRaisesRegex(ValueError, "return type annotation"):
+            app.register_operator(missing_return, operator_id="missing_return")
 
     def test_app_capability_decorator_registers_contract_and_default_operator(self) -> None:
         app = isolated_app()
@@ -171,7 +201,7 @@ class OperatorRegistrationTests(unittest.TestCase):
         def search(query: str, limit: int = 10) -> str:
             return query
 
-        def flexible(**options) -> str:
+        def flexible(**options: Any) -> str:
             return str(options["query"])
 
         with self.assertWarns(OperatorContractWarning):
@@ -217,6 +247,42 @@ class OperatorRegistrationTests(unittest.TestCase):
             registered.contract.output.json_schema,
             {"items": {"type": "string"}, "type": "array"},
         )
+
+    def test_workflow_contract_rejects_arbitrary_resource_types(self) -> None:
+        app = isolated_app()
+
+        def use_connection(connection: DatabaseConnection) -> str:
+            return str(connection)
+
+        def return_invalid_model() -> InvalidRuntimeModel:
+            return InvalidRuntimeModel(connection=DatabaseConnection())
+
+        with self.assertRaisesRegex(ValueError, "non-serializable.*DatabaseConnection"):
+            app.register_operator(use_connection, operator_id="use_connection")
+        with self.assertRaisesRegex(ValueError, "non-serializable.*InvalidRuntimeModel"):
+            app.register_operator(return_invalid_model, operator_id="invalid_model")
+
+    def test_explicit_any_is_a_normalized_dynamic_json_contract(self) -> None:
+        app = isolated_app()
+
+        def dynamic(value: Any) -> Any:
+            return value
+
+        registered = app.register_operator(dynamic, operator_id="dynamic_json")
+        artifact = ArtifactRef(uri="artifact://result")
+        normalized = registered.contract.output.validate(
+            {"request": SearchRequest(query="docs"), "artifact": artifact}
+        )
+
+        self.assertTrue(registered.contract.output.known)
+        self.assertEqual("json", registered.contract.output.restoration_mode)
+        self.assertEqual(
+            {"query": "docs", "limit": 10},
+            normalized["request"],
+        )
+        self.assertEqual(artifact, normalized["artifact"])
+        with self.assertRaisesRegex(ValueError, "Unsupported runtime value"):
+            registered.contract.input.restore({"value": DatabaseConnection()})
 
     def test_public_apis_reject_schema_overrides(self) -> None:
         app = isolated_app()
@@ -307,10 +373,25 @@ class OperatorRegistrationTests(unittest.TestCase):
         self.assertIs(registered.handler, specific_task)
 
 class OperatorExecutionTests(unittest.TestCase):
+    def test_nested_any_cannot_hide_a_process_local_resource(self) -> None:
+        def invalid_output() -> DynamicRuntimeModel:
+            return DynamicRuntimeModel(value=DatabaseConnection())
+
+        workflow = Workflow(id="invalid_nested_any")
+        workflow.add_node(invalid_output, node_id="invalid")
+
+        invocation = started_app().invoke(workflow)
+
+        self.assertEqual("failed", invocation.state)
+        self.assertEqual("OPERATOR_OUTPUT_INVALID", invocation.error.code)
+
     def test_direct_operator_executes_without_app_registration(self) -> None:
+        def uppercase(value: str) -> str:
+            return value.upper()
+
         direct = Operator(
             id="direct_uppercase",
-            handler=lambda value: value.upper(),
+            handler=uppercase,
             version=2,
         )
         workflow = Workflow(

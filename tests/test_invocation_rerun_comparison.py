@@ -4,9 +4,17 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel
 
 from autoagent import AutoAgentApp, AutoAgentSettings, Workflow
 from autoagent.debug import DebugQueryService, build_rerun_result
+from tests.helpers import dynamic_json_callable
+
+
+class RerunRequest(BaseModel):
+    value: int
 
 
 def _history_workflow(workflow_id: str = "rerun_history") -> Workflow:
@@ -16,7 +24,7 @@ def _history_workflow(workflow_id: str = "rerun_history") -> Workflow:
             "history": list(ctx.session_context.data.get("history", ())),
         }
 
-    def execute(value: int, history: list[int]):
+    def execute(value: int, history: list[int]) -> dict[str, Any]:
         return {"value": value, "history_before": history}
 
     def remember(ctx) -> None:
@@ -37,14 +45,14 @@ def _history_workflow(workflow_id: str = "rerun_history") -> Workflow:
 class InvocationComparisonTests(unittest.IsolatedAsyncioTestCase):
     async def test_loop_iterations_align_by_execution_scope(self) -> None:
         workflow = Workflow(id="comparison_loop")
-        workflow.add_node(lambda: 0, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: 0), node_id="start")
         workflow.add_node(
-            lambda value: value + 1,
+            dynamic_json_callable(lambda value: value + 1),
             node_id="agent",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
         workflow.add_node(
-            lambda value: value,
+            dynamic_json_callable(lambda value: value),
             node_id="finish",
             input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
         )
@@ -97,11 +105,11 @@ class InvocationComparisonTests(unittest.IsolatedAsyncioTestCase):
             }
 
         workflow = Workflow(id="comparison_parallel")
-        workflow.add_node(lambda: None, node_id="start")
+        workflow.add_node(dynamic_json_callable(lambda: None), node_id="start")
         workflow.add_node(left, node_id="left")
         workflow.add_node(right, node_id="right")
         workflow.add_node(
-            lambda values: values,
+            dynamic_json_callable(lambda values: values),
             node_id="collect",
             input_mapping=collect_input,
         )
@@ -181,7 +189,7 @@ class InvocationComparisonTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_comparison_rejects_different_modes(self) -> None:
         workflow = Workflow(id="comparison_modes")
-        workflow.add_node(lambda value: value, node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="work")
         app = AutoAgentApp(settings=AutoAgentSettings())
         app.register_workflow(workflow)
         await app.astart()
@@ -206,7 +214,7 @@ class InvocationComparisonTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_comparison_rejects_minimal_mode(self) -> None:
         workflow = Workflow(id="comparison_minimal")
-        workflow.add_node(lambda value: value, node_id="work")
+        workflow.add_node(dynamic_json_callable(lambda value: value), node_id="work")
         app = AutoAgentApp(settings=AutoAgentSettings())
         app.register_workflow(workflow)
         await app.astart()
@@ -223,9 +231,9 @@ class InvocationComparisonTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_different_workflows_are_incompatible(self) -> None:
         first = Workflow(id="comparison_first")
-        first.add_node(lambda: "done", node_id="work")
+        first.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         second = Workflow(id="comparison_second")
-        second.add_node(lambda: "done", node_id="work")
+        second.add_node(dynamic_json_callable(lambda: "done"), node_id="work")
         app = AutoAgentApp(settings=AutoAgentSettings())
         app.register_workflow(first)
         app.register_workflow(second)
@@ -251,9 +259,9 @@ class InvocationComparisonTests(unittest.IsolatedAsyncioTestCase):
 class InvocationRerunTests(unittest.IsolatedAsyncioTestCase):
     async def test_rerun_executes_current_registered_revision(self) -> None:
         baseline = Workflow(id="rerun_revision", version=1)
-        baseline.add_node(lambda value: value, node_id="work")
+        baseline.add_node(dynamic_json_callable(lambda value: value), node_id="work")
         candidate_workflow = Workflow(id="rerun_revision", version=2)
-        candidate_workflow.add_node(lambda value: value + 1, node_id="work")
+        candidate_workflow.add_node(dynamic_json_callable(lambda value: value + 1), node_id="work")
         app = AutoAgentApp(settings=AutoAgentSettings())
         app.register_workflow(baseline)
         app.register_workflow(candidate_workflow)
@@ -278,6 +286,43 @@ class InvocationRerunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"value": 4}, candidate.input)
         self.assertEqual({"output": 5}, candidate.result)
         self.assertEqual("full", candidate.event_mode)
+
+    async def test_rerun_materializes_source_json_with_target_revision_contract(
+        self,
+    ) -> None:
+        def original(request: dict[str, int]) -> int:
+            return request["value"]
+
+        def revised(request: RerunRequest) -> int:
+            return request.value + 1
+
+        baseline = Workflow(id="rerun_typed_target", version=1)
+        baseline.add_node(original, node_id="work")
+        candidate_workflow = Workflow(id="rerun_typed_target", version=2)
+        candidate_workflow.add_node(revised, node_id="work")
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        app.register_workflow(baseline)
+        app.register_workflow(candidate_workflow)
+        await app.astart()
+        try:
+            source = await app.ainvoke(
+                baseline,
+                input={"request": {"value": 4}},
+                event_mode="standard",
+            )
+            admitted, candidate = await app._arerun(
+                candidate_workflow,
+                source_invocation_id=source.id,
+            )
+        finally:
+            await app.aclose()
+
+        self.assertNotEqual(
+            admitted.source_workflow_revision_id,
+            candidate.workflow_revision_id,
+        )
+        self.assertEqual({"request": {"value": 4}}, candidate.input)
+        self.assertEqual({"output": 5}, candidate.result)
 
     async def test_standard_rerun_copies_pre_invocation_session_context(self) -> None:
         workflow = _history_workflow()

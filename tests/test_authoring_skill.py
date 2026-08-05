@@ -222,6 +222,26 @@ class AuthoringSkillTests(unittest.TestCase):
         self.assertIn("selector-less Map", diagnostics)
         self.assertIn("exactly one incoming Edge", diagnostics)
 
+    def test_skill_documents_only_the_current_runtime_value_contract(self) -> None:
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        hooks = (REFERENCES_ROOT / "hook-contracts.md").read_text(
+            encoding="utf-8"
+        )
+        public_api = (REFERENCES_ROOT / "public-api.md").read_text(
+            encoding="utf-8"
+        )
+        combined = "\n".join((skill, hooks, public_api))
+
+        self.assertIn("declared serializable Workflow values", skill)
+        self.assertIn("Every parameter and return annotation is required", hooks)
+        self.assertIn("normal lambda cannot declare", hooks)
+        self.assertIn("explicit `Any`", hooks)
+        self.assertIn("supported typed scalars and containers", public_api)
+        self.assertIn("exact registered Workflow revision", public_api)
+        self.assertNotIn("RuntimeCodec", combined)
+        self.assertNotIn("register Runtime", combined)
+        self.assertNotIn("serialization codecs", combined)
+
     def test_eval_requests_contain_business_language_only(self) -> None:
         requirements = sorted(SKILL_EVAL_ROOT.glob("0[1-3]-*/REQUIREMENTS.md"))
         self.assertEqual(len(requirements), 3)

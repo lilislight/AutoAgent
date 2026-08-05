@@ -48,6 +48,7 @@ from autoagent.core.runtime import (
 )
 from autoagent.core.runtime.context import HookContextSnapshot
 from autoagent.core.runtime.hooks import invoke_hook_async
+from autoagent.core.runtime.serialization import RuntimeSerializationError
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.workflow import BackoffPolicy
 from autoagent.core.workflow.capability import SystemCommand, WAIT_SYSTEM_COMMAND_ID
@@ -459,7 +460,7 @@ def _execute_system_command(job: NodeExecutionJob) -> NodeExecutionResult:
     try:
         if not isinstance(job.input, Mapping):
             raise TypeError("SystemCommand wait input must be a named-argument mapping.")
-        arguments = job.node_ir.input_contract.validate(dict(job.input))
+        arguments = job.node_ir.input_contract.restore(dict(job.input))
         wait_key = arguments.get("wait_key") or str(job.node_execution.id)
         if not wait_key.strip():
             raise ValueError("SystemCommand wait_key cannot be empty.")
@@ -906,11 +907,11 @@ def _validate_unit_inputs(
                     "Node input must be a mapping whose keys match Operator parameters."
                 )
             arguments = dict(unit_input)
-            arguments = job.node_ir.input_contract.validate(arguments)
+            arguments = job.node_ir.input_contract.restore(arguments)
             # Detach hook-owned/custom Mapping objects before they cross into
             # an Operator or are retained in runtime execution records.
             units[unit_position] = (unit_index, arguments)
-        except (TypeError, ValidationError) as exc:
+        except (TypeError, ValidationError, RuntimeSerializationError) as exc:
             is_map_item = (
                 job.node_ir.policy is not None
                 and job.node_ir.policy.map is not None
@@ -945,7 +946,7 @@ def _validate_operator_output(
             continue
         try:
             contract.validate(output)
-        except (TypeError, ValidationError) as exc:
+        except (TypeError, ValidationError, RuntimeSerializationError) as exc:
             raise _OperatorOutputInvalid(
                 f"Operator {operator.id} returned output that does not satisfy "
                 f"contract {contract.json_schema}: {exc}"
@@ -953,10 +954,11 @@ def _validate_operator_output(
         checked.add(id(contract))
 
 
-def _validate_final_output(job: ResolvedNodeExecutionJob, output: Any) -> None:
+def _validate_final_output(job: ResolvedNodeExecutionJob, output: Any) -> Any:
     try:
-        job.node_ir.output_contract.validate(output)
-    except (TypeError, ValidationError) as exc:
+        validated = job.node_ir.output_contract.validate(output)
+        return validated
+    except (TypeError, ValidationError, RuntimeSerializationError) as exc:
         raise _NodeOutputInvalid(
             f"Node {job.node_ir.id} output does not satisfy final contract "
             f"{job.node_ir.output_contract.json_schema}: {exc}"
@@ -1713,7 +1715,7 @@ async def _aggregate_unit_results(
             )
         else:
             output = outputs[0]
-        _validate_final_output(job, output)
+        output = _validate_final_output(job, output)
     except Exception as exc:
         aggregation_elapsed_ns = max(
             0,

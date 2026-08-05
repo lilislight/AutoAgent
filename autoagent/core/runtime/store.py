@@ -1032,16 +1032,17 @@ class RuntimeStore:
             )
         if through_sequence is None:
             all_events = events
-            if (
-                snapshot.through_sequence > 0
-                and invocation_id not in self.runtime_events
-                and self.backend is not None
-            ):
-                all_events = await self._load_event_range(
-                    invocation_id=invocation_id,
-                    after_sequence=0,
-                    before_sequence=None,
-                )
+            if snapshot.through_sequence > 0:
+                with self._lock:
+                    cached_events = self.runtime_events.get(invocation_id)
+                if cached_events is not None:
+                    all_events = tuple(cached_events)
+                elif self.backend is not None:
+                    all_events = await self._load_event_range(
+                        invocation_id=invocation_id,
+                        after_sequence=0,
+                        before_sequence=None,
+                    )
             latest_user_event_sequence = (
                 0
                 if self.backend is None

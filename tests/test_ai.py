@@ -147,8 +147,12 @@ class LLMContractTests(unittest.TestCase):
         )
         serializer = JsonRuntimeSerializer()
 
-        restored = serializer.loads(serializer.dumps(request))
+        persisted = serializer.loads(serializer.dumps(request))
+        restored = LLM_CALL_CONTRACT.input.restore({"request": persisted})[
+            "request"
+        ]
 
+        self.assertIsInstance(persisted, dict)
         self.assertEqual(restored.response_format.name, "DataclassAnswer")
         self.assertEqual(
             restored.response_format.json_schema["properties"]["value"]["type"],
@@ -185,7 +189,7 @@ class ToolDecoratorTests(unittest.TestCase):
         )
 
     def test_tool_rejects_untyped_output(self) -> None:
-        with self.assertRaisesRegex(ValueError, "type annotations"):
+        with self.assertRaisesRegex(ValueError, "return type annotation"):
 
             @tool()
             def invalid(value: str):
@@ -1612,7 +1616,7 @@ class ReActWorkflowTests(unittest.TestCase):
         session = next(iter(app.runtime_store.sessions.values()))
         messages = session.context.data["__autoagent_react_messages__"]["$"]
         self.assertEqual(
-            [(message.role, message.content) for message in messages],
+            [(message["role"], message["content"]) for message in messages],
             [
                 ("user", "first question"),
                 ("assistant", "first answer"),
@@ -1620,7 +1624,7 @@ class ReActWorkflowTests(unittest.TestCase):
                 ("assistant", "second answer"),
             ],
         )
-        self.assertTrue(all(isinstance(message, LLMMessage) for message in messages))
+        self.assertTrue(all(isinstance(message, dict) for message in messages))
 
     def test_new_session_starts_without_react_history(self) -> None:
         requests: list[LLMRequest] = []
@@ -1796,7 +1800,7 @@ class ReActWorkflowTests(unittest.TestCase):
             {"first", "second"},
         )
 
-    def test_react_session_messages_round_trip_as_llm_messages(self) -> None:
+    def test_react_session_messages_persist_as_type_neutral_json(self) -> None:
         requests: list[LLMRequest] = []
         app = self.app_with_responses([_text_response("answer")], requests)
         workflow = react_workflow(
@@ -1811,16 +1815,14 @@ class ReActWorkflowTests(unittest.TestCase):
         session = next(iter(app.runtime_store.sessions.values()))
         payload = app.runtime_serializer.dumps(session.context.to_record())
 
-        restored_app = self.app_with_responses([], [])
-        restored_app.register_workflow(workflow)
-        restored = restored_app.runtime_serializer.loads(payload)
+        restored = app.runtime_serializer.loads(payload)
         messages = restored["data"]["__autoagent_react_messages__"]["$"]
 
         self.assertEqual(
-            [(message.role, message.content) for message in messages],
+            [(message["role"], message["content"]) for message in messages],
             [("user", "question"), ("assistant", "answer")],
         )
-        self.assertTrue(all(isinstance(message, LLMMessage) for message in messages))
+        self.assertTrue(all(isinstance(message, dict) for message in messages))
 
     def test_react_stream_emits_message_reasoning_and_final_user_events(
         self,

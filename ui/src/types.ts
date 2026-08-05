@@ -99,7 +99,7 @@ export interface WorkflowNodeView {
   entry: boolean;
   exit: boolean;
   policy: Record<string, unknown> | null;
-  input_plan: Record<string, unknown> | null;
+  input_mapping: Record<string, unknown> | null;
   output_binding: Record<string, unknown> | null;
   input_contract: Record<string, unknown>;
   operator_output_contract: Record<string, unknown>;

@@ -99,7 +99,7 @@ def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
                 "input_contract": node.input_contract.describe(),
                 "operator_output_contract": node.operator_output_contract.describe(),
                 "output_contract": node.output_contract.describe(),
-                "input_plan": _hook_definition(node.input_plan),
+                "input_mapping": _hook_definition(node.input_mapping),
                 "output_binding": _hook_definition(node.output_binding),
                 "stream_user_event_mapping": _canonicalize(
                     node.stream_user_event_mapping

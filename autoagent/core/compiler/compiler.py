@@ -20,6 +20,7 @@ from autoagent.core.operators import CapabilityRegistry, Operator, OperatorRegis
 from autoagent.core.operators.contract import (
     OperatorContract,
     callable_contract,
+    callable_output_contract,
     value_contract,
 )
 from autoagent.core.operators import callable_operator_id
@@ -339,7 +340,7 @@ class WorkflowCompiler:
                 input_contract=contract.input,
                 operator_output_contract=contract.output,
                 output_contract=contract.output,
-                input_plan=node.input_mapping,
+                input_mapping=node.input_mapping,
                 output_binding=node.output_binding,
                 stream_user_event_mapping=node.stream_user_event_mapping,
                 user_event_mapping=node.user_event_mapping,
@@ -1272,7 +1273,7 @@ class WorkflowCompiler:
                         subject=node_id,
                     )
                 )
-            if node.input_plan is not None:
+            if node.input_mapping is not None:
                 diagnostics.append(
                     Diagnostic(
                         code="POLICY_MAP_INPUT_MAPPING_CONFLICT",
@@ -1312,17 +1313,19 @@ class WorkflowCompiler:
                 item_annotation = node.operator_output_contract.annotation
                 node.output_contract = value_contract(list[item_annotation])
                 continue
-            contract, _ = callable_contract(parallel_policy.output_aggregator)
-            node.output_contract = contract.output
-            if not contract.output.known:
-                kind = "Map" if policy.map is not None else "Replication"
+            output_contract, issues = callable_output_contract(
+                parallel_policy.output_aggregator
+            )
+            node.output_contract = output_contract
+            kind = "Map" if policy.map is not None else "Replication"
+            for issue in issues:
                 diagnostics.append(
                     Diagnostic(
-                        code="POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
-                        severity="warning",
+                        code="POLICY_AGGREGATOR_CONTRACT_INVALID",
+                        severity=issue.severity,
                         message=(
-                            f"{kind} output_aggregator has no concrete return "
-                            "annotation; final Node output cannot be validated."
+                            f"{kind} output_aggregator contract is invalid: "
+                            f"{issue.message}"
                         ),
                         subject=node_id,
                     )

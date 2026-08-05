@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 import unittest
+from collections.abc import AsyncIterator, Iterator
 from unittest.mock import patch
 
 from autoagent import (
@@ -489,34 +490,26 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_raw_sync_generator_is_rejected_with_specific_error(self) -> None:
-        def stream():
+    def test_raw_sync_generator_contract_is_rejected(self) -> None:
+        def stream() -> Iterator[str]:
             yield "not wrapped"
 
         workflow = Workflow(id="raw_sync_stream")
         workflow.add_node(stream, node_id="stream")
 
-        invocation = started_app().invoke(workflow)
+        with self.assertRaisesRegex(ValueError, "non-serializable"):
+            started_app().invoke(workflow)
 
-        self.assertEqual(invocation.state, "failed")
-        self.assertEqual(invocation.error.code, "UNSUPPORTED_STREAM_RESULT")
-        self.assertIn("streaming_result", invocation.error.message)
-
-    def test_raw_async_generator_is_rejected_and_closed(self) -> None:
+    def test_raw_async_generator_contract_is_rejected(self) -> None:
         async def scenario() -> None:
-            async def stream():
+            async def stream() -> AsyncIterator[str]:
                 yield "not wrapped"
 
             workflow = Workflow(id="raw_async_stream")
             workflow.add_node(stream, node_id="stream")
 
-            invocation = await started_app().ainvoke(workflow)
-
-            self.assertEqual(invocation.state, "failed")
-            self.assertEqual(
-                invocation.error.code,
-                "UNSUPPORTED_STREAM_RESULT",
-            )
+            with self.assertRaisesRegex(ValueError, "non-serializable"):
+                await started_app().ainvoke(workflow)
 
         asyncio.run(scenario())
 
@@ -859,6 +852,9 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         self.assertGreater(summary.stream_reduction_ns, 0)
 
     def test_map_consumes_each_stream_before_aggregation(self) -> None:
+        def source() -> list[int]:
+            return [1, 2, 3]
+
         def stream(value: int) -> StreamingResult[str, str]:
             return streaming_result(
                 iter((str(value), "!")),
@@ -867,7 +863,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
 
         workflow = Workflow(id="mapped_stream")
         workflow.add_node(
-            lambda: [1, 2, 3],
+            source,
             node_id="source",
         )
         workflow.add_node(
@@ -905,6 +901,12 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
     def test_runtime_limit_accumulates_across_loop_executions(self) -> None:
         calls = 0
 
+        def start() -> None:
+            return None
+
+        def done(value: int) -> int:
+            return value
+
         def iterative() -> int:
             nonlocal calls
             calls += 1
@@ -912,16 +914,16 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             return calls
 
         workflow = Workflow(id="accumulated_runtime_limit")
-        workflow.add_node(lambda: None, node_id="start", entry=True)
+        workflow.add_node(start, node_id="start", entry=True)
         workflow.add_node(
             iterative,
             node_id="loop",
             input_mapping=lambda _ctx: {},
             policy=NodePolicy(
-                resource=ResourcePolicy(max_runtime_ms_per_invocation=20)
+                resource=ResourcePolicy(max_runtime_ms_per_invocation=25)
             ),
         )
-        workflow.add_node(lambda value: value, node_id="done")
+        workflow.add_node(done, node_id="done")
         workflow.add_edge("start", "loop")
         workflow.add_edge(
             "loop",
@@ -944,7 +946,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "RESOURCE_LIMIT_EXCEEDED")
         self.assertEqual(invocation.error.detail["resource"], "runtime_ms")
-        self.assertGreater(invocation.error.detail["actual"], 20)
+        self.assertGreater(invocation.error.detail["actual"], 25)
         self.assertEqual(calls, 2)
         self.assertEqual(
             [execution.state for execution in executions],

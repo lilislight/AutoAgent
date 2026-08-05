@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from copy import deepcopy
 import logging
 from pathlib import Path
 from threading import RLock
-from typing import Any, TypeVar, get_args, get_origin
+from typing import Any, TypeVar
 from uuid import UUID, uuid4
-
-from pydantic import BaseModel
 
 from autoagent.core.app.settings import AutoAgentSettings
 from autoagent.core.compiler import (
@@ -30,7 +28,6 @@ from autoagent.core.operators.contract import OperatorContract, ensure_callable_
 from autoagent.core.runtime import (
     Invocation,
     JsonRuntimeSerializer,
-    RuntimeCodec,
     RuntimeEventMode,
     RuntimeStore,
     Session,
@@ -38,6 +35,7 @@ from autoagent.core.runtime import (
     SessionBusyError,
 )
 from autoagent.core.runtime.hooks import RuntimeEventLoop
+from autoagent.core.runtime.serialization import normalize_json_value
 from autoagent.core.workflow import Workflow
 
 
@@ -99,8 +97,6 @@ class AutoAgentApp:
         settings: AutoAgentSettings | None = None,
         runtime_store: RuntimeStore | None = None,
         runtime_serializer: JsonRuntimeSerializer | None = None,
-        runtime_codecs: Iterable[RuntimeCodec] = (),
-        runtime_models: Iterable[type[BaseModel]] = (),
     ) -> None:
         resolved_settings = settings or AutoAgentSettings.from_env()
         self.settings = resolved_settings
@@ -123,10 +119,6 @@ class AutoAgentApp:
             )
         self.runtime_store = runtime_store
         self.runtime_serializer = runtime_store.serializer
-        for codec in runtime_codecs:
-            self.register_runtime_codec(codec)
-        for model_type in runtime_models:
-            self.register_runtime_model(model_type)
         node_executor = NodeExecutor(
             max_thread_workers=resolved_settings.executor_max_thread_workers,
             max_parallel_units=resolved_settings.executor_max_parallel_units,
@@ -154,11 +146,6 @@ class AutoAgentApp:
         self._started = False
         self._start_lock: asyncio.Lock | None = None
         self._closed = False
-
-    def register_runtime_codec(self, codec: RuntimeCodec) -> None:
-        """Register one trusted custom persistence codec before loading records."""
-
-        self.runtime_serializer.register_codec(codec)
 
     def start(self) -> None:
         """Initialize resources and recover registered Workflows."""
@@ -265,19 +252,6 @@ class AutoAgentApp:
                 recover_one(entry, session, invocation)
                 for entry, session, invocation in recoveries
             )
-        )
-
-    def register_runtime_model(
-        self,
-        model_type: type[BaseModel],
-        *,
-        type_id: str | None = None,
-    ) -> str:
-        """Register a trusted Pydantic type used by durable runtime values."""
-
-        return self.runtime_serializer.register_pydantic_model(
-            model_type,
-            type_id=type_id,
         )
 
     def close(self) -> None:
@@ -853,47 +827,7 @@ class AutoAgentApp:
             raise ValueError(f"Workflow validation failed: {diagnostics}")
         if compile_result.workflow_snapshot is None:
             raise RuntimeError("Compiler omitted WorkflowVersionSnapshot.")
-        self._register_runtime_models_from_workflow_ir(
-            compile_result.workflow_ir
-        )
         return compile_result.workflow_ir, compile_result.workflow_snapshot
-
-    def _register_runtime_models_from_workflow_ir(
-        self,
-        workflow_ir: WorkflowIR,
-    ) -> None:
-        """Trust and register Pydantic types declared by compiled contracts.
-
-        Runtime values written in one process must be decodable after restart.
-        Compiled callable annotations are part of the executable application
-        definition, so their Pydantic models are safe to register without
-        allowing persisted data to import arbitrary Python types.
-        """
-
-        for node in workflow_ir.nodes.values():
-            contracts = (
-                node.input_contract,
-                node.operator_output_contract,
-                node.output_contract,
-            )
-            for contract in contracts:
-                annotations = [contract.annotation, contract.extra_annotation]
-                annotations.extend(
-                    parameter.annotation for parameter in contract.parameters
-                )
-                for annotation in annotations:
-                    for model_type in _pydantic_model_types(annotation):
-                        self.register_runtime_model(model_type)
-            capability = node.capability
-            if isinstance(capability, Operator):
-                annotations = getattr(
-                    capability.handler,
-                    "__autoagent_runtime_annotations__",
-                    (),
-                )
-                for annotation in annotations:
-                    for model_type in _pydantic_model_types(annotation):
-                        self.register_runtime_model(model_type)
 
     async def _prepare_invocation(
         self,
@@ -951,13 +885,16 @@ class AutoAgentApp:
         input: dict[str, Any] | None,
         event_mode: RuntimeEventMode,
     ) -> _PreparedInvocation:
+        normalized_input = normalize_json_value(dict(input or {}))
+        if not isinstance(normalized_input, dict):
+            raise TypeError("Workflow Invocation input must be a JSON object.")
         invocation = Invocation(
             workflow_id=workflow_ir.workflow_id,
             workflow_revision_id=session.workflow_revision_id,
             workflow_version=workflow_ir.workflow_version,
             workflow_definition_hash=workflow_ir.definition_hash,
             entry_node_id=entry_node_id,
-            input=input,
+            input=normalized_input,
             event_mode=event_mode,
         )
         self._set_invocation_live(invocation.id, True)
@@ -1035,30 +972,3 @@ class AutoAgentApp:
                 "code or await app.astart() from asynchronous code before "
                 "invoking, submitting, or resuming Workflows."
             )
-
-
-def _pydantic_model_types(annotation: Any) -> tuple[type[BaseModel], ...]:
-    """Return every Pydantic model reachable from one type annotation."""
-
-    found: list[type[BaseModel]] = []
-    visited: set[Any] = set()
-
-    def visit(value: Any) -> None:
-        try:
-            if value in visited:
-                return
-            visited.add(value)
-        except TypeError:
-            return
-        if isinstance(value, type) and issubclass(value, BaseModel):
-            found.append(value)
-            for field in value.model_fields.values():
-                visit(field.annotation)
-            return
-        origin = get_origin(value)
-        if origin is not None:
-            for argument in get_args(value):
-                visit(argument)
-
-    visit(annotation)
-    return tuple(found)

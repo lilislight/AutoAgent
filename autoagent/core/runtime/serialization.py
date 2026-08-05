@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, Literal, get_args, get_origin
+from enum import Enum
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -22,7 +22,7 @@ class RuntimeSerializationError(ValueError):
 
 
 class RuntimeDeserializationError(ValueError):
-    """Raised when persisted data needs an unavailable registered type/codec."""
+    """Raised when persisted runtime JSON is malformed."""
 
 
 class ArtifactRef(BaseModel):
@@ -61,16 +61,6 @@ class ArtifactRef(BaseModel):
         return self
 
 
-@dataclass(frozen=True)
-class RuntimeCodec:
-    """Explicit trusted codec used for one custom Python type."""
-
-    type_id: str
-    python_type: type[Any]
-    encode: Callable[[Any], Any]
-    decode: Callable[[Any], Any]
-
-
 class RuntimeSerializer(ABC):
     """Persistence serializer shared by database Store and observation views."""
 
@@ -90,59 +80,17 @@ class RuntimeSerializer(ABC):
 
 
 class JsonRuntimeSerializer(RuntimeSerializer):
-    """Safe JSON-plus serializer; it never imports types or executes pickle.
+    """Safe JSON serializer for Workflow values and framework-owned scalar tags.
 
-    Built-ins, UUID/time/Decimal, ArtifactRef, tuples/sets, registered custom
-    codecs, and Pydantic models are supported. Pydantic classes seen by ``dumps``
-    are registered in this serializer instance automatically. A fresh process
-    must register those classes before ``loads`` so recovery cannot import and
-    instantiate arbitrary persisted type names. ``json_view`` remains available
-    without those registrations for observation endpoints.
+    User Pydantic values are stored as JSON objects, never as importable Python
+    type ids. Executable reads restore concrete values from registered Workflow
+    contracts; observation reads remain type-neutral.
     """
 
     def __init__(self, *, max_inline_bytes: int | None = None) -> None:
         if max_inline_bytes is not None and max_inline_bytes <= 0:
             raise ValueError("max_inline_bytes must be positive or None.")
         self.max_inline_bytes = max_inline_bytes
-        self._codecs_by_id: dict[str, RuntimeCodec] = {}
-        self._codecs_by_type: dict[type[Any], RuntimeCodec] = {}
-        self._models: dict[str, type[BaseModel]] = {}
-        self._model_ids_by_type: dict[type[BaseModel], str] = {}
-
-    def register_codec(self, codec: RuntimeCodec) -> None:
-        """Register one stable codec; duplicate type ids/types are rejected."""
-
-        if not codec.type_id.strip():
-            raise ValueError("RuntimeCodec type_id cannot be empty.")
-        if codec.type_id in self._codecs_by_id:
-            raise ValueError(f"Runtime codec already registered: {codec.type_id}")
-        if codec.python_type in self._codecs_by_type:
-            raise ValueError(
-                f"Runtime codec already registered for: {codec.python_type.__name__}"
-            )
-        self._codecs_by_id[codec.type_id] = codec
-        self._codecs_by_type[codec.python_type] = codec
-
-    def register_pydantic_model(
-        self,
-        model_type: type[BaseModel],
-        *,
-        type_id: str | None = None,
-    ) -> str:
-        """Allow a persisted Pydantic value to recover to its original class."""
-
-        resolved_id = type_id or _python_type_id(model_type)
-        existing_id = self._model_ids_by_type.get(model_type)
-        if existing_id is not None and existing_id != resolved_id:
-            raise ValueError(
-                f"Pydantic runtime model already registered as: {existing_id}"
-            )
-        existing = self._models.get(resolved_id)
-        if existing is not None and existing is not model_type:
-            raise ValueError(f"Pydantic runtime type id already used: {resolved_id}")
-        self._models[resolved_id] = model_type
-        self._model_ids_by_type[model_type] = resolved_id
-        return resolved_id
 
     def dumps(self, value: Any) -> bytes:
         return self._dumps(value, enforce_limit=True)
@@ -190,6 +138,16 @@ class JsonRuntimeSerializer(RuntimeSerializer):
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise RuntimeDeserializationError(str(exc)) from exc
 
+    def normalize_json_value(self, value: Any) -> Any:
+        """Normalize a dynamic Workflow value without losing ArtifactRefs."""
+
+        try:
+            return self._dynamic_json_view(self._encode(value))
+        except RuntimeSerializationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise RuntimeSerializationError(str(exc)) from exc
+
     def json_view(self, payload: bytes | str) -> Any:
         """Decode only transport tags; custom values remain their JSON payload."""
 
@@ -216,6 +174,8 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             return {_TYPE_TAG: "time", "value": value.isoformat()}
         if isinstance(value, Decimal):
             return {_TYPE_TAG: "decimal", "value": str(value)}
+        if isinstance(value, Enum):
+            return self._encode(value.value)
         if isinstance(value, bytes):
             raise RuntimeSerializationError(
                 "Raw bytes are not persisted inline; store an ArtifactRef."
@@ -226,23 +186,8 @@ class JsonRuntimeSerializer(RuntimeSerializer):
                 "value": self._encode(value.model_dump(mode="python")),
             }
 
-        codec = self._codecs_by_type.get(type(value))
-        if codec is not None:
-            return {
-                _TYPE_TAG: "codec",
-                "type_id": codec.type_id,
-                "value": self._encode(codec.encode(value)),
-            }
         if isinstance(value, BaseModel):
-            model_type = type(value)
-            type_id = self._model_ids_by_type.get(model_type)
-            if type_id is None:
-                type_id = self.register_pydantic_model(model_type)
-            return {
-                _TYPE_TAG: "pydantic",
-                "type_id": type_id,
-                "value": self._encode_model_fields(value),
-            }
+            return self._encode_model_fields(value)
         if isinstance(value, Mapping):
             if any(not isinstance(key, str) for key in value):
                 raise RuntimeSerializationError("Runtime mapping keys must be strings.")
@@ -269,30 +214,17 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             f"Unsupported runtime value: {type(value).__module__}.{type(value).__qualname__}"
         )
 
-    def _encode_model_fields(self, value: BaseModel) -> dict[str, Any]:
-        """Encode broad Pydantic fields without erasing nested runtime types.
+    def _encode_model_fields(self, value: BaseModel) -> Any:
+        """Encode a Pydantic value as type-neutral JSON field data."""
 
-        Pydantic's model_dump recursively converts nested BaseModel values to
-        dictionaries. That is correct for concretely typed fields because the
-        outer model reconstructs them, but an Any-bearing field cannot recover
-        the original type. Use raw field values for broad annotations and fall
-        back to Pydantic's serialized value for custom field serializers such
-        as LLMRequest.response_format.
-        """
-
-        dumped = value.model_dump(mode="python")
-        encoded: dict[str, Any] = {}
-        for name, dumped_item in dumped.items():
-            field = type(value).model_fields.get(name)
-            use_raw = field is None or _annotation_contains_any(field.annotation)
-            if use_raw and hasattr(value, name):
-                try:
-                    encoded[name] = self._encode(getattr(value, name))
-                    continue
-                except RuntimeSerializationError:
-                    pass
-            encoded[name] = self._encode(dumped_item)
-        return encoded
+        if type(value).__pydantic_root_model__:
+            return self._encode(value.root)
+        return {
+            _pydantic_persistence_key(name, field_info): self._encode(
+                getattr(value, name)
+            )
+            for name, field_info in type(value).model_fields.items()
+        }
 
     def _decode(self, value: Any) -> Any:
         if isinstance(value, list):
@@ -320,23 +252,6 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             return tuple(self._decode(item) for item in value["value"])
         if type_tag == "set":
             return set(self._decode(item) for item in value["value"])
-        if type_tag == "codec":
-            type_id = value["type_id"]
-            codec = self._codecs_by_id.get(type_id)
-            if codec is None:
-                raise RuntimeDeserializationError(
-                    f"Runtime codec is not registered: {type_id}"
-                )
-            return codec.decode(self._decode(value["value"]))
-        if type_tag == "pydantic":
-            type_id = value["type_id"]
-            model_type = self._models.get(type_id)
-            if model_type is None:
-                raise RuntimeDeserializationError(
-                    "Pydantic runtime type is not registered in this process: "
-                    f"{type_id}"
-                )
-            return model_type.model_validate(self._decode(value["value"]))
         raise RuntimeDeserializationError(f"Unknown runtime type tag: {type_tag}")
 
     def _json_view(self, value: Any) -> Any:
@@ -349,7 +264,7 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             return {key: self._json_view(item) for key, item in value.items()}
         if type_tag == "artifact":
             return {_ARTIFACT_VIEW_TAG: self._json_view(value["value"])}
-        if type_tag in {"mapping", "pydantic", "codec"}:
+        if type_tag == "mapping":
             return self._json_view(value["value"])
         if type_tag in {"tuple", "set"}:
             return [self._json_view(item) for item in value["value"]]
@@ -357,31 +272,48 @@ class JsonRuntimeSerializer(RuntimeSerializer):
             return value["value"]
         raise RuntimeDeserializationError(f"Unknown runtime type tag: {type_tag}")
 
+    def _dynamic_json_view(self, value: Any) -> Any:
+        if isinstance(value, list):
+            return [self._dynamic_json_view(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        type_tag = value.get(_TYPE_TAG)
+        if type_tag is None:
+            return {
+                key: self._dynamic_json_view(item)
+                for key, item in value.items()
+            }
+        if type_tag == "artifact":
+            return ArtifactRef.model_validate(self._decode(value["value"]))
+        if type_tag == "mapping":
+            return self._dynamic_json_view(value["value"])
+        if type_tag in {"tuple", "set"}:
+            return [self._dynamic_json_view(item) for item in value["value"]]
+        if type_tag in {"uuid", "datetime", "date", "time", "decimal"}:
+            return value["value"]
+        raise RuntimeSerializationError(f"Unknown runtime type tag: {type_tag}")
 
-def _python_type_id(model_type: type[Any]) -> str:
-    return f"{model_type.__module__}:{model_type.__qualname__}"
+
+_WORKFLOW_VALUE_SERIALIZER = JsonRuntimeSerializer()
 
 
-def _annotation_contains_any(
-    annotation: Any,
-    visited: set[Any] | None = None,
-) -> bool:
-    if annotation is Any or annotation is object:
-        return True
-    seen = visited if visited is not None else set()
-    try:
-        if annotation in seen:
-            return False
-        seen.add(annotation)
-    except TypeError:
-        return False
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return any(
-            _annotation_contains_any(field.annotation, seen)
-            for field in annotation.model_fields.values()
-        )
-    origin = get_origin(annotation)
-    return origin is not None and any(
-        _annotation_contains_any(argument, seen)
-        for argument in get_args(annotation)
-    )
+def _pydantic_persistence_key(name: str, field_info: Any) -> str:
+    validation_alias = field_info.validation_alias
+    if isinstance(validation_alias, str):
+        return validation_alias
+    if isinstance(field_info.alias, str):
+        return field_info.alias
+    return name
+
+
+def ensure_serializable_value(value: Any) -> Any:
+    """Reject a typed Workflow value that cannot be persisted safely."""
+
+    _WORKFLOW_VALUE_SERIALIZER.dumps_unchecked(value)
+    return value
+
+
+def normalize_json_value(value: Any) -> Any:
+    """Return the canonical JSON value allowed at dynamic Workflow boundaries."""
+
+    return _WORKFLOW_VALUE_SERIALIZER.normalize_json_value(value)

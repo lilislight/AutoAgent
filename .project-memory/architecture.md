@@ -19,10 +19,10 @@ AutoAgent separates static Workflow definition from deployment configuration and
 
 ## Key Flows
 
-1. **Author and compile:** Workflow source enters WorkflowCompiler, child Workflows are expanded, graph/contracts/policies are validated, and successful compilation yields Workflow IR plus a definition-hash revision snapshot. WorkflowAnalysis and Preview reuse compiler state but are tooling views, not runtime inputs.
+1. **Author and compile:** Workflow source enters WorkflowCompiler, child Workflows are expanded, graph/contracts/policies and serializable callable boundaries are validated, and successful compilation yields Workflow IR plus a definition-hash revision snapshot. WorkflowAnalysis and Preview reuse compiler state but are tooling views, not runtime inputs.
 2. **Register and start:** ProjectLoader imports only manifest-declared objects. ProjectHost resolves deployment environment, creates AutoAgentApp, installs required AI Providers, registers Workflows, then explicitly starts the App. Startup initializes RuntimeStore and recovers only registered durable revisions.
 3. **Invoke:** AutoAgentApp admits a Session/Invocation into RuntimeStore. WorkflowExecutor runs the control loop: Scheduler produces scoped ready work, NodeExecutor resolves and executes Operators, results and edge decisions mutate Runtime state, and Runtime Events are recorded after changes are applied.
-4. **Persist:** RuntimeStore hands immutable envelopes to PersistenceCoordinator. DatabaseBackend serializes, batches fairly across Session queues, externalizes large values, and writes on its own runtime loop. Recovery state is periodically compacted while Event sequence remains the latest durable journal position.
+4. **Persist:** RuntimeStore hands immutable envelopes to PersistenceCoordinator. DatabaseBackend stores user values as type-neutral JSON, batches fairly across Session queues, externalizes large values, and writes on its own runtime loop. Recovery state is periodically compacted while Event sequence remains the latest durable journal position; executable recovery restores types through the exact registered Workflow revision.
 5. **Observe and control:** AutoAgentServer exposes registered Workflow execution and paged trace APIs. TraceService projects Runtime Events and merges live memory with durable history where required. SSE wakes the UI for status, directory, Invocation, and User Event changes.
 6. **Evaluate:** EvaluationLoader resolves a manifest Suite only when requested. EvaluationRunner gives every Case an isolated Session, executes invoke/resume through ProjectHost in Full Event mode, and supplies bounded Runtime evidence to Evaluators.
 7. **Guide and forward-test Coding Agents:** Authoring and debugging Skills route Coding Agents through the public project, Workflow, Evaluation, Report, Query, Rerun, and Comparison contracts. Isolated Skill Evaluations test observable results and CLI behavior without becoming Runtime features.
@@ -35,6 +35,7 @@ AutoAgent separates static Workflow definition from deployment configuration and
 - RuntimeStore owns latest execution state whether or not a durable backend is attached. The database is a downstream durability and historical-query layer, not the live execution owner.
 - Runtime Events and User Events are independent ordered journals. User Events do not participate in execution replay or recovery.
 - App startup and Workflow registration are explicit. A durable Invocation is recovered only when its exact Workflow revision is registered.
+- Historical observation stays type-neutral JSON; executable Workflow contracts restore typed values only for continued execution.
 - One Session cannot admit a second active Invocation while its current Invocation is created, running, or waiting.
 - The root package `__all__` is the stable Workflow-authoring contract; hosting, compiler, Runtime, persistence, and Server types remain owned by their modules.
 - Coding Agent Skills describe the supported public workflow; evaluator-only harnesses may observe CLI usage but do not capture private reasoning or enter the shipped Runtime path.

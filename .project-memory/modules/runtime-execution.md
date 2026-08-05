@@ -32,6 +32,8 @@ AutoAgentApp owns registries, Compiler, RuntimeStore, WorkflowExecutor, and one 
 
 RuntimeStore is one authoritative in-memory aggregate for Workflow revisions, Sessions, Invocations, outputs, Runtime Events, User Events, reduced state, and replay checkpoints. Event modes trade recording cost for capability: Minimal retains terminal/wait state, Standard records graph-level facts and recovery points, and Full also records internal phases and state operations.
 
+Runtime Context and Invocation input are canonical JSON values. Typed Node outputs remain typed during live execution, while Dynamic JSON contracts normalize values immediately. Recovery and Resume materialize persisted Node JSON through the exact registered Workflow revision before graph execution continues.
+
 ## Boundaries and Rules
 
 - App startup is explicit; Workflows that may recover durable work must be registered before startup.
@@ -39,6 +41,7 @@ RuntimeStore is one authoritative in-memory aggregate for Workflow revisions, Se
 - Runtime changes are applied before the corresponding Runtime Event is recorded.
 - Standard recovery checkpoints are compact state images near durable Event positions; Full mode can rebuild through state operations.
 - Recovery reuses normal graph behavior in recovery mode and stops or skips when Node recovery policy forbids execution.
+- Output Binding commits Context transactionally and rejects any non-serializable value without publishing partial changes.
 - Runtime Events support execution state, replay, and recovery. User Events are an independent semantic/live journal.
 - Waiting, running, or newly created work makes its Session busy; later Invocation admission is rejected until the active Invocation settles.
 

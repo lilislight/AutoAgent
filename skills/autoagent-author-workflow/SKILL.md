@@ -106,6 +106,10 @@ Examples of minimal routing:
 - Use stable, descriptive Workflow, Node, and Edge IDs.
 - Keep Condition and Input Mapping read-only. Write Invocation or Session
   Context only through Output Binding.
+- Pass only declared serializable Workflow values across Node, Context, Wait,
+  and persistence boundaries: supported scalar/container types, typed Pydantic
+  models, dynamic JSON, or `ArtifactRef`. Keep clients, connections, locks,
+  classes, generators, and other live resources inside Operator implementations.
 - Prevent overlapping parallel Context writes.
 - Bound Loops and dynamic parallel work.
 - Keep secrets out of source, Manifest, fixtures, Runtime values, and reports.

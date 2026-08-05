@@ -8,7 +8,6 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
-    field_serializer,
     field_validator,
     model_validator,
 )
@@ -103,17 +102,13 @@ class LLMUsage(BaseModel):
 class LLMRequest(BaseModel):
     """One provider-neutral model request."""
 
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-        frozen=True,
-    )
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     messages: tuple[LLMMessage, ...]
     model: str | None = None
     tools: tuple[LLMToolDefinition, ...] = ()
     tool_choice: LLMToolChoice | None = None
-    response_format: Any | None = None
+    response_format: LLMResponseFormat | None = None
     temperature: float | None = None
     max_output_tokens: int | None = Field(default=None, ge=1)
     provider_options: dict[str, Any] = Field(default_factory=dict)
@@ -140,27 +135,18 @@ class LLMRequest(BaseModel):
             )
         return self
 
-    @field_validator("response_format")
+    @field_validator("response_format", mode="before")
     @classmethod
-    def validate_response_format(cls, value: Any) -> Any:
+    def validate_response_format(cls, value: Any) -> LLMResponseFormat | None:
         if value is None or isinstance(value, LLMResponseFormat):
             return value
         if isinstance(value, dict) and {"name", "json_schema"} <= value.keys():
             return LLMResponseFormat.model_validate(value)
-        response_format_from_type(value)
-        return value
-
-    @field_serializer("response_format")
-    def serialize_response_format(self, value: Any) -> Any:
-        if value is None:
-            return None
-        return response_format_from_type(value).model_dump(mode="python")
+        return response_format_from_type(value)
 
     @property
     def response_format_spec(self) -> LLMResponseFormat | None:
-        if self.response_format is None:
-            return None
-        return response_format_from_type(self.response_format)
+        return self.response_format
 
 
 class LLMResponse(BaseModel):

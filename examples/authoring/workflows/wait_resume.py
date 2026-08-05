@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from autoagent import InputMappingContext, SystemCommand, Workflow
@@ -17,7 +19,7 @@ class ApprovalResult(BaseModel):
     comment: str
 
 
-def map_approval_response(ctx: InputMappingContext) -> dict[str, object]:
+def map_approval_response(ctx: InputMappingContext) -> dict[str, Any]:
     return {"response": ctx.incoming[0].value}
 
 

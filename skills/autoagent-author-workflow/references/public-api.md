@@ -165,17 +165,24 @@ def score_order(order: Order) -> RiskScore:
 ```
 
 AutoAgent derives an Operator contract from the signature. Pydantic models are
-recommended for structured boundaries. Dataclasses, typed containers, and
-other types supported by the framework's Pydantic contract layer may also
-work, but verify them with `workflow check`.
+recommended for structured boundaries. JSON scalars and containers with string
+mapping keys are supported directly. UUID, date/time, Decimal, Enum, and
+`ArtifactRef` have explicit Runtime encodings.
+
+`Any`, bare `dict`/`list`, `dict[str, Any]`, and `list[Any]` are explicit
+dynamic JSON contracts. Runtime normalizes those values immediately: Pydantic
+models become dictionaries, tuple/set values become lists, and UUID/date/time
+values become strings. Use a typed Pydantic contract when downstream code or
+Recovery must receive the original type.
 
 Avoid:
 
 - untyped parameters or returns;
 - positional meaning that is not visible in names;
-- `Any` at durable or external boundaries without a concrete need;
-- capturing live clients, locks, generators, or other non-serializable objects
-  in Runtime values.
+- `Any` when a typed schema is available;
+- live clients, database connections, locks, Python classes, generators, or
+  other process-local objects anywhere in Runtime values, including fields
+  hidden inside an `Any` value.
 
 ## Streaming callable contract
 
@@ -214,7 +221,7 @@ independently from Runtime tracing:
 ```python
 from autoagent import UserEventMapping
 
-def answer_event(output: Answer) -> dict[str, object]:
+def answer_event(output: Answer) -> dict[str, Any]:
     return {"answer": output}
 
 workflow.add_node(
@@ -236,9 +243,18 @@ failure never changes an otherwise successful Node result.
 
 ## Durable values
 
-Values crossing Node, Context, Wait, or persistence boundaries must be
-serializable by the installed Runtime contract. Prefer typed models, primitive
-containers, UUIDs, timestamps, and other explicitly supported values.
+Values crossing Node, Context, Wait, or persistence boundaries must use a
+declared serializable contract:
+
+- supported typed scalars and containers;
+- typed Pydantic values when exact type restoration matters;
+- dynamic JSON values for intentionally schema-free data;
+- `ArtifactRef` for data owned by artifact storage.
+
+Persistence stores user Pydantic values as type-neutral JSON. Historical trace
+reads therefore do not import project model classes. Recovery and Resume use
+the exact registered Workflow revision's contracts to restore typed Node
+outputs before execution continues.
 
 Do not place large documents, media, model blobs, open streams, or live client
 objects directly in Context or Node outputs. Preserve an `ArtifactRef` supplied

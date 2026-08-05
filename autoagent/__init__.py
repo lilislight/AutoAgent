@@ -60,7 +60,6 @@ from autoagent.core.runtime import (
     PersistenceHealth,
     PersistencePolicy,
     ReplicationAggregationContext,
-    RuntimeCodec,
     RuntimeRetentionPolicy,
     RuntimeStore,
 )

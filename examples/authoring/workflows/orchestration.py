@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,7 +54,7 @@ def receive_request(request: ReviewRequest) -> ReviewRequest:
     return request
 
 
-def map_review_plan(ctx: InputMappingContext) -> dict[str, object]:
+def map_review_plan(ctx: InputMappingContext) -> dict[str, Any]:
     """Enter the loop from the request or advance it from the prior summary."""
 
     incoming = ctx.incoming[0]
@@ -93,7 +93,7 @@ def approve_low_risk(plan: ReviewPlan) -> ReviewSummary:
 
 def map_review_plan_from_incoming(
     ctx: InputMappingContext,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {"plan": ctx.incoming[0].value}
 
 
@@ -148,7 +148,7 @@ def review_complete(ctx: ConditionContext) -> bool:
     return ReviewSummary.model_validate(ctx.source_output).approved
 
 
-def map_final_report(ctx: InputMappingContext) -> dict[str, object]:
+def map_final_report(ctx: InputMappingContext) -> dict[str, Any]:
     return {"summary": ctx.incoming[0].value}
 
 
@@ -162,7 +162,7 @@ def finalize_report(summary: ReviewSummary) -> ReviewReport:
     )
 
 
-def review_completed_event(report: ReviewReport) -> dict[str, object]:
+def review_completed_event(report: ReviewReport) -> dict[str, Any]:
     """Expose one application-specific event without changing Runtime state."""
 
     return {

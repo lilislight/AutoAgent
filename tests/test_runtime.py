@@ -27,7 +27,7 @@ from autoagent.core.runtime.snapshot import (
     capture_recovery_state,
     compact_recovery_state,
 )
-from tests.helpers import started_app
+from tests.helpers import dynamic_json_callable, started_app
 
 
 class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -471,7 +471,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         app = started_app(runtime_store=store)
         workflow = Workflow(id="checkpoint_retention")
-        workflow.add_node(lambda: "done", node_id="node")
+        workflow.add_node(dynamic_json_callable(lambda: "done"), node_id="node")
         invocation = await app.ainvoke(workflow, event_mode="full")
 
         for sequence in (1, 2, 3):
@@ -497,7 +497,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         store = RuntimeStore()
         app = started_app(runtime_store=store)
         workflow = Workflow(id="reducer")
-        workflow.add_node(lambda: {"value": 1}, node_id="entry")
+        workflow.add_node(dynamic_json_callable(lambda: {"value": 1}), node_id="entry")
 
         invocation = await app.ainvoke(
             workflow,

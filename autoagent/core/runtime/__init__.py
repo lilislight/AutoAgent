@@ -83,7 +83,6 @@ from autoagent.core.runtime.backends import DatabaseBackend
 from autoagent.core.runtime.serialization import (
     ArtifactRef,
     JsonRuntimeSerializer,
-    RuntimeCodec,
     RuntimeDeserializationError,
     RuntimeSerializationError,
     RuntimeSerializer,
@@ -148,7 +147,6 @@ __all__ = [
     "StateOperation",
     "RuntimeContext",
     "RuntimeConcurrencyController",
-    "RuntimeCodec",
     "RuntimeDeserializationError",
     "RuntimeSerializationError",
     "RuntimeSerializer",

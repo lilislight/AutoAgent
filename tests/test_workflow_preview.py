@@ -140,7 +140,7 @@ class WorkflowPreviewTests(unittest.TestCase):
         )
         self.assertEqual("edge_source_target", diagnostic.object_id)
 
-    def test_compiler_warning_marks_map_node_amber(self) -> None:
+    def test_invalid_aggregator_contract_marks_map_node_red(self) -> None:
         def item_source(value: str) -> list[dict[str, str]]:
             return [{"value": value}]
 
@@ -169,19 +169,19 @@ class WorkflowPreviewTests(unittest.TestCase):
 
         diagram = workflow.diagram()
 
-        self.assertTrue(diagram.compiled)
-        self.assertEqual(diagram.warning_count, 1)
+        self.assertFalse(diagram.compiled)
+        self.assertEqual(diagram.error_count, 1)
         node = diagram.analysis.nodes[1]
         self.assertIsNotNone(node.map_policy)
         assert node.map_policy is not None
         self.assertFalse(node.map_policy.has_item_selector)
         self.assertTrue(node.map_policy.has_output_aggregator)
-        self.assertEqual(diagram.node_status(node), "warning")
+        self.assertEqual(diagram.node_status(node), "error")
         self.assertEqual(
             diagram.diagnostics[0].code,
-            "POLICY_AGGREGATOR_OUTPUT_UNVERIFIED",
+            "POLICY_AGGREGATOR_CONTRACT_INVALID",
         )
-        self.assertIn("class n1 warning", diagram.to_mermaid())
+        self.assertIn("class n1 error", diagram.to_mermaid())
 
     def test_forbidden_second_loop_entry_edge_is_marked_red(self) -> None:
         def condition(_ctx) -> bool:

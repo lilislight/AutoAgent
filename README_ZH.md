@@ -104,6 +104,9 @@ autoagent project check
 autoagent workflow list
 autoagent workflow check <workflow-id>
 autoagent invocation run <workflow-id> --input-file input.json
+autoagent invocation report <invocation-id>
+autoagent invocation query <invocation-id> nodes
+autoagent invocation query <invocation-id> node <node-execution-id>
 autoagent eval list
 autoagent eval check <suite-id>
 autoagent eval run <suite-id>
@@ -115,6 +118,11 @@ autoagent server --host 127.0.0.1 --port 8765
 ``Evaluation`` 类和 Workflow；``eval run`` 使用正常 App 执行路径和 Full event
 mode 运行其 ``eval_*`` Cases。业务预期不匹配返回退出码 1，加载、配置或
 Evaluator 基础设施错误返回退出码 2。
+
+`invocation report` 为一次已观测执行生成紧凑的诊断索引；
+`invocation query` 按需分页读取 Node、Edge、Operator Call、RuntimeEvent、
+UserEvent 或 Full Runtime State 证据。两个命令都会优先连接匹配的运行中 Server，
+也可以只读查询显式配置的持久化数据库，不会恢复或重新执行 Workflow。
 
 完整的条件编排、Wait/Resume 和 LLM/Tool/ReActWorkflow 可以参考随包发布的
 [authoring examples](examples/authoring/README.md)。推荐的 Coding Agent 工作方式
@@ -129,8 +137,8 @@ Runtime 配置通过 CLI 参数和环境变量提供；[.env.example](.env.examp
 SQLite/PostgreSQL 持久化、Recovery、Runtime Event、CLI、Tracing Server/UI、
 AI 基础能力、随包示例和 authoring Skill。
 
-下一阶段先在独立项目中验证 Coding Agent authoring，再实现面向 Agent 的
-Invocation Report、渐进式 Trace 查询、Rerun/Compare 和基于 Fork 的调试。
+当前正在补齐面向 Coding Agent 的 Invocation Report、渐进式证据查询和本地
+调试 Skill；后续再实现 Rerun/Compare 和基于 Fork 的调试。
 [MVP.md](MVP.md) 定义稳定的产品阶段和验收边界，[TODO.md](TODO.md) 记录当前
 工作状态。
 

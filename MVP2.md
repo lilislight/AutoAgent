@@ -328,12 +328,15 @@ complete journal. List queries use stable cursors and preserve the Report's
 observed sequence boundary so an active Invocation cannot silently change the
 meaning of later pages.
 
-The first implemented progressive pages are RuntimeEvents and UserEvents.
-Their opaque cursors bind the Invocation, query kind, filters, and observed
-sequence and reject modification or reuse with another query. List items carry
-only bounded metadata; one explicit detail lookup returns bounded summaries of
-payload, input, output, or data. NodeExecution, Edge, Operator Call, and
-historical state pages build on the same cursor contract.
+The implemented progressive pages cover RuntimeEvents, UserEvents,
+NodeExecutions, Edge evaluations, and Operator Calls. Their opaque cursors bind
+the Invocation, query kind, filters, and observed sequence and reject
+modification or reuse with another query. List items carry only bounded
+metadata; one explicit detail lookup returns bounded summaries of payload,
+input, output, or data. Full-mode Runtime State can be reconstructed at a fixed
+sequence and addressed by JSON pointer without dumping the complete state.
+The CLI exposes these through one `autoagent invocation query` surface rather
+than a separate top-level command for every evidence type.
 
 `autoagent invocation report <invocation-id>` has one nonterminal behavior,
 not separate immediate and terminal-wait command variants. A `waiting`

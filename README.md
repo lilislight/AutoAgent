@@ -117,6 +117,9 @@ autoagent workflow preview <workflow-id>
 autoagent workflow preview <workflow-id> --format mermaid --output workflow.mmd
 autoagent workflow preview <workflow-id> --format json
 autoagent invocation run <workflow-id> --input-file input.json
+autoagent invocation report <invocation-id>
+autoagent invocation query <invocation-id> nodes
+autoagent invocation query <invocation-id> node <node-execution-id>
 autoagent eval list
 autoagent eval check <suite-id>
 autoagent eval run <suite-id>
@@ -129,6 +132,12 @@ validates the selected ``Evaluation`` class and Workflow without Provider
 credentials, and ``eval run`` executes its ``eval_*`` Cases through the normal
 App path in Full event mode. Business mismatches exit with code 1; loading,
 configuration, or Evaluator infrastructure errors exit with code 2.
+
+`invocation report` returns a compact diagnostic index for one observed
+execution. `invocation query` progressively loads bounded Node, Edge, Operator
+Call, RuntimeEvent, UserEvent, or Full Runtime State evidence. Both commands
+prefer the matching running Server and can use an explicitly configured
+durable database without recovering or executing the Workflow.
 
 For an unregistered Workflow exported directly from a Python file, `check`,
 `preview`, `invocation run`, and local `invocation resume` also accept `--file`.

@@ -346,6 +346,158 @@ class AutoAgentServer:
             return report.model_dump(mode="json")
 
         @router.get(
+            "/invocations/{invocation_id}/debug/node-executions",
+            dependencies=auth,
+        )
+        async def debug_node_executions(
+            invocation_id: UUID,
+            cursor: str | None = None,
+            through_sequence: int | None = Query(default=None, ge=0),
+            limit: int = Query(default=20, ge=1, le=100),
+        ) -> dict[str, Any]:
+            try:
+                page = await self.debug.node_executions(
+                    invocation_id,
+                    cursor=cursor,
+                    through_sequence=through_sequence,
+                    limit=limit,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return page.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/node-executions/"
+            "{node_execution_id}",
+            dependencies=auth,
+        )
+        async def debug_node_execution(
+            invocation_id: UUID,
+            node_execution_id: UUID,
+            through_sequence: int | None = Query(default=None, ge=0),
+        ) -> dict[str, Any]:
+            try:
+                return await self.debug.node_execution(
+                    invocation_id,
+                    node_execution_id,
+                    through_sequence=through_sequence,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/edge-evaluations",
+            dependencies=auth,
+        )
+        async def debug_edge_evaluations(
+            invocation_id: UUID,
+            cursor: str | None = None,
+            through_sequence: int | None = Query(default=None, ge=0),
+            limit: int = Query(default=20, ge=1, le=100),
+        ) -> dict[str, Any]:
+            try:
+                page = await self.debug.edge_evaluations(
+                    invocation_id,
+                    cursor=cursor,
+                    through_sequence=through_sequence,
+                    limit=limit,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return page.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/edge-evaluations/"
+            "{edge_evaluation_id}",
+            dependencies=auth,
+        )
+        async def debug_edge_evaluation(
+            invocation_id: UUID,
+            edge_evaluation_id: str,
+            through_sequence: int | None = Query(default=None, ge=0),
+        ) -> dict[str, Any]:
+            try:
+                return await self.debug.edge_evaluation(
+                    invocation_id,
+                    edge_evaluation_id,
+                    through_sequence=through_sequence,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/operator-calls",
+            dependencies=auth,
+        )
+        async def debug_operator_calls(
+            invocation_id: UUID,
+            cursor: str | None = None,
+            through_sequence: int | None = Query(default=None, ge=0),
+            limit: int = Query(default=20, ge=1, le=100),
+        ) -> dict[str, Any]:
+            try:
+                page = await self.debug.operator_calls(
+                    invocation_id,
+                    cursor=cursor,
+                    through_sequence=through_sequence,
+                    limit=limit,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return page.model_dump(mode="json")
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/operator-calls/"
+            "{operator_call_id}",
+            dependencies=auth,
+        )
+        async def debug_operator_call(
+            invocation_id: UUID,
+            operator_call_id: UUID,
+            through_sequence: int | None = Query(default=None, ge=0),
+        ) -> dict[str, Any]:
+            try:
+                return await self.debug.operator_call(
+                    invocation_id,
+                    operator_call_id,
+                    through_sequence=through_sequence,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        @router.get(
+            "/invocations/{invocation_id}/debug/runtime-state",
+            dependencies=auth,
+        )
+        async def debug_runtime_state(
+            invocation_id: UUID,
+            through_sequence: int | None = Query(default=None, ge=0),
+            path: str | None = None,
+        ) -> dict[str, Any]:
+            try:
+                return await self.debug.runtime_state(
+                    invocation_id,
+                    through_sequence=through_sequence,
+                    path=path,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        @router.get(
             "/invocations/{invocation_id}/debug/runtime-events",
             dependencies=auth,
         )

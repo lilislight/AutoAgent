@@ -46,7 +46,7 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 ### Phase 0: Freeze local debugging and evaluation contracts
 
-- [ ] Define versioned Invocation Report, value summary, evidence warning, and
+- [x] Define versioned Invocation Report, value summary, evidence warning, and
   progressive detail-query models for Minimal, Standard, and Full modes.
 - [x] Define the first public Evaluation and result contracts: Manifest Suite
   locator, ``Evaluation`` class, ``eval_*`` Case method, internal Invoke/Resume
@@ -65,9 +65,9 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 - [x] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
   uniqueness, Workflow targeting, and stable diagnostics.
 - [x] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
-- [ ] Define Report value-size limits, redaction, and incomplete-evidence
+- [x] Define Report value-size limits, redaction, and incomplete-evidence
   behavior. Eval Results remain stdout plus an optional ordinary report file.
-- [ ] Audit current Runtime Events and trace APIs against the Report/Eval models;
+- [x] Audit current Runtime Events and trace APIs against the Report/Eval models;
   list missing facts before adding new Runtime recording.
 
 ### Phase 1: Eval framework and CLI
@@ -100,8 +100,9 @@ public Eval execution surface; do not duplicate Cases as pytest functions.
 
 ### Phase 3: Invocation Report and progressive queries
 
-**Current focus:** finish NodeExecution, Edge, Operator Call, and Full-state
-progressive queries, then expose the complete detail-query set through CLI.
+**Current focus:** complete the remaining Invocation-mode fixtures and
+large-journal/large-value performance coverage, then stabilize the local
+debugging Skill.
 
 - [x] Add same-project Server discovery and evidence-source resolution: prefer
   the matching live Server, otherwise use an explicitly configured database,
@@ -109,24 +110,29 @@ progressive queries, then expose the complete detail-query set through CLI.
 - [x] Add the accepted `autoagent.debug` V1 read models: one
   `InvocationReport` plus bounded value, error, primary-boundary, and warning
   models; keep them outside the root Workflow authoring API.
-- [ ] Add a type-neutral read-only Debug Query service shared by CLI, Server,
+- [x] Add a type-neutral read-only Debug Query service shared by CLI, Server,
   and future platform adapters.
-- [ ] Build bounded Reports for active, waiting, completed, failed, and partially
+- [x] Build bounded Reports for active, waiting, completed, failed, and partially
   durable Invocations.
 - [x] For `created` or `running` Server Invocations, wait through notifications
   for at most 10 seconds for `waiting` or a terminal boundary, then return the
   current Report with an explicit still-running warning.
-- [ ] Keep the root Report compact and expose NodeExecution, Edge evaluation,
+- [x] Keep the root Report compact and expose NodeExecution, Edge evaluation,
   Operator Call, Event, and Full-mode state collections through stable cursor
   pages fixed to the Report's observed sequence.
 - [x] Include only categorized UserEvent counts in the root Report; page
   completed semantic/custom events separately and exclude stream deltas unless
   a stream-diagnostic query explicitly requests them.
-- [ ] Add direct CLI detail queries for one Invocation, NodeExecution, Edge
+- [x] Add direct CLI detail queries for one Invocation, NodeExecution, Edge
   evaluation, Operator Call, Event, or Full-mode state boundary.
 - [x] Keep Report and comparison results out of Runtime persistence; render to
   stdout and optionally tee the same content to an ordinary `--report-file`.
-- [ ] Add large-journal and large-value performance coverage.
+- [ ] Complete fixture coverage for Minimal, Standard, Full, partial durability,
+  Loop, Retry/Fallback, Map, and ReAct evidence. Core active, waiting,
+  completed, failed, memory, and historical-database paths are covered.
+- [x] Add large-journal and large-value performance coverage. The SQLite smoke
+  guard uses an 80-Node journal plus a 100 KB Invocation input and bounds both
+  query latency and rendered Report/page size.
 
 ### Phase 4: Local debugging Skill
 

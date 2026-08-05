@@ -189,6 +189,96 @@ class AutoAgentServerClient:
             f"/api/v1/invocations/{invocation_id}/report",
         )
 
+    async def debug_node_executions(
+        self,
+        invocation_id: str,
+        **options: Any,
+    ) -> dict[str, Any]:
+        return await self._debug_page(
+            invocation_id,
+            "node-executions",
+            options,
+        )
+
+    async def debug_node_execution(
+        self,
+        invocation_id: str,
+        node_execution_id: str,
+        *,
+        through_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._debug_detail(
+            invocation_id,
+            f"node-executions/{node_execution_id}",
+            through_sequence=through_sequence,
+        )
+
+    async def debug_edge_evaluations(
+        self,
+        invocation_id: str,
+        **options: Any,
+    ) -> dict[str, Any]:
+        return await self._debug_page(
+            invocation_id,
+            "edge-evaluations",
+            options,
+        )
+
+    async def debug_edge_evaluation(
+        self,
+        invocation_id: str,
+        edge_evaluation_id: str,
+        *,
+        through_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._debug_detail(
+            invocation_id,
+            f"edge-evaluations/{edge_evaluation_id}",
+            through_sequence=through_sequence,
+        )
+
+    async def debug_operator_calls(
+        self,
+        invocation_id: str,
+        **options: Any,
+    ) -> dict[str, Any]:
+        return await self._debug_page(
+            invocation_id,
+            "operator-calls",
+            options,
+        )
+
+    async def debug_operator_call(
+        self,
+        invocation_id: str,
+        operator_call_id: str,
+        *,
+        through_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._debug_detail(
+            invocation_id,
+            f"operator-calls/{operator_call_id}",
+            through_sequence=through_sequence,
+        )
+
+    async def debug_runtime_state(
+        self,
+        invocation_id: str,
+        *,
+        through_sequence: int | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if through_sequence is not None:
+            params["through_sequence"] = through_sequence
+        if path is not None:
+            params["path"] = path
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/runtime-state",
+            params=params,
+        )
+
     async def debug_runtime_events(
         self,
         invocation_id: str,
@@ -257,6 +347,42 @@ class AutoAgentServerClient:
         return await self._request(
             "GET",
             f"/api/v1/invocations/{invocation_id}/debug/user-events/{sequence}",
+        )
+
+    async def _debug_page(
+        self,
+        invocation_id: str,
+        resource: str,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        params = {
+            key: value
+            for key, value in options.items()
+            if value is not None
+        }
+        params.setdefault("limit", 20)
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/{resource}",
+            params=params,
+        )
+
+    async def _debug_detail(
+        self,
+        invocation_id: str,
+        resource: str,
+        *,
+        through_sequence: int | None,
+    ) -> dict[str, Any]:
+        params = (
+            {}
+            if through_sequence is None
+            else {"through_sequence": through_sequence}
+        )
+        return await self._request(
+            "GET",
+            f"/api/v1/invocations/{invocation_id}/debug/{resource}",
+            params=params,
         )
 
     async def wait_for_invocation(

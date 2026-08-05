@@ -8,6 +8,7 @@ import threading
 from time import perf_counter
 import tempfile
 import unittest
+import json
 
 from sqlalchemy import text
 
@@ -19,6 +20,7 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core.runtime.backends.database import _PersistenceItem
+from autoagent.debug import DebugQueryService
 from tests.helpers import started_app
 
 
@@ -27,6 +29,9 @@ MEMORY_CHAIN_MAX_SECONDS = float(
 )
 SQLITE_CHAIN_MAX_SECONDS = float(
     os.getenv("AUTOAGENT_PERF_SQLITE_CHAIN_MAX_SECONDS", "10")
+)
+DEBUG_QUERY_MAX_SECONDS = float(
+    os.getenv("AUTOAGENT_PERF_DEBUG_QUERY_MAX_SECONDS", "5")
 )
 
 
@@ -120,6 +125,64 @@ class RuntimePerformanceRegressionTests(unittest.TestCase):
 
 
 class DatabasePerformanceRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_large_journal_report_and_first_page_stay_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "debug-runtime.db"
+            writer = RuntimeStore(
+                backend=DatabaseBackend.from_path(
+                    path,
+                    batch_max_delay_ms=0,
+                )
+            )
+            app = started_app(runtime_store=writer)
+            workflow = _build_chain("debug_large_journal", node_count=80)
+            workflow.nodes[0].input_mapping = lambda ctx: {}
+            try:
+                await app.astart()
+                invocation = await app.ainvoke(
+                    workflow,
+                    input={"large": "x" * 100_000},
+                    event_mode="standard",
+                )
+                invocation_id = invocation.id
+            finally:
+                await app.aclose()
+
+            reader = RuntimeStore(
+                backend=DatabaseBackend.from_path(path, read_only=True)
+            )
+            try:
+                await reader.ainitialize()
+                service = DebugQueryService(reader, source="database")
+                started = perf_counter()
+                report = await service.report(invocation_id)
+                page = await service.node_executions(
+                    invocation_id,
+                    through_sequence=report.observed_sequence,
+                    limit=20,
+                )
+                elapsed = perf_counter() - started
+            finally:
+                await reader.aclose()
+
+        report_bytes = len(
+            json.dumps(report.model_dump(mode="json")).encode("utf-8")
+        )
+        page_bytes = len(
+            json.dumps(page.model_dump(mode="json")).encode("utf-8")
+        )
+        self.assertEqual(80, report.node_execution_count)
+        self.assertEqual(20, len(page.items))
+        self.assertTrue(page.has_more)
+        self.assertNotIn("x" * 100, json.dumps(report.input.preview))
+        self.assertLess(report_bytes, 20_000)
+        self.assertLess(page_bytes, 50_000)
+        self.assertLess(
+            elapsed,
+            DEBUG_QUERY_MAX_SECONDS,
+            "Large-journal Debug query exceeded its smoke budget.",
+        )
+
     async def test_sqlite_runtime_returns_and_flushes_thirty_node_chain_within_budget(
         self,
     ) -> None:

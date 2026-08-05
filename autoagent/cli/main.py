@@ -31,7 +31,11 @@ from autoagent.cli.evaluation import (
     list_evaluations,
     run_evaluation,
 )
-from autoagent.cli.debugging import InvocationReportCliError, run_invocation_report
+from autoagent.cli.debugging import (
+    InvocationReportCliError,
+    run_invocation_query,
+    run_invocation_report,
+)
 from autoagent.cli.server_client import (
     AutoAgentServerClient,
     ServerClientError,
@@ -170,6 +174,45 @@ def build_parser() -> argparse.ArgumentParser:
     invocation_report.add_argument("--server-url")
     invocation_report.add_argument("--report-file")
 
+    invocation_query = invocation_commands.add_parser(
+        "query",
+        help="Progressively query bounded evidence for one Invocation.",
+    )
+    invocation_query.add_argument("invocation_id")
+    invocation_query.add_argument(
+        "kind",
+        choices=(
+            "nodes",
+            "node",
+            "edges",
+            "edge",
+            "operator-calls",
+            "operator-call",
+            "runtime-events",
+            "runtime-event",
+            "user-events",
+            "user-event",
+            "runtime-state",
+        ),
+    )
+    invocation_query.add_argument(
+        "subject_id",
+        nargs="?",
+        help="Required by singular node, edge, Operator Call, or Event queries.",
+    )
+    invocation_query.add_argument("--cursor")
+    invocation_query.add_argument("--through-sequence", type=int)
+    invocation_query.add_argument("--limit", type=int, default=20)
+    invocation_query.add_argument("--path")
+    invocation_query.add_argument("--include-stream-deltas", action="store_true")
+    invocation_query.add_argument(
+        "--source",
+        choices=("auto", "server", "database"),
+        default="auto",
+    )
+    invocation_query.add_argument("--server-url")
+    invocation_query.add_argument("--report-file")
+
     evaluation = commands.add_parser(
         "eval",
         help="List, validate, and run project-owned Workflow Evaluations.",
@@ -306,6 +349,10 @@ def _dispatch_project_command(
         if arguments.command == "report":
             return asyncio.run(
                 run_invocation_report(project, environment, arguments)
+            )
+        if arguments.command == "query":
+            return asyncio.run(
+                run_invocation_query(project, environment, arguments)
             )
         if _uses_server(arguments):
             return asyncio.run(

@@ -88,7 +88,7 @@ class AutoAgentServerClientTests(unittest.IsolatedAsyncioTestCase):
                     input={"value": "hello"},
                     session_key="remote-session",
                     entry_node_id=None,
-                    event_mode="standard",
+                    event_mode="full",
                 )
                 detail = await client.wait_for_invocation(
                     str(submitted["invocation_id"]),
@@ -107,6 +107,29 @@ class AutoAgentServerClientTests(unittest.IsolatedAsyncioTestCase):
                     debug_page["items"][0]["sequence"],
                     through_sequence=debug_page["through_sequence"],
                 )
+                nodes = await client.debug_node_executions(
+                    str(submitted["invocation_id"]),
+                    limit=20,
+                )
+                node = await client.debug_node_execution(
+                    str(submitted["invocation_id"]),
+                    nodes["items"][0]["node_execution_id"],
+                    through_sequence=nodes["through_sequence"],
+                )
+                calls = await client.debug_operator_calls(
+                    str(submitted["invocation_id"]),
+                    limit=20,
+                )
+                call = await client.debug_operator_call(
+                    str(submitted["invocation_id"]),
+                    calls["items"][0]["operator_call_id"],
+                    through_sequence=calls["through_sequence"],
+                )
+                runtime_state = await client.debug_runtime_state(
+                    str(submitted["invocation_id"]),
+                    through_sequence=report["observed_sequence"],
+                    path="/invocation/state",
+                )
         finally:
             await app.aclose()
 
@@ -120,6 +143,9 @@ class AutoAgentServerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, report["node_execution_count"])
         self.assertEqual(2, len(debug_page["items"]))
         self.assertIn("payload", debug_event)
+        self.assertEqual("completed", node["state"])
+        self.assertEqual("completed", call["state"])
+        self.assertEqual("completed", runtime_state["value"]["preview"])
 
     async def test_client_preserves_http_status_for_source_resolution(self) -> None:
         app = AutoAgentApp(settings=AutoAgentSettings())

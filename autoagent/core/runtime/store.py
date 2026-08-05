@@ -154,6 +154,7 @@ class DurableBackend(Protocol):
         after_sequence: int,
         before_sequence: int | None,
         limit: int,
+        event_names: tuple[str, ...] | None = None,
     ) -> tuple[RuntimeEvent, ...]: ...
 
     async def alist_user_events(
@@ -1074,6 +1075,7 @@ class RuntimeStore:
         after_sequence: int = 0,
         before_sequence: int | None = None,
         limit: int = 1000,
+        event_names: tuple[str, ...] | None = None,
     ) -> tuple[RuntimeEvent, ...]:
         """Read Events for observation without restoring user runtime types."""
 
@@ -1088,6 +1090,10 @@ class RuntimeStore:
                 and (
                     before_sequence is None
                     or event.sequence < before_sequence
+                )
+                and (
+                    event_names is None
+                    or event.event_name in event_names
                 )
             ]
         if known_in_memory:
@@ -1109,7 +1115,106 @@ class RuntimeStore:
             after_sequence=after_sequence,
             before_sequence=before_sequence,
             limit=limit,
+            event_names=event_names,
         )
+
+    async def aget_trace_runtime_event_by_subject(
+        self,
+        *,
+        invocation_id: UUID,
+        subject_type: str,
+        subject_id: str,
+        event_name: str | None = None,
+        through_sequence: int | None = None,
+    ) -> RuntimeEvent | None:
+        """Read one indexed tracing fact without rebuilding user types."""
+
+        with self._lock:
+            known_in_memory = invocation_id in self.runtime_events
+            values = tuple(self.runtime_events.get(invocation_id, ()))
+        if known_in_memory:
+            return next(
+                (
+                    event.model_copy(deep=True)
+                    for event in values
+                    if event.subject_type == subject_type
+                    and event.subject_id == subject_id
+                    and (event_name is None or event.event_name == event_name)
+                    and (
+                        through_sequence is None
+                        or event.sequence <= through_sequence
+                    )
+                ),
+                None,
+            )
+        if self.backend is None:
+            return None
+        loader = getattr(
+            self.backend,
+            "aget_trace_runtime_event_by_subject",
+            None,
+        )
+        if loader is not None:
+            return await loader(
+                invocation_id=invocation_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                event_name=event_name,
+                through_sequence=through_sequence,
+            )
+        cursor = 0
+        while True:
+            page = await self.alist_trace_runtime_events(
+                invocation_id=invocation_id,
+                after_sequence=cursor,
+                limit=500,
+                event_names=(event_name,) if event_name is not None else None,
+            )
+            if not page:
+                return None
+            for event in page:
+                if through_sequence is not None and event.sequence > through_sequence:
+                    return None
+                if event.subject_type == subject_type and event.subject_id == subject_id:
+                    return event
+            cursor = page[-1].sequence
+
+    async def aget_trace_runtime_event_by_id(
+        self,
+        *,
+        invocation_id: UUID,
+        event_id: UUID,
+        event_name: str | None = None,
+        through_sequence: int | None = None,
+    ) -> RuntimeEvent | None:
+        with self._lock:
+            known_in_memory = invocation_id in self.runtime_events
+            values = tuple(self.runtime_events.get(invocation_id, ()))
+        if known_in_memory:
+            return next(
+                (
+                    event.model_copy(deep=True)
+                    for event in values
+                    if event.id == event_id
+                    and (event_name is None or event.event_name == event_name)
+                    and (
+                        through_sequence is None
+                        or event.sequence <= through_sequence
+                    )
+                ),
+                None,
+            )
+        if self.backend is None:
+            return None
+        loader = getattr(self.backend, "aget_trace_runtime_event_by_id", None)
+        if loader is not None:
+            return await loader(
+                invocation_id=invocation_id,
+                event_id=event_id,
+                event_name=event_name,
+                through_sequence=through_sequence,
+            )
+        return None
 
     def record_user_event(
         self,

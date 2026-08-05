@@ -6,6 +6,7 @@ from pathlib import Path
 import asyncio
 from threading import Event as ThreadingEvent
 import sqlite3
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -248,6 +249,13 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
                     reader_store,
                     source="database",
                 ).report(invocation_id)
+                service = DebugQueryService(reader_store, source="database")
+                nodes = await service.node_executions(invocation_id)
+                node = await service.node_execution(
+                    invocation_id,
+                    UUID(nodes.items[0]["node_execution_id"]),
+                    through_sequence=nodes.through_sequence,
+                )
             finally:
                 await reader_store.aclose()
 
@@ -256,6 +264,69 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.node_execution_count, 1)
         self.assertEqual(report.operator_call_count, 1)
         self.assertEqual(report.observed_sequence, report.durable_sequence)
+        self.assertEqual("completed", node["state"])
+
+    async def test_database_progressive_queries_are_type_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "debug-details.db"
+            writer_store = RuntimeStore(backend=DatabaseBackend.from_path(path))
+            app = AutoAgentApp(runtime_store=writer_store)
+            workflow = Workflow(id="historical_debug_details")
+            workflow.add_node(lambda: {"value": 1}, node_id="start")
+            workflow.add_node(
+                lambda value: value + 1,
+                node_id="finish",
+                input_mapping=lambda ctx: {
+                    "value": ctx.incoming[0].value["value"]
+                },
+            )
+            workflow.add_edge("start", "finish")
+            try:
+                await app.astart()
+                invocation = await app.ainvoke(workflow, event_mode="full")
+                invocation_id = invocation.id
+            finally:
+                await app.aclose()
+
+            reader_store = RuntimeStore(
+                backend=DatabaseBackend.from_path(path, read_only=True)
+            )
+            try:
+                await reader_store.ainitialize()
+                service = DebugQueryService(reader_store, source="database")
+                nodes = await service.node_executions(invocation_id)
+                edges = await service.edge_evaluations(invocation_id)
+                calls = await service.operator_calls(invocation_id)
+                node = await service.node_execution(
+                    invocation_id,
+                    UUID(nodes.items[0]["node_execution_id"]),
+                    through_sequence=nodes.through_sequence,
+                )
+                edge = await service.edge_evaluation(
+                    invocation_id,
+                    edges.items[0]["edge_evaluation_id"],
+                    through_sequence=edges.through_sequence,
+                )
+                call = await service.operator_call(
+                    invocation_id,
+                    UUID(calls.items[0]["operator_call_id"]),
+                    through_sequence=calls.through_sequence,
+                )
+                state = await service.runtime_state(
+                    invocation_id,
+                    through_sequence=nodes.through_sequence,
+                    path="/invocation/state",
+                )
+            finally:
+                await reader_store.aclose()
+
+        self.assertEqual(2, len(nodes.items))
+        self.assertEqual(1, len(edges.items))
+        self.assertEqual(2, len(calls.items))
+        self.assertEqual("completed", node["state"])
+        self.assertTrue(edge["selected"])
+        self.assertEqual("completed", call["state"])
+        self.assertEqual("completed", state["value"]["preview"])
 
     async def test_running_report_waits_on_notification_then_returns_terminal(
         self,
@@ -338,6 +409,113 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("payload", detail)
         self.assertNotIn("operations", detail)
+
+    async def test_execution_pages_and_details_share_observed_boundary(
+        self,
+    ) -> None:
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        workflow = Workflow(id="debug_execution_pages")
+        workflow.add_node(lambda: {"value": 1}, node_id="start")
+        workflow.add_node(
+            lambda value: {"value": value + 1},
+            node_id="finish",
+            input_mapping=lambda ctx: {
+                "value": ctx.incoming[0].value["value"]
+            },
+        )
+        workflow.add_edge("start", "finish")
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="full")
+            service = DebugQueryService(app.runtime_store, source="server")
+
+            first_nodes = await service.node_executions(
+                invocation.id,
+                limit=1,
+            )
+            second_nodes = await service.node_executions(
+                invocation.id,
+                cursor=first_nodes.next_cursor,
+                limit=1,
+            )
+            node_id = UUID(first_nodes.items[0]["node_execution_id"])
+            node = await service.node_execution(
+                invocation.id,
+                node_id,
+                through_sequence=first_nodes.through_sequence,
+            )
+            edges = await service.edge_evaluations(
+                invocation.id,
+                through_sequence=first_nodes.through_sequence,
+            )
+            edge = await service.edge_evaluation(
+                invocation.id,
+                edges.items[0]["edge_evaluation_id"],
+                through_sequence=edges.through_sequence,
+            )
+            calls = await service.operator_calls(
+                invocation.id,
+                through_sequence=first_nodes.through_sequence,
+            )
+            call = await service.operator_call(
+                invocation.id,
+                UUID(calls.items[0]["operator_call_id"]),
+                through_sequence=calls.through_sequence,
+            )
+        finally:
+            await app.aclose()
+
+        self.assertTrue(first_nodes.has_more)
+        self.assertEqual(1, len(second_nodes.items))
+        self.assertEqual(first_nodes.through_sequence, second_nodes.through_sequence)
+        self.assertLess(
+            first_nodes.items[0]["start_sequence"],
+            second_nodes.items[0]["start_sequence"],
+        )
+        self.assertEqual("completed", node["state"])
+        self.assertEqual("start", node["node_id"])
+        self.assertTrue(edge["selected"])
+        self.assertEqual("finish", edge["target_node_id"])
+        self.assertEqual("completed", call["state"])
+        self.assertIsNotNone(call["input"])
+        self.assertIsNotNone(call["output"])
+
+    async def test_full_runtime_state_is_path_addressable_and_bounded(
+        self,
+    ) -> None:
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        workflow = Workflow(id="debug_runtime_state")
+        workflow.add_node(lambda: "done", node_id="work")
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="full")
+            service = DebugQueryService(app.runtime_store, source="server")
+
+            summary = await service.runtime_state(invocation.id)
+            state = await service.runtime_state(
+                invocation.id,
+                through_sequence=summary["through_sequence"],
+                path="/invocation/state",
+            )
+        finally:
+            await app.aclose()
+
+        self.assertEqual("completed", summary["invocation_state"])
+        self.assertEqual(1, summary["node_execution_count"])
+        self.assertEqual("completed", state["value"]["preview"])
+
+    async def test_standard_runtime_state_is_explicitly_unavailable(self) -> None:
+        app = AutoAgentApp(settings=AutoAgentSettings())
+        workflow = Workflow(id="debug_standard_state")
+        workflow.add_node(lambda: "done", node_id="work")
+        try:
+            await app.astart()
+            invocation = await app.ainvoke(workflow, event_mode="standard")
+            service = DebugQueryService(app.runtime_store, source="server")
+            with self.assertRaisesRegex(ValueError, "only in full mode"):
+                await service.runtime_state(invocation.id)
+        finally:
+            await app.aclose()
 
     async def test_user_event_page_excludes_builtin_stream_deltas_by_default(
         self,

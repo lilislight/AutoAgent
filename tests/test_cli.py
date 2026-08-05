@@ -146,6 +146,25 @@ class AutoAgentCliTests(unittest.TestCase):
             arguments.invocation_id,
         )
 
+    def test_parser_exposes_one_progressive_query_surface(self) -> None:
+        arguments = build_parser().parse_args(
+            [
+                "invocation",
+                "query",
+                "00000000-0000-0000-0000-000000000001",
+                "nodes",
+                "--limit",
+                "5",
+                "--source",
+                "database",
+            ]
+        )
+
+        self.assertEqual("query", arguments.command)
+        self.assertEqual("nodes", arguments.kind)
+        self.assertEqual(5, arguments.limit)
+        self.assertEqual("database", arguments.source)
+
     def test_invocation_report_falls_back_to_explicit_database(self) -> None:
         with self.project(
             module_name="cli_report_workflow",
@@ -190,6 +209,16 @@ class AutoAgentCliTests(unittest.TestCase):
                 "--source",
                 "database",
             )
+            query_code, query_output = self.run_cli(
+                "--project",
+                str(root),
+                "invocation",
+                "query",
+                invocation_id,
+                "nodes",
+                "--source",
+                "database",
+            )
 
         self.assertEqual(0, run_code, run_output)
         self.assertEqual(0, report_code, report_output)
@@ -197,6 +226,11 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIn("STATE completed", report_output)
         self.assertIn("NODES 1", report_output)
         self.assertIn("REPORT_RESULT generated", report_output)
+        self.assertEqual(0, query_code, query_output)
+        self.assertIn("EVIDENCE nodes", query_output)
+        self.assertIn("ITEM_COUNT 1", query_output)
+        self.assertIn('"node_id":"echo"', query_output)
+        self.assertIn("QUERY_RESULT generated", query_output)
 
     def test_eval_list_is_lazy_and_check_validates_cases(self) -> None:
         evaluation_source = """

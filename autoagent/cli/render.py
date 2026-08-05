@@ -112,6 +112,54 @@ def render_invocation_report(report: InvocationReport) -> str:
     return "\n".join(lines)
 
 
+def render_invocation_query(
+    invocation_id: str,
+    kind: str,
+    value: dict[str, Any],
+) -> str:
+    """Render one bounded progressive result without a second output format."""
+
+    lines = [
+        f"INVOCATION {invocation_id}",
+        f"EVIDENCE {kind}",
+    ]
+    if "items" in value:
+        lines.extend(
+            [
+                f"THROUGH_SEQUENCE {value.get('through_sequence', 0)}",
+                f"ITEM_COUNT {len(value.get('items', ())) }",
+            ]
+        )
+        for item in value.get("items", ()):
+            lines.append(
+                "ITEM "
+                + json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        lines.extend(
+            [
+                f"HAS_MORE {str(bool(value.get('has_more'))).lower()}",
+                f"NEXT_CURSOR {value.get('next_cursor') or '<none>'}",
+            ]
+        )
+    else:
+        lines.append(
+            "DETAIL "
+            + json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    lines.append("QUERY_RESULT generated")
+    return "\n".join(lines)
+
+
 def _value_summary_text(value: Any) -> str:
     summary = (
         f"type={value.type} bytes={value.serialized_bytes} "

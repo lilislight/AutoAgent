@@ -1070,6 +1070,7 @@ class DatabaseBackend:
         after_sequence: int = 0,
         before_sequence: int | None = None,
         limit: int = 1000,
+        event_names: tuple[str, ...] | None = None,
     ) -> tuple[RuntimeEvent, ...]:
         """Load type-neutral Events for tracing without runtime registrations."""
 
@@ -1080,6 +1081,7 @@ class DatabaseBackend:
                     after_sequence=after_sequence,
                     before_sequence=before_sequence,
                     limit=limit,
+                    event_names=event_names,
                 )
             )
         await self.ainitialize()
@@ -1088,6 +1090,12 @@ class DatabaseBackend:
                 RuntimeEventRow.invocation_id == str(invocation_id),
                 RuntimeEventRow.sequence > after_sequence,
             )
+            if event_names is not None:
+                if not event_names:
+                    return ()
+                statement = statement.where(
+                    RuntimeEventRow.event_name.in_(event_names)
+                )
             if before_sequence is not None:
                 statement = statement.where(
                     RuntimeEventRow.sequence < before_sequence
@@ -1131,6 +1139,105 @@ class DatabaseBackend:
                 ),
             )
             for row in rows
+        )
+
+    async def aget_trace_runtime_event_by_subject(
+        self,
+        *,
+        invocation_id: UUID,
+        subject_type: str,
+        subject_id: str,
+        event_name: str | None = None,
+        through_sequence: int | None = None,
+    ) -> RuntimeEvent | None:
+        if not self._database_loop.is_current():
+            return await self._arun_database_operation(
+                self.aget_trace_runtime_event_by_subject(
+                    invocation_id=invocation_id,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    event_name=event_name,
+                    through_sequence=through_sequence,
+                )
+            )
+        statement = select(RuntimeEventRow).where(
+            RuntimeEventRow.invocation_id == str(invocation_id),
+            RuntimeEventRow.subject_type == subject_type,
+            RuntimeEventRow.subject_id == subject_id,
+        )
+        if event_name is not None:
+            statement = statement.where(RuntimeEventRow.event_name == event_name)
+        if through_sequence is not None:
+            statement = statement.where(
+                RuntimeEventRow.sequence <= through_sequence
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            row = await database.scalar(statement.order_by(RuntimeEventRow.sequence))
+        return None if row is None else self._trace_runtime_event_row(row)
+
+    async def aget_trace_runtime_event_by_id(
+        self,
+        *,
+        invocation_id: UUID,
+        event_id: UUID,
+        event_name: str | None = None,
+        through_sequence: int | None = None,
+    ) -> RuntimeEvent | None:
+        if not self._database_loop.is_current():
+            return await self._arun_database_operation(
+                self.aget_trace_runtime_event_by_id(
+                    invocation_id=invocation_id,
+                    event_id=event_id,
+                    event_name=event_name,
+                    through_sequence=through_sequence,
+                )
+            )
+        statement = select(RuntimeEventRow).where(
+            RuntimeEventRow.invocation_id == str(invocation_id),
+            RuntimeEventRow.id == str(event_id),
+        )
+        if event_name is not None:
+            statement = statement.where(RuntimeEventRow.event_name == event_name)
+        if through_sequence is not None:
+            statement = statement.where(
+                RuntimeEventRow.sequence <= through_sequence
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            row = await database.scalar(statement)
+        return None if row is None else self._trace_runtime_event_row(row)
+
+    def _trace_runtime_event_row(self, row: RuntimeEventRow) -> RuntimeEvent:
+        return RuntimeEvent(
+            id=UUID(row.id),
+            invocation_id=UUID(row.invocation_id),
+            sequence=row.sequence,
+            schema_version=row.schema_version,
+            event_type=row.event_type,
+            event_name=row.event_name,
+            subject_type=row.subject_type,
+            subject_id=row.subject_id,
+            occurred_at_ms=row.occurred_at_ms,
+            elapsed_ns=row.elapsed_ns,
+            status=row.status,
+            timing=self.serializer.json_view(row.timing_json),
+            payload=self.serializer.json_view(row.payload_json),
+            input=(
+                None
+                if row.input_json is None
+                else self.serializer.json_view(row.input_json)
+            ),
+            output=(
+                None
+                if row.output_json is None
+                else self.serializer.json_view(row.output_json)
+            ),
+            operations=(
+                None
+                if row.operations_json is None
+                else self.serializer.json_view(row.operations_json)
+            ),
         )
 
     async def alist_user_events(

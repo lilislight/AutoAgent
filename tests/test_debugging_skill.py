@@ -86,10 +86,13 @@ class DebuggingSkillTests(unittest.TestCase):
     def test_skill_is_report_first_and_keeps_rerun_boundary_explicit(self) -> None:
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
+        first_cli_call = skill.index("autoagent invocation report")
+        self.assertNotIn("autoagent ", skill[:first_cli_call])
         self.assertLess(
-            skill.index("autoagent invocation report"),
+            first_cli_call,
             skill.index("Form one evidence question"),
         )
+        self.assertIn("Do not weaken, delete, or rewrite", skill)
         self.assertIn("Rerun starts at the entry Node", skill)
         self.assertIn("it is not Replay or Fork", skill)
         self.assertIn("Do not mutate the original Invocation", skill)

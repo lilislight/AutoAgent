@@ -186,6 +186,14 @@ class AuthoringSkillTests(unittest.TestCase):
         self.assertIn("--report-file", cli)
         self.assertIn("does not persist an Eval Result", cli)
 
+    def test_ai_reference_documents_v1_auto_structured_output_mode(self) -> None:
+        reference = (REFERENCES_ROOT / "ai-workflows.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("`auto` resolves to `json_object`", reference)
+        self.assertIn("omits `response_format", reference)
+
     def test_skill_documents_authoring_boundaries_found_by_forward_review(
         self,
     ) -> None:

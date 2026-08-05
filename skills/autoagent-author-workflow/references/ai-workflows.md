@@ -211,8 +211,12 @@ AUTOAGENT_LLM_API_KEY
 
 Structured output modes are `auto`, `json_schema`, `json_object`, and `prompt`.
 Use `AUTOAGENT_LLM_PROVIDER=chat_completions`. The Base URL may point to OpenAI
-or another service implementing the OpenAI Chat Completions protocol. `auto`
-selects a structured-output strategy from the configured endpoint.
+or another service implementing the OpenAI Chat Completions protocol. In V1,
+`auto` resolves to `json_object` for broad endpoint compatibility. When the
+same request may call Tools, AutoAgent adds the JSON Schema instruction to the
+conversation but omits `response_format={"type":"json_object"}` so Tool calls
+remain valid. Choose `json_schema` explicitly only for an endpoint known to
+support that constraint.
 
 Put placeholders and explanations in `.env.example`; never commit a real API
 key. Compilation and `workflow check` do not require Provider secrets.

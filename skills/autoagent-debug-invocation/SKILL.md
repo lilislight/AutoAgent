@@ -12,15 +12,17 @@ not a generated root-cause conclusion.
 ## Follow this workflow
 
 1. Read repository guidance applying to the target project.
-2. Confirm the project has `auto-agent.toml` and the intended environment can
-   run `autoagent`. Do not create an App or start a Workflow merely to inspect
-   an existing Invocation.
-3. Obtain the exact Invocation ID. Run:
+2. Obtain the exact Invocation ID. Make the Report the first AutoAgent CLI
+   command in the investigation:
 
    ```bash
    autoagent invocation report <invocation-id>
    ```
 
+3. If that command is unavailable or cannot resolve authoritative evidence,
+   fix only the package/environment or evidence-source configuration needed to
+   retry it. Do not create an App, start a Workflow, or run Project/Workflow
+   checks before the initial Report.
 4. Read the state, Event mode, primary boundary, persistence status, counts,
    available evidence, and every warning. If no authoritative source is found,
    ask for the matching running Server or database configuration; do not guess
@@ -92,6 +94,8 @@ with the smallest evidence-driven step.
 - Rerun starts at the entry Node; it is not Replay or Fork and does not infer a
   root cause or business verdict.
 - Do not mutate the original Invocation or database while investigating it.
+- Do not weaken, delete, or rewrite an existing Eval oracle merely to make the
+  repaired Workflow pass.
 
 ## Return a compact handoff
 

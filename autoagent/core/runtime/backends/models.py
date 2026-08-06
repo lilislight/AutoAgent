@@ -136,6 +136,12 @@ class RuntimeEventRow(RuntimeDatabaseBase):
             "subject_type",
             "subject_id",
         ),
+        Index(
+            "ix_runtime_events_node_execution",
+            "invocation_id",
+            "node_execution_id",
+            "sequence",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -149,6 +155,9 @@ class RuntimeEventRow(RuntimeDatabaseBase):
     event_name: Mapped[str] = mapped_column(String(128), nullable=False)
     subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
     subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    node_execution_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     elapsed_ns: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str | None] = mapped_column(String(64), nullable=True)

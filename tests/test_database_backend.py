@@ -43,6 +43,7 @@ from autoagent.core.runtime import (
 from autoagent.core.compiler import workflow_revision_id
 from autoagent.core.runtime.time import utc_timestamp_ms
 from autoagent.core.runtime.persistence import UserEventPersistenceError
+from autoagent.core.server.trace import TraceProjectionReducer
 
 
 class ApprovalSeed(BaseModel):
@@ -157,6 +158,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         user_event_columns = await self.backend._database_loop.arun(
             table_columns("user_events")
         )
+        runtime_event_columns = await self.backend._database_loop.arun(
+            table_columns("runtime_events")
+        )
         artifact_columns = await self.backend._database_loop.arun(
             table_columns("artifacts")
         )
@@ -176,6 +180,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("namespace", session_columns)
         self.assertNotIn("namespace", artifact_columns)
         self.assertIn("workflow_path_json", user_event_columns)
+        self.assertIn("node_execution_id", runtime_event_columns)
 
     async def test_close_abandons_flush_after_shutdown_deadline(self) -> None:
         self.backend.shutdown_timeout_ms = 10
@@ -990,13 +995,9 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("standard", state["invocation"]["event_mode"])
         self.assertTrue(state["node_executions"])
         self.assertIsNone(state["node_executions"][0]["input"])
-        self.assertTrue(
-            all(
-                "input" not in operator_call and "output" not in operator_call
-                for operator_call in state["node_executions"][0][
-                    "operator_executions"
-                ]
-            )
+        self.assertEqual(
+            1,
+            state["node_executions"][0]["operator_summary"]["attempt_count"],
         )
         await app.aclose()
 
@@ -1075,6 +1076,49 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
             },
             {row.invocation_id for row in recovery},
         )
+        await app.aclose()
+
+    async def test_database_pages_every_map_call_by_node_execution(
+        self,
+    ) -> None:
+        workflow = Workflow(id="persisted_actual_map_calls")
+        workflow.add_node(
+            dynamic_json_callable(lambda: list(range(60))),
+            node_id="source",
+        )
+        workflow.add_node(
+            dynamic_json_callable(lambda value: value * 2),
+            node_id="mapped",
+            policy=NodePolicy(
+                map=MapPolicy(
+                    item_selector=lambda ctx: [
+                        {"value": value} for value in ctx.input
+                    ],
+                    max_parallelism=10,
+                )
+            ),
+        )
+        workflow.add_edge("source", "mapped")
+        app = AutoAgentApp(runtime_store=self.store)
+        await app.astart()
+        invocation = await app.ainvoke(workflow, event_mode="full")
+        await self.store.aflush()
+
+        execution = invocation.latest_node_execution("mapped")
+        events = await self.backend.alist_trace_runtime_events(
+            invocation_id=invocation.id,
+            after_sequence=0,
+            limit=100,
+            event_names=("operator_call.completed",),
+            node_execution_id=execution.id,
+        )
+
+        self.assertEqual(60, len(events))
+        self.assertEqual(list(range(60)), sorted(
+            event.payload["unit_index"] for event in events
+        ))
+        self.assertTrue(all(event.input is not None for event in events))
+        self.assertTrue(all(event.output is not None for event in events))
         await app.aclose()
 
     async def test_minimal_wait_resumes_only_while_runtime_memory_survives(
@@ -2232,8 +2276,8 @@ class RuntimeEventTests(unittest.TestCase):
 
         self.assertEqual("running", mapped.node_executions[0].state)
         self.assertEqual({"value": "hello"}, mapped.node_executions[0].input)
-        self.assertEqual([], mapped.node_executions[0].operator_executions)
-        self.assertEqual(1, len(called.node_executions[0].operator_executions))
+        self.assertEqual(0, mapped.node_executions[0].operator_summary.attempt_count)
+        self.assertEqual(1, called.node_executions[0].operator_summary.attempt_count)
         self.assertTrue(all(event.operations is not None for event in events))
 
     def test_full_freezes_each_parallel_edge_decision_independently(self) -> None:
@@ -2324,7 +2368,7 @@ class RuntimeEventTests(unittest.TestCase):
         self.assertTrue(all(event.elapsed_ns is not None for event in timed))
         self.assertTrue(all(event.elapsed_ns >= 0 for event in timed))
 
-    def test_map_units_collapse_into_one_logical_operator_event(self) -> None:
+    def test_map_units_emit_actual_calls_without_growing_runtime_state(self) -> None:
         store = RuntimeStore()
         app = self._started_app(runtime_store=store)
         workflow = Workflow(id="bounded_map_history")
@@ -2360,29 +2404,45 @@ class RuntimeEventTests(unittest.TestCase):
             if event.event_name == "operator_call.completed"
             and event.payload.get("node_id") == "target"
         ]
-        self.assertEqual(1, len(operator_events))
-        self.assertEqual(1, len(target.operator_executions))
-        logical = target.operator_executions[0]
+        self.assertEqual(100, len(operator_events))
+        self.assertEqual(100, target.operator_summary.attempt_count)
+        logical = target.parallel_summary
+        assert logical is not None
         self.assertEqual("map", logical.kind)
-        self.assertEqual(100, logical.summary.call_count)
-        self.assertEqual(100, logical.summary.attempt_count)
-        self.assertFalse(hasattr(logical, "output"))
-        operations = operator_events[0].operations
-        assert operations is not None
-        self.assertTrue(
-            any(
-                operation.op == "add"
-                and operation.path[-2:] == ("operator_executions", 0)
-                for operation in operations
-            )
-        )
+        self.assertEqual(100, logical.call_count)
+        self.assertEqual(100, logical.attempt_count)
+        operations = [
+            operation
+            for event in operator_events
+            for operation in (event.operations or ())
+        ]
         self.assertFalse(
-            any(
-                operation.op == "replace"
-                and operation.path[-1:] == ("operator_executions",)
-                for operation in operations
-            )
+            any("operator_calls" in operation.path for operation in operations)
         )
+        self.assertTrue(all(event.input is not None for event in operator_events))
+        self.assertTrue(all(event.output is not None for event in operator_events))
+        selection = next(
+            event
+            for event in events
+            if event.event_name == "item_selection.completed"
+            and event.payload.get("node_id") == "target"
+        )
+        self.assertIsNone(selection.input)
+        self.assertIsNone(selection.output)
+        aggregation = next(
+            event
+            for event in events
+            if event.event_name == "aggregation.completed"
+            and event.payload.get("node_id") == "target"
+        )
+        self.assertIsNone(aggregation.input)
+        self.assertEqual(list(range(0, 200, 2)), aggregation.output)
+        projection = TraceProjectionReducer.initial(invocation.id)
+        for event in events:
+            projection = TraceProjectionReducer.apply(projection, event)
+        projected = projection["node_executions"][str(target.id)]
+        self.assertEqual(100, projected["operator_call_count"])
+        self.assertEqual(50, len(projected["operator_calls"]))
 
 
 class RecoveryExecutionModeTests(unittest.IsolatedAsyncioTestCase):

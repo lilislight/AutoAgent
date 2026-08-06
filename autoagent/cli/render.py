@@ -80,6 +80,7 @@ def render_invocation_report(report: InvocationReport) -> str:
             f"  NODES {report.node_execution_count}",
             f"  EDGES {report.edge_evaluation_count}",
             f"  OPERATOR_CALLS {report.operator_call_count}",
+            "  OPERATOR_CALL_SEMANTICS ACTUAL_ATTEMPTS",
             f"  RETRIES {report.retry_count}",
             f"  FALLBACKS {report.fallback_count}",
             f"  TIMEOUTS {report.timeout_count}",

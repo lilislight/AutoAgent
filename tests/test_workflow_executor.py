@@ -23,7 +23,12 @@ from autoagent.core.workflow import (
     TimeoutPolicy,
     Workflow,
 )
-from tests.helpers import dynamic_json_callable, isolated_app, started_app
+from tests.helpers import (
+    dynamic_json_callable,
+    isolated_app,
+    operator_call_events,
+    started_app,
+)
 
 
 def start_message(message: str) -> dict[str, str]:
@@ -184,8 +189,8 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(0, invocation.event_sequence)
         execution = invocation.latest_node_execution("node")
         self.assertEqual("completed", execution.state)
-        self.assertEqual(1, len(execution.operator_executions))
-        self.assertEqual("completed", execution.operator_executions[0].state)
+        self.assertEqual(1, execution.operator_summary.attempt_count)
+        self.assertEqual(1, execution.operator_summary.success_count)
 
     def test_expanded_child_workflow_executes_with_local_hook_ids(self) -> None:
         observed_condition: list[tuple[str, str, str, int]] = []
@@ -333,7 +338,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(len(waiting.node_executions), 1)
         execution = waiting.node_executions[0]
         self.assertEqual(execution.state, "waiting")
-        self.assertEqual(execution.operator_executions, [])
+        self.assertEqual(0, execution.operator_summary.attempt_count)
         wait = waiting.scheduler.waiting_executions["approval:request-1"]
         self.assertEqual(wait.node_execution_id, execution.id)
         self.assertEqual(wait.wait_type, "human")
@@ -530,7 +535,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_invalid_system_wait_input_fails_without_operator_executions(self) -> None:
+    def test_invalid_system_wait_input_fails_without_operator_calls(self) -> None:
         workflow = Workflow(id="invalid_wait_input")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
 
@@ -543,7 +548,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(invocation.state, "failed")
         execution = invocation.node_executions[0]
         self.assertEqual(execution.error.code, "SYSTEM_COMMAND_INPUT_INVALID")
-        self.assertEqual(execution.operator_executions, [])
+        self.assertEqual(0, execution.operator_summary.attempt_count)
 
     def test_duplicate_active_wait_key_fails_invocation(self) -> None:
         def start() -> dict[str, str]:
@@ -797,7 +802,8 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
         workflow.add_edge("start", "target", condition=condition)
 
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow)
 
         self.assertEqual(invocation.result, {"output": 4})
         self.assertEqual(invocation.context.data, {"bound": 4})
@@ -1190,7 +1196,8 @@ class WorkflowExecutorTests(unittest.TestCase):
             condition=lambda ctx: ctx.source_output >= 3,
         )
 
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow)
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": 3})
@@ -1683,11 +1690,11 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow)
 
         self.assertEqual(invocation.state, "completed")
-        execution = invocation.node_executions[0]
-        self.assertEqual([call.reason for call in execution.operator_executions], [
+        self.assertEqual([call.payload["reason"] for call in operator_call_events(app, invocation)], [
             "normal",
             "retry",
             "retry",
@@ -1729,7 +1736,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(order, ["primary", "primary", "fallback"])
         self.assertEqual(
-            [call.reason for call in invocation.node_executions[0].operator_executions],
+            [call.payload["reason"] for call in operator_call_events(app, invocation)],
             ["normal", "retry", "fallback"],
         )
 
@@ -1785,13 +1792,14 @@ class WorkflowExecutorTests(unittest.TestCase):
             policy=NodePolicy(timeout=TimeoutPolicy(timeout_ms=1)),
         )
 
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow)
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
-        self.assertEqual(invocation.node_executions[0].operator_executions[0].state, "failed")
+        self.assertEqual(operator_call_events(app, invocation)[0].payload["state"], "failed")
 
-    def test_replication_aggregates_indexed_operator_executions(self) -> None:
+    def test_replication_aggregates_indexed_operator_calls(self) -> None:
         workflow = Workflow(id="replication_execution")
         workflow.add_node(
             dynamic_json_callable(lambda: 2),
@@ -1807,16 +1815,20 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow)
 
         self.assertEqual(invocation.result, {"output": 6})
-        calls = invocation.node_executions[0].operator_executions
-        self.assertEqual(1, len(calls))
-        self.assertEqual("replication", calls[0].kind)
-        self.assertEqual(3, calls[0].summary.call_count)
-        self.assertEqual(3, calls[0].summary.success_count)
+        calls = operator_call_events(app, invocation, node_id="sample")
+        self.assertEqual(3, len(calls))
+        self.assertEqual([0, 1, 2], [call.payload["unit_index"] for call in calls])
+        summary = invocation.node_executions[0].parallel_summary
+        assert summary is not None
+        self.assertEqual("replication", summary.kind)
+        self.assertEqual(3, summary.call_count)
+        self.assertEqual(3, summary.success_count)
 
-    def test_map_policy_aggregates_indexed_operator_executions(self) -> None:
+    def test_map_policy_aggregates_indexed_operator_calls(self) -> None:
         workflow = Workflow(id="map_execution")
         workflow.add_node(dynamic_json_callable(lambda: [1, 2, 3]), node_id="source")
         workflow.add_node(
@@ -1839,14 +1851,18 @@ class WorkflowExecutorTests(unittest.TestCase):
             "square",
         )
 
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow)
 
         self.assertEqual(invocation.result, {"output": [1, 4, 9]})
-        calls = invocation.latest_node_execution("square").operator_executions
-        self.assertEqual(1, len(calls))
-        self.assertEqual("map", calls[0].kind)
-        self.assertEqual(3, calls[0].summary.call_count)
-        self.assertEqual(3, calls[0].summary.success_count)
+        calls = operator_call_events(app, invocation, node_id="square")
+        self.assertEqual(3, len(calls))
+        self.assertEqual([0, 1, 2], [call.payload["unit_index"] for call in calls])
+        summary = invocation.latest_node_execution("square").parallel_summary
+        assert summary is not None
+        self.assertEqual("map", summary.kind)
+        self.assertEqual(3, summary.call_count)
+        self.assertEqual(3, summary.success_count)
 
     def test_default_map_iterates_single_incoming_value(self) -> None:
         workflow = Workflow(id="default_node_map")
@@ -2055,7 +2071,7 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(fallback_calls, 0)
         execution = invocation.latest_node_execution("target")
         self.assertEqual(execution.state, "failed")
-        self.assertEqual(execution.operator_executions, [])
+        self.assertEqual(0, execution.operator_summary.attempt_count)
 
     def test_invalid_mapping_output_bypasses_retry_and_fallback(self) -> None:
         app = started_app()
@@ -2090,14 +2106,14 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(invocation.error.code, "INPUT_MAPPING_INVALID")
         self.assertEqual(primary_calls, 0)
         self.assertEqual(fallback_calls, 0)
-        self.assertEqual(execution.operator_executions, [])
+        self.assertEqual(0, execution.operator_summary.attempt_count)
 
     def test_non_mapping_input_mapping_result_is_rejected_before_operator(self) -> None:
-        operator_executions = 0
+        operator_calls = 0
 
         def target(value: int) -> int:
-            nonlocal operator_executions
-            operator_executions += 1
+            nonlocal operator_calls
+            operator_calls += 1
             return value
 
         workflow = Workflow(id="non_mapping_input")
@@ -2114,18 +2130,18 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "INPUT_MAPPING_INVALID")
-        self.assertEqual(operator_executions, 0)
+        self.assertEqual(operator_calls, 0)
         self.assertEqual(
-            invocation.latest_node_execution("target").operator_executions,
-            [],
+            invocation.latest_node_execution("target").operator_summary.attempt_count,
+            0,
         )
 
     def test_map_selector_requires_an_iterable_of_mappings(self) -> None:
-        operator_executions = 0
+        operator_calls = 0
 
         def target(value: int) -> int:
-            nonlocal operator_executions
-            operator_executions += 1
+            nonlocal operator_calls
+            operator_calls += 1
             return value
 
         workflow = Workflow(id="invalid_map_collection")
@@ -2144,14 +2160,14 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "MAP_ITEM_SELECTION_FAILED")
-        self.assertEqual(operator_executions, 0)
+        self.assertEqual(operator_calls, 0)
 
     def test_map_selector_rejects_non_mapping_item_before_operator(self) -> None:
-        operator_executions = 0
+        operator_calls = 0
 
         def target(value: int) -> int:
-            nonlocal operator_executions
-            operator_executions += 1
+            nonlocal operator_calls
+            operator_calls += 1
             return value
 
         workflow = Workflow(id="invalid_map_item")
@@ -2173,18 +2189,18 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "MAP_ITEM_INPUT_INVALID")
-        self.assertEqual(operator_executions, 0)
+        self.assertEqual(operator_calls, 0)
         self.assertEqual(
-            invocation.latest_node_execution("target").operator_executions,
-            [],
+            invocation.latest_node_execution("target").operator_summary.attempt_count,
+            0,
         )
 
     def test_map_item_arguments_are_validated_before_operator(self) -> None:
-        operator_executions = 0
+        operator_calls = 0
 
         def target(value: int) -> int:
-            nonlocal operator_executions
-            operator_executions += 1
+            nonlocal operator_calls
+            operator_calls += 1
             return value
 
         workflow = Workflow(id="invalid_map_arguments")
@@ -2209,7 +2225,7 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "MAP_ITEM_INPUT_INVALID")
-        self.assertEqual(operator_executions, 0)
+        self.assertEqual(operator_calls, 0)
 
     def test_async_map_hooks_and_operator_are_supported(self) -> None:
         seen_contexts: list[tuple[str, str, bool]] = []
@@ -2301,13 +2317,23 @@ class WorkflowExecutorTests(unittest.TestCase):
         )
 
         started = time.perf_counter()
-        invocation = started_app().invoke(workflow)
+        app = started_app()
+        invocation = app.invoke(workflow, event_mode="full")
         elapsed = time.perf_counter() - started
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "OPERATOR_CALL_FAILED")
         self.assertFalse(aggregated)
         self.assertLess(elapsed, 0.5)
+        calls = operator_call_events(app, invocation, node_id="process")
+        self.assertEqual(3, len(calls))
+        self.assertEqual(
+            ["failed", "interrupted", "interrupted"],
+            sorted(
+                (str(call.payload["state"]) for call in calls),
+                key=lambda state: {"failed": 0, "interrupted": 1}[state],
+            ),
+        )
 
     def test_async_replication_aggregator_is_supported(self) -> None:
         async def sample(value: int) -> int:
@@ -2374,8 +2400,8 @@ class WorkflowExecutorTests(unittest.TestCase):
         self.assertEqual(invocation.error.code, "OUTPUT_BINDING_FAILED")
         self.assertEqual(primary_calls, 1)
         self.assertEqual(fallback_calls, 0)
-        calls = invocation.latest_node_execution("node").operator_executions
-        self.assertEqual([call.operator_id for call in calls], ["binding_primary"])
+        calls = operator_call_events(app, invocation, node_id="node")
+        self.assertEqual([call.payload["operator_id"] for call in calls], ["binding_primary"])
         self.assertEqual(invocation.context.data, {})
         self.assertEqual(session.context.data, {})
 

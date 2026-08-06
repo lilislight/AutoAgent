@@ -8,12 +8,12 @@ from autoagent import AutoAgentApp, RuntimeRetentionPolicy, Workflow
 from autoagent.core.runtime import (
     apply_state_operations,
     capture_execution_state,
-    DirectOperatorExecution,
+    OperatorCall,
     ExecutionSnapshot,
     RuntimeStore,
     Invocation,
+    OperatorCallSummary,
     ParallelExecutionSummary,
-    ParallelOperatorExecution,
     reduce_execution_state,
     RuntimeEvent,
     RuntimeConcurrencyController,
@@ -306,13 +306,14 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         execution = invocation.create_node_execution("entry")
         execution.input = {"prompt": "input"}
         execution.output = {"answer": "output"}
-        operator_call = DirectOperatorExecution(
+        operator_call = OperatorCall(
             operator_id="primary",
             sequence=1,
             input={"operator": "input"},
         )
         operator_call.mark_completed({"operator": "output"})
-        execution.operator_executions.append(operator_call)
+        execution.operator_summary.record(operator_call)
+        execution.last_operator_call_id = operator_call.id
 
         expected = compact_recovery_state(
             capture_execution_state(session, invocation)
@@ -325,11 +326,12 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
             {"answer": "output"},
             captured["node_executions"][0]["output"],
         )
-        operator_record = captured["node_executions"][0][
-            "operator_executions"
-        ][0]
-        self.assertNotIn("input", operator_record)
-        self.assertNotIn("output", operator_record)
+        self.assertEqual(
+            1,
+            captured["node_executions"][0]["operator_summary"][
+                "attempt_count"
+            ],
+        )
         execution.output["answer"] = "changed"
         session.context.data["session_payload"]["value"] = 3
         self.assertEqual(
@@ -539,7 +541,7 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, paged)
         await app.aclose()
 
-    async def test_direct_and_parallel_execution_records_round_trip(self) -> None:
+    async def test_operator_and_parallel_summaries_round_trip(self) -> None:
         store = RuntimeStore()
         session = await store.aget_or_create_session(
             workflow_id="flow",
@@ -554,40 +556,34 @@ class RuntimeStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         await store.aadmit_invocation(session.id, invocation)
         execution = invocation.create_node_execution("entry")
-        direct = DirectOperatorExecution(operator_id="primary", sequence=1)
-        direct.streaming = True
-        direct.stream_chunk_count = 4
-        direct.resource_usage.stream_consumption_ns = 20
-        direct.resource_usage.stream_reduction_ns = 5
-        direct.mark_completed({"value": 1})
-        parallel = ParallelOperatorExecution(
-            kind="map",
-            operator_ids=("primary",),
-            summary=ParallelExecutionSummary(
-                call_count=100,
-                attempt_count=101,
-                success_count=100,
-                retry_count=1,
-                streaming_call_count=100,
-                stream_chunk_count=400,
-                stream_consumption_ns=2_000,
-                stream_reduction_ns=500,
-            ),
-            state="completed",
+        execution.operator_summary = OperatorCallSummary(
+            attempt_count=101,
+            success_count=100,
+            failure_count=1,
+            retry_count=1,
+            streaming_call_count=100,
+            stream_chunk_count=400,
         )
-        execution.operator_executions.extend((direct, parallel))
+        execution.parallel_summary = ParallelExecutionSummary(
+            kind="map",
+            call_count=100,
+            attempt_count=101,
+            success_count=100,
+            retry_count=1,
+            streaming_call_count=100,
+            stream_chunk_count=400,
+            stream_consumption_ns=2_000,
+            stream_reduction_ns=500,
+        )
 
         record = execution.to_record(invocation.id)
         restored = type(execution).from_record(record)
 
-        self.assertEqual("primary", restored.operator_executions[0].operator_id)
-        self.assertTrue(restored.operator_executions[0].streaming)
-        self.assertEqual(4, restored.operator_executions[0].stream_chunk_count)
-        self.assertEqual(
-            20,
-            restored.operator_executions[0].resource_usage.stream_consumption_ns,
-        )
-        summary = restored.operator_executions[1].summary
+        self.assertEqual(101, restored.operator_summary.attempt_count)
+        self.assertEqual(100, restored.operator_summary.streaming_call_count)
+        self.assertEqual(400, restored.operator_summary.stream_chunk_count)
+        summary = restored.parallel_summary
+        assert summary is not None
         self.assertEqual(100, summary.call_count)
         self.assertEqual(101, summary.attempt_count)
         self.assertEqual(100, summary.streaming_call_count)

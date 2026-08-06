@@ -181,8 +181,8 @@ export interface OperatorCallView {
   call_no: number;
   kind: string;
   reason?: string | null;
-  item_index: number | null;
-  replica_index: number | null;
+  unit_index: number | null;
+  unit_attempt_no: number;
   state: RuntimeState;
   input: unknown;
   output: unknown;
@@ -237,7 +237,7 @@ export interface InvocationDetail extends InvocationSummary {
 
 export interface TimelineSpan {
   id: string;
-  kind: "node_execution";
+  kind: "node_execution" | "operator_call";
   parent_id: string | null;
   node_id: string;
   label: string;
@@ -246,6 +246,7 @@ export interface TimelineSpan {
   started_at_ms: number;
   ended_at_ms: number | null;
   duration_ms: number | null;
+  omitted_child_count?: number;
 }
 
 export interface TimelineView {
@@ -316,6 +317,9 @@ export interface ProjectedNodeExecution {
   retry_count?: number;
   fallback_count?: number;
   timeout_count?: number;
+  streaming_call_count?: number;
+  stream_chunk_count?: number;
+  parallel_summary?: Record<string, unknown> | null;
   operator_calls?: ProjectedOperatorCall[];
 }
 
@@ -325,10 +329,13 @@ export interface ProjectedOperatorCall {
   node_execution_id: string;
   operator_id: string;
   kind: string;
+  call_no: number;
+  unit_index: number | null;
+  unit_attempt_no: number;
   reason: string | null;
   state: RuntimeState;
   error: Record<string, unknown> | null;
-  summary: Record<string, unknown> | null;
+  started_at_ms: number | null;
   occurred_at_ms: number;
   elapsed_ns: number | null;
   timing: Record<string, number>;
@@ -382,7 +389,6 @@ export interface RuntimeProjection {
   node_executions: Record<string, ProjectedNodeExecution>;
   nodes: Record<string, ProjectedNode>;
   edges: Record<string, ProjectedEdge>;
-  operator_states: Record<string, RuntimeState>;
   active_waits?: Record<string, {
     wait_key: string;
     created_at_ms: number;

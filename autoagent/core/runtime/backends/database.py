@@ -620,6 +620,7 @@ class DatabaseBackend:
                 "event_name": event.event_name,
                 "subject_type": event.subject_type,
                 "subject_id": event.subject_id,
+                "node_execution_id": event.payload.get("node_execution_id"),
                 "occurred_at_ms": event.occurred_at_ms,
                 "elapsed_ns": event.elapsed_ns,
                 "status": event.status,
@@ -1067,6 +1068,7 @@ class DatabaseBackend:
         before_sequence: int | None = None,
         limit: int = 1000,
         event_names: tuple[str, ...] | None = None,
+        node_execution_id: UUID | None = None,
     ) -> tuple[RuntimeEvent, ...]:
         """Load type-neutral Events for tracing without runtime registrations."""
 
@@ -1078,6 +1080,7 @@ class DatabaseBackend:
                     before_sequence=before_sequence,
                     limit=limit,
                     event_names=event_names,
+                    node_execution_id=node_execution_id,
                 )
             )
         await self.ainitialize()
@@ -1091,6 +1094,11 @@ class DatabaseBackend:
                     return ()
                 statement = statement.where(
                     RuntimeEventRow.event_name.in_(event_names)
+                )
+            if node_execution_id is not None:
+                statement = statement.where(
+                    RuntimeEventRow.node_execution_id
+                    == str(node_execution_id)
                 )
             if before_sequence is not None:
                 statement = statement.where(
@@ -2315,6 +2323,7 @@ class DatabaseBackend:
                 or row.event_name != item.record["event_name"]
                 or row.subject_type != item.record["subject_type"]
                 or row.subject_id != item.record["subject_id"]
+                or row.node_execution_id != item.record["node_execution_id"]
                 or row.occurred_at_ms != item.record["occurred_at_ms"]
                 or row.elapsed_ns != item.record["elapsed_ns"]
                 or row.status != item.record["status"]
@@ -2340,6 +2349,7 @@ class DatabaseBackend:
                     event_name=str(item.record["event_name"]),
                     subject_type=str(item.record["subject_type"]),
                     subject_id=str(item.record["subject_id"]),
+                    node_execution_id=item.record["node_execution_id"],
                     occurred_at_ms=int(item.record["occurred_at_ms"]),
                     elapsed_ns=item.record["elapsed_ns"],
                     status=item.record["status"],

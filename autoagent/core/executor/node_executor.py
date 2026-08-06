@@ -31,14 +31,14 @@ from autoagent.core.operators import (
 )
 from autoagent.core.operators.streaming import is_raw_stream_result
 from autoagent.core.runtime import (
-    DirectOperatorExecution,
+    OperatorCall,
     IncomingOutput,
     InvocationExecutionMailbox,
     MapAggregationContext,
     MapItemSelectionContext,
     NodeExecution,
+    OperatorCallSummary,
     ParallelExecutionSummary,
-    ParallelOperatorExecution,
     ResourceUsage,
     ReplicationAggregationContext,
     RuntimeErrorInfo,
@@ -514,10 +514,7 @@ async def _execute_job_with_slot(job: ResolvedNodeExecutionJob) -> NodeExecution
         return result
     budget = _CallBudget(job.max_operator_attempts)
     call_sequence = _CallSequence(
-        sum(
-            execution.attempt_count
-            for execution in job.node_execution.operator_executions
-        )
+        job.node_execution.operator_summary.attempt_count
     )
     operator_started_ns = perf_counter_ns()
     unit_results, peak_parallelism = await _execute_units(
@@ -545,7 +542,7 @@ class _UnitResult:
     index: int
     output: Any | None
     error: RuntimeErrorInfo | None
-    attempts: list[DirectOperatorExecution]
+    attempts: list[OperatorCall]
     retry_backoff_ns: int = 0
 
 
@@ -665,9 +662,7 @@ def _publish_phase(
 
 def _publish_operator_call(
     job: ResolvedNodeExecutionJob,
-    operator_execution: DirectOperatorExecution | ParallelOperatorExecution,
-    *,
-    logical_elapsed_ns: int,
+    operator_call: OperatorCall,
 ) -> None:
     if job.event_mode == "minimal" or job.publish_progress is None:
         return
@@ -675,8 +670,7 @@ def _publish_operator_call(
         NodeExecutionProgress(
             node_execution_id=job.node_execution.id,
             kind="operator_call",
-            operator_execution=deepcopy(operator_execution),
-            logical_elapsed_ns=logical_elapsed_ns,
+            operator_call=deepcopy(operator_call),
         )
     )
 
@@ -783,7 +777,6 @@ async def _prepare_units(
                 name="item_selection.completed",
                 status="completed",
                 elapsed_ns=elapsed_ns,
-                output=deepcopy(selected),
                 timing={"execution_ns": elapsed_ns},
             )
         _publish_phase(job, phase)
@@ -826,8 +819,8 @@ def _map_units(
 
     The selector owns both fan-out and per-item input construction. Its outer
     result must therefore be an iterable, while every item must be a Mapping
-    representing one complete OperatorExecution input. This validation runs before
-    any OperatorExecution is created, so selector/data-shaping errors never enter
+    representing one complete Operator Call input. This validation runs before
+    any Operator Call is created, so selector/data-shaping errors never enter
     retry or capability fallback.
     """
 
@@ -1044,7 +1037,7 @@ async def _execute_unit(
     unit_kind: str,
     unit_index: int,
 ) -> _UnitResult:
-    attempts: list[DirectOperatorExecution] = []
+    attempts: list[OperatorCall] = []
     retry_backoff_ns = 0
     retry = job.node_ir.policy.retry if job.node_ir.policy is not None else None
     max_attempts = retry.max_attempts if retry is not None else 1
@@ -1063,10 +1056,19 @@ async def _execute_unit(
                 attempt_index,
                 recovery=job.recovery,
             )
-            attempt = DirectOperatorExecution(
+            attempt = OperatorCall(
                 operator_id=operator.id,
                 sequence=call_sequence.next(),
                 reason=reason,
+                kind=(
+                    "map"
+                    if unit_kind == "map_item"
+                    else "replication"
+                    if unit_kind == "replica"
+                    else "direct"
+                ),
+                unit_index=(unit_index if unit_kind != "normal" else None),
+                unit_attempt_no=attempt_index + 1,
                 input=deepcopy(unit_input),
             )
 
@@ -1100,16 +1102,41 @@ async def _execute_unit(
                 )
                 attempt.mark_completed(output)
                 attempts.append(attempt)
-                if unit_kind == "normal":
-                    _publish_operator_call(
-                        job,
-                        attempt,
-                        logical_elapsed_ns=attempt.resource_usage.duration_ns,
-                    )
+                _publish_operator_call(
+                    job,
+                    attempt,
+                )
                 return _UnitResult(
                     unit_index,
                     output,
                     None,
+                    attempts,
+                    retry_backoff_ns,
+                )
+            except asyncio.CancelledError:
+                duration_ns = max(0, perf_counter_ns() - started_ns)
+                attempt.resource_usage = ResourceUsage(
+                    duration_ns=duration_ns,
+                    execution_ns=duration_ns,
+                )
+                attempt.mark_interrupted(
+                    RuntimeErrorInfo(
+                        code="OPERATOR_CALL_CANCELLED",
+                        message="Operator Call was cancelled before completion.",
+                        detail={
+                            "node_id": job.node_ir.id,
+                            "operator_id": operator.id,
+                        },
+                    )
+                )
+                attempts.append(attempt)
+                _publish_operator_call(job, attempt)
+                if unit_kind == "normal":
+                    raise
+                return _UnitResult(
+                    unit_index,
+                    None,
+                    attempt.error,
                     attempts,
                     retry_backoff_ns,
                 )
@@ -1147,12 +1174,10 @@ async def _execute_unit(
                 )
                 attempt.mark_failed(error)
                 attempts.append(attempt)
-                if unit_kind == "normal":
-                    _publish_operator_call(
-                        job,
-                        attempt,
-                        logical_elapsed_ns=attempt.resource_usage.duration_ns,
-                    )
+                _publish_operator_call(
+                    job,
+                    attempt,
+                )
                 if attempt_index + 1 < max_attempts:
                     backoff_started_ns = perf_counter_ns()
                     await asyncio.sleep(
@@ -1615,13 +1640,9 @@ async def _aggregate_unit_results(
         stream_consumption_ns=stream_consumption_ns,
         stream_reduction_ns=stream_reduction_ns,
     )
-    duration_ns = sum(
-        attempt.resource_usage.duration_ns
-        for attempt in attempts
-    )
     is_parallel = unit_kind in {"map_item", "replica"}
-    parallel_execution = (
-        _parallel_execution(
+    parallel_summary = (
+        _parallel_summary(
             unit_kind=unit_kind,
             attempts=attempts,
             unit_results=unit_results,
@@ -1631,67 +1652,34 @@ async def _aggregate_unit_results(
         if is_parallel
         else None
     )
-    retained_executions = (
-        (parallel_execution,)
-        if parallel_execution is not None
-        else attempts
+    operator_summary = _operator_summary(attempts)
+    failed = next(
+        (
+            item
+            for item in unit_results
+            if item.error is not None
+            and item.error.code != "OPERATOR_CALL_CANCELLED"
+        ),
+        next((item for item in unit_results if item.error is not None), None),
     )
-    failed = next((item for item in unit_results if item.error is not None), None)
     if failed is not None:
-        if parallel_execution is not None:
-            parallel_execution.state = "failed"
-            parallel_execution.error = failed.error
-            parallel_execution.ended_at_ms = max(
-                (
-                    attempt.ended_at_ms or attempt.started_at_ms
-                    for attempt in attempts
-                ),
-                default=parallel_execution.started_at_ms,
-            )
-            _publish_operator_call(
-                job,
-                parallel_execution,
-                logical_elapsed_ns=operator_elapsed_ns,
-            )
         return NodeExecutionResult(
             node_execution_id=job.node_execution.id,
             state="failed",
             error=failed.error,
-            operator_executions=retained_executions,
-            operator_elapsed_ns=operator_elapsed_ns,
+            operator_summary=operator_summary,
+            parallel_summary=parallel_summary,
             phases=phases,
             resource_usage=resource_usage,
         )
 
-    if parallel_execution is not None:
-        # Map/replication calls are complete before the user-defined
-        # aggregation phase begins. Aggregation failure belongs to the phase
-        # and Node, not to the already completed logical Operator call.
-        parallel_execution.state = "completed"
-        _publish_operator_call(
-            job,
-            parallel_execution,
-            logical_elapsed_ns=operator_elapsed_ns,
-        )
-
-    outputs = [deepcopy(item.output) for item in unit_results]
+    outputs = [item.output for item in unit_results]
     map_policy = job.node_ir.policy.map if job.node_ir.policy is not None else None
     aggregation_phase: NodePhaseResult | None = None
     aggregation_started_ns = perf_counter_ns()
-    has_custom_aggregator = (
-        (
-            unit_kind == "map_item"
-            and map_policy is not None
-            and map_policy.output_aggregator is not None
-        )
-        or (
-            unit_kind == "replica"
-            and job.node_ir.policy is not None
-            and job.node_ir.policy.replication is not None
-            and job.node_ir.policy.replication.output_aggregator is not None
-        )
-    )
-    record_aggregator = has_custom_aggregator and job.event_mode == "full"
+    # Parallel Calls own their individual values. One aggregation Event owns
+    # the resulting logical Node output, including the default list result.
+    record_aggregator = is_parallel and job.event_mode == "full"
     try:
         if unit_kind == "map_item":
             output = (
@@ -1726,7 +1714,6 @@ async def _aggregate_unit_results(
                 name="aggregation.completed",
                 status="failed",
                 elapsed_ns=aggregation_elapsed_ns,
-                input=deepcopy(outputs),
                 timing={"execution_ns": aggregation_elapsed_ns},
             )
         error = RuntimeErrorInfo(
@@ -1743,8 +1730,8 @@ async def _aggregate_unit_results(
             node_execution_id=job.node_execution.id,
             state="failed",
             error=error,
-            operator_executions=retained_executions,
-            operator_elapsed_ns=operator_elapsed_ns,
+            operator_summary=operator_summary,
+            parallel_summary=parallel_summary,
             phases=phases,
             resource_usage=resource_usage,
         )
@@ -1758,7 +1745,6 @@ async def _aggregate_unit_results(
             name="aggregation.completed",
             status="completed",
             elapsed_ns=aggregation_elapsed_ns,
-            input=deepcopy(outputs),
             output=deepcopy(output),
             timing={"execution_ns": aggregation_elapsed_ns},
         )
@@ -1767,8 +1753,11 @@ async def _aggregate_unit_results(
         node_execution_id=job.node_execution.id,
         state="completed",
         output=output,
-        operator_executions=retained_executions,
-        operator_elapsed_ns=operator_elapsed_ns,
+        operator_summary=operator_summary,
+        parallel_summary=parallel_summary,
+        last_operator_call_id=(
+            attempts[-1].id if attempts and not is_parallel else None
+        ),
         phases=phases,
         resource_usage=resource_usage,
     )
@@ -1851,14 +1840,14 @@ def _attempt_reason(
     return "normal"
 
 
-def _parallel_execution(
+def _parallel_summary(
     *,
     unit_kind: str,
-    attempts: tuple[DirectOperatorExecution, ...],
+    attempts: tuple[OperatorCall, ...],
     unit_results: list[_UnitResult],
     unit_count: int,
     peak_parallelism: int,
-) -> ParallelOperatorExecution:
+) -> ParallelExecutionSummary:
     durations = [
         attempt.resource_usage.duration_ns
         for attempt in attempts
@@ -1877,17 +1866,28 @@ def _parallel_execution(
         for result in unit_results
         if result.error is None
     )
+    cancelled_units = sum(
+        1
+        for result in unit_results
+        if result.error is not None
+        and result.error.code == "OPERATOR_CALL_CANCELLED"
+    )
     failed_units = sum(
         1
         for result in unit_results
         if result.error is not None
+        and result.error.code != "OPERATOR_CALL_CANCELLED"
     )
     summary = ParallelExecutionSummary(
+        kind="map" if unit_kind == "map_item" else "replication",
         call_count=unit_count,
         attempt_count=len(attempts),
         success_count=completed_units,
         failure_count=failed_units,
-        cancelled_count=max(0, unit_count - completed_units - failed_units),
+        cancelled_count=max(
+            cancelled_units,
+            unit_count - completed_units - failed_units,
+        ),
         retry_count=sum(
             1 for attempt in attempts if attempt.reason == "retry"
         ),
@@ -1914,32 +1914,23 @@ def _parallel_execution(
         ),
         failure_samples=tuple(failures),
     )
-    started_at_ms = min(
-        (attempt.started_at_ms for attempt in attempts),
-        default=utc_timestamp_ms(),
-    )
-    ended_at_ms = max(
-        (
-            attempt.ended_at_ms or attempt.started_at_ms
-            for attempt in attempts
-        ),
-        default=started_at_ms,
-    )
-    return ParallelOperatorExecution(
-        kind="map" if unit_kind == "map_item" else "replication",
-        summary=summary,
-        operator_ids=tuple(dict.fromkeys(attempt.operator_id for attempt in attempts)),
-        state="running",
-        started_at_ms=started_at_ms,
-        ended_at_ms=ended_at_ms,
-    )
+    return summary
+
+
+def _operator_summary(
+    attempts: tuple[OperatorCall, ...],
+) -> OperatorCallSummary:
+    summary = OperatorCallSummary()
+    for attempt in attempts:
+        summary.record(attempt)
+    return summary
 
 
 def _operator_budget_error(job: ResolvedNodeExecutionJob) -> RuntimeErrorInfo:
     return RuntimeErrorInfo(
         code="RESOURCE_LIMIT_EXCEEDED",
         message="Operator attempt limit exceeded.",
-        detail={"node_id": job.node_ir.id, "resource": "operator_executions"},
+        detail={"node_id": job.node_ir.id, "resource": "operator_attempts"},
     )
 
 

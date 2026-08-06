@@ -119,6 +119,9 @@ the local debugging loop.
 - [x] Keep the root Report compact and expose NodeExecution, Edge evaluation,
   Operator Call, Event, and Full-mode state collections through stable cursor
   pages fixed to the Report's observed sequence.
+- [x] Record each actual Map/Replication attempt as an Operator Call Event,
+  keep its Full-mode values in one place, support NodeExecution-filtered Call
+  pages, and bound the Timeline projection to 50 Call rows per execution.
 - [x] Include only categorized UserEvent counts in the root Report; page
   completed semantic/custom events separately and exclude stream deltas unless
   a stream-diagnostic query explicitly requests them.
@@ -144,7 +147,7 @@ owning Eval Suite without using framework-internal APIs.
 - [x] Add isolated same-mode Rerun against the current project Revision. Reuse
   exact Standard/Full Genesis Session Context and reject Minimal evidence.
 - [x] Add read-only Invocation Comparison for matching Standard or matching
-  Full modes with semantic Node, Loop, Edge, and logical Operator alignment;
+  Full modes with semantic Node, Loop, Edge, and actual Operator Call alignment;
   reject Minimal and mixed modes and keep results out of Runtime storage.
 - [x] Update the debugging Skill with side-effect, Wait, Rerun, Comparison, and
   Eval ownership boundaries.

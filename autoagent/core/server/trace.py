@@ -21,6 +21,8 @@ from autoagent.core.runtime import (
     apply_state_operations,
 )
 
+_TIMELINE_OPERATOR_CALL_LIMIT = 50
+
 
 @dataclass(frozen=True)
 class TracePage:
@@ -53,27 +55,7 @@ def _node_operator_summary(
         }
     calls = execution.get("operator_calls", ())
     latest = calls[-1] if calls else None
-    parallel_call_count = sum(
-        int((call.get("summary") or {}).get("call_count", 0))
-        for call in calls
-        if call.get("kind") in {"map", "replication"}
-    )
-    streaming_call_count = sum(
-        (
-            int((call.get("summary") or {}).get("streaming_call_count", 0))
-            if call.get("kind") in {"map", "replication"}
-            else int(bool(call.get("streaming", False)))
-        )
-        for call in calls
-    )
-    stream_chunk_count = sum(
-        (
-            int((call.get("summary") or {}).get("stream_chunk_count", 0))
-            if call.get("kind") in {"map", "replication"}
-            else int(call.get("stream_chunk_count", 0))
-        )
-        for call in calls
-    )
+    parallel_summary = execution.get("parallel_summary") or {}
     return {
         "operator_call_count": int(
             execution.get("operator_call_count", 0)
@@ -84,9 +66,9 @@ def _node_operator_summary(
         "retry_count": int(execution.get("retry_count", 0)),
         "fallback_count": int(execution.get("fallback_count", 0)),
         "timeout_count": int(execution.get("timeout_count", 0)),
-        "parallel_call_count": parallel_call_count,
-        "streaming_call_count": streaming_call_count,
-        "stream_chunk_count": stream_chunk_count,
+        "parallel_call_count": int(parallel_summary.get("call_count", 0)),
+        "streaming_call_count": int(execution.get("streaming_call_count", 0)),
+        "stream_chunk_count": int(execution.get("stream_chunk_count", 0)),
         "latest_operator_kind": (
             latest.get("kind") if latest is not None else None
         ),
@@ -96,7 +78,7 @@ def _node_operator_summary(
 class TraceProjectionReducer:
     """Pure graph/read-model reducer shared semantically with the UI."""
 
-    schema_version = 4
+    schema_version = 5
 
     @classmethod
     def initial(cls, invocation_id: UUID | str) -> dict[str, Any]:
@@ -108,7 +90,6 @@ class TraceProjectionReducer:
             "nodes": {},
             "node_executions": {},
             "edges": {},
-            "operator_states": {},
             "active_waits": {},
             "latest_phase": None,
         }
@@ -138,6 +119,7 @@ class TraceProjectionReducer:
             if execution_id is not None:
                 execution_id = str(execution_id)
                 previous = executions.get(execution_id, {})
+                operator_summary = payload.get("operator_summary") or {}
                 executions[execution_id] = {
                     "execution_id": execution_id,
                     "node_id": node_id,
@@ -177,14 +159,51 @@ class TraceProjectionReducer:
                     "elapsed_ns": event.elapsed_ns,
                     "timing": dict(event.timing),
                     "operator_call_count": int(
-                        previous.get("operator_call_count", 0)
+                        operator_summary.get(
+                            "attempt_count",
+                            previous.get("operator_call_count", 0),
+                        )
                     ),
                     "failed_operator_call_count": int(
-                        previous.get("failed_operator_call_count", 0)
+                        (
+                            int(operator_summary.get("failure_count", 0))
+                            + int(operator_summary.get("interrupted_count", 0))
+                        )
+                        if operator_summary
+                        else previous.get("failed_operator_call_count", 0)
                     ),
-                    "retry_count": int(previous.get("retry_count", 0)),
-                    "fallback_count": int(previous.get("fallback_count", 0)),
-                    "timeout_count": int(previous.get("timeout_count", 0)),
+                    "retry_count": int(
+                        operator_summary.get(
+                            "retry_count", previous.get("retry_count", 0)
+                        )
+                    ),
+                    "fallback_count": int(
+                        operator_summary.get(
+                            "fallback_count", previous.get("fallback_count", 0)
+                        )
+                    ),
+                    "timeout_count": int(
+                        operator_summary.get(
+                            "timeout_count", previous.get("timeout_count", 0)
+                        )
+                    ),
+                    "streaming_call_count": int(
+                        operator_summary.get(
+                            "streaming_call_count",
+                            previous.get("streaming_call_count", 0),
+                        )
+                    ),
+                    "stream_chunk_count": int(
+                        operator_summary.get(
+                            "stream_chunk_count",
+                            previous.get("stream_chunk_count", 0),
+                        )
+                    ),
+                    "parallel_summary": (
+                        payload.get("parallel_summary")
+                        if payload.get("parallel_summary") is not None
+                        else previous.get("parallel_summary")
+                    ),
                     "operator_calls": list(previous.get("operator_calls", ())),
                 }
             node_executions = [
@@ -280,35 +299,33 @@ class TraceProjectionReducer:
         if name == "operator_call.completed":
             call_id = str(payload.get("operator_call_id") or event.subject_id)
             state = str(payload.get("state") or event.status or "completed")
-            result["operator_states"][call_id] = state
             execution_id = payload.get("node_execution_id")
             if execution_id is not None:
                 execution = result["node_executions"].get(str(execution_id))
                 if execution is not None:
                     error = payload.get("error")
                     reason = payload.get("reason")
-                    summary = payload.get("summary")
                     call = {
                         "id": call_id,
                         "event_sequence": event.sequence,
                         "node_execution_id": str(execution_id),
-                        "operator_id": str(
-                            payload.get("operator_id")
-                            or ", ".join(payload.get("operator_ids", ()))
-                            or payload.get("kind")
-                            or "operator"
-                        ),
+                        "operator_id": str(payload.get("operator_id") or "operator"),
                         "kind": str(payload.get("kind") or "direct"),
+                        "call_no": int(payload.get("call_no", 0)),
+                        "unit_index": payload.get("unit_index"),
+                        "unit_attempt_no": int(
+                            payload.get("unit_attempt_no", 1)
+                        ),
                         "reason": (
                             str(reason) if reason is not None else None
                         ),
                         "state": state,
                         "error": error,
-                        "summary": summary,
                         "streaming": bool(payload.get("streaming", False)),
                         "stream_chunk_count": int(
                             payload.get("stream_chunk_count", 0)
                         ),
+                        "started_at_ms": payload.get("started_at_ms"),
                         "occurred_at_ms": event.occurred_at_ms,
                         "elapsed_ns": event.elapsed_ns,
                         "timing": dict(event.timing),
@@ -319,7 +336,9 @@ class TraceProjectionReducer:
                         if value.get("id") != call_id
                     ]
                     calls.append(call)
-                    execution["operator_calls"] = calls
+                    execution["operator_calls"] = calls[
+                        -_TIMELINE_OPERATOR_CALL_LIMIT:
+                    ]
                     execution["operator_call_count"] += 1
                     execution["failed_operator_call_count"] += int(
                         state != "completed"
@@ -329,6 +348,12 @@ class TraceProjectionReducer:
                     execution["timeout_count"] += int(
                         isinstance(error, dict)
                         and error.get("code") == "OPERATOR_TIMEOUT"
+                    )
+                    execution["streaming_call_count"] += int(
+                        bool(payload.get("streaming", False))
+                    )
+                    execution["stream_chunk_count"] += int(
+                        payload.get("stream_chunk_count", 0)
                     )
                     node = result["nodes"].get(execution["node_id"])
                     if node is not None:
@@ -954,34 +979,20 @@ class TraceService:
                 continue
             if node_execution.error is not None:
                 projected["error"] = node_execution.error.to_record()
-            runtime_calls = {
-                str(call.id): call.to_record()
-                for call in node_execution.operator_executions
-            }
-            for call in projected.get("operator_calls", ()):
-                runtime_call = runtime_calls.get(str(call.get("id")))
-                if runtime_call is None:
-                    continue
-                call["reason"] = runtime_call.get("reason")
-                call["error"] = runtime_call.get("error")
-                call["summary"] = runtime_call.get("summary")
-                call["streaming"] = runtime_call.get("streaming", False)
-                call["stream_chunk_count"] = runtime_call.get(
-                    "stream_chunk_count",
-                    0,
-                )
-            calls = projected.get("operator_calls", ())
-            projected["retry_count"] = sum(
-                1 for call in calls if call.get("reason") == "retry"
+            summary = node_execution.operator_summary
+            projected["operator_call_count"] = summary.attempt_count
+            projected["failed_operator_call_count"] = (
+                summary.failure_count + summary.interrupted_count
             )
-            projected["fallback_count"] = sum(
-                1 for call in calls if call.get("reason") == "fallback"
-            )
-            projected["timeout_count"] = sum(
-                1
-                for call in calls
-                if (call.get("error") or {}).get("code")
-                == "OPERATOR_TIMEOUT"
+            projected["retry_count"] = summary.retry_count
+            projected["fallback_count"] = summary.fallback_count
+            projected["timeout_count"] = summary.timeout_count
+            projected["streaming_call_count"] = summary.streaming_call_count
+            projected["stream_chunk_count"] = summary.stream_chunk_count
+            projected["parallel_summary"] = (
+                node_execution.parallel_summary.to_record()
+                if node_execution.parallel_summary is not None
+                else None
             )
             node = projection["nodes"].get(node_execution.node_id)
             if node is not None:

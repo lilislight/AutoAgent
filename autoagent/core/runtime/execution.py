@@ -3,16 +3,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import perf_counter_ns
-from typing import Any, TypeAlias
+from typing import Any
 from uuid import UUID, uuid4
 
 from autoagent.core.runtime.scheduler import EdgeActivation, ExecutionScope, LoopIteration
 from autoagent.core.runtime.status import (
-    DirectOperatorExecutionReason,
+    OperatorCallReason,
     EdgeEvaluationStateValue,
     NodeExecutionStateValue,
-    OperatorExecutionStateValue,
-    ParallelOperatorExecutionKind,
+    OperatorCallStateValue,
+    ParallelExecutionKind,
 )
 from autoagent.core.runtime.time import TimestampMs, coerce_timestamp_ms, utc_timestamp_ms
 
@@ -104,14 +104,17 @@ class ResourceUsage:
 
 
 @dataclass
-class DirectOperatorExecution:
-    """One retained direct attempt used by normal/retry/fallback/recovery."""
+class OperatorCall:
+    """Transient result for one actual Operator invocation before Event capture."""
 
     operator_id: str
     sequence: int
-    reason: DirectOperatorExecutionReason = "normal"
+    reason: OperatorCallReason = "normal"
+    kind: str = "direct"
+    unit_index: int | None = None
+    unit_attempt_no: int = 1
     id: UUID = field(default_factory=uuid4)
-    state: OperatorExecutionStateValue = "running"
+    state: OperatorCallStateValue = "running"
     input: Any | None = None
     output: Any | None = None
     error: RuntimeErrorInfo | None = None
@@ -120,10 +123,6 @@ class DirectOperatorExecution:
     ended_at_ms: TimestampMs | None = None
     streaming: bool = False
     stream_chunk_count: int = 0
-
-    @property
-    def attempt_count(self) -> int:
-        return 1
 
     def mark_completed(self, output: Any) -> None:
         self.state = "completed"
@@ -140,44 +139,6 @@ class DirectOperatorExecution:
         self.state = "interrupted"
         self.error = error
         self.ended_at_ms = utc_timestamp_ms()
-
-    def to_record(self) -> dict[str, Any]:
-        return {
-            "type": "direct",
-            "id": str(self.id),
-            "operator_id": self.operator_id,
-            "sequence": self.sequence,
-            "reason": self.reason,
-            "state": self.state,
-            "input": self.input,
-            "output": self.output,
-            "error": self.error.to_record() if self.error else None,
-            "resource_usage": self.resource_usage.to_record(),
-            "started_at_ms": self.started_at_ms,
-            "ended_at_ms": self.ended_at_ms,
-            "streaming": self.streaming,
-            "stream_chunk_count": self.stream_chunk_count,
-        }
-
-    @classmethod
-    def from_record(cls, record: Mapping[str, Any]) -> DirectOperatorExecution:
-        return cls(
-            id=UUID(str(record["id"])),
-            operator_id=str(record["operator_id"]),
-            sequence=int(record["sequence"]),
-            reason=record.get("reason", "normal"),
-            state=record["state"],
-            input=record.get("input"),
-            output=record.get("output"),
-            error=RuntimeErrorInfo.from_record(record.get("error")),
-            resource_usage=ResourceUsage.from_record(record.get("resource_usage")),
-            started_at_ms=coerce_timestamp_ms(record.get("started_at_ms"))
-            or utc_timestamp_ms(),
-            ended_at_ms=coerce_timestamp_ms(record.get("ended_at_ms")),
-            streaming=bool(record.get("streaming", False)),
-            stream_chunk_count=int(record.get("stream_chunk_count", 0)),
-        )
-
 
 @dataclass
 class ParallelExecutionSummary:
@@ -201,6 +162,7 @@ class ParallelExecutionSummary:
     stream_consumption_ns: int = 0
     stream_reduction_ns: int = 0
     failure_samples: tuple[dict[str, Any], ...] = ()
+    kind: ParallelExecutionKind | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -220,6 +182,7 @@ class ParallelExecutionSummary:
             "stream_consumption_ns": self.stream_consumption_ns,
             "stream_reduction_ns": self.stream_reduction_ns,
             "failure_samples": [dict(value) for value in self.failure_samples],
+            "kind": self.kind,
         }
 
     @classmethod
@@ -252,61 +215,64 @@ class ParallelExecutionSummary:
             failure_samples=tuple(
                 dict(item) for item in value.get("failure_samples", [])
             ),
+            kind=value.get("kind"),
         )
 
 
 @dataclass
-class ParallelOperatorExecution:
-    """One logical map/replication execution without per-unit inputs or outputs."""
+class OperatorCallSummary:
+    """Bounded actual-call counts retained in executable Runtime state."""
 
-    kind: ParallelOperatorExecutionKind
-    summary: ParallelExecutionSummary
-    operator_ids: tuple[str, ...] = ()
-    id: UUID = field(default_factory=uuid4)
-    state: OperatorExecutionStateValue = "running"
-    error: RuntimeErrorInfo | None = None
-    started_at_ms: TimestampMs = field(default_factory=utc_timestamp_ms)
-    ended_at_ms: TimestampMs | None = None
-
-    @property
-    def attempt_count(self) -> int:
-        return self.summary.attempt_count
+    attempt_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    interrupted_count: int = 0
+    retry_count: int = 0
+    fallback_count: int = 0
+    timeout_count: int = 0
+    streaming_call_count: int = 0
+    stream_chunk_count: int = 0
 
     def to_record(self) -> dict[str, Any]:
         return {
-            "type": "parallel",
-            "id": str(self.id),
-            "kind": self.kind,
-            "state": self.state,
-            "summary": self.summary.to_record(),
-            "operator_ids": list(self.operator_ids),
-            "error": self.error.to_record() if self.error else None,
-            "started_at_ms": self.started_at_ms,
-            "ended_at_ms": self.ended_at_ms,
+            "attempt_count": self.attempt_count,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "interrupted_count": self.interrupted_count,
+            "retry_count": self.retry_count,
+            "fallback_count": self.fallback_count,
+            "timeout_count": self.timeout_count,
+            "streaming_call_count": self.streaming_call_count,
+            "stream_chunk_count": self.stream_chunk_count,
         }
 
     @classmethod
-    def from_record(cls, record: Mapping[str, Any]) -> ParallelOperatorExecution:
+    def from_record(cls, record: Mapping[str, Any] | None) -> OperatorCallSummary:
+        value = record or {}
         return cls(
-            id=UUID(str(record["id"])),
-            kind=record["kind"],
-            state=record["state"],
-            summary=ParallelExecutionSummary.from_record(record.get("summary")),
-            operator_ids=tuple(str(value) for value in record.get("operator_ids", [])),
-            error=RuntimeErrorInfo.from_record(record.get("error")),
-            started_at_ms=coerce_timestamp_ms(record.get("started_at_ms"))
-            or utc_timestamp_ms(),
-            ended_at_ms=coerce_timestamp_ms(record.get("ended_at_ms")),
+            attempt_count=int(value.get("attempt_count", 0)),
+            success_count=int(value.get("success_count", 0)),
+            failure_count=int(value.get("failure_count", 0)),
+            interrupted_count=int(value.get("interrupted_count", 0)),
+            retry_count=int(value.get("retry_count", 0)),
+            fallback_count=int(value.get("fallback_count", 0)),
+            timeout_count=int(value.get("timeout_count", 0)),
+            streaming_call_count=int(value.get("streaming_call_count", 0)),
+            stream_chunk_count=int(value.get("stream_chunk_count", 0)),
         )
 
-
-OperatorExecution: TypeAlias = DirectOperatorExecution | ParallelOperatorExecution
-
-
-def operator_execution_from_record(record: Mapping[str, Any]) -> OperatorExecution:
-    if record.get("type") == "parallel":
-        return ParallelOperatorExecution.from_record(record)
-    return DirectOperatorExecution.from_record(record)
+    def record(self, call: OperatorCall) -> None:
+        self.attempt_count += 1
+        self.success_count += int(call.state == "completed")
+        self.failure_count += int(call.state == "failed")
+        self.interrupted_count += int(call.state == "interrupted")
+        self.retry_count += int(call.reason == "retry")
+        self.fallback_count += int(call.reason == "fallback")
+        self.timeout_count += int(
+            call.error is not None and call.error.code == "OPERATOR_TIMEOUT"
+        )
+        self.streaming_call_count += int(call.streaming)
+        self.stream_chunk_count += call.stream_chunk_count
 
 
 @dataclass
@@ -372,7 +338,11 @@ class NodeExecution:
     base_session_context_revision: int = 0
     incoming_activations: tuple[EdgeActivation, ...] = ()
     execution_scope: ExecutionScope = ()
-    operator_executions: list[OperatorExecution] = field(default_factory=list)
+    operator_summary: OperatorCallSummary = field(
+        default_factory=OperatorCallSummary
+    )
+    parallel_summary: ParallelExecutionSummary | None = None
+    last_operator_call_id: UUID | None = None
     edge_evaluations: list[EdgeEvaluation] = field(default_factory=list)
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
     started_at_ms: TimestampMs | None = None
@@ -415,11 +385,6 @@ class NodeExecution:
         self.error = error
         self.ended_at_ms = utc_timestamp_ms()
         self.updated_at_ms = self.ended_at_ms
-        for execution in self.operator_executions:
-            if execution.state == "running":
-                execution.state = "interrupted"
-                execution.error = error
-                execution.ended_at_ms = self.ended_at_ms
 
     def mark_interrupted(self, error: RuntimeErrorInfo | None = None) -> None:
         self.state = "interrupted"
@@ -429,11 +394,6 @@ class NodeExecution:
         )
         self.ended_at_ms = utc_timestamp_ms()
         self.updated_at_ms = self.ended_at_ms
-        for execution in self.operator_executions:
-            if execution.state == "running":
-                execution.state = "interrupted"
-                execution.error = self.error
-                execution.ended_at_ms = self.ended_at_ms
 
     def add_edge_evaluation(
         self,
@@ -482,9 +442,17 @@ class NodeExecution:
                 activation.to_record() for activation in self.incoming_activations
             ],
             "execution_scope": [frame.to_record() for frame in self.execution_scope],
-            "operator_executions": [
-                execution.to_record() for execution in self.operator_executions
-            ],
+            "operator_summary": self.operator_summary.to_record(),
+            "parallel_summary": (
+                self.parallel_summary.to_record()
+                if self.parallel_summary is not None
+                else None
+            ),
+            "last_operator_call_id": (
+                str(self.last_operator_call_id)
+                if self.last_operator_call_id is not None
+                else None
+            ),
             "edge_evaluations": [
                 evaluation.to_record() for evaluation in self.edge_evaluations
             ],
@@ -526,10 +494,19 @@ class NodeExecution:
                 LoopIteration.from_record(item)
                 for item in record.get("execution_scope", [])
             ),
-            operator_executions=[
-                operator_execution_from_record(item)
-                for item in record.get("operator_executions", [])
-            ],
+            operator_summary=OperatorCallSummary.from_record(
+                record.get("operator_summary")
+            ),
+            parallel_summary=(
+                ParallelExecutionSummary.from_record(record["parallel_summary"])
+                if record.get("parallel_summary") is not None
+                else None
+            ),
+            last_operator_call_id=(
+                UUID(str(record["last_operator_call_id"]))
+                if record.get("last_operator_call_id") is not None
+                else None
+            ),
             edge_evaluations=[
                 EdgeEvaluation.from_record(item)
                 for item in record.get("edge_evaluations", [])

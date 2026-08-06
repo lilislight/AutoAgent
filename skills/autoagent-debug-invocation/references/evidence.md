@@ -23,11 +23,16 @@ business oracle instead of treating completion as correctness.
 | Mode | Expected evidence |
 | --- | --- |
 | Minimal | Invocation input/result/state and semantic UserEvents |
-| Standard | Node states, Edge evaluations, Operator Call summaries, timing, Wait/Resume, Recovery |
-| Full | Standard evidence plus Hook phases, recorded input/output, operations, and state reconstruction |
+| Standard | Node states, Edge evaluations, actual Operator Call metadata/timing, Wait/Resume, Recovery |
+| Full | Standard evidence plus per-Call input/output, Hook phases, operations, and state reconstruction |
 
 Missing Full-only detail in Standard or Minimal mode is intentional. Do not
 diagnose it as database corruption.
+
+Map and Replication emit one Operator Call for every actual attempt. Treat
+`unit_index` as the logical parallel unit and `unit_attempt_no` as that unit's
+Retry number. The NodeExecution summary is bounded aggregate evidence; it is
+not a replacement for the paged Call journal.
 
 ## Read warnings before details
 

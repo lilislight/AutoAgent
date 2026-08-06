@@ -459,6 +459,7 @@ class AutoAgentServer:
         )
         async def debug_operator_calls(
             invocation_id: UUID,
+            node_execution_id: UUID | None = None,
             cursor: str | None = None,
             through_sequence: int | None = Query(default=None, ge=0),
             limit: int = Query(default=20, ge=1, le=100),
@@ -466,6 +467,7 @@ class AutoAgentServer:
             try:
                 page = await self.debug.operator_calls(
                     invocation_id,
+                    node_execution_id=node_execution_id,
                     cursor=cursor,
                     through_sequence=through_sequence,
                     limit=limit,

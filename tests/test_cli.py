@@ -165,6 +165,21 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertEqual(5, arguments.limit)
         self.assertEqual("database", arguments.source)
 
+        calls = build_parser().parse_args(
+            [
+                "invocation",
+                "query",
+                "00000000-0000-0000-0000-000000000001",
+                "operator-calls",
+                "--node-execution-id",
+                "00000000-0000-0000-0000-000000000002",
+            ]
+        )
+        self.assertEqual(
+            "00000000-0000-0000-0000-000000000002",
+            calls.node_execution_id,
+        )
+
     def test_invocation_report_falls_back_to_explicit_database(self) -> None:
         with self.project(
             module_name="cli_report_workflow",
@@ -225,6 +240,11 @@ class AutoAgentCliTests(unittest.TestCase):
         self.assertIn("SOURCE database", report_output)
         self.assertIn("STATE completed", report_output)
         self.assertIn("NODES 1", report_output)
+        self.assertIn("OPERATOR_CALLS 1", report_output)
+        self.assertIn(
+            "OPERATOR_CALL_SEMANTICS ACTUAL_ATTEMPTS",
+            report_output,
+        )
         self.assertIn("REPORT_RESULT generated", report_output)
         self.assertEqual(0, query_code, query_output)
         self.assertIn("EVIDENCE nodes", query_output)

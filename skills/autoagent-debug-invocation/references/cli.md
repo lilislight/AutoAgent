@@ -40,6 +40,7 @@ Use `--report-file <path>` to tee the same stdout result to a normal file.
 autoagent invocation query <id> nodes --through-sequence <n> --limit 20
 autoagent invocation query <id> edges --through-sequence <n> --limit 20
 autoagent invocation query <id> operator-calls --through-sequence <n> --limit 20
+autoagent invocation query <id> operator-calls --node-execution-id <execution-id> --limit 20
 autoagent invocation query <id> runtime-events --through-sequence <n> --limit 20
 autoagent invocation query <id> user-events --limit 20
 ```
@@ -52,6 +53,12 @@ autoagent invocation query <id> nodes --cursor '<cursor>'
 
 Do not reuse a cursor with another Invocation, query kind, filter, or explicit
 sequence boundary. The CLI rejects modified or mismatched cursors.
+
+`operator-calls` returns one record for every actual attempt. Use `unit_index`
+and `unit_attempt_no` to align Map/Replication Calls;
+then query one `operator-call` by ID to read its bounded detail. Full mode makes
+the recorded Call input/output available; Standard mode retains metadata and
+timing only.
 
 Built-in `message_delta`, `reasoning_delta`, and `tool_call_delta` events are
 excluded from the normal UserEvent page. Include them only for stream transport

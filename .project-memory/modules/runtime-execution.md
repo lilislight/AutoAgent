@@ -32,6 +32,8 @@ AutoAgentApp owns registries, Compiler, RuntimeStore, WorkflowExecutor, and one 
 
 RuntimeStore is one authoritative in-memory aggregate for Workflow revisions, Sessions, Invocations, outputs, Runtime Events, User Events, reduced state, and replay checkpoints. Event modes trade recording cost for capability: Minimal retains terminal/wait state, Standard records graph-level facts and recovery points, and Full also records internal phases and state operations.
 
+Every actual Operator attempt, including each Map item, Replication unit, retry, and fallback, produces its own Operator Call Event with exact timing and stable unit identity. NodeExecution retains only bounded aggregate counters and an optional Map/Replication summary; individual Call values live in Events rather than executable Runtime state. In Full mode the Call Event is the canonical recorded owner of that attempt's input and output. Selector and Output Binding phases do not duplicate those values, while Aggregation records only the final logical Node output.
+
 Runtime Context and Invocation input are canonical JSON values. Typed Node outputs remain typed during live execution, while Dynamic JSON contracts normalize values immediately. Recovery and Resume materialize persisted Node JSON through the exact registered Workflow revision before graph execution continues.
 
 ## Boundaries and Rules
@@ -43,6 +45,7 @@ Runtime Context and Invocation input are canonical JSON values. Typed Node outpu
 - Recovery reuses normal graph behavior in recovery mode and stops or skips when Node recovery policy forbids execution.
 - Output Binding commits Context transactionally and rejects any non-serializable value without publishing partial changes.
 - Runtime Events support execution state, replay, and recovery. User Events are an independent semantic/live journal.
+- Recovery checkpoints contain Operator summaries but not unbounded per-Call records; a Node interrupted mid-execution is recovered according to its Node recovery policy.
 - Waiting, running, or newly created work makes its Session busy; later Invocation admission is rejected until the active Invocation settles.
 
 ## Relationships

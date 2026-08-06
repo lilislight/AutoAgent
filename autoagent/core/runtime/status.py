@@ -31,23 +31,23 @@ NodeExecutionStateValue = Literal[
     "interrupted",  # Process loss interrupted a running node execution.
 ]
 
-# One logical OperatorExecution belongs to one NodeExecution. Direct executions
-# describe retry/fallback attempts; map/replication use one parallel summary.
-OperatorExecutionStateValue = Literal[
+# Every actual Operator invocation becomes one durable Operator Call Event.
+# Executable Runtime state retains only bounded summaries of those Calls.
+OperatorCallStateValue = Literal[
     "running",
     "completed",
     "failed",
     "interrupted",
 ]
 
-DirectOperatorExecutionReason = Literal[
+OperatorCallReason = Literal[
     "normal",
     "retry",
     "fallback",
     "recovery",
 ]
 
-ParallelOperatorExecutionKind = Literal[
+ParallelExecutionKind = Literal[
     "map",
     "replication",
 ]

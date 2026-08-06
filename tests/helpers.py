@@ -4,6 +4,7 @@ import inspect
 from typing import Any, Callable, TypeVar
 
 from autoagent import AutoAgentApp, AutoAgentSettings
+from autoagent.core.runtime import Invocation, RuntimeEvent
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -38,3 +39,19 @@ def started_app(*args: Any, **kwargs: Any) -> AutoAgentApp:
     app = isolated_app(*args, **kwargs)
     app.start()
     return app
+
+
+def operator_call_events(
+    app: AutoAgentApp,
+    invocation: Invocation,
+    *,
+    node_id: str | None = None,
+) -> list[RuntimeEvent]:
+    """Return actual Operator Call Events retained by an in-memory test App."""
+
+    return [
+        event
+        for event in app.runtime_store.runtime_events.get(invocation.id, ())
+        if event.event_name == "operator_call.completed"
+        and (node_id is None or event.payload.get("node_id") == node_id)
+    ]

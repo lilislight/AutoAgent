@@ -140,6 +140,9 @@ execution. `invocation query` progressively loads bounded Node, Edge, Operator
 Call, RuntimeEvent, UserEvent, or Full Runtime State evidence. Both commands
 prefer the matching running Server and can use an explicitly configured
 durable database without recovering or executing the Workflow.
+Every actual Map/Replication attempt is an independent Operator Call. Use
+`operator-calls --node-execution-id <execution-id>` to page one NodeExecution's
+Calls; Full-mode Call detail exposes its single recorded input/output copy.
 `invocation rerun` creates an isolated candidate in the source Standard or Full
 mode from its input, entry Node, and Genesis Session Context. Minimal sources
 cannot be rerun. `invocation compare` requires two Standard Invocations or two

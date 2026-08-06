@@ -5,7 +5,9 @@ from typing import Any, Literal
 from uuid import UUID
 
 from autoagent.core.runtime.execution import (
-    OperatorExecution,
+    OperatorCall,
+    OperatorCallSummary,
+    ParallelExecutionSummary,
     ResourceUsage,
     RuntimeErrorInfo,
 )
@@ -37,33 +39,32 @@ class NodeExecutionProgress:
     node_execution_id: UUID
     kind: Literal["phase", "operator_call", "user_event"]
     phase: NodePhaseResult | None = None
-    operator_execution: OperatorExecution | None = None
+    operator_call: OperatorCall | None = None
     user_event_specs: tuple[UserEventSpec, ...] = ()
-    logical_elapsed_ns: int = 0
 
     def __post_init__(self) -> None:
         if self.kind == "phase":
             if (
                 self.phase is None
-                or self.operator_execution is not None
+                or self.operator_call is not None
                 or self.user_event_specs
             ):
                 raise ValueError("Phase progress must contain only a phase result.")
             return
         if self.kind == "operator_call":
             if (
-                self.operator_execution is None
+                self.operator_call is None
                 or self.phase is not None
                 or self.user_event_specs
             ):
                 raise ValueError(
-                    "Operator-call progress must contain only an OperatorExecution."
+                    "Operator-call progress must contain only one actual Call."
                 )
             return
         if (
             not self.user_event_specs
             or self.phase is not None
-            or self.operator_execution is not None
+            or self.operator_call is not None
         ):
             raise ValueError(
                 "User-event progress must contain only UserEventSpecs."
@@ -82,6 +83,9 @@ class NodeExecutionResult:
     wait_key: str | None = None
     wait_type: str | None = None
     wait_payload: dict[str, Any] | None = None
-    operator_executions: tuple[OperatorExecution, ...] = ()
-    operator_elapsed_ns: int = 0
+    operator_summary: OperatorCallSummary = field(
+        default_factory=OperatorCallSummary
+    )
+    parallel_summary: ParallelExecutionSummary | None = None
+    last_operator_call_id: UUID | None = None
     phases: tuple[NodePhaseResult, ...] = ()

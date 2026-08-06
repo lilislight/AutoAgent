@@ -123,12 +123,12 @@ class NodeIR(BaseModel):
     )
     input_contract: SchemaContract = Field(
         description=(
-            "Compiled named-argument input contract for each OperatorExecution."
+            "Compiled named-argument input contract for each Operator Call."
         ),
     )
     operator_output_contract: SchemaContract = Field(
         description=(
-            "Compiled output contract for each individual OperatorExecution before "
+            "Compiled output contract for each individual Operator Call before "
             "map or replication aggregation."
         ),
     )

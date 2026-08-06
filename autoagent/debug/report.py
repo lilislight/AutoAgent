@@ -616,17 +616,19 @@ class DebugQueryService:
         self,
         invocation_id: UUID,
         *,
+        node_execution_id: UUID | None = None,
         cursor: str | None = None,
         through_sequence: int | None = None,
         limit: int = 20,
     ) -> DebugPage[dict[str, Any]]:
-        """Page logical direct or parallel Operator Calls."""
+        """Page actual Operator Calls, optionally within one NodeExecution."""
 
         return await self._event_kind_page(
             invocation_id,
             query="operator_calls",
             event_name="operator_call.completed",
             summary=_operator_call_summary,
+            node_execution_id=node_execution_id,
             cursor=cursor,
             through_sequence=through_sequence,
             limit=limit,
@@ -969,6 +971,7 @@ class DebugQueryService:
         through_sequence: int,
         limit: int,
         event_names: frozenset[str] | None = None,
+        node_execution_id: UUID | None = None,
     ) -> tuple[tuple[Any, ...], bool]:
         """Scan bounded forward pages while retaining only requested facts."""
 
@@ -984,6 +987,7 @@ class DebugQueryService:
                     if event_names is None
                     else tuple(sorted(event_names))
                 ),
+                node_execution_id=node_execution_id,
             )
             if not page:
                 break
@@ -1008,17 +1012,25 @@ class DebugQueryService:
         query: str,
         event_name: str,
         summary: Any,
+        node_execution_id: UUID | None = None,
         cursor: str | None,
         through_sequence: int | None,
         limit: int,
     ) -> DebugPage[dict[str, Any]]:
         limit = _page_limit(limit)
+        filters = {
+            "node_execution_id": (
+                str(node_execution_id)
+                if node_execution_id is not None
+                else None
+            )
+        }
         boundary, position = await self._page_boundary(
             invocation_id,
             query=query,
             cursor=cursor,
             through_sequence=through_sequence,
-            filters={},
+            filters=filters,
         )
         selected, has_more = await self._select_runtime_events(
             invocation_id,
@@ -1026,6 +1038,7 @@ class DebugQueryService:
             through_sequence=boundary,
             limit=limit,
             event_names=frozenset({event_name}),
+            node_execution_id=node_execution_id,
         )
         return DebugPage[dict[str, Any]](
             through_sequence=boundary,
@@ -1036,6 +1049,7 @@ class DebugQueryService:
                     query=query,
                     through_sequence=boundary,
                     position=selected[-1].sequence,
+                    filters=filters,
                 )
                 if has_more and selected
                 else None
@@ -1132,22 +1146,38 @@ class DebugQueryService:
                         value["ended_at_ms"] = event.occurred_at_ms
                     if payload.get("error") is not None:
                         value["error"] = payload["error"]
+                    if payload.get("operator_summary") is not None:
+                        value["operator_summary"] = payload["operator_summary"]
+                    if payload.get("parallel_summary") is not None:
+                        value["parallel_summary"] = payload["parallel_summary"]
                 elif event.event_name == "operator_call.completed":
-                    calls = value.setdefault("operator_executions", [])
-                    call_id = str(payload.get("operator_call_id"))
-                    if not any(str(call.get("id")) == call_id for call in calls):
-                        calls.append(
-                            {
-                                "id": call_id,
-                                "type": (
-                                    "parallel" if payload.get("kind") else "direct"
-                                ),
-                                "state": payload.get("state") or event.status,
-                                "reason": payload.get("reason"),
-                                "summary": payload.get("summary"),
-                                "error": payload.get("error"),
-                            }
-                        )
+                    summary = value.setdefault("operator_summary", {})
+                    summary["attempt_count"] = int(
+                        summary.get("attempt_count", 0)
+                    ) + 1
+                    state = payload.get("state") or event.status
+                    summary["success_count"] = int(
+                        summary.get("success_count", 0)
+                    ) + int(state == "completed")
+                    summary["failure_count"] = int(
+                        summary.get("failure_count", 0)
+                    ) + int(state == "failed")
+                    summary["interrupted_count"] = int(
+                        summary.get("interrupted_count", 0)
+                    ) + int(state == "interrupted")
+                    reason = payload.get("reason")
+                    summary["retry_count"] = int(
+                        summary.get("retry_count", 0)
+                    ) + int(reason == "retry")
+                    summary["fallback_count"] = int(
+                        summary.get("fallback_count", 0)
+                    ) + int(reason == "fallback")
+                    summary["timeout_count"] = int(
+                        summary.get("timeout_count", 0)
+                    ) + int(
+                        (payload.get("error") or {}).get("code")
+                        == "OPERATOR_TIMEOUT"
+                    )
                 elif event.event_name == "edge.evaluated":
                     edges = value.setdefault("edge_evaluations", [])
                     evaluation_id = _edge_evaluation_identity(event)
@@ -1475,49 +1505,29 @@ def _operator_differences(
     baseline: Mapping[str, Any],
     candidate: Mapping[str, Any],
 ) -> list[InvocationDifference]:
-    left = list(baseline.get("operator_executions", ()))
-    right = list(candidate.get("operator_executions", ()))
-    values: list[InvocationDifference] = []
-    for index in range(max(len(left), len(right))):
-        left_value = left[index] if index < len(left) else None
-        right_value = right[index] if index < len(right) else None
-        left_identity = _operator_identity(left_value)
-        right_identity = _operator_identity(right_value)
-        if left_identity != right_identity:
-            values.append(
-                InvocationDifference(
-                    category="operator_call",
-                    key=f"{node_key}:call:{index + 1}",
-                    baseline=left_identity,
-                    candidate=right_identity,
-                    baseline_ref=(
-                        None
-                        if left_value is None
-                        else f"operator_call:{left_value.get('id')}"
-                    ),
-                    candidate_ref=(
-                        None
-                        if right_value is None
-                        else f"operator_call:{right_value.get('id')}"
-                    ),
-                )
-            )
-    return values
+    left_identity = _operator_identity(baseline)
+    right_identity = _operator_identity(candidate)
+    if left_identity == right_identity:
+        return []
+    return [
+        InvocationDifference(
+            category="operator_call",
+            key=f"{node_key}:summary",
+            baseline=left_identity,
+            candidate=right_identity,
+        )
+    ]
 
 
 def _operator_identity(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if value is None:
         return None
-    error = value.get("error") or {}
-    summary = value.get("summary") or {}
+    summary = value.get("operator_summary") or {}
+    parallel = value.get("parallel_summary") or {}
     return {
-        "type": value.get("type", "direct"),
         "state": value.get("state"),
-        "reason": value.get("reason"),
-        "operator_id": value.get("operator_id"),
-        "operator_ids": tuple(value.get("operator_ids", ())),
-        "error_code": error.get("code"),
-        "call_count": summary.get("call_count"),
+        "kind": parallel.get("kind"),
+        "call_count": parallel.get("call_count"),
         "attempt_count": summary.get("attempt_count"),
         "retry_count": summary.get("retry_count"),
         "fallback_count": summary.get("fallback_count"),
@@ -1553,26 +1563,11 @@ def _execution_counts(records: tuple[dict[str, Any], ...]) -> dict[str, int]:
             counts["wait_count"] += 1
         if int(node.get("recovery_attempt", 0)) > 0:
             counts["recovery_count"] += 1
-        for call in node.get("operator_executions", ()):
-            counts["operator_call_count"] += 1
-            if call.get("type") == "parallel":
-                summary = call.get("summary") or {}
-                counts["retry_count"] += int(summary.get("retry_count", 0))
-                counts["fallback_count"] += int(summary.get("fallback_count", 0))
-                counts["timeout_count"] += sum(
-                    1
-                    for sample in summary.get("failure_samples", ())
-                    if (sample.get("error") or {}).get("code")
-                    == "OPERATOR_TIMEOUT"
-                )
-            else:
-                reason = call.get("reason")
-                if reason == "retry":
-                    counts["retry_count"] += 1
-                elif reason == "fallback":
-                    counts["fallback_count"] += 1
-                if (call.get("error") or {}).get("code") == "OPERATOR_TIMEOUT":
-                    counts["timeout_count"] += 1
+        summary = node.get("operator_summary") or {}
+        counts["operator_call_count"] += int(summary.get("attempt_count", 0))
+        counts["retry_count"] += int(summary.get("retry_count", 0))
+        counts["fallback_count"] += int(summary.get("fallback_count", 0))
+        counts["timeout_count"] += int(summary.get("timeout_count", 0))
     return counts
 
 
@@ -1706,7 +1701,9 @@ def _node_execution_summary(
         "started_at_ms": value.get("started_at_ms", start_event.occurred_at_ms),
         "ended_at_ms": value.get("ended_at_ms"),
         "duration_ns": (value.get("resource_usage") or {}).get("duration_ns"),
-        "operator_call_count": len(value.get("operator_executions", ())),
+        "operator_call_count": int(
+            (value.get("operator_summary") or {}).get("attempt_count", 0)
+        ),
         "edge_evaluation_count": len(value.get("edge_evaluations", ())),
         "recovery_attempt": int(value.get("recovery_attempt", 0)),
         "error": error.model_dump(mode="json") if error is not None else None,
@@ -1728,7 +1725,8 @@ def _standard_node_record_from_start(event: Any) -> dict[str, Any]:
         "recovery_attempt": 0,
         "incoming_activations": [],
         "execution_scope": [],
-        "operator_executions": [],
+        "operator_summary": {},
+        "parallel_summary": None,
         "edge_evaluations": [],
         "resource_usage": {},
         "started_at_ms": event.occurred_at_ms,
@@ -1771,7 +1769,9 @@ def _node_execution_detail(
         ).model_dump(mode="json"),
         "error": error.model_dump(mode="json") if error is not None else None,
         "resource_usage": dict(record.get("resource_usage") or {}),
-        "operator_call_count": len(record.get("operator_executions", ())),
+        "operator_call_count": int(
+            (record.get("operator_summary") or {}).get("attempt_count", 0)
+        ),
         "edge_evaluation_count": len(record.get("edge_evaluations", ())),
         "incoming_activation_count": len(record.get("incoming_activations", ())),
         "execution_scope": summarize_value(
@@ -1805,7 +1805,6 @@ def _edge_evaluation_summary(event: Any) -> dict[str, Any]:
 def _operator_call_summary(event: Any) -> dict[str, Any]:
     payload = event.payload
     error = _report_error(payload.get("error"))
-    summary = payload.get("summary") or {}
     return {
         "operator_call_id": str(
             payload.get("operator_call_id") or event.subject_id
@@ -1814,19 +1813,22 @@ def _operator_call_summary(event: Any) -> dict[str, Any]:
         "node_id": payload.get("node_id"),
         "node_execution_id": payload.get("node_execution_id"),
         "operator_id": payload.get("operator_id"),
-        "operator_ids": list(payload.get("operator_ids", ())),
         "kind": str(payload.get("kind") or "direct"),
+        "call_no": int(payload.get("call_no", 0)),
+        "unit_index": payload.get("unit_index"),
+        "unit_attempt_no": int(payload.get("unit_attempt_no", 1)),
         "reason": payload.get("reason"),
         "state": str(payload.get("state") or event.status or "completed"),
+        "started_at_ms": payload.get("started_at_ms"),
         "occurred_at_ms": event.occurred_at_ms,
         "elapsed_ns": event.elapsed_ns,
         "timing": dict(event.timing),
         "streaming": bool(payload.get("streaming", False)),
         "stream_chunk_count": int(payload.get("stream_chunk_count", 0)),
-        "call_count": int(summary.get("call_count", 1)),
-        "attempt_count": int(summary.get("attempt_count", 1)),
-        "retry_count": int(summary.get("retry_count", 0)),
-        "fallback_count": int(summary.get("fallback_count", 0)),
+        "call_count": 1,
+        "attempt_count": 1,
+        "retry_count": int(payload.get("reason") == "retry"),
+        "fallback_count": int(payload.get("reason") == "fallback"),
         "error": error.model_dump(mode="json") if error is not None else None,
         "has_input": event.input is not None,
         "has_output": event.output is not None,

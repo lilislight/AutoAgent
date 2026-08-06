@@ -18,7 +18,6 @@ export function projectEvents(
   const nodeExecutions = structuredClone(base?.node_executions ?? {});
   const nodes = structuredClone(base?.nodes ?? {});
   const edges = structuredClone(base?.edges ?? {});
-  const operatorStates = { ...(base?.operator_states ?? {}) };
   const activeWaits = structuredClone(base?.active_waits ?? {});
   let latestPhase = base?.latest_phase ?? null;
 
@@ -75,30 +74,28 @@ export function projectEvents(
     }
     if (name === "operator_call.completed") {
       const callId = String(payload.operator_call_id ?? event.subject_id);
-      operatorStates[callId] = String(payload.state ?? event.status ?? "completed");
+      const callState = String(payload.state ?? event.status ?? "completed");
       const execution = nodeExecutions[String(payload.node_execution_id ?? "")];
       if (execution) {
         const error = asRecordOrNull(payload.error);
         const reason = payload.reason == null ? null : String(payload.reason);
-        const summary = asRecordOrNull(payload.summary);
-        const operatorIds = (
-          (payload.operator_ids as unknown[] | undefined) ?? []
-        ).map(String);
         const call = {
           id: callId,
           event_sequence: event.sequence,
           node_execution_id: execution.execution_id,
-          operator_id: String(
-            payload.operator_id ??
-            (operatorIds.length > 0 ? operatorIds.join(", ") : undefined) ??
-            payload.kind ??
-            "operator"
-          ),
+          operator_id: String(payload.operator_id ?? "operator"),
           kind: String(payload.kind ?? "direct"),
+          call_no: Number(payload.call_no ?? 0),
+          unit_index: payload.unit_index == null
+            ? null
+            : Number(payload.unit_index),
+          unit_attempt_no: Number(payload.unit_attempt_no ?? 1),
           reason,
-          state: operatorStates[callId],
+          state: callState,
           error,
-          summary,
+          started_at_ms: payload.started_at_ms == null
+            ? null
+            : Number(payload.started_at_ms),
           streaming: Boolean(payload.streaming),
           stream_chunk_count: Number(payload.stream_chunk_count ?? 0),
           occurred_at_ms: event.occurred_at_ms,
@@ -108,16 +105,20 @@ export function projectEvents(
         execution.operator_calls = [
           ...(execution.operator_calls ?? []).filter((value) => value.id !== callId),
           call,
-        ];
+        ].slice(-50);
         execution.operator_call_count = (execution.operator_call_count ?? 0) + 1;
         execution.failed_operator_call_count =
           (execution.failed_operator_call_count ?? 0) +
-          Number(operatorStates[callId] !== "completed");
+          Number(callState !== "completed");
         execution.retry_count = (execution.retry_count ?? 0) + Number(reason === "retry");
         execution.fallback_count =
           (execution.fallback_count ?? 0) + Number(reason === "fallback");
         execution.timeout_count =
           (execution.timeout_count ?? 0) + Number(error?.code === "OPERATOR_TIMEOUT");
+        execution.streaming_call_count =
+          (execution.streaming_call_count ?? 0) + Number(Boolean(payload.streaming));
+        execution.stream_chunk_count =
+          (execution.stream_chunk_count ?? 0) + Number(payload.stream_chunk_count ?? 0);
         const node = nodes[execution.node_id];
         if (node) Object.assign(node, nodeOperatorSummary(execution));
       }
@@ -160,14 +161,13 @@ export function projectEvents(
     }
   }
   return {
-    schema_version: base?.schema_version ?? 4,
+    schema_version: base?.schema_version ?? 5,
     invocation_id: invocationId,
     through_sequence: appliedSequence,
     invocation_state: invocationState,
     node_executions: nodeExecutions,
     nodes,
     edges,
-    operator_states: operatorStates,
     active_waits: activeWaits,
     latest_phase: latestPhase,
   };
@@ -184,6 +184,7 @@ function applyNodeEvent(
   const executionId = nullableString(payload.node_execution_id);
   if (executionId) {
     const previous = executions[executionId];
+    const operatorSummary = asRecordOrNull(payload.operator_summary) ?? {};
     executions[executionId] = {
       execution_id: executionId,
       node_id: nodeId,
@@ -197,11 +198,32 @@ function applyNodeEvent(
       ended_at_ms: isTerminal(state) ? event.occurred_at_ms : null,
       elapsed_ns: event.elapsed_ns,
       timing: event.timing,
-      operator_call_count: previous?.operator_call_count ?? 0,
-      failed_operator_call_count: previous?.failed_operator_call_count ?? 0,
-      retry_count: previous?.retry_count ?? 0,
-      fallback_count: previous?.fallback_count ?? 0,
-      timeout_count: previous?.timeout_count ?? 0,
+      operator_call_count: Number(
+        operatorSummary.attempt_count ?? previous?.operator_call_count ?? 0
+      ),
+      failed_operator_call_count: Number(
+        Object.keys(operatorSummary).length > 0
+          ? Number(operatorSummary.failure_count ?? 0) +
+            Number(operatorSummary.interrupted_count ?? 0)
+          : previous?.failed_operator_call_count ?? 0
+      ),
+      retry_count: Number(
+        operatorSummary.retry_count ?? previous?.retry_count ?? 0
+      ),
+      fallback_count: Number(
+        operatorSummary.fallback_count ?? previous?.fallback_count ?? 0
+      ),
+      timeout_count: Number(
+        operatorSummary.timeout_count ?? previous?.timeout_count ?? 0
+      ),
+      streaming_call_count: Number(
+        operatorSummary.streaming_call_count ?? previous?.streaming_call_count ?? 0
+      ),
+      stream_chunk_count: Number(
+        operatorSummary.stream_chunk_count ?? previous?.stream_chunk_count ?? 0
+      ),
+      parallel_summary:
+        asRecordOrNull(payload.parallel_summary) ?? previous?.parallel_summary ?? null,
       operator_calls: previous?.operator_calls ?? [],
     };
   }
@@ -256,25 +278,9 @@ function nodeOperatorSummary(
     retry_count: execution?.retry_count ?? 0,
     fallback_count: execution?.fallback_count ?? 0,
     timeout_count: execution?.timeout_count ?? 0,
-    parallel_call_count: calls
-      .filter((call) => ["map", "replication"].includes(call.kind))
-      .reduce((count, call) => count + Number(call.summary?.call_count ?? 0), 0),
-    streaming_call_count: calls.reduce(
-      (count, call) =>
-        count +
-        (["map", "replication"].includes(call.kind)
-          ? Number(call.summary?.streaming_call_count ?? 0)
-          : Number(call.streaming)),
-      0,
-    ),
-    stream_chunk_count: calls.reduce(
-      (count, call) =>
-        count +
-        (["map", "replication"].includes(call.kind)
-          ? Number(call.summary?.stream_chunk_count ?? 0)
-          : call.stream_chunk_count),
-      0,
-    ),
+    parallel_call_count: Number(execution?.parallel_summary?.call_count ?? 0),
+    streaming_call_count: execution?.streaming_call_count ?? 0,
+    stream_chunk_count: execution?.stream_chunk_count ?? 0,
     latest_operator_kind: calls.at(-1)?.kind ?? null,
   };
 }

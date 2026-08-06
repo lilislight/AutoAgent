@@ -1,4 +1,6 @@
 import { projectEvents } from "./projection";
+import { buildTimelineView } from "./timeline";
+export { buildTimelineView } from "./timeline";
 import type {
   InvocationDetail,
   InvocationRecord,
@@ -454,14 +456,14 @@ function invocationDetail(
         execution_scope: [],
         incoming_activations: [],
         edge_evaluations: [],
-        operator_calls: (execution.operator_calls ?? []).map((call, index) => ({
+        operator_calls: (execution.operator_calls ?? []).map((call) => ({
           id: call.id,
           operator_id: call.operator_id,
-          call_no: index + 1,
+          call_no: call.call_no,
           kind: call.kind,
           reason: call.reason,
-          item_index: null,
-          replica_index: null,
+          unit_index: call.unit_index,
+          unit_attempt_no: call.unit_attempt_no,
           state: call.state,
           input: null,
           output: null,
@@ -469,13 +471,9 @@ function invocationDetail(
           resource_usage: {
             ...call.timing,
             elapsed_ns: call.elapsed_ns,
-            summary: call.summary,
             reason: call.reason,
           },
-          started_at_ms:
-            call.elapsed_ns == null
-              ? null
-              : call.occurred_at_ms - call.elapsed_ns / 1_000_000,
+          started_at_ms: call.started_at_ms,
           ended_at_ms: call.occurred_at_ms,
           created_at_ms: call.occurred_at_ms,
           updated_at_ms: call.occurred_at_ms,
@@ -489,37 +487,5 @@ function invocationDetail(
         updated_at_ms: execution.ended_at_ms ?? value.updated_at_ms,
       }),
     ),
-  };
-}
-
-export function buildTimelineView(
-  invocation: InvocationDetail,
-  projection: RuntimeProjection,
-): TimelineView {
-  const spans = Object.values(projection.node_executions).map((execution) => {
-    return {
-      id: execution.execution_id,
-      kind: "node_execution" as const,
-      parent_id: null,
-      node_id: execution.node_id,
-      label: execution.node_id,
-      state: execution.state,
-      sequence: execution.first_event_sequence ?? execution.sequence,
-      started_at_ms: execution.started_at_ms ?? invocation.created_at_ms,
-      ended_at_ms: execution.ended_at_ms ?? null,
-      duration_ms:
-        execution.elapsed_ns === null || execution.elapsed_ns === undefined
-          ? null
-          : execution.elapsed_ns / 1_000_000,
-    };
-  });
-  return {
-    invocation_id: invocation.id,
-    started_at_ms: invocation.created_at_ms,
-    ended_at_ms:
-      ["completed", "failed", "cancelled", "interrupted"].includes(invocation.state)
-        ? invocation.updated_at_ms
-        : null,
-    spans,
   };
 }

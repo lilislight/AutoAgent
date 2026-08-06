@@ -217,22 +217,28 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         map_execution = invocation.latest_node_execution(
             "investigation/gather_evidence"
         )
-        self.assertEqual(len(map_execution.operator_executions), 1)
-        self.assertEqual("map", map_execution.operator_executions[0].kind)
-        self.assertEqual(3, map_execution.operator_executions[0].summary.call_count)
+        assert map_execution.parallel_summary is not None
+        self.assertEqual("map", map_execution.parallel_summary.kind)
+        self.assertEqual(3, map_execution.parallel_summary.call_count)
 
         replicated = invocation.latest_node_execution("final_decision")
-        self.assertEqual(len(replicated.operator_executions), 1)
-        self.assertEqual("replication", replicated.operator_executions[0].kind)
-        self.assertEqual(3, replicated.operator_executions[0].summary.call_count)
+        assert replicated.parallel_summary is not None
+        self.assertEqual("replication", replicated.parallel_summary.kind)
+        self.assertEqual(3, replicated.parallel_summary.call_count)
 
-        fallback_execution = invocation.latest_node_execution("reliability_review")
+        invocation.latest_node_execution("reliability_review")
+        fallback_calls = [
+            event
+            for event in events
+            if event.event_name == "operator_call.completed"
+            and event.payload.get("node_id") == "reliability_review"
+        ]
         self.assertEqual(
-            [call.operator_id for call in fallback_execution.operator_executions],
+            [call.payload["operator_id"] for call in fallback_calls],
             ["slow_reliability_review", "reliability_review_fallback"],
         )
         self.assertEqual(
-            [call.state for call in fallback_execution.operator_executions],
+            [call.payload["state"] for call in fallback_calls],
             ["failed", "completed"],
         )
         reliability_events = [
@@ -305,12 +311,18 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         self.assertEqual(invocation.state, "failed")
         failed = invocation.latest_node_execution("security_review")
         self.assertEqual(failed.state, "failed")
+        failed_calls = [
+            event
+            for event in app.runtime_store.runtime_events[invocation.id]
+            if event.event_name == "operator_call.completed"
+            and event.payload.get("node_id") == "security_review"
+        ]
         self.assertEqual(
-            [call.reason for call in failed.operator_executions],
+            [call.payload["reason"] for call in failed_calls],
             ["normal", "retry"],
         )
         self.assertTrue(
-            all(call.error is not None for call in failed.operator_executions)
+            all(call.payload.get("error") is not None for call in failed_calls)
         )
 
     def test_manual_approval_wait_branch_resumes_without_touching_normal_paths(

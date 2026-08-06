@@ -22,11 +22,10 @@ from autoagent.core.runtime import (
     InputMappingContext,
     IncomingOutput,
     Invocation,
-    DirectOperatorExecution,
+    OperatorCall,
     EdgeEvaluation,
     NodeExecution,
     OutputBindingContext,
-    ParallelOperatorExecution,
     RuntimeErrorInfo,
     RuntimeEvent,
     RuntimeEventSubjectType,
@@ -1030,7 +1029,7 @@ class WorkflowExecutor:
                     elapsed_ns=mapping_elapsed_ns,
                     timing={"execution_ns": mapping_elapsed_ns},
                 )
-                # Mapping is a workflow data-shaping phase, not an OperatorExecution.
+                # Mapping is a workflow data-shaping phase, not an Operator Call.
                 # Finalize the node here so retry and operator fallback cannot run.
                 invocation.mark_node_failed(
                     node_execution.id,
@@ -1070,7 +1069,6 @@ class WorkflowExecutor:
                 },
                 elapsed_ns=mapping_elapsed_ns,
                 timing={"execution_ns": mapping_elapsed_ns},
-                output=node_input,
             )
 
             resource_error = self._check_operator_attempt_resource(
@@ -1139,21 +1137,16 @@ class WorkflowExecutor:
             return
 
         if progress.kind == "operator_call":
-            operator_execution = progress.operator_execution
-            if operator_execution is None:  # pragma: no cover - validated message.
+            operator_call = progress.operator_call
+            if operator_call is None:  # pragma: no cover - validated message.
                 return
-            if any(
-                existing.id == operator_execution.id
-                for existing in node_execution.operator_executions
-            ):
-                return
-            node_execution.operator_executions.append(operator_execution)
+            node_execution.operator_summary.record(operator_call)
+            node_execution.last_operator_call_id = operator_call.id
             await self._record_operator_call(
                 session,
                 invocation,
                 node_execution,
-                operator_execution,
-                logical_elapsed_ns=progress.logical_elapsed_ns,
+                operator_call,
             )
             return
 
@@ -1221,20 +1214,13 @@ class WorkflowExecutor:
                 output=phase.output,
                 occurred_at_ms=phase.occurred_at_ms,
             )
-        for operator_execution in result.operator_executions:
-            if any(
-                existing.id == operator_execution.id
-                for existing in node_execution.operator_executions
-            ):
-                continue
-            node_execution.operator_executions.append(operator_execution)
-            await self._record_operator_call(
-                session,
-                invocation,
-                node_execution,
-                operator_execution,
-                logical_elapsed_ns=result.operator_elapsed_ns,
-            )
+        if invocation.event_mode == "minimal":
+            node_execution.operator_summary = result.operator_summary
+        elif node_execution.operator_summary.attempt_count == 0:
+            node_execution.operator_summary = result.operator_summary
+        node_execution.parallel_summary = result.parallel_summary
+        if result.last_operator_call_id is not None:
+            node_execution.last_operator_call_id = result.last_operator_call_id
         node_execution.resource_usage = result.resource_usage
         if after_operator and result.state == "completed":
             node_execution.output = result.output
@@ -1308,7 +1294,6 @@ class WorkflowExecutor:
                         },
                         elapsed_ns=binding_elapsed_ns,
                         timing={"execution_ns": binding_elapsed_ns},
-                        input=result.output,
                     )
                 # Binding runs after successful operator execution. Its failure
                 # rolls back its isolated Context copies and finalizes the node
@@ -1342,7 +1327,6 @@ class WorkflowExecutor:
                         },
                         elapsed_ns=binding_elapsed_ns,
                         timing={"execution_ns": binding_elapsed_ns},
-                        input=result.output,
                     )
                 invocation.mark_node_completed(node_execution.id, result.output)
                 session.mark_context_updated()
@@ -1392,6 +1376,12 @@ class WorkflowExecutor:
                     if node_execution.error is not None
                     else None
                 ),
+                "operator_summary": node_execution.operator_summary.to_record(),
+                "parallel_summary": (
+                    node_execution.parallel_summary.to_record()
+                    if node_execution.parallel_summary is not None
+                    else None
+                ),
             },
             elapsed_ns=(
                 max(
@@ -1431,8 +1421,8 @@ class WorkflowExecutor:
         if not mappings:
             return
         operator_call_id = (
-            node_execution.operator_executions[-1].id
-            if node_execution.operator_executions
+            node_execution.last_operator_call_id
+            if node_execution.parallel_summary is None
             else None
         )
         specs: list[UserEventSpec] = []
@@ -1557,82 +1547,47 @@ class WorkflowExecutor:
                 workflow_path=workflow_ir.nodes[
                     llm_execution.node_id
                 ].workflow_path,
-                operator_call_id=(
-                    llm_execution.operator_executions[-1].id
-                    if llm_execution.operator_executions
-                    else None
-                ),
+                operator_call_id=llm_execution.last_operator_call_id,
             ),
         )
 
-    def _record_abandoned_user_events(
+    async def _record_abandoned_progress(
         self,
+        session: Session,
         invocation: Invocation,
         messages: list[NodeExecutionProgress | NodeExecutionResult],
     ) -> None:
         for message in messages:
-            if (
-                isinstance(message, NodeExecutionProgress)
-                and message.kind == "user_event"
-                and message.user_event_specs
-            ):
-                self._record_user_event_specs(
-                    invocation,
-                    message.user_event_specs,
-                )
+            if not isinstance(message, NodeExecutionProgress):
+                continue
+            if message.kind == "user_event" and message.user_event_specs:
+                self._record_user_event_specs(invocation, message.user_event_specs)
+                continue
+            if message.kind != "operator_call":
+                continue
+            call = message.operator_call
+            node_execution = invocation.get_node_execution(
+                message.node_execution_id
+            )
+            if call is None or node_execution is None:
+                continue
+            node_execution.operator_summary.record(call)
+            node_execution.last_operator_call_id = call.id
+            await self._record_operator_call(
+                session,
+                invocation,
+                node_execution,
+                call,
+            )
 
     async def _record_operator_call(
         self,
         session: Session,
         invocation: Invocation,
         node_execution: NodeExecution,
-        operator_execution: DirectOperatorExecution | ParallelOperatorExecution,
-        *,
-        logical_elapsed_ns: int,
+        operator_call: OperatorCall,
     ) -> None:
-        if isinstance(operator_execution, DirectOperatorExecution):
-            usage = operator_execution.resource_usage
-            detail = {
-                "node_id": node_execution.node_id,
-                "node_execution_id": str(node_execution.id),
-                "operator_call_id": str(operator_execution.id),
-                "operator_id": operator_execution.operator_id,
-                "reason": operator_execution.reason,
-                "state": operator_execution.state,
-                "streaming": operator_execution.streaming,
-                "stream_chunk_count": operator_execution.stream_chunk_count,
-                "error": (
-                    operator_execution.error.to_record()
-                    if operator_execution.error is not None
-                    else None
-                ),
-            }
-            await self._record_event(
-                session,
-                invocation,
-                "operator_call.completed",
-                node_execution_ids=(node_execution.id,),
-                detail=detail,
-                elapsed_ns=usage.duration_ns,
-                timing={
-                    key: value
-                    for key, value in {
-                        "execution_ns": usage.execution_ns,
-                        "thread_pool_queue_ns": usage.thread_pool_queue_ns,
-                        "stream_consumption_ns": (
-                            usage.stream_consumption_ns
-                        ),
-                        "stream_reduction_ns": usage.stream_reduction_ns,
-                    }.items()
-                    if value
-                },
-                input=operator_execution.input,
-                output=operator_execution.output,
-                occurred_at_ms=operator_execution.ended_at_ms,
-            )
-            return
-
-        summary = operator_execution.summary
+        usage = operator_call.resource_usage
         await self._record_event(
             session,
             invocation,
@@ -1641,30 +1596,39 @@ class WorkflowExecutor:
             detail={
                 "node_id": node_execution.node_id,
                 "node_execution_id": str(node_execution.id),
-                "operator_call_id": str(operator_execution.id),
-                "kind": operator_execution.kind,
-                "operator_ids": list(operator_execution.operator_ids),
-                "state": operator_execution.state,
-                "summary": summary.to_record(),
+                "operator_call_id": str(operator_call.id),
+                "kind": operator_call.kind,
+                "operator_id": operator_call.operator_id,
+                "call_no": operator_call.sequence,
+                "unit_index": operator_call.unit_index,
+                "unit_attempt_no": operator_call.unit_attempt_no,
+                "reason": operator_call.reason,
+                "state": operator_call.state,
+                "started_at_ms": operator_call.started_at_ms,
+                "streaming": operator_call.streaming,
+                "stream_chunk_count": operator_call.stream_chunk_count,
                 "error": (
-                    operator_execution.error.to_record()
-                    if operator_execution.error is not None
+                    operator_call.error.to_record()
+                    if operator_call.error is not None
                     else None
                 ),
             },
-            elapsed_ns=logical_elapsed_ns,
+            elapsed_ns=usage.duration_ns,
             timing={
                 key: value
                 for key, value in {
-                    "execution_ns": summary.total_duration_ns,
+                    "execution_ns": usage.execution_ns,
+                    "thread_pool_queue_ns": usage.thread_pool_queue_ns,
                     "stream_consumption_ns": (
-                        summary.stream_consumption_ns
+                        usage.stream_consumption_ns
                     ),
-                    "stream_reduction_ns": summary.stream_reduction_ns,
+                    "stream_reduction_ns": usage.stream_reduction_ns,
                 }.items()
                 if value
             },
-            occurred_at_ms=operator_execution.ended_at_ms,
+            input=operator_call.input,
+            output=operator_call.output,
+            occurred_at_ms=operator_call.ended_at_ms,
         )
 
     async def _build_node_input(
@@ -1960,11 +1924,15 @@ class WorkflowExecutor:
             for execution in invocation.node_executions
             if execution.state in {"created", "ready", "running", "waiting"}
         )
-        invocation.cancel_active_node_executions(error)
         abandoned_messages = await self.node_executor.abandon(
             invocation.execution_mailbox
         )
-        self._record_abandoned_user_events(invocation, abandoned_messages)
+        await self._record_abandoned_progress(
+            session,
+            invocation,
+            abandoned_messages,
+        )
+        invocation.cancel_active_node_executions(error)
         await self._record_terminal_node_events(
             session=session,
             invocation=invocation,
@@ -1985,15 +1953,16 @@ class WorkflowExecutor:
             for execution in invocation.node_executions
             if execution.state in {"created", "ready", "running", "waiting"}
         )
-        invocation.interrupt_active_node_executions(error)
         if abandon_workers:
             abandoned_messages = await self.node_executor.abandon(
                 invocation.execution_mailbox
             )
-            self._record_abandoned_user_events(
+            await self._record_abandoned_progress(
+                session,
                 invocation,
                 abandoned_messages,
             )
+        invocation.interrupt_active_node_executions(error)
         await self._record_terminal_node_events(
             session=session,
             invocation=invocation,
@@ -2052,7 +2021,7 @@ class WorkflowExecutor:
                 message="Operator attempt limit exceeded.",
                 detail={
                     "scope": "invocation",
-                    "resource": "operator_executions",
+                    "resource": "operator_attempts",
                     "node_id": node_ir.id,
                     "limit": limit,
                     "actual": actual + 1,

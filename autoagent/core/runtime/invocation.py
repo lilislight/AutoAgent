@@ -247,13 +247,12 @@ class Invocation:
         return sum(1 for execution in self.node_executions if execution.node_id == node_id)
 
     def count_operator_attempts(self, node_id: str) -> int:
-        """Count actual handler attempts, including summarized parallel work."""
+        """Count actual handler attempts from bounded Node summaries."""
 
         return sum(
-            operator_execution.attempt_count
+            execution.operator_summary.attempt_count
             for execution in self.node_executions
             if execution.node_id == node_id
-            for operator_execution in execution.operator_executions
         )
 
     def sum_node_runtime_ms(self, node_id: str) -> int:

@@ -91,6 +91,9 @@ with the smallest evidence-driven step.
   values or historical state operations.
 - Full mode supports detailed phases and state reconstruction at recorded Event
   boundaries.
+- Map and Replication Calls are actual paged attempts. Filter them by
+  NodeExecution when investigating one Node; do not infer individual Calls
+  from the bounded Node summary or the UI's 50-row Timeline projection.
 - Rerun starts at the entry Node; it is not Replay or Fork and does not infer a
   root cause or business verdict.
 - Do not mutate the original Invocation or database while investigating it.

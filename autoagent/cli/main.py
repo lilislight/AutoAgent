@@ -208,6 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
     invocation_query.add_argument("--path")
     invocation_query.add_argument("--include-stream-deltas", action="store_true")
     invocation_query.add_argument(
+        "--node-execution-id",
+        help="Restrict operator-calls to one NodeExecution.",
+    )
+    invocation_query.add_argument(
         "--source",
         choices=("auto", "server", "database"),
         default="auto",

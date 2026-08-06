@@ -181,7 +181,7 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             tuple(item["reason"] for item in operator_calls.items),
         )
 
-    async def test_map_is_one_logical_operator_call_with_parallel_summary(
+    async def test_map_exposes_each_actual_operator_call(
         self,
     ) -> None:
         workflow = Workflow(id="debug_map_report")
@@ -211,14 +211,21 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
             service = DebugQueryService(app.runtime_store, source="server")
             report = await service.report(invocation.id)
             calls = await service.operator_calls(invocation.id)
+            mapped_execution = invocation.latest_node_execution("mapped")
+            mapped_calls = await service.operator_calls(
+                invocation.id,
+                node_execution_id=mapped_execution.id,
+            )
         finally:
             await app.aclose()
 
-        mapped = next(item for item in calls.items if item["kind"] == "map")
+        mapped = [item for item in calls.items if item["kind"] == "map"]
         self.assertEqual("completed", report.state)
-        self.assertEqual(2, report.operator_call_count)
-        self.assertEqual(3, mapped["call_count"])
-        self.assertEqual(3, mapped["attempt_count"])
+        self.assertEqual(4, report.operator_call_count)
+        self.assertEqual(3, len(mapped))
+        self.assertEqual([0, 1, 2], [item["unit_index"] for item in mapped])
+        self.assertTrue(all(item["call_count"] == 1 for item in mapped))
+        self.assertEqual(3, len(mapped_calls.items))
 
     async def test_loop_report_preserves_each_node_execution_occurrence(
         self,
@@ -459,6 +466,12 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 nodes = await service.node_executions(invocation_id)
                 edges = await service.edge_evaluations(invocation_id)
                 calls = await service.operator_calls(invocation_id)
+                filtered_calls = await service.operator_calls(
+                    invocation_id,
+                    node_execution_id=UUID(
+                        nodes.items[0]["node_execution_id"]
+                    ),
+                )
                 node = await service.node_execution(
                     invocation_id,
                     UUID(nodes.items[0]["node_execution_id"]),
@@ -485,6 +498,11 @@ class DebugQueryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(nodes.items))
         self.assertEqual(1, len(edges.items))
         self.assertEqual(2, len(calls.items))
+        self.assertEqual(1, len(filtered_calls.items))
+        self.assertEqual(
+            nodes.items[0]["node_execution_id"],
+            filtered_calls.items[0]["node_execution_id"],
+        )
         self.assertEqual("completed", node["state"])
         self.assertTrue(edge["selected"])
         self.assertEqual("completed", call["state"])

@@ -125,6 +125,9 @@ Evaluator 基础设施错误返回退出码 2。
 `invocation query` 按需分页读取 Node、Edge、Operator Call、RuntimeEvent、
 UserEvent 或 Full Runtime State 证据。两个命令都会优先连接匹配的运行中 Server，
 也可以只读查询显式配置的持久化数据库，不会恢复或重新执行 Workflow。
+Map/Replication 的每一次真实调用都是独立 Operator Call；可以使用
+`operator-calls --node-execution-id <execution-id>` 只分页读取一个 NodeExecution
+的调用。Full mode 的 Call 详情包含该次调用唯一保存的 input/output。
 `invocation rerun` 使用原始 input、入口 Node 和 Genesis Session Context 创建与源
 Invocation 相同 Standard 或 Full 模式的隔离候选；Minimal 不支持 Rerun。
 `invocation compare` 只接受两个 Standard 或两个 Full Invocation，按 Node、Loop 和

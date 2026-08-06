@@ -1174,9 +1174,11 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                     "node_execution_id": str(execution_id),
                     "operator_call_id": "mapped",
                     "kind": "map",
-                    "operator_ids": ["mapped"],
+                    "operator_id": "mapped",
+                    "call_no": 3,
+                    "unit_index": 0,
+                    "unit_attempt_no": 1,
                     "state": "completed",
-                    "summary": {"call_count": 8},
                 },
             ),
         )
@@ -1215,6 +1217,17 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                     "node_id": "worker",
                     "node_execution_id": str(execution_id),
                     "state": "cancelled",
+                    "operator_summary": {
+                        "attempt_count": 3,
+                        "success_count": 2,
+                        "failure_count": 1,
+                        "retry_count": 0,
+                        "fallback_count": 1,
+                        "timeout_count": 1,
+                        "streaming_call_count": 1,
+                        "stream_chunk_count": 7,
+                    },
+                    "parallel_summary": {"kind": "map", "call_count": 8},
                     "error": {
                         "code": "INVOCATION_FAILED_FAST",
                         "message": "Sibling branch failed.",
@@ -1256,6 +1269,62 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(8, projection["nodes"]["worker"]["parallel_call_count"])
         self.assertEqual(7, projection["through_sequence"])
+
+    async def test_projection_bounds_timeline_calls_without_losing_counts(
+        self,
+    ) -> None:
+        invocation_id = uuid4()
+        execution_id = uuid4()
+        projection = TraceProjectionReducer.initial(invocation_id)
+        projection = TraceProjectionReducer.apply(
+            projection,
+            RuntimeEvent(
+                invocation_id=invocation_id,
+                sequence=1,
+                event_type="state_change",
+                event_name="node.running",
+                subject_type="node",
+                subject_id="mapped",
+                occurred_at_ms=1,
+                status="running",
+                payload={
+                    "node_id": "mapped",
+                    "node_execution_id": str(execution_id),
+                },
+            ),
+        )
+        for index in range(60):
+            projection = TraceProjectionReducer.apply(
+                projection,
+                RuntimeEvent(
+                    invocation_id=invocation_id,
+                    sequence=index + 2,
+                    event_type="operator_call",
+                    event_name="operator_call.completed",
+                    subject_type="operator_call",
+                    subject_id=f"call-{index}",
+                    occurred_at_ms=index + 2,
+                    status="completed",
+                    payload={
+                        "node_id": "mapped",
+                        "node_execution_id": str(execution_id),
+                        "operator_call_id": f"call-{index}",
+                        "operator_id": "mapped",
+                        "kind": "map",
+                        "call_no": index + 1,
+                        "unit_index": index,
+                        "unit_attempt_no": 1,
+                        "started_at_ms": index + 1,
+                        "state": "completed",
+                    },
+                ),
+            )
+
+        execution = projection["node_executions"][str(execution_id)]
+        self.assertEqual(60, execution["operator_call_count"])
+        self.assertEqual(50, len(execution["operator_calls"]))
+        self.assertEqual("call-10", execution["operator_calls"][0]["id"])
+        self.assertEqual("call-59", execution["operator_calls"][-1]["id"])
 
     async def test_projection_preserves_executed_loop_node_after_later_skip(
         self,

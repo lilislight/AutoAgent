@@ -122,6 +122,9 @@ merge code, deploy a Candidate, or mutate an active Workflow Revision.
   and stable execution identities without dumping the Event journal.
 - Progressive local queries for one Invocation, NodeExecution, Edge evaluation,
   Operator Call, Event, and reconstructed Full-mode Runtime state.
+- One Operator Call Event per actual attempt, including each Map or Replication
+  unit, with Full-mode input/output and exact start/end timing; Runtime recovery
+  state keeps only bounded Call and parallel summaries.
 - CLI contracts that let a Coding Agent report and inspect an Invocation,
   and validate/run an Eval Suite without importing framework internals.
 - Isolated same-mode Rerun for Standard and Full sources from the original

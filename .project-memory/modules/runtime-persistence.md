@@ -30,6 +30,7 @@ PersistenceCoordinator accepts immutable-by-ownership envelopes for Workflow rev
 - Queue watermarks are byte based: high pressure pauses new admission, low pressure reopens it, and the hard limit degrades persistence rather than blocking already-running execution.
 - Runtime and User Event journals have independent contiguous durability and failure accounting.
 - DatabaseBackend supports the current V1 schema directly; obsolete per-Node and per-Operator tables are not part of the model.
+- Actual Operator Calls are Runtime Event rows, indexed by NodeExecution for paged inspection. Their input and output are not repeated in selector, aggregator-input, or Output Binding phase records.
 - Historical and tracing reads expose type-neutral JSON without importing project model classes.
 - Recovery combines a genesis or compact recovery snapshot with later ordered Runtime Events, then uses the exact registered Workflow revision's contracts to restore executable typed outputs.
 

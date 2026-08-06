@@ -49,7 +49,7 @@ class CapabilitySelectionPolicy(BaseModel):
     allow_fallback: bool = Field(
         default=True,
         description=(
-            "Whether execution may try another operator after an OperatorExecution "
+            "Whether execution may try another operator after an Operator Call "
             "failure. Mapping, binding, condition, and aggregation failures do "
             "not enter operator fallback."
         ),
@@ -98,7 +98,7 @@ class BackoffPolicy(BaseModel):
 
 
 class RetryPolicy(BaseModel):
-    """Retry rule for OperatorExecution failures inside one NodeExecution."""
+    """Retry rule for Operator Call failures inside one NodeExecution."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 

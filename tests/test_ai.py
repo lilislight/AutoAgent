@@ -2164,11 +2164,9 @@ class ReActWorkflowTests(unittest.TestCase):
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(sorted(calls), [2, 4])
         tool_execution = invocation.latest_node_execution("tool_0_double")
-        self.assertEqual(len(tool_execution.operator_executions), 1)
-        self.assertEqual(
-            tool_execution.operator_executions[0].summary.call_count,
-            2,
-        )
+        assert tool_execution.parallel_summary is not None
+        self.assertEqual(tool_execution.parallel_summary.call_count, 2)
+        self.assertEqual(tool_execution.operator_summary.attempt_count, 2)
         events = app.runtime_store.list_user_events(
             invocation_id=invocation.id,
         )

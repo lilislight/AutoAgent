@@ -13,12 +13,11 @@ from autoagent.core.runtime.context import (
 )
 from autoagent.core.runtime.concurrency import RuntimeConcurrencyController
 from autoagent.core.runtime.execution import (
-    DirectOperatorExecution,
+    OperatorCall,
     EdgeEvaluation,
     NodeExecution,
-    OperatorExecution,
+    OperatorCallSummary,
     ParallelExecutionSummary,
-    ParallelOperatorExecution,
     ResourceUsage,
     RuntimeErrorInfo,
 )
@@ -68,11 +67,11 @@ from autoagent.core.runtime.snapshot import (
 from autoagent.core.runtime.status import (
     EdgeEvaluationStateValue,
     EdgeResolutionStateValue,
-    DirectOperatorExecutionReason,
+    OperatorCallReason,
     InvocationStateValue,
     NodeExecutionStateValue,
-    OperatorExecutionStateValue,
-    ParallelOperatorExecutionKind,
+    OperatorCallStateValue,
+    ParallelExecutionKind,
 )
 from autoagent.core.runtime.store import (
     DurableBackend,
@@ -95,8 +94,8 @@ __all__ = [
     "ArtifactPolicy",
     "ConditionContext",
     "ContextSnapshot",
-    "DirectOperatorExecution",
-    "DirectOperatorExecutionReason",
+    "OperatorCall",
+    "OperatorCallReason",
     "EdgeActivation",
     "EdgeEvaluation",
     "EdgeEvaluationStateValue",
@@ -120,11 +119,10 @@ __all__ = [
     "NodeExecutionRequest",
     "NodeExecutionTransition",
     "NodeOutput",
-    "OperatorExecution",
-    "OperatorExecutionStateValue",
+    "OperatorCallSummary",
+    "OperatorCallStateValue",
     "ParallelExecutionSummary",
-    "ParallelOperatorExecution",
-    "ParallelOperatorExecutionKind",
+    "ParallelExecutionKind",
     "PersistenceCoordinator",
     "PersistenceEnvelope",
     "PersistenceError",

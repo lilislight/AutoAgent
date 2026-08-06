@@ -118,6 +118,7 @@ class AutoAgentServerClientTests(unittest.IsolatedAsyncioTestCase):
                 )
                 calls = await client.debug_operator_calls(
                     str(submitted["invocation_id"]),
+                    node_execution_id=nodes["items"][0]["node_execution_id"],
                     limit=20,
                 )
                 call = await client.debug_operator_call(

@@ -26,7 +26,7 @@ from autoagent.core.workflow import (
     TimeoutPolicy,
     Workflow,
 )
-from tests.helpers import started_app
+from tests.helpers import operator_call_events, started_app
 
 
 def registered_revision_id(app: AutoAgentApp, workflow: Workflow) -> str:
@@ -443,7 +443,6 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         app = started_app()
         invocation = app.invoke(workflow, event_mode="full")
         execution = invocation.latest_node_execution("stream")
-        call = execution.operator_executions[0]
         operator_event = next(
             event
             for event in app.runtime_store.runtime_events[invocation.id]
@@ -452,10 +451,8 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": "hello world"})
-        self.assertTrue(call.streaming)
-        self.assertEqual(call.stream_chunk_count, 3)
-        self.assertGreater(call.resource_usage.stream_consumption_ns, 0)
-        self.assertGreater(call.resource_usage.stream_reduction_ns, 0)
+        self.assertTrue(operator_event.payload["streaming"])
+        self.assertEqual(operator_event.payload["stream_chunk_count"], 3)
         self.assertEqual(operator_event.output, "hello world")
         self.assertEqual(operator_event.payload["stream_chunk_count"], 3)
         self.assertNotIn("chunks", operator_event.payload)
@@ -475,18 +472,17 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             workflow = Workflow(id="async_stream")
             workflow.add_node(stream, node_id="stream")
 
-            invocation = await started_app().ainvoke(workflow)
-            call = invocation.latest_node_execution(
-                "stream"
-            ).operator_executions[0]
+            app = started_app()
+            invocation = await app.ainvoke(workflow)
+            call = operator_call_events(app, invocation)[0]
 
             self.assertEqual(invocation.state, "completed")
             self.assertEqual(
                 invocation.result,
                 {"output": "async stream"},
             )
-            self.assertTrue(call.streaming)
-            self.assertEqual(call.stream_chunk_count, 2)
+            self.assertTrue(call.payload["streaming"])
+            self.assertEqual(call.payload["stream_chunk_count"], 2)
 
         asyncio.run(scenario())
 
@@ -547,22 +543,21 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             policy=NodePolicy(retry=RetryPolicy(max_attempts=2)),
         )
 
-        invocation = started_app().invoke(workflow)
-        attempts = invocation.latest_node_execution(
-            "stream"
-        ).operator_executions
+        app = started_app()
+        invocation = app.invoke(workflow)
+        attempts = operator_call_events(app, invocation)
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(invocation.result, {"output": "attempt-2"})
         self.assertEqual(calls, 2)
-        self.assertEqual([call.reason for call in attempts], ["normal", "retry"])
+        self.assertEqual([call.payload["reason"] for call in attempts], ["normal", "retry"])
         self.assertEqual(
-            attempts[0].error.code,
+            attempts[0].payload["error"]["code"],
             "STREAM_CONSUMPTION_FAILED",
         )
-        self.assertTrue(attempts[0].streaming)
-        self.assertEqual(attempts[0].stream_chunk_count, 1)
-        self.assertTrue(attempts[1].streaming)
+        self.assertTrue(attempts[0].payload["streaming"])
+        self.assertEqual(attempts[0].payload["stream_chunk_count"], 1)
+        self.assertTrue(attempts[1].payload["streaming"])
 
     def test_stream_failure_uses_fallback_operator(self) -> None:
         app = started_app()
@@ -589,9 +584,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         )
 
         invocation = app.invoke(workflow)
-        attempts = invocation.latest_node_execution(
-            "stream"
-        ).operator_executions
+        attempts = operator_call_events(app, invocation)
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(
@@ -599,14 +592,14 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             {"output": "fallback result"},
         )
         self.assertEqual(
-            [attempt.reason for attempt in attempts],
+            [attempt.payload["reason"] for attempt in attempts],
             ["normal", "fallback"],
         )
         self.assertEqual(
-            attempts[0].error.code,
+            attempts[0].payload["error"]["code"],
             "STREAM_CONSUMPTION_FAILED",
         )
-        self.assertTrue(attempts[1].streaming)
+        self.assertTrue(attempts[1].payload["streaming"])
 
     def test_async_stream_timeout_closes_the_source(self) -> None:
         async def scenario() -> None:
@@ -629,16 +622,15 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
                 policy=NodePolicy(timeout=TimeoutPolicy(timeout_ms=5)),
             )
 
-            invocation = await started_app().ainvoke(workflow)
+            app = started_app()
+            invocation = await app.ainvoke(workflow)
 
             self.assertEqual(invocation.state, "failed")
             self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
             self.assertTrue(closed.is_set())
-            attempt = invocation.latest_node_execution(
-                "stream"
-            ).operator_executions[0]
-            self.assertTrue(attempt.streaming)
-            self.assertEqual(attempt.stream_chunk_count, 1)
+            attempt = operator_call_events(app, invocation)[0]
+            self.assertTrue(attempt.payload["streaming"])
+            self.assertEqual(attempt.payload["stream_chunk_count"], 1)
 
         asyncio.run(scenario())
 
@@ -715,20 +707,23 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
                 ),
             )
 
-            invocation = await started_app().ainvoke(workflow)
-            calls = invocation.latest_node_execution("slow").operator_executions
+            app = started_app()
+            invocation = await app.ainvoke(workflow)
+            calls = operator_call_events(app, invocation)
 
             self.assertEqual(invocation.state, "failed")
             self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
             self.assertEqual(started, 2)
             self.assertEqual(cancelled, 2)
-            self.assertEqual([call.reason for call in calls], ["normal", "retry"])
+            self.assertEqual([call.payload["reason"] for call in calls], ["normal", "retry"])
             self.assertTrue(
-                all(call.error.code == "OPERATOR_TIMEOUT" for call in calls)
+                all(call.payload["error"]["code"] == "OPERATOR_TIMEOUT" for call in calls)
             )
             self.assertTrue(
                 all(
-                    call.error.detail["execution_may_continue"] is False
+                    call.payload["error"]["detail"][
+                        "execution_may_continue"
+                    ] is False
                     for call in calls
                 )
             )
@@ -772,8 +767,7 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(stored.state, "failed")
         self.assertEqual(execution.state, "failed")
         self.assertIsNone(execution.output)
-        self.assertEqual(len(execution.operator_executions), 1)
-        self.assertIsNone(execution.operator_executions[0].output)
+        self.assertEqual(execution.operator_summary.attempt_count, 1)
         self.assertFalse(stored.execution_mailbox.has_pending())
 
     def test_sync_operator_late_result_after_cancellation_is_discarded(self) -> None:
@@ -814,7 +808,10 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             self.assertEqual(stored.state, "cancelled")
             self.assertEqual(execution.state, "cancelled")
             self.assertIsNone(execution.output)
-            self.assertEqual(execution.operator_executions, [])
+            self.assertEqual(execution.operator_summary.attempt_count, 1)
+            calls = operator_call_events(app, stored, node_id="slow")
+            self.assertEqual(1, len(calls))
+            self.assertEqual("interrupted", calls[0].payload["state"])
             self.assertFalse(stored.execution_mailbox.has_pending())
 
         asyncio.run(scenario())
@@ -837,15 +834,15 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
 
         invocation = started_app().invoke(workflow)
         execution = invocation.latest_node_execution("stream")
-        parallel_call = execution.operator_executions[0]
-        summary = parallel_call.summary
+        summary = execution.parallel_summary
+        assert summary is not None
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(
             invocation.result,
             {"output": ["ab", "ab", "ab"]},
         )
-        self.assertEqual(parallel_call.kind, "replication")
+        self.assertEqual(summary.kind, "replication")
         self.assertEqual(summary.streaming_call_count, 3)
         self.assertEqual(summary.stream_chunk_count, 6)
         self.assertGreater(summary.stream_consumption_ns, 0)
@@ -885,15 +882,15 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
 
         invocation = started_app().invoke(workflow)
         execution = invocation.latest_node_execution("stream")
-        parallel_call = execution.operator_executions[0]
-        summary = parallel_call.summary
+        summary = execution.parallel_summary
+        assert summary is not None
 
         self.assertEqual(invocation.state, "completed")
         self.assertEqual(
             invocation.result,
             {"output": ["1!", "2!", "3!"]},
         )
-        self.assertEqual(parallel_call.kind, "map")
+        self.assertEqual(summary.kind, "map")
         self.assertEqual(summary.streaming_call_count, 3)
         self.assertEqual(summary.stream_chunk_count, 6)
         self.assertLessEqual(summary.peak_parallelism, 2)
@@ -988,17 +985,19 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
         )
 
         invocation = app.invoke(workflow)
-        calls = invocation.latest_node_execution("sample").operator_executions
+        calls = operator_call_events(app, invocation, node_id="sample")
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "OUTPUT_AGGREGATION_FAILED")
         self.assertEqual(primary_calls, 2)
         self.assertEqual(fallback_calls, 0)
-        self.assertEqual(1, len(calls))
-        self.assertEqual("replication", calls[0].kind)
-        self.assertEqual(("primary",), calls[0].operator_ids)
-        self.assertEqual(2, calls[0].summary.call_count)
-        self.assertEqual(2, calls[0].summary.attempt_count)
+        self.assertEqual(2, len(calls))
+        self.assertEqual({"replication"}, {call.payload["kind"] for call in calls})
+        self.assertEqual({"primary"}, {call.payload["operator_id"] for call in calls})
+        summary = invocation.latest_node_execution("sample").parallel_summary
+        assert summary is not None
+        self.assertEqual(2, summary.call_count)
+        self.assertEqual(2, summary.attempt_count)
 
 
 if __name__ == "__main__":

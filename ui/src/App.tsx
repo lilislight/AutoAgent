@@ -1830,7 +1830,6 @@ function createDraftProjection(graph: WorkflowGraphView): RuntimeProjection {
       ]),
     ),
     edges: {},
-    operator_states: {},
   };
 }
 

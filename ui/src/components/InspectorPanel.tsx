@@ -35,6 +35,7 @@ import type {
 } from "../types";
 import { useTraceUi } from "../state";
 import type { InspectorTab } from "../state";
+import { runtimeEventBelongsToNodeExecution } from "../inspection";
 
 interface InspectorPanelProps {
   graph: WorkflowGraphView;
@@ -71,6 +72,26 @@ export function InspectorPanel({
     queryKey: ["event-detail", invocation.id, selectedEventSequence],
     queryFn: () => getEventDetail(invocation.id, selectedEventSequence!),
     enabled: selectedEventSequence !== null,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+  });
+  const selectedOperatorSequence = selection?.type === "operator_call"
+    ? (
+        Object.values(projection.node_executions)
+          .flatMap((execution) => execution.operator_calls ?? [])
+          .find((call) => call.id === selection.id)?.event_sequence ??
+        events.find(
+          (event) =>
+            String(event.payload.operator_call_id ?? event.subject_id) ===
+            selection.id
+        )?.sequence ??
+        null
+      )
+    : null;
+  const operatorDetailQuery = useQuery({
+    queryKey: ["event-detail", invocation.id, selectedOperatorSequence],
+    queryFn: () => getEventDetail(invocation.id, selectedOperatorSequence!),
+    enabled: selectedOperatorSequence !== null,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
   });
@@ -159,14 +180,16 @@ export function InspectorPanel({
     () => inspectSelection(
       graph,
       invocation,
-      eventDetailQuery.data
-        ? events.map((event) => event.id === eventDetailQuery.data.id ? eventDetailQuery.data : event)
-        : events,
+      mergeDetailedEvents(
+        events,
+        eventDetailQuery.data,
+        operatorDetailQuery.data,
+      ),
       projection,
       selection,
       cursorSequence,
     ),
-    [cursorSequence, eventDetailQuery.data, events, graph, invocation, projection, selection],
+    [cursorSequence, eventDetailQuery.data, events, graph, invocation, operatorDetailQuery.data, projection, selection],
   );
   const currentExecution =
     inspected.executions.find((value) => value.id === selectedExecutionId) ??
@@ -370,6 +393,14 @@ function inspectorTabs(
       { id: "definition", label: "Definition", icon: <FileJson size={14} /> },
     ];
   }
+  if (selection?.type === "operator_call") {
+    return [
+      { id: "overview", label: "Summary", icon: <Activity size={14} /> },
+      { id: "data", label: "Input / output", icon: <Database size={14} /> },
+      { id: "trace", label: "Event", icon: <Clock3 size={14} /> },
+      ...stateTab,
+    ];
+  }
   return [
     { id: "overview", label: "Summary", icon: <Activity size={14} /> },
     { id: "trace", label: "Trace", icon: <Clock3 size={14} /> },
@@ -395,6 +426,18 @@ function inspectorTabDescription(
       return "The immutable Edge definition and routing condition used by this Invocation.";
     }
     return "The latest evaluation at the current replay cursor.";
+  }
+  if (selection?.type === "operator_call") {
+    if (tab === "data") {
+      return "The input and output recorded once by this Call's canonical Runtime Event.";
+    }
+    if (tab === "trace") {
+      return "The immutable Runtime Event that completed or interrupted this actual Operator attempt.";
+    }
+    if (tab === "context") {
+      return "Runtime state reconstructed immediately after this Call Event.";
+    }
+    return "Identity, state, timing, and failure metadata for this actual Operator attempt.";
   }
   if (tab === "data") {
     return selection?.type === "invocation"
@@ -506,6 +549,22 @@ function RuntimeView({
           <div className="inspector-capability-empty">
             This mode retains Invocation-level runtime data without Node or Edge history.
           </div>
+        )}
+      </div>
+    );
+  }
+  if (inspected.kind === "Operator call") {
+    const { error, resource_usage: resourceUsage, ...summary } = asRecord(
+      inspected.definition,
+    );
+    return (
+      <div className="runtime-view">
+        <Overview values={summary} />
+        {error !== null && error !== undefined && (
+          <FieldBlock label="Call error" value={error} />
+        )}
+        {resourceUsage !== null && resourceUsage !== undefined && (
+          <FieldBlock label="Resource usage" value={resourceUsage} />
         )}
       </div>
     );
@@ -635,15 +694,34 @@ function DataView({
     detailQueries.flatMap((query) => query.data ? [[query.data.id, query.data] as const] : []),
   );
   const detailedPhases = phases.map((event) => detailedById.get(event.id) ?? event);
-  const mappedInput = detailedPhases.find((event) => event.event_name === "input_mapping.completed");
   const aggregation = detailedPhases.find((event) => event.event_name === "aggregation.completed");
   const operatorCalls = detailedPhases.filter(
     (event) => event.event_name === "operator_call.completed",
   );
   const lastOperatorCall = operatorCalls.at(-1);
-  const binding = [...detailedPhases].reverse().find(
-    (event) => event.event_name === "output_binding.completed",
-  );
+  if (inspected.kind === "Operator call") {
+    return (
+      <div className="inspector-data-view">
+        {detailQueries.some((query) => query.isLoading) && (
+          <div className="inspector-empty">Loading recorded Call values…</div>
+        )}
+        {detailQueries.some((query) => query.error) && (
+          <div className="inspector-capability-empty">
+            {detailQueries.find((query) => query.error)?.error?.message ??
+              "Recorded Call values could not be loaded."}
+          </div>
+        )}
+        <FieldBlock
+          label="Call input"
+          value={lastOperatorCall?.input ?? inspected.input}
+        />
+        <FieldBlock
+          label="Call output"
+          value={lastOperatorCall?.output ?? inspected.output}
+        />
+      </div>
+    );
+  }
   return (
     <div className="inspector-data-view">
       {detailQueries.some((query) => query.isLoading) && (
@@ -655,19 +733,21 @@ function DataView({
             "Recorded phase values could not be loaded."}
         </div>
       )}
-      <FieldBlock label="Mapped input" value={mappedInput?.output ?? execution?.input ?? inspected.input} />
+      <FieldBlock label="Mapped input" value={operatorCalls[0]?.input ?? execution?.input ?? inspected.input} />
       <FieldBlock
         label="Operator calls"
         value={operatorCalls.map((event) => ({
           id: event.payload.operator_call_id ?? event.id,
           operator_id: event.payload.operator_id ?? event.subject_id,
           kind: event.payload.kind ?? "direct",
+          call_no: event.payload.call_no,
+          unit_index: event.payload.unit_index,
+          unit_attempt_no: event.payload.unit_attempt_no,
           state: event.payload.state ?? event.status,
           input: event.input,
           output: event.output,
           elapsed_ns: event.elapsed_ns,
           timing: event.timing,
-          summary: event.payload.summary,
           streaming: event.payload.streaming,
           stream_chunk_count: event.payload.stream_chunk_count,
         }))}
@@ -676,7 +756,6 @@ function DataView({
       <FieldBlock
         label="Node output"
         value={
-          binding?.output ??
           aggregation?.output ??
           lastOperatorCall?.output ??
           execution?.output ??
@@ -806,8 +885,7 @@ function phaseEvents(
 ): RuntimeEvent[] {
   if (!execution) return events;
   return events.filter((event) =>
-    event.payload.node_execution_id === execution.id ||
-    event.subject_id === execution.id,
+    runtimeEventBelongsToNodeExecution(event, execution.id),
   );
 }
 
@@ -910,6 +988,51 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
+function mergeDetailedEvents(
+  events: RuntimeEvent[],
+  ...details: Array<RuntimeEvent | undefined>
+): RuntimeEvent[] {
+  const values = new Map(events.map((event) => [event.id, event]));
+  for (const detail of details) {
+    if (detail) values.set(detail.id, detail);
+  }
+  return [...values.values()].sort((left, right) => left.sequence - right.sequence);
+}
+
+function operatorCallFromEvent(event: RuntimeEvent): OperatorCallView {
+  return {
+    id: String(event.payload.operator_call_id ?? event.id),
+    operator_id: String(event.payload.operator_id ?? "operator"),
+    call_no: Number(event.payload.call_no ?? 0),
+    kind: String(event.payload.kind ?? "direct"),
+    reason: event.payload.reason == null ? null : String(event.payload.reason),
+    unit_index: event.payload.unit_index == null
+      ? null
+      : Number(event.payload.unit_index),
+    unit_attempt_no: Number(event.payload.unit_attempt_no ?? 1),
+    state: String(event.payload.state ?? event.status ?? "completed"),
+    input: event.input,
+    output: event.output,
+    error:
+      event.payload.error && typeof event.payload.error === "object"
+        ? event.payload.error as Record<string, unknown>
+        : null,
+    resource_usage: {
+      ...event.timing,
+      elapsed_ns: event.elapsed_ns,
+      reason: event.payload.reason,
+    },
+    started_at_ms: event.payload.started_at_ms == null
+      ? null
+      : Number(event.payload.started_at_ms),
+    ended_at_ms: event.occurred_at_ms,
+    created_at_ms: event.occurred_at_ms,
+    updated_at_ms: event.occurred_at_ms,
+    streaming: Boolean(event.payload.streaming),
+    stream_chunk_count: Number(event.payload.stream_chunk_count ?? 0),
+  };
+}
+
 function operatorCallFromValue(value: unknown): OperatorCallView | null {
   const record = asRecord(value);
   if (
@@ -921,6 +1044,29 @@ function operatorCallFromValue(value: unknown): OperatorCallView | null {
     return record as unknown as OperatorCallView;
   }
   return null;
+}
+
+function operatorCallDefinition(call: OperatorCallView): Record<string, unknown> {
+  return {
+    id: call.id,
+    operator_id: call.operator_id,
+    call_no: call.call_no,
+    kind: call.kind,
+    reason: call.reason,
+    unit_index: call.unit_index,
+    unit_attempt_no: call.unit_attempt_no,
+    state: call.state,
+    error: call.error,
+    resource_usage: call.resource_usage,
+    started_at: call.started_at_ms === null
+      ? null
+      : formatTimestamp(call.started_at_ms),
+    ended_at: call.ended_at_ms === null
+      ? null
+      : formatTimestamp(call.ended_at_ms),
+    streaming: call.streaming ?? false,
+    stream_chunk_count: call.stream_chunk_count ?? 0,
+  };
 }
 
 function failureSummaryItems({
@@ -956,8 +1102,8 @@ function failureSummaryItems({
         detail: {
           operator_id: call.operator_id,
           kind: call.kind,
-          item_index: call.item_index,
-          replica_index: call.replica_index,
+          unit_index: call.unit_index,
+          unit_attempt_no: call.unit_attempt_no,
           error: call.error,
           resource_usage: call.resource_usage,
         },
@@ -1264,16 +1410,17 @@ function inspectSelection(
   const projectedExecutions = Object.values(projection.node_executions).map(
     (execution): NodeExecutionView => {
       const related = visibleEvents.filter(
-        (event) =>
-          event.payload.node_execution_id === execution.execution_id ||
-          event.subject_id === execution.execution_id,
+        (event) => runtimeEventBelongsToNodeExecution(
+          event,
+          execution.execution_id,
+        ),
       );
       const mappedInput = related.find(
-        (event) => event.event_name === "input_mapping.completed",
-      )?.output;
+        (event) => event.event_name === "operator_call.completed",
+      )?.input;
       const boundOutput = [...related].reverse().find(
         (event) =>
-          event.event_name === "output_binding.completed" ||
+          event.event_name === "aggregation.completed" ||
           event.event_name === "operator_call.completed",
       );
       return ({
@@ -1304,40 +1451,7 @@ function inspectSelection(
             event.event_name === "operator_call.completed" &&
             event.payload.node_execution_id === execution.execution_id,
         )
-        .map((event, index): OperatorCallView => ({
-          id: String(event.payload.operator_call_id ?? event.id),
-          operator_id: String(
-            event.payload.operator_id ??
-            (event.payload.operator_ids as unknown[] | undefined)?.join(", ") ??
-            "parallel",
-          ),
-          call_no: index + 1,
-          kind: String(event.payload.kind ?? "direct"),
-          reason: event.payload.reason == null
-            ? null
-            : String(event.payload.reason),
-          item_index: null,
-          replica_index: null,
-          state: String(event.payload.state ?? event.status ?? "completed"),
-          input: event.input,
-          output: event.output,
-          error:
-            event.payload.error && typeof event.payload.error === "object"
-              ? event.payload.error as Record<string, unknown>
-              : null,
-          resource_usage: {
-            ...event.timing,
-            elapsed_ns: event.elapsed_ns,
-            summary: event.payload.summary,
-          },
-          started_at_ms:
-            event.elapsed_ns == null
-              ? null
-              : event.occurred_at_ms - event.elapsed_ns / 1_000_000,
-          ended_at_ms: event.occurred_at_ms,
-          created_at_ms: event.occurred_at_ms,
-          updated_at_ms: event.occurred_at_ms,
-        })),
+        .map(operatorCallFromEvent),
       resource_usage: execution.timing ?? {},
       started_at_ms: execution.started_at_ms ?? null,
       ended_at_ms: execution.ended_at_ms ?? null,
@@ -1510,23 +1624,30 @@ function inspectSelection(
       policies: execution?.resource_usage ? { resource_usage: execution.resource_usage } : {},
       executions: execution ? [execution] : [],
       edgeEvaluations: [],
-      events: allEvents.filter((event) => event.subject_id === selection.id),
+      events: visibleEvents.filter((event) =>
+        runtimeEventBelongsToNodeExecution(event, selection.id),
+      ),
     };
   }
-  const call = invocation.node_executions
+  const callEvent = allEvents.find(
+    (event) =>
+      event.event_name === "operator_call.completed" &&
+      String(event.payload.operator_call_id ?? event.subject_id) === selection.id,
+  );
+  const call = (callEvent ? operatorCallFromEvent(callEvent) : null) ?? invocation.node_executions
     .flatMap((execution) => execution.operator_calls)
     .find((value) => value.id === selection.id);
   return {
     kind: "Operator call",
     title: call?.operator_id || selection.id.slice(0, 8),
-    definition: call ?? { id: selection.id },
+    definition: call ? operatorCallDefinition(call) : { id: selection.id },
     input: call?.input,
     output: call?.output,
     contracts: {},
     policies: call?.resource_usage ? { resource_usage: call.resource_usage } : {},
     executions: [],
     edgeEvaluations: [],
-    events: allEvents.filter((event) => event.subject_id === selection.id),
+    events: callEvent ? [callEvent] : [],
   };
 }
 

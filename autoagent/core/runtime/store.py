@@ -161,6 +161,7 @@ class DurableBackend(Protocol):
         before_sequence: int | None,
         limit: int,
         event_names: tuple[str, ...] | None = None,
+        node_execution_id: UUID | None = None,
     ) -> tuple[RuntimeEvent, ...]: ...
 
     async def alist_user_events(
@@ -1118,6 +1119,7 @@ class RuntimeStore:
         before_sequence: int | None = None,
         limit: int = 1000,
         event_names: tuple[str, ...] | None = None,
+        node_execution_id: UUID | None = None,
     ) -> tuple[RuntimeEvent, ...]:
         """Read Events for observation without restoring user runtime types."""
 
@@ -1136,6 +1138,11 @@ class RuntimeStore:
                 and (
                     event_names is None
                     or event.event_name in event_names
+                )
+                and (
+                    node_execution_id is None
+                    or str(event.payload.get("node_execution_id"))
+                    == str(node_execution_id)
                 )
             ]
         if known_in_memory:
@@ -1158,6 +1165,7 @@ class RuntimeStore:
             before_sequence=before_sequence,
             limit=limit,
             event_names=event_names,
+            node_execution_id=node_execution_id,
         )
 
     async def aget_trace_runtime_event_by_subject(

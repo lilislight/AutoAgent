@@ -385,7 +385,11 @@ async def _server_query(
             through_sequence=arguments.through_sequence,
         )
     if kind == "operator-calls":
-        return await client.debug_operator_calls(str(invocation_id), **common)
+        return await client.debug_operator_calls(
+            str(invocation_id),
+            **common,
+            node_execution_id=arguments.node_execution_id,
+        )
     if kind == "operator-call":
         return await client.debug_operator_call(
             str(invocation_id),
@@ -450,7 +454,15 @@ async def _database_query(
             through_sequence=arguments.through_sequence,
         )
     if kind == "operator-calls":
-        return (await service.operator_calls(invocation_id, **common)).model_dump(
+        return (await service.operator_calls(
+            invocation_id,
+            **common,
+            node_execution_id=(
+                UUID(arguments.node_execution_id)
+                if arguments.node_execution_id is not None
+                else None
+            ),
+        )).model_dump(
             mode="json"
         )
     if kind == "operator-call":
@@ -511,6 +523,15 @@ def _validate_query_arguments(arguments: argparse.Namespace) -> None:
         raise ValueError("--limit must be between 1 and 100.")
     if arguments.path is not None and arguments.kind != "runtime-state":
         raise ValueError("--path is valid only for runtime-state.")
+    if (
+        arguments.node_execution_id is not None
+        and arguments.kind != "operator-calls"
+    ):
+        raise ValueError(
+            "--node-execution-id is valid only for operator-calls."
+        )
+    if arguments.node_execution_id is not None:
+        UUID(arguments.node_execution_id)
     if arguments.cursor is not None and arguments.kind in singular | {"runtime-state"}:
         raise ValueError("--cursor is valid only for collection queries.")
 

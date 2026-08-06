@@ -111,9 +111,6 @@ def _compact_node_execution_record_in_place(
     """Remove trace-only values from one privately owned Node record."""
 
     execution["input"] = None
-    for operator_call in execution.get("operator_executions", ()):
-        operator_call.pop("input", None)
-        operator_call.pop("output", None)
 
 
 def restore_execution_state(state: dict[str, Any]) -> tuple[Session, Invocation]:
@@ -158,7 +155,9 @@ _MUTABLE_NODE_EXECUTION_FIELDS = (
     "recovery_attempt",
     "incoming_activations",
     "execution_scope",
-    "operator_executions",
+    "operator_summary",
+    "parallel_summary",
+    "last_operator_call_id",
     "edge_evaluations",
     "resource_usage",
     "started_at_ms",

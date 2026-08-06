@@ -338,6 +338,16 @@ sequence and addressed by JSON pointer without dumping the complete state.
 The CLI exposes these through one `autoagent invocation query` surface rather
 than a separate top-level command for every evidence type.
 
+Each real Operator attempt is one Operator Call, including Map and Replication
+units, Retry, Fallback, Recovery, failure, and interruption. A Call carries a
+stable Call number, optional parallel-unit index, unit-attempt number, and exact
+start/end timing. Full mode stores the Call input/output on that Call Event.
+Input Mapping, selector, aggregation input, and Output Binding Events do not
+repeat those values; the aggregation Event owns only the resulting logical
+Node output. Executable Runtime State retains only bounded counts and a
+Map/Replication summary. `operator-calls --node-execution-id <id>` pages every
+Call for one NodeExecution without loading another Node's Calls.
+
 `autoagent invocation report <invocation-id>` has one nonterminal behavior,
 not separate immediate and terminal-wait command variants. A `waiting`
 Invocation is already a stable debugging boundary and returns immediately. If

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
+  ChevronDown,
+  ChevronRight,
   Clock3,
   CirclePause,
   History,
@@ -10,6 +12,8 @@ import {
   Radio,
   Square,
 } from "lucide-react";
+
+import { visibleTimelineSpans as buildVisibleTimelineSpans } from "../timeline";
 
 import type {
   RuntimeEvent,
@@ -112,6 +116,9 @@ export function ExecutionTimeline({
   const [clusterPopover, setClusterPopover] = useState<ClusterPopoverState | null>(null);
   const [clusterPopoverOpen, setClusterPopoverOpen] = useState(false);
   const [durationTooltip, setDurationTooltip] = useState<DurationTooltipState | null>(null);
+  const [collapsedNodeExecutionIds, setCollapsedNodeExecutionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const clusterPopoverHideTimerRef = useRef<number | null>(null);
   const clusterPopoverRemoveTimerRef = useRef<number | null>(null);
   const range = useMemo(() => timelineRange(timeline, events), [events, timeline]);
@@ -166,6 +173,10 @@ export function ExecutionTimeline({
   const cursorLeft = cursorMarker?.left ?? scale.left(cursorTime);
   const cursorOffset = (cursorLeft / 100) * trackWidthPx;
   const hoverOffset = hoverLeft === null ? null : (hoverLeft / 100) * trackWidthPx;
+
+  useEffect(() => {
+    setCollapsedNodeExecutionIds(new Set());
+  }, [timeline.invocation_id]);
 
   useEffect(() => {
     if (followLive || collapsed) setIsPlaying(false);
@@ -347,10 +358,33 @@ export function ExecutionTimeline({
     if (options.requireNear && !position.near) return;
     onCursorChange(position.sequence);
   };
+  const operatorCallCountByExecution = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const span of timeline.spans) {
+      if (span.kind !== "operator_call" || span.parent_id === null) continue;
+      counts.set(span.parent_id, (counts.get(span.parent_id) ?? 0) + 1);
+    }
+    for (const span of timeline.spans) {
+      if (span.kind !== "node_execution") continue;
+      counts.set(
+        span.id,
+        (counts.get(span.id) ?? 0) + (span.omitted_child_count ?? 0),
+      );
+    }
+    return counts;
+  }, [timeline.spans]);
   const visibleSpans = useMemo(
-    () => [...timeline.spans].sort(compareTimelineSpans),
-    [timeline.spans],
+    () => buildVisibleTimelineSpans(timeline.spans, collapsedNodeExecutionIds),
+    [collapsedNodeExecutionIds, timeline.spans],
   );
+  const toggleNodeExecution = (nodeExecutionId: string) => {
+    setCollapsedNodeExecutionIds((current) => {
+      const next = new Set(current);
+      if (next.has(nodeExecutionId)) next.delete(nodeExecutionId);
+      else next.add(nodeExecutionId);
+      return next;
+    });
+  };
   const startHeightDrag = (clientY: number) => {
     const initialHeight = collapsed ? 42 : height;
     let moved = false;
@@ -559,7 +593,13 @@ export function ExecutionTimeline({
                 onCursorDragStart={startCursorDrag}
                 onDurationHover={showDurationTooltip}
                 onDurationLeave={() => setDurationTooltip(null)}
+                operatorCallCount={operatorCallCountByExecution.get(span.id) ?? 0}
+                childrenCollapsed={collapsedNodeExecutionIds.has(span.id)}
+                onToggleChildren={() => toggleNodeExecution(span.id)}
                 onSelect={() => {
+                  if (span.kind === "operator_call") {
+                    onCursorChange(span.sequence);
+                  }
                   onSelect({ type: span.kind, id: span.id });
                 }}
               />
@@ -670,6 +710,9 @@ function TimelineRow({
   onCursorDragStart,
   onDurationHover,
   onDurationLeave,
+  operatorCallCount,
+  childrenCollapsed,
+  onToggleChildren,
   onSelect,
 }: {
   span: TimelineSpan;
@@ -679,13 +722,18 @@ function TimelineRow({
   onCursorDragStart: (clientX: number) => void;
   onDurationHover: (span: TimelineSpan, durationLabel: string, anchor: HTMLElement) => void;
   onDurationLeave: () => void;
+  operatorCallCount: number;
+  childrenCollapsed: boolean;
+  onToggleChildren: () => void;
   onSelect: () => void;
 }) {
   const start = scale.left(span.started_at_ms);
   const end = scale.left(span.ended_at_ms ?? span.started_at_ms);
-  const durationMs = span.ended_at_ms === null
-    ? span.duration_ms
-    : Math.max(0, span.ended_at_ms - span.started_at_ms);
+  const durationMs = span.duration_ms ?? (
+    span.ended_at_ms === null
+      ? null
+      : Math.max(0, span.ended_at_ms - span.started_at_ms)
+  );
   const durationLabel = formatDuration(durationMs ?? 0);
   const width = Math.max(
     0.15,
@@ -696,16 +744,41 @@ function TimelineRow({
   const left = Math.min(start, 100 - width);
   return (
     <>
-      <button
-        className="timeline-label is-node"
-        type="button"
+      <div
+        className={`timeline-label ${span.kind === "operator_call" ? "is-child" : "is-node"}`}
         data-timeline-row-id={span.id}
-        onClick={onSelect}
         title={span.label}
       >
-        <span className="timeline-label-spacer" />
-        <span>{span.label}</span>
-      </button>
+        {span.kind === "node_execution" && operatorCallCount > 0 ? (
+          <button
+            className="timeline-disclosure"
+            type="button"
+            aria-expanded={!childrenCollapsed}
+            aria-label={`${childrenCollapsed ? "Expand" : "Collapse"} ${operatorCallCount} Operator Calls for ${span.label}`}
+            onClick={onToggleChildren}
+          >
+            {childrenCollapsed
+              ? <ChevronRight size={13} />
+              : <ChevronDown size={13} />}
+          </button>
+        ) : (
+          <span className="timeline-label-spacer" />
+        )}
+        <button
+          className="timeline-label-content"
+          type="button"
+          onClick={onSelect}
+        >
+          <span>
+            {span.label}
+            {childrenCollapsed && operatorCallCount > 0
+              ? ` · ${operatorCallCount} calls`
+              : span.omitted_child_count
+                ? ` · ${span.omitted_child_count} calls omitted`
+                : ""}
+          </span>
+        </button>
+      </div>
       <button
         className="timeline-track timeline-row"
         type="button"
@@ -753,14 +826,6 @@ function timelineRange(
   // example after final bookkeeping), which otherwise leaves a misleading gap
   // after the final visible node.
   return { start, end: Math.max(start + 1, eventEnd, spanEnd) };
-}
-
-function compareTimelineSpans(left: TimelineSpan, right: TimelineSpan): number {
-  if (left.sequence !== right.sequence) return left.sequence - right.sequence;
-  if (left.started_at_ms !== right.started_at_ms) {
-    return left.started_at_ms - right.started_at_ms;
-  }
-  return left.id.localeCompare(right.id);
 }
 
 function percent(value: number, start: number, end: number): number {
@@ -934,7 +999,8 @@ function timelineRowIdForEvent(event: RuntimeEvent | undefined): string | null {
       : String(nodeExecutionId);
   }
   if (event.subject_type === "edge") {
-    const sourceExecutionId = event.payload.node_execution_id;
+    const sourceExecutionId =
+      event.payload.source_execution_id ?? event.payload.node_execution_id;
     return sourceExecutionId === undefined || sourceExecutionId === null
       ? null
       : String(sourceExecutionId);

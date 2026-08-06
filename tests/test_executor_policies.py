@@ -811,7 +811,8 @@ class ExecutorPolicyBoundaryTests(unittest.TestCase):
             self.assertEqual(execution.operator_summary.attempt_count, 1)
             calls = operator_call_events(app, stored, node_id="slow")
             self.assertEqual(1, len(calls))
-            self.assertEqual("interrupted", calls[0].payload["state"])
+            self.assertEqual("operator_call.cancelled", calls[0].event_name)
+            self.assertEqual("cancelled", calls[0].payload["state"])
             self.assertFalse(stored.execution_mailbox.has_pending())
 
         asyncio.run(scenario())

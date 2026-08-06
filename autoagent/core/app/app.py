@@ -729,11 +729,12 @@ class AutoAgentApp:
     ) -> Invocation:
         """Atomically claim and resume one external wait.
 
-        The Store validates the compiled Workflow definition before changing
-        the invocation from ``waiting`` to ``running``.
-        Standard and Full waits survive a process restart with a durable
-        backend; Minimal waits intentionally exist only in current process
-        memory.
+        The Store validates the compiled Workflow definition, then the App
+        claims process-local execution ownership before changing the
+        Invocation from ``waiting`` to ``running``. Standard and Full modes
+        can recover the durable Event prefix after process loss; Resume does
+        not wait for database persistence during normal execution. Minimal
+        waits intentionally exist only in current process memory.
         """
 
         self._ensure_open()
@@ -752,7 +753,7 @@ class AutoAgentApp:
         await self.runtime_store.asave_workflow_snapshot(
             workflow_snapshot,
         )
-        session = await self.runtime_store.aclaim_waiting_session(
+        session = await self.runtime_store.afind_waiting_session(
             workflow_revision_id=workflow_revision_id(
                 workflow_snapshot.workflow_id,
                 workflow_snapshot.definition_hash,
@@ -764,6 +765,8 @@ class AutoAgentApp:
         invocation = session.get_current_invocation()
         if invocation is None:
             raise ValueError("Session does not have a current Invocation.")
+        if not self._claim_invocation_live(invocation.id):
+            raise SessionBusyError(session, invocation)
 
         kwargs: dict[str, Any] = {
             "workflow_ir": workflow_ir,
@@ -773,7 +776,6 @@ class AutoAgentApp:
         }
         if output is not _MISSING:
             kwargs["output"] = output
-        self._set_invocation_live(invocation.id, True)
         try:
             return await self.workflow_executor.aresume(**kwargs)
         finally:

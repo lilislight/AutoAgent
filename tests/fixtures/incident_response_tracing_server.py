@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import random
 import time
 from dataclasses import replace
@@ -10,7 +9,6 @@ from pathlib import Path
 from threading import Thread
 from typing import Any, Literal
 
-from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 from autoagent import (
@@ -36,6 +34,7 @@ from autoagent.core.runtime import (
     ReplicationAggregationContext,
     RuntimeStore,
 )
+from autoagent.core.server import ServerSettings
 
 
 SECURITY_REVIEW_FAILURE_RATE = 0.4
@@ -1009,6 +1008,7 @@ def _submit_startup_examples(
     port: int,
     *,
     workflow_id: str,
+    access_token: str | None,
 ) -> None:
     """Wait for the Server and submit both demonstration entry inputs."""
 
@@ -1031,7 +1031,16 @@ def _submit_startup_examples(
 
     try:
         connection = HTTPConnection(host, port, timeout=5)
-        connection.request("GET", "/api/v1/registered-workflows?limit=200")
+        headers = (
+            {"Authorization": f"Bearer {access_token}"}
+            if access_token is not None
+            else {}
+        )
+        connection.request(
+            "GET",
+            "/api/v1/registered-workflows?limit=200",
+            headers=headers,
+        )
         response = connection.getresponse()
         workflow_page = json.loads(response.read())
         if response.status != 200:
@@ -1060,6 +1069,7 @@ def _submit_startup_examples(
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/json",
+                    **headers,
                 },
             )
             response = connection.getresponse()
@@ -1088,11 +1098,7 @@ def _submit_startup_examples(
 
 def main() -> None:
     app, workflow = build_incident_response_app()
-    env_file = dotenv_values(Path.cwd() / ".env")
-
-    def configured(name: str, default: str) -> str:
-        value = os.environ.get(name, env_file.get(name))
-        return default if value is None or not str(value).strip() else str(value)
+    server_settings = ServerSettings.from_env(env_file=Path.cwd() / ".env")
 
     compile_result = app.compiler.compile(workflow)
     if not compile_result.ok:
@@ -1106,8 +1112,8 @@ def main() -> None:
     print("Compiled exits:", compile_result.workflow_ir.exit_node_ids)
     print("Expanded node count:", len(compile_result.workflow_ir.nodes))
 
-    host = configured("AUTOAGENT_SERVER_HOST", "0.0.0.0")
-    port = int(configured("AUTOAGENT_SERVER_PORT", "8765"))
+    host = server_settings.host
+    port = server_settings.port
     browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     server_url = f"http://{browser_host}:{port}"
 
@@ -1123,13 +1129,21 @@ def main() -> None:
             f"AUTOAGENT_SERVER_URL={server_url} "
             "npm --prefix ui run dev"
         )
-    server = AutoAgentServer(app)
+    server = AutoAgentServer(
+        app,
+        execution_enabled=server_settings.execution_enabled,
+        access_token=server_settings.access_token,
+        secure_cookies=server_settings.secure_cookies,
+        ui_directory=server_settings.ui_directory,
+        trace_cache_size=server_settings.trace_cache_size,
+    )
     Thread(
         target=_submit_startup_examples,
         kwargs={
             "host": browser_host,
             "port": port,
             "workflow_id": workflow.id,
+            "access_token": server_settings.access_token,
         },
         name="incident-response-startup-examples",
         daemon=True,

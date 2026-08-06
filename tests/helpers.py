@@ -52,6 +52,6 @@ def operator_call_events(
     return [
         event
         for event in app.runtime_store.runtime_events.get(invocation.id, ())
-        if event.event_name == "operator_call.completed"
+        if event.event_name.startswith("operator_call.")
         and (node_id is None or event.payload.get("node_id") == node_id)
     ]

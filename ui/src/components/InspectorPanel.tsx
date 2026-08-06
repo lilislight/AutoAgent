@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
@@ -17,6 +17,7 @@ import {
 
 import {
   getAllUserEvents,
+  getArtifactValue,
   getEventDetail,
   getRuntimeState,
   subscribeToUserEvents,
@@ -47,6 +48,8 @@ interface InspectorPanelProps {
   capabilities?: TraceBootstrap["capabilities"];
   onClose: () => void;
 }
+
+const ArtifactInvocationContext = createContext<string | null>(null);
 
 export function InspectorPanel({
   graph,
@@ -201,8 +204,9 @@ export function InspectorPanel({
     null;
 
   return (
-    <AnimatePresence mode="wait">
-      <motion.aside
+    <ArtifactInvocationContext.Provider value={invocation.id}>
+      <AnimatePresence mode="wait">
+        <motion.aside
         key={selection ? `${selection.type}:${selection.id}` : "summary"}
         className="detail-panel"
         style={{ width: panelWidth }}
@@ -324,8 +328,9 @@ export function InspectorPanel({
               }} />
             )}
           </div>
-      </motion.aside>
-    </AnimatePresence>
+        </motion.aside>
+      </AnimatePresence>
+    </ArtifactInvocationContext.Provider>
   );
 }
 
@@ -673,13 +678,12 @@ function DataView({
 }) {
   const phases = phaseEvents(inspected.events, execution);
   const detailCandidates = phases.filter((event) =>
-    [
+    ([
       "input_mapping.completed",
       "item_selection.completed",
-      "operator_call.completed",
       "aggregation.completed",
       "output_binding.completed",
-    ].includes(event.event_name) &&
+    ].includes(event.event_name) || event.event_name.startsWith("operator_call.")) &&
     (event.has_input || event.has_output),
   );
   const detailQueries = useQueries({
@@ -696,7 +700,7 @@ function DataView({
   const detailedPhases = phases.map((event) => detailedById.get(event.id) ?? event);
   const aggregation = detailedPhases.find((event) => event.event_name === "aggregation.completed");
   const operatorCalls = detailedPhases.filter(
-    (event) => event.event_name === "operator_call.completed",
+    (event) => event.event_name.startsWith("operator_call."),
   );
   const lastOperatorCall = operatorCalls.at(-1);
   if (inspected.kind === "Operator call") {
@@ -803,7 +807,7 @@ function PhaseView({
             <strong>{phaseLabel(event.event_name)}</strong>
             <span>
               {event.status ?? event.event_type}
-              {event.event_name === "operator_call.completed" &&
+              {event.event_name.startsWith("operator_call.") &&
               event.payload.streaming
                 ? ` · streaming · ${Number(
                     event.payload.stream_chunk_count ?? 0,
@@ -1187,7 +1191,7 @@ function JsonBlock({ value, empty }: { value: unknown; empty: string }) {
       {artifacts.length > 0 && (
         <div className="artifact-list">
           {artifacts.map((artifact, index) => (
-            <ArtifactCard key={`${artifact.uri}:${index}`} artifact={artifact} />
+            <ArtifactCard key={`${artifact.id}:${index}`} artifact={artifact} />
           ))}
         </div>
       )}
@@ -1269,7 +1273,10 @@ function JsonTreeNode({
 }
 
 interface ArtifactView {
-  uri: string;
+  id: string;
+  kind: "runtime_value" | "artifact";
+  storage: "database" | "external";
+  uri?: string | null;
   media_type?: string | null;
   size_bytes?: number | null;
   sha256?: string | null;
@@ -1277,7 +1284,20 @@ interface ArtifactView {
 }
 
 function ArtifactCard({ artifact }: { artifact: ArtifactView }) {
-  const href = /^https?:\/\//i.test(artifact.uri) ? artifact.uri : null;
+  const invocationId = useContext(ArtifactInvocationContext);
+  const href = artifact.uri && /^https?:\/\//i.test(artifact.uri)
+    ? artifact.uri
+    : null;
+  const valueQuery = useQuery({
+    queryKey: ["artifact-value", invocationId, artifact.id],
+    queryFn: () => getArtifactValue(invocationId!, artifact.id),
+    enabled: false,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+  });
+  const canLoad = Boolean(
+    invocationId && artifact.storage === "database" && artifact.id,
+  );
   return (
     <div className="artifact-card">
       <File size={17} />
@@ -1287,13 +1307,22 @@ function ArtifactCard({ artifact }: { artifact: ArtifactView }) {
           <a href={href} target="_blank" rel="noreferrer">
             {artifact.uri}
           </a>
-        ) : (
-          <code>{artifact.uri}</code>
-        )}
+        ) : <code>{artifact.id}</code>}
         <span>
           {artifact.size_bytes == null ? "External data" : formatBytes(artifact.size_bytes)}
           {artifact.sha256 ? ` sha256 ${artifact.sha256.slice(0, 12)}` : ""}
         </span>
+        {canLoad && !valueQuery.data && (
+          <button
+            type="button"
+            onClick={() => void valueQuery.refetch()}
+            disabled={valueQuery.isFetching}
+          >
+            {valueQuery.isFetching ? "Loading value…" : "Load value"}
+          </button>
+        )}
+        {valueQuery.error && <span>{valueQuery.error.message}</span>}
+        {valueQuery.data && <JsonTree value={valueQuery.data.value} />}
       </div>
     </div>
   );
@@ -1304,7 +1333,7 @@ function findArtifacts(value: unknown): ArtifactView[] {
   if (!value || typeof value !== "object") return [];
   const record = value as Record<string, unknown>;
   const tagged = record.__autoagent_artifact__;
-  if (tagged && typeof tagged === "object" && "uri" in tagged) {
+  if (tagged && typeof tagged === "object" && "id" in tagged) {
     return [tagged as ArtifactView];
   }
   return Object.values(record).flatMap(findArtifacts);
@@ -1416,12 +1445,12 @@ function inspectSelection(
         ),
       );
       const mappedInput = related.find(
-        (event) => event.event_name === "operator_call.completed",
+        (event) => event.event_name.startsWith("operator_call."),
       )?.input;
       const boundOutput = [...related].reverse().find(
         (event) =>
           event.event_name === "aggregation.completed" ||
-          event.event_name === "operator_call.completed",
+          event.event_name.startsWith("operator_call."),
       );
       return ({
       id: execution.execution_id,
@@ -1448,7 +1477,7 @@ function inspectSelection(
       operator_calls: related
         .filter(
           (event) =>
-            event.event_name === "operator_call.completed" &&
+            event.event_name.startsWith("operator_call.") &&
             event.payload.node_execution_id === execution.execution_id,
         )
         .map(operatorCallFromEvent),
@@ -1631,7 +1660,7 @@ function inspectSelection(
   }
   const callEvent = allEvents.find(
     (event) =>
-      event.event_name === "operator_call.completed" &&
+      event.event_name.startsWith("operator_call.") &&
       String(event.payload.operator_call_id ?? event.subject_id) === selection.id,
   );
   const call = (callEvent ? operatorCallFromEvent(callEvent) : null) ?? invocation.node_executions

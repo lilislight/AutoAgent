@@ -9,7 +9,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 from sqlalchemy import inspect, select, text
@@ -909,7 +909,7 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.store.aflush()
 
-        async def persisted_artifacts() -> tuple[int, int, bool]:
+        async def persisted_artifacts() -> tuple[int, int, bool, UUID]:
             async with self.backend._database_sessions() as database:
                 artifacts = (
                     await database.scalars(select(ArtifactRow))
@@ -929,14 +929,28 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
                         '"__autoagent_type__":"artifact"' in payload
                         for payload in events.scalars()
                     ),
+                    UUID(artifacts[0].id),
                 )
 
-        count, payload_bytes, event_has_ref = (
+        count, payload_bytes, event_has_ref, artifact_id = (
             await self.backend._database_loop.arun(persisted_artifacts())
         )
         self.assertEqual(1, count)
         self.assertGreaterEqual(payload_bytes, 100_000)
         self.assertTrue(event_has_ref)
+        loaded = await self.store.aload_artifact_value(
+            invocation_id=invocation.id,
+            artifact_id=artifact_id,
+        )
+        assert loaded is not None
+        self.assertEqual("x" * 100_000, loaded["value"])
+        self.assertEqual(artifact_id, UUID(loaded["artifact"]["id"]))
+        self.assertIsNone(
+            await self.store.aload_artifact_value(
+                invocation_id=uuid4(),
+                artifact_id=artifact_id,
+            )
+        )
         await app.aclose()
 
         self.backend = DatabaseBackend.from_path(
@@ -1793,11 +1807,19 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "unavailable"):
             await app.aclose()
 
-    async def test_hard_queue_limit_degrades_persistence_not_execution(
+    async def test_hard_queue_limit_blocks_execution_until_queue_drains(
         self,
     ) -> None:
+        release = threading.Event()
+
+        class BlockedBackend(DatabaseBackend):
+            async def _persist_batch(self, batch) -> None:
+                while not release.is_set():
+                    await asyncio.sleep(0.001)
+                await super()._persist_batch(batch)
+
         await self.store.aclose()
-        bounded_backend = DatabaseBackend.from_path(self.path)
+        bounded_backend = BlockedBackend.from_path(self.path)
         bounded = RuntimeStore(
             backend=bounded_backend,
             persistence_policy=PersistencePolicy(
@@ -1814,19 +1836,18 @@ class DatabaseBackendTests(unittest.IsolatedAsyncioTestCase):
         app = AutoAgentApp(runtime_store=bounded)
         await app.astart()
 
-        invocation = await asyncio.wait_for(app.ainvoke(workflow), timeout=1)
+        execution = asyncio.create_task(app.ainvoke(workflow))
+        await asyncio.sleep(0.05)
 
+        self.assertFalse(execution.done())
+        self.assertGreater(bounded.pending_persistence_bytes, 0)
+
+        release.set()
+        invocation = await asyncio.wait_for(execution, timeout=1)
+        await bounded.aflush()
         self.assertEqual("completed", invocation.state)
-        self.assertEqual("degraded", bounded.persistence_status(invocation.id))
-        self.assertLessEqual(
-            bounded.pending_persistence_bytes,
-            80 * 1024,
-        )
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "hard memory limit",
-        ):
-            await app.aclose()
+        self.assertEqual("durable", bounded.persistence_status(invocation.id))
+        await app.aclose()
 
     async def test_database_initialization_failure_rejects_invocation(
         self,

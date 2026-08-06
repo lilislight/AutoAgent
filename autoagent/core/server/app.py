@@ -955,6 +955,18 @@ class AutoAgentServer:
             )
 
         @router.get(
+            "/invocations/{invocation_id}/artifacts/{artifact_id}/value",
+            dependencies=auth,
+        )
+        async def get_invocation_artifact_value(
+            invocation_id: UUID,
+            artifact_id: UUID,
+        ) -> dict[str, Any]:
+            return await self._trace_call(
+                self.trace.artifact_value(invocation_id, artifact_id)
+            )
+
+        @router.get(
             "/invocations/{invocation_id}/projection",
             dependencies=auth,
         )

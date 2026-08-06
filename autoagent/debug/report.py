@@ -570,7 +570,7 @@ class DebugQueryService:
         return await self._event_kind_page(
             invocation_id,
             query="edge_evaluations",
-            event_name="edge.evaluated",
+            event_names=frozenset({"edge.evaluated"}),
             summary=_edge_evaluation_summary,
             cursor=cursor,
             through_sequence=through_sequence,
@@ -626,7 +626,14 @@ class DebugQueryService:
         return await self._event_kind_page(
             invocation_id,
             query="operator_calls",
-            event_name="operator_call.completed",
+            event_names=frozenset(
+                {
+                    "operator_call.completed",
+                    "operator_call.failed",
+                    "operator_call.cancelled",
+                    "operator_call.interrupted",
+                }
+            ),
             summary=_operator_call_summary,
             node_execution_id=node_execution_id,
             cursor=cursor,
@@ -649,7 +656,6 @@ class DebugQueryService:
             invocation_id=invocation_id,
             subject_type="operator_call",
             subject_id=str(operator_call_id),
-            event_name="operator_call.completed",
             through_sequence=boundary,
         )
         if event is None:
@@ -1010,7 +1016,7 @@ class DebugQueryService:
         invocation_id: UUID,
         *,
         query: str,
-        event_name: str,
+        event_names: frozenset[str],
         summary: Any,
         node_execution_id: UUID | None = None,
         cursor: str | None,
@@ -1037,7 +1043,7 @@ class DebugQueryService:
             after_sequence=position,
             through_sequence=boundary,
             limit=limit,
-            event_names=frozenset({event_name}),
+            event_names=event_names,
             node_execution_id=node_execution_id,
         )
         return DebugPage[dict[str, Any]](
@@ -1150,7 +1156,7 @@ class DebugQueryService:
                         value["operator_summary"] = payload["operator_summary"]
                     if payload.get("parallel_summary") is not None:
                         value["parallel_summary"] = payload["parallel_summary"]
-                elif event.event_name == "operator_call.completed":
+                elif event.event_name.startswith("operator_call."):
                     summary = value.setdefault("operator_summary", {})
                     summary["attempt_count"] = int(
                         summary.get("attempt_count", 0)
@@ -1162,6 +1168,9 @@ class DebugQueryService:
                     summary["failure_count"] = int(
                         summary.get("failure_count", 0)
                     ) + int(state == "failed")
+                    summary["cancelled_count"] = int(
+                        summary.get("cancelled_count", 0)
+                    ) + int(state == "cancelled")
                     summary["interrupted_count"] = int(
                         summary.get("interrupted_count", 0)
                     ) + int(state == "interrupted")
@@ -1532,6 +1541,7 @@ def _operator_identity(value: Mapping[str, Any] | None) -> dict[str, Any] | None
         "retry_count": summary.get("retry_count"),
         "fallback_count": summary.get("fallback_count"),
         "failure_count": summary.get("failure_count"),
+        "cancelled_count": summary.get("cancelled_count"),
     }
 
 

@@ -37,6 +37,7 @@ OperatorCallStateValue = Literal[
     "running",
     "completed",
     "failed",
+    "cancelled",
     "interrupted",
 ]
 

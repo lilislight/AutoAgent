@@ -251,7 +251,7 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, self.coordinator.pending_bytes)
         self.assertEqual(0, self.coordinator.pending_count)
 
-    async def test_hard_watermark_degrades_without_blocking_producer(
+    async def test_hard_watermark_waits_until_capacity_is_released(
         self,
     ) -> None:
         first = _envelope(estimated_bytes=700)
@@ -259,13 +259,27 @@ class PersistenceCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         first_reservation = self.coordinator.try_reserve(first)
         assert first_reservation is not None
 
-        rejected = self.coordinator.try_reserve(second)
+        waiting = asyncio.create_task(
+            self.coordinator.await_reservation(second)
+        )
+        await asyncio.sleep(0)
 
-        self.assertIsNone(rejected)
+        self.assertFalse(waiting.done())
         self.coordinator.cancel(first_reservation)
-        second_reservation = self.coordinator.try_reserve(second)
+        second_reservation = await asyncio.wait_for(waiting, timeout=1)
         assert second_reservation is not None
         self.coordinator.cancel(second_reservation)
+
+    async def test_empty_queue_accepts_one_envelope_larger_than_hard_limit(
+        self,
+    ) -> None:
+        oversized = _envelope(estimated_bytes=2_000)
+
+        reservation = await self.coordinator.await_reservation(oversized)
+
+        assert reservation is not None
+        self.assertEqual(2_000, self.coordinator.pending_bytes)
+        self.coordinator.cancel(reservation)
 
     async def test_invocation_failure_discards_only_that_journal(self) -> None:
         failed_id = uuid4()

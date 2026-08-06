@@ -1591,7 +1591,7 @@ class WorkflowExecutor:
         await self._record_event(
             session,
             invocation,
-            "operator_call.completed",
+            f"operator_call.{operator_call.state}",
             node_execution_ids=(node_execution.id,),
             detail={
                 "node_id": node_execution.node_id,

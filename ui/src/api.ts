@@ -323,6 +323,18 @@ export async function getEventDetail(
   );
 }
 
+export function getArtifactValue(
+  invocationId: string,
+  artifactId: string,
+): Promise<{ artifact: Record<string, unknown>; value: unknown }> {
+  return requestJson(
+    `${API}/invocations/${encodeURIComponent(invocationId)}/artifacts/${
+      encodeURIComponent(artifactId)
+    }/value`,
+    60_000,
+  );
+}
+
 export function getRuntimeState(
   invocationId: string,
   throughSequence: number,

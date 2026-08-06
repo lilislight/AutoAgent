@@ -104,6 +104,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
                 "127.0.0.1",
                 8765,
                 workflow_id="production_incident_response_v1",
+                access_token=None,
             )
 
         self.assertEqual(
@@ -230,7 +231,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         fallback_calls = [
             event
             for event in events
-            if event.event_name == "operator_call.completed"
+            if event.event_name.startswith("operator_call.")
             and event.payload.get("node_id") == "reliability_review"
         ]
         self.assertEqual(
@@ -244,7 +245,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         reliability_events = [
             event
             for event in events
-            if event.event_name == "operator_call.completed"
+            if event.event_name.startswith("operator_call.")
             and event.payload.get("node_id") == "reliability_review"
         ]
         self.assertEqual(
@@ -314,7 +315,7 @@ class IncidentResponseFixtureTests(unittest.TestCase):
         failed_calls = [
             event
             for event in app.runtime_store.runtime_events[invocation.id]
-            if event.event_name == "operator_call.completed"
+            if event.event_name.startswith("operator_call.")
             and event.payload.get("node_id") == "security_review"
         ]
         self.assertEqual(

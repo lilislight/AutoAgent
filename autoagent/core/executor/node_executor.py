@@ -1119,7 +1119,7 @@ async def _execute_unit(
                     duration_ns=duration_ns,
                     execution_ns=duration_ns,
                 )
-                attempt.mark_interrupted(
+                attempt.mark_cancelled(
                     RuntimeErrorInfo(
                         code="OPERATOR_CALL_CANCELLED",
                         message="Operator Call was cancelled before completion.",

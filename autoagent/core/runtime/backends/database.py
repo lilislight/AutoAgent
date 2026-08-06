@@ -2689,6 +2689,46 @@ class DatabaseBackend:
                 )
             current = _replace_runtime_artifact_refs(current, replacements)
 
+    async def aload_artifact_value(
+        self,
+        *,
+        invocation_id: UUID,
+        artifact_id: UUID,
+    ) -> dict[str, Any] | None:
+        """Load one database Artifact owned by an Invocation for observation."""
+
+        if not self._database_loop.is_current():
+            return await self._arun_database_operation(
+                self.aload_artifact_value(
+                    invocation_id=invocation_id,
+                    artifact_id=artifact_id,
+                )
+            )
+        await self.ainitialize()
+        async with self._database_sessions() as database:
+            row = await database.scalar(
+                select(ArtifactRow).where(
+                    ArtifactRow.id == str(artifact_id),
+                    ArtifactRow.owner_invocation_id == str(invocation_id),
+                )
+            )
+        if row is None or row.payload_blob is None:
+            return None
+        return {
+            "artifact": {
+                "id": row.id,
+                "kind": row.kind,
+                "storage": row.storage,
+                "uri": row.uri,
+                "media_type": row.media_type,
+                "encoding": row.encoding,
+                "size_bytes": row.size_bytes,
+                "sha256": row.sha256,
+                "metadata": self.serializer.json_view(row.metadata_json),
+            },
+            "value": self.serializer.json_view(row.payload_blob),
+        }
+
     def _halt_unavailable_persistence(
         self,
         batch: list[_PersistenceItem],

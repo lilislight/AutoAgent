@@ -138,6 +138,12 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
             for route in self.server.router.routes
             if getattr(route, "name", "") == "compare_invocations"
         )
+        self.artifact_value = next(
+            route.endpoint
+            for route in self.server.router.routes
+            if getattr(route, "name", "")
+            == "get_invocation_artifact_value"
+        )
 
     async def asyncTearDown(self) -> None:
         if self.server._invocation_tasks:
@@ -152,6 +158,32 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
         return workflow_revision_id(
             snapshot.workflow_id,
             snapshot.definition_hash,
+        )
+
+    async def test_artifact_value_endpoint_scopes_lookup_to_invocation(self) -> None:
+        invocation_id = uuid4()
+        artifact_id = uuid4()
+        expected = {
+            "artifact": {
+                "id": str(artifact_id),
+                "kind": "runtime_value",
+                "storage": "database",
+            },
+            "value": {"large": "value"},
+        }
+        loader = AsyncMock(return_value=expected)
+
+        with patch.object(
+            self.app.runtime_store,
+            "aload_artifact_value",
+            new=loader,
+        ):
+            observed = await self.artifact_value(invocation_id, artifact_id)
+
+        self.assertEqual(expected, observed)
+        loader.assert_awaited_once_with(
+            invocation_id=invocation_id,
+            artifact_id=artifact_id,
         )
 
     async def test_waiting_session_rejects_submit_before_new_admission(self) -> None:
@@ -1113,7 +1145,7 @@ class AutoAgentServerTests(unittest.IsolatedAsyncioTestCase):
                 invocation_id=invocation_id,
                 sequence=3,
                 event_type="operator_call",
-                event_name="operator_call.completed",
+                event_name="operator_call.failed",
                 subject_type="operator_call",
                 subject_id="primary",
                 occurred_at_ms=3,

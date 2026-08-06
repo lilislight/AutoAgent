@@ -535,6 +535,60 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_concurrent_resume_claims_one_wait_once(self) -> None:
+        async def scenario() -> None:
+            resumed_node_started = asyncio.Event()
+            release = asyncio.Event()
+            call_count = 0
+
+            async def after_resume(value: bool) -> bool:
+                nonlocal call_count
+                call_count += 1
+                resumed_node_started.set()
+                await release.wait()
+                return value
+
+            workflow = Workflow(id="concurrent_resume_claim")
+            workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+            workflow.add_node(
+                after_resume,
+                node_id="after",
+                input_mapping=lambda ctx: {"value": ctx.incoming[0].value},
+            )
+            workflow.add_edge("wait", "after")
+            app = started_app()
+            waiting = await app.ainvoke(
+                workflow,
+                input={"wait_key": "approval"},
+                session_id="session",
+            )
+            self.assertEqual("waiting", waiting.state)
+
+            first = asyncio.create_task(
+                app.aresume(
+                    workflow,
+                    session_id="session",
+                    wait_key="approval",
+                    output=True,
+                )
+            )
+            await asyncio.wait_for(resumed_node_started.wait(), timeout=1)
+            with self.assertRaises(SessionBusyError):
+                await app.aresume(
+                    workflow,
+                    session_id="session",
+                    wait_key="approval",
+                    output=False,
+                )
+
+            release.set()
+            resumed = await asyncio.wait_for(first, timeout=1)
+            self.assertEqual("completed", resumed.state)
+            self.assertEqual(1, call_count)
+            await app.aclose()
+
+        asyncio.run(scenario())
+
     def test_invalid_system_wait_input_fails_without_operator_calls(self) -> None:
         workflow = Workflow(id="invalid_wait_input")
         workflow.add_node(SystemCommand(id="wait"), node_id="wait")
@@ -1797,7 +1851,9 @@ class WorkflowExecutorTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, "failed")
         self.assertEqual(invocation.error.code, "OPERATOR_TIMEOUT")
-        self.assertEqual(operator_call_events(app, invocation)[0].payload["state"], "failed")
+        operator_event = operator_call_events(app, invocation)[0]
+        self.assertEqual("operator_call.failed", operator_event.event_name)
+        self.assertEqual("failed", operator_event.payload["state"])
 
     def test_replication_aggregates_indexed_operator_calls(self) -> None:
         workflow = Workflow(id="replication_execution")
@@ -2328,10 +2384,10 @@ class WorkflowExecutorTests(unittest.TestCase):
         calls = operator_call_events(app, invocation, node_id="process")
         self.assertEqual(3, len(calls))
         self.assertEqual(
-            ["failed", "interrupted", "interrupted"],
+            ["failed", "cancelled", "cancelled"],
             sorted(
                 (str(call.payload["state"]) for call in calls),
-                key=lambda state: {"failed": 0, "interrupted": 1}[state],
+                key=lambda state: {"failed": 0, "cancelled": 1}[state],
             ),
         )
 

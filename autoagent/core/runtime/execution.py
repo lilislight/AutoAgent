@@ -135,6 +135,11 @@ class OperatorCall:
         self.error = error
         self.ended_at_ms = utc_timestamp_ms()
 
+    def mark_cancelled(self, error: RuntimeErrorInfo) -> None:
+        self.state = "cancelled"
+        self.error = error
+        self.ended_at_ms = utc_timestamp_ms()
+
     def mark_interrupted(self, error: RuntimeErrorInfo) -> None:
         self.state = "interrupted"
         self.error = error
@@ -226,6 +231,7 @@ class OperatorCallSummary:
     attempt_count: int = 0
     success_count: int = 0
     failure_count: int = 0
+    cancelled_count: int = 0
     interrupted_count: int = 0
     retry_count: int = 0
     fallback_count: int = 0
@@ -238,6 +244,7 @@ class OperatorCallSummary:
             "attempt_count": self.attempt_count,
             "success_count": self.success_count,
             "failure_count": self.failure_count,
+            "cancelled_count": self.cancelled_count,
             "interrupted_count": self.interrupted_count,
             "retry_count": self.retry_count,
             "fallback_count": self.fallback_count,
@@ -253,6 +260,7 @@ class OperatorCallSummary:
             attempt_count=int(value.get("attempt_count", 0)),
             success_count=int(value.get("success_count", 0)),
             failure_count=int(value.get("failure_count", 0)),
+            cancelled_count=int(value.get("cancelled_count", 0)),
             interrupted_count=int(value.get("interrupted_count", 0)),
             retry_count=int(value.get("retry_count", 0)),
             fallback_count=int(value.get("fallback_count", 0)),
@@ -265,6 +273,7 @@ class OperatorCallSummary:
         self.attempt_count += 1
         self.success_count += int(call.state == "completed")
         self.failure_count += int(call.state == "failed")
+        self.cancelled_count += int(call.state == "cancelled")
         self.interrupted_count += int(call.state == "interrupted")
         self.retry_count += int(call.reason == "retry")
         self.fallback_count += int(call.reason == "fallback")

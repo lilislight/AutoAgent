@@ -167,6 +167,7 @@ class TraceProjectionReducer:
                     "failed_operator_call_count": int(
                         (
                             int(operator_summary.get("failure_count", 0))
+                            + int(operator_summary.get("cancelled_count", 0))
                             + int(operator_summary.get("interrupted_count", 0))
                         )
                         if operator_summary
@@ -296,7 +297,7 @@ class TraceProjectionReducer:
             }
             return result
 
-        if name == "operator_call.completed":
+        if name.startswith("operator_call."):
             call_id = str(payload.get("operator_call_id") or event.subject_id)
             state = str(payload.get("state") or event.status or "completed")
             execution_id = payload.get("node_execution_id")
@@ -408,6 +409,19 @@ class TraceService:
             tuple[UUID, int], dict[str, Any]
         ] = OrderedDict()
         self._cache_size = cache_size
+
+    async def artifact_value(
+        self,
+        invocation_id: UUID,
+        artifact_id: UUID,
+    ) -> dict[str, Any]:
+        value = await self.store.aload_artifact_value(
+            invocation_id=invocation_id,
+            artifact_id=artifact_id,
+        )
+        if value is None:
+            raise KeyError(f"Unknown Artifact: {artifact_id}")
+        return value
 
     async def list_workflows(
         self,
@@ -982,7 +996,9 @@ class TraceService:
             summary = node_execution.operator_summary
             projected["operator_call_count"] = summary.attempt_count
             projected["failed_operator_call_count"] = (
-                summary.failure_count + summary.interrupted_count
+                summary.failure_count
+                + summary.cancelled_count
+                + summary.interrupted_count
             )
             projected["retry_count"] = summary.retry_count
             projected["fallback_count"] = summary.fallback_count

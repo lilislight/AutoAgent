@@ -72,7 +72,7 @@ export function projectEvents(
       };
       continue;
     }
-    if (name === "operator_call.completed") {
+    if (name.startsWith("operator_call.")) {
       const callId = String(payload.operator_call_id ?? event.subject_id);
       const callState = String(payload.state ?? event.status ?? "completed");
       const execution = nodeExecutions[String(payload.node_execution_id ?? "")];
@@ -204,6 +204,7 @@ function applyNodeEvent(
       failed_operator_call_count: Number(
         Object.keys(operatorSummary).length > 0
           ? Number(operatorSummary.failure_count ?? 0) +
+            Number(operatorSummary.cancelled_count ?? 0) +
             Number(operatorSummary.interrupted_count ?? 0)
           : previous?.failed_operator_call_count ?? 0
       ),

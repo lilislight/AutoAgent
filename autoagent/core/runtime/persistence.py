@@ -351,6 +351,9 @@ class PersistenceCoordinator:
         self._admission_pressure = False
         self._wake_consumer: Callable[[], None] | None = None
         self._status_change_listeners: set[Callable[[], None]] = set()
+        self._capacity_waiters: set[
+            tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]
+        ] = set()
 
     def bind_consumer(self, wake_consumer: Callable[[], None]) -> None:
         with self._lock:
@@ -377,6 +380,19 @@ class PersistenceCoordinator:
     def _notify_status_change(self) -> None:
         with self._lock:
             listeners = tuple(self._status_change_listeners)
+            capacity_waiters = tuple(self._capacity_waiters)
+            self._capacity_waiters.clear()
+        for loop, waiter in capacity_waiters:
+            try:
+                loop.call_soon_threadsafe(
+                    lambda value=waiter: (
+                        None if value.done() else value.set_result(None)
+                    )
+                )
+            except RuntimeError:
+                # The owning execution loop can close during shutdown after a
+                # cancelled producer has already abandoned its waiter.
+                continue
         for listener in listeners:
             try:
                 listener()
@@ -449,39 +465,85 @@ class PersistenceCoordinator:
                 raise self._admission_error(timeout_ms=timeout_ms)
             await asyncio.sleep(0.01)
 
+    async def await_reservation(
+        self,
+        envelope: PersistenceEnvelope,
+    ) -> PersistenceReservation | None:
+        """Wait until one execution record fits below the hard watermark.
+
+        Invocation failures and known Event gaps remain terminal for that
+        Invocation and therefore return ``None`` immediately. Capacity
+        pressure is different: an already-running Invocation waits for the
+        database consumer to release queue memory instead of creating a new
+        durability gap.
+        """
+
+        loop = asyncio.get_running_loop()
+        while True:
+            with self._lock:
+                reservation = self._try_reserve_locked(envelope)
+                if reservation is not None:
+                    return reservation
+                invocation_id = envelope.invocation_id
+                if invocation_id is not None and (
+                    invocation_id in self._invocation_errors
+                    or invocation_id in self._invocation_gaps
+                ):
+                    return None
+                waiter = loop.create_future()
+                key = (loop, waiter)
+                self._capacity_waiters.add(key)
+            try:
+                await waiter
+            finally:
+                with self._lock:
+                    self._capacity_waiters.discard(key)
+
     def try_reserve(
         self,
         envelope: PersistenceEnvelope,
     ) -> PersistenceReservation | None:
         with self._lock:
-            if (
-                envelope.kind != "user_event_batch"
-                and envelope.invocation_id is not None
-                and (
-                    envelope.invocation_id in self._invocation_errors
-                    or envelope.invocation_id in self._invocation_gaps
-                )
-            ):
-                return None
-            hard = self.policy.queue_hard_watermark_bytes
-            assert hard is not None
-            if self._pending_bytes + envelope.estimated_bytes > hard:
-                return None
-            reservation = PersistenceReservation(
-                id=envelope.id,
-                invocation_id=envelope.invocation_id,
-                estimated_bytes=envelope.estimated_bytes,
+            return self._try_reserve_locked(envelope)
+
+    def _try_reserve_locked(
+        self,
+        envelope: PersistenceEnvelope,
+    ) -> PersistenceReservation | None:
+        if (
+            envelope.kind != "user_event_batch"
+            and envelope.invocation_id is not None
+            and (
+                envelope.invocation_id in self._invocation_errors
+                or envelope.invocation_id in self._invocation_gaps
             )
-            self._reservations[reservation.id] = reservation
-            self._outstanding_bytes[reservation.id] = (
-                reservation.estimated_bytes
-            )
-            self._outstanding_invocations[reservation.id] = (
-                reservation.invocation_id
-            )
-            self._outstanding_kinds[reservation.id] = envelope.kind
-            self._pending_bytes += reservation.estimated_bytes
-            return reservation
+        ):
+            return None
+        hard = self.policy.queue_hard_watermark_bytes
+        assert hard is not None
+        # One envelope may itself be larger than the configured hard
+        # watermark before the persistence worker externalizes its large
+        # values as ArtifactRefs. When the queue is empty, admit that one
+        # envelope so it can be transformed and drained; later producers wait
+        # until capacity is released.
+        if (
+            self._pending_bytes > 0
+            and self._pending_bytes + envelope.estimated_bytes > hard
+        ):
+            return None
+        reservation = PersistenceReservation(
+            id=envelope.id,
+            invocation_id=envelope.invocation_id,
+            estimated_bytes=envelope.estimated_bytes,
+        )
+        self._reservations[reservation.id] = reservation
+        self._outstanding_bytes[reservation.id] = reservation.estimated_bytes
+        self._outstanding_invocations[reservation.id] = (
+            reservation.invocation_id
+        )
+        self._outstanding_kinds[reservation.id] = envelope.kind
+        self._pending_bytes += reservation.estimated_bytes
+        return reservation
 
     def publish(
         self,

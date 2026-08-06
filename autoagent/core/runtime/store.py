@@ -177,6 +177,13 @@ class DurableBackend(Protocol):
         invocation_id: UUID,
     ) -> int: ...
 
+    async def aload_artifact_value(
+        self,
+        *,
+        invocation_id: UUID,
+        artifact_id: UUID,
+    ) -> dict[str, Any] | None: ...
+
 
 _NON_DURABLE_USER_EVENT_TYPES = frozenset(
     {"message_delta", "reasoning_delta", "tool_call_delta"}
@@ -380,6 +387,21 @@ class RuntimeStore:
     async def aload_workflow_snapshot(self, **kwargs: Any) -> WorkflowVersionSnapshot | None:
         return self.load_workflow_snapshot(**kwargs)
 
+    async def aload_artifact_value(
+        self,
+        *,
+        invocation_id: UUID,
+        artifact_id: UUID,
+    ) -> dict[str, Any] | None:
+        """Load one explicitly requested Artifact as observation-safe JSON."""
+
+        if self.backend is None:
+            return None
+        return await self.backend.aload_artifact_value(
+            invocation_id=invocation_id,
+            artifact_id=artifact_id,
+        )
+
     def get_or_create_session(
         self,
         *,
@@ -574,7 +596,7 @@ class RuntimeStore:
                     invocation.id,
                 )
             else:
-                self._publish_persistence(envelope)
+                await self._apublish_persistence(envelope)
         return session
 
     def _ensure_session_can_admit(self, session: Session) -> None:
@@ -589,7 +611,7 @@ class RuntimeStore:
         }:
             raise SessionBusyError(session, current)
 
-    async def aclaim_waiting_session(
+    async def afind_waiting_session(
         self,
         *,
         workflow_revision_id: str,
@@ -597,6 +619,8 @@ class RuntimeStore:
         wait_key: str,
         workflow_definition_hash: str | None = None,
     ) -> Session:
+        """Find and validate a waiting Session without claiming execution."""
+
         session = await self.afind_session(
             workflow_revision_id=workflow_revision_id,
             session_key=session_key,
@@ -750,7 +774,7 @@ class RuntimeStore:
                     owned_event.sequence,
                 )
             else:
-                self._publish_persistence(envelope)
+                await self._apublish_persistence(envelope)
         if self.backend is not None:
             self._persistence_advanced(invocation.id)
         self._notify_runtime_change(invocation.id)
@@ -784,7 +808,7 @@ class RuntimeStore:
                 invocation.id,
             )
         else:
-            self._publish_persistence(envelope)
+            await self._apublish_persistence(envelope)
         self._notify_runtime_change(invocation.id)
 
     def _publish_persistence(self, envelope: PersistenceEnvelope) -> bool:
@@ -818,6 +842,21 @@ class RuntimeStore:
                 envelope.invocation_id,
                 persistence.pending_bytes,
             )
+            return False
+        persistence.publish(reservation, envelope)
+        return True
+
+    async def _apublish_persistence(
+        self,
+        envelope: PersistenceEnvelope,
+    ) -> bool:
+        """Publish an execution record without dropping it at hard pressure."""
+
+        persistence = self.persistence
+        if persistence is None:
+            return False
+        reservation = await persistence.await_reservation(envelope)
+        if reservation is None:
             return False
         persistence.publish(reservation, envelope)
         return True

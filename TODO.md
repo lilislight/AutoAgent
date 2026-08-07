@@ -138,10 +138,11 @@ the local debugging loop.
 
 ### Phase 4: Local debugging Skill
 
-**Current focus:** forward-test the complete CLI-only debugging loop from one
-real failed or business-incorrect Invocation. The test must exercise Report,
-bounded Query, a focused code repair, same-mode Rerun, Comparison, and the
-owning Eval Suite without using framework-internal APIs.
+**Current focus:** validate the complete CLI-only debugging loop against the
+current Runtime foundation after the Node-owned Map, contract-driven Runtime
+value, and actual Operator Call refactors. Use a freshly built Wheel, a copied
+Debug Skill, and an isolated project so the test cannot accidentally depend on
+the AutoAgent source tree or framework-internal APIs.
 
 - [x] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
 - [x] Add isolated same-mode Rerun against the current project Revision. Reuse
@@ -154,8 +155,12 @@ owning Eval Suite without using framework-internal APIs.
 - [x] Add a deterministic Full-mode Debug Skill Evaluation with an existing
   project, business-incorrect Invocation input, registered four-Case Eval
   Suite, and hidden Report/Query/Rerun/Comparison acceptance gates.
-- [ ] Forward-test Report -> optional Case update -> code change -> compile ->
+- [ ] Run one independent Coding Agent forward test through Report -> bounded
+  Query -> optional Case update -> focused code change -> compile -> same-mode
   Rerun -> Comparison -> Eval Result -> user-review handoff using CLI only.
+- [ ] Audit the forward-test transcript and generated project against the
+  hidden acceptance gates. Fix only demonstrated framework or Skill gaps, then
+  close Phase 4 when the complete loop passes without private APIs.
 
 ### Phase 5: Optional Invocation-to-Case capture
 

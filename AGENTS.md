@@ -41,3 +41,13 @@ Pull requests should include a short summary, affected documentation areas, and 
 ## Agent-Specific Instructions
 
 Do not overwrite an existing `AGENTS.md`. Keep edits scoped to the requested documentation area, and avoid introducing build or test instructions that are not backed by repository files.
+
+## AutoAgent V2 Rewrite
+
+- Treat `autoagent_v2/` as a completely independent new project root for the V2 rewrite.
+- Put all V2 source, tests, skills, documentation, packaging files, and future examples under `autoagent_v2/`.
+- Do not implement V2 by modifying the existing `autoagent/`, `tests/`, `docs-deprecated/`, `skills/`, `examples/`, or `ui/` trees.
+- Do not add compatibility layers for the existing AutoAgent API or data model. V2 follows `Refactor.md` and may intentionally be incompatible.
+- Existing source may be inspected to understand proven algorithms. Reuse only logic that still matches the V2 design; do not copy the old architecture or preserve obsolete abstractions.
+- Design and implement V2 as a complete standalone project with its own future `autoagent/`, `tests/`, `skills/`, and packaging structure. During the initial Core implementation, create only the directories and files required by the implemented code and tests.
+- Run V2 tests from the repository-root environment while targeting `autoagent_v2/`; do not modify legacy tests to make V2 pass.

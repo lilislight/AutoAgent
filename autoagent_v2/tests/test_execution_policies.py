@@ -24,7 +24,7 @@ from autoagent.core import (
     Workflow,
     WorkflowPolicy,
 )
-from tests.helpers import always_false, identity_int, increment
+from tests.helpers import always_false, decode_checkpoint, decode_events, identity_int, increment
 
 
 def sum_values(_context: ExecutionContext, values: list[int]) -> int:
@@ -40,18 +40,14 @@ class _Sink:
         self.events: list[Any] = []
         self.checkpoints: list[Any] = []
 
-    async def wait_until_admissible(self, timeout: float | None) -> bool:
-        return True
-
-    async def submit_events(self, events: tuple[Any, ...]) -> None:
-        self.events.extend(events)
-
-    def offer_checkpoint(self, checkpoint: Any) -> None:
-        self.checkpoints.append(checkpoint)
-
-    def pressure(self) -> Any:
+    async def wait_until_admissible(self) -> None:
         return None
 
+    async def submit_events(self, events: tuple[Any, ...]) -> None:
+        self.events.extend(decode_events(events))
+
+    def offer_checkpoint(self, checkpoint: Any) -> None:
+        self.checkpoints.append(decode_checkpoint(checkpoint))
 
 class ExecutionPolicyTests(unittest.TestCase):
     def test_all_skipped_path_completes_with_empty_output(self) -> None:

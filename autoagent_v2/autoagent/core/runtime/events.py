@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import UUID, uuid4
 
-from .serialization import json_value
+from .serialization import decode_json_record, encode_json_record, json_value
 
 
 def now_ms() -> int:
@@ -155,3 +155,57 @@ class UserEvent:
 
 
 Event: TypeAlias = RuntimeEvent | UserEvent
+
+
+@dataclass(frozen=True, slots=True)
+class SerializedEvent:
+    """Immutable Core-to-Sink ownership envelope."""
+
+    id: UUID
+    workflow_id: str
+    workflow_revision_id: str
+    session_id: str
+    invocation_id: UUID
+    channel: Literal["runtime", "user"]
+    sequence: int
+    occurred_at_ms: int
+    event_type: str
+    subject_type: str | None
+    subject_id: str | None
+    payload: bytes
+    size_bytes: int
+
+    @classmethod
+    def from_event(cls, event: Event) -> "SerializedEvent":
+        payload = encode_json_record(event.to_record())
+        if isinstance(event, RuntimeEvent):
+            channel: Literal["runtime", "user"] = "runtime"
+            event_type = event.event_name
+            subject_type = event.subject_type
+            subject_id = event.subject_id
+        else:
+            channel = "user"
+            event_type = event.type
+            subject_type = "node"
+            subject_id = event.node_id
+        return cls(
+            id=event.id,
+            workflow_id=event.workflow_id,
+            workflow_revision_id=event.workflow_revision_id,
+            session_id=event.session_id,
+            invocation_id=event.invocation_id,
+            channel=channel,
+            sequence=event.sequence,
+            occurred_at_ms=event.occurred_at_ms,
+            event_type=event_type,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            payload=payload,
+            size_bytes=len(payload),
+        )
+
+    def decode(self) -> Event:
+        record = decode_json_record(self.payload)
+        if self.channel == "runtime":
+            return RuntimeEvent.from_record(record)
+        return UserEvent.from_record(record)

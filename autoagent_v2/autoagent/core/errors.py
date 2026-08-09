@@ -64,9 +64,5 @@ class AdmissionRejectedError(AutoAgentError):
     """The RuntimeSink rejected or timed out new-execution admission."""
 
 
-class SinkDeliveryError(AutoAgentError):
-    """The RuntimeSink failed before accepting Event ownership."""
-
-
 class RecoveryError(AutoAgentError):
     """A RecoveryCheckpoint is invalid for the current App."""

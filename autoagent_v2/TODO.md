@@ -10,29 +10,6 @@ should be resolved before building a durable V2 Server on top of Core.
 
 ### P0 correctness
 
-- Separate Runtime Event capture and delivery from authoritative execution.
-  Business state is committed first; Runtime Event construction, freezing, or
-  Sink failure must only degrade tracing health and must never fail, cancel, or
-  change the result of the Invocation. Checkpoint capture failure likewise
-  degrades recoverability rather than business execution. Keep attached User
-  Event stream semantics as a separate contract.
-- Decouple `ResourcePolicy` accounting from Runtime Event capture. In the
-  current implementation, `minimal` mode does not update the Invocation-wide
-  Operator attempt/runtime counters, so the same Map can complete in Minimal
-  and fail in Standard/Full. Capture mode must never change execution policy.
-- Redesign `RuntimeSink.submit_events()` as a synchronous acceptance boundary
-  in the execution flow. Core waits for it to return; return means the Sink has
-  accepted ownership of the Events, normally by placing them into its queue.
-  Sink-defined high/hard pressure may deliberately block that execution point.
-  The ownership transfer must still be cancellation-safe so Core never retries
-  an ambiguously accepted batch. Database or remote persistence after queue
-  acceptance remains Sink-owned work.
-- Enforce the advertised immutable handoff boundary recursively. Frozen Event
-  and Checkpoint dataclasses still contain mutable dictionaries, lists, and
-  values; a Sink can mutate data retained by the Invocation Handle or later
-  delivered to an attached stream. Use immutable value envelopes or detached
-  ownership per consumer without moving serialization back onto the executor
-  hot path.
 - Persist recovery-attempt progress at the pre-Node Checkpoint boundary.
   `NodeExecutionRequest.recovery_attempt` is incremented only after the current
   Checkpoint is captured, so repeated crashes can replay the same Node forever
@@ -61,9 +38,9 @@ should be resolved before building a durable V2 Server on top of Core.
   timestamps across explicit recovery and reject snapshots for unregistered
   Workflow ids.
 - Define bounded App shutdown when a Sink never accepts pending or cancellation
-  Events. Core must expose the failed delivery boundary without allowing
-  `close()` to wait forever. Enforce `admission_timeout` in Core rather than
-  trusting every Sink implementation to honor the argument.
+  Events. Core must expose the failed acceptance boundary without allowing
+  `close()` to wait forever. This does not move queue ownership, pressure
+  policy, or persistence work into Core.
 - Treat an explicitly supplied empty `session_id` deterministically (prefer a
   validation error); do not silently replace it with a generated UUID.
 - Simplify Node policy composition before stabilizing the authoring API. Fold
@@ -98,19 +75,22 @@ should be resolved before building a durable V2 Server on top of Core.
 - Add a global Invocation execution budget so a large cycle cannot evade the
   implemented per-Node safety limit by spreading work across many Nodes.
 
-## Completed Workflow contract
+## Completed Workflow control-flow contract
 
-- `workflow.md` is implemented by one Compiler analysis and one scope-aware
-  Scheduler: all-matches DAG fan-out, complete fan-in, reducible SCC analysis,
-  one Back Edge per Loop, nested and same-Header sibling Loop regions, scoped
-  re-entry, cross-level Exit, and deterministic static/runtime conflicts.
+- The control-flow and Loop portion of `workflow.md` is implemented by one
+  Compiler analysis and one scope-aware Scheduler: all-matches DAG fan-out,
+  complete fan-in, reducible SCC analysis, one Back Edge per Loop, nested and
+  same-Header sibling Loop regions, scoped re-entry, cross-level Exit, and
+  deterministic static/runtime conflicts.
 - Parallel Loop boundaries stabilize before committing Back or Exit. Pending
   transitions survive Wait/Resume, conflicting Back/Exit choices fail
   atomically, and `LOOP_NO_ROUTE` detects a settled boundary with no route.
 - Every Node inherits a finite Invocation-wide execution limit; Map/Replication
   units do not consume additional Node executions. The independent
-  `workflow.md` conformance suite covers Compiler, Scheduler, Executor, Wait,
-  cancellation, and safety behavior.
+  conformance suite covers Compiler, Scheduler, Executor, Wait, cancellation,
+  and control-flow safety behavior. The complete data-flow, durability, and
+  performance contract in `workflow.md` remains normative even where P0/P1
+  work in this file is still incomplete.
 
 ## Compiler and authoring diagnostics
 
@@ -126,6 +106,20 @@ should be resolved before building a durable V2 Server on top of Core.
 
 ## Runtime Events and tracing
 
+- The Core/Sink acceptance boundary is implemented. Core assigns per-channel
+  Invocation sequences, captures immutable UTF-8 JSON Event and Checkpoint
+  envelopes, owns admission timeout, and keeps `ResourcePolicy` accounting
+  independent of Event mode.
+- `RuntimeSink` remains a Core protocol with no Core implementation. Executor
+  directly awaits `submit_events()`; normal return means the supplied immutable
+  records have been atomically accepted into Sink-owned memory. A full Sink
+  queue may suspend that call and therefore backpressure Runtime only at an
+  Event boundary.
+- High, Hard, Resume hysteresis, queue capacity/fairness, backend retry, local
+  spool, batching, retention, and database/remote delivery are entirely
+  Sink/Server concerns. `wait_until_admissible()` exposes the Sink's admission
+  decision, while `submit_events()` exposes its execution-backpressure
+  decision. Core neither stores these watermarks nor interprets queue state.
 - Finalize the Runtime Event schema, error/timing contract, reducer contract,
   and graph projection with the V2 Server/Tracing Service. Current Full
   Operations are not sufficient to rebuild Scheduler/Wait/counter state into a
@@ -136,9 +130,18 @@ should be resolved before building a durable V2 Server on top of Core.
   heavy values, and `full` adds phases, state operations, inputs, and outputs.
 - Define optional Map/Replication summary Events without replacing the required
   per-call Events.
-- Add Event batching and a production Sink implementation outside Core. Backlog,
-  retention, database queues, and remote delivery belong to the Sink/Server,
-  not the Invocation coordinator.
+- Add production in-memory-journal Sink implementations in the V2 Server
+  layer. Core normally submits one execution-boundary Event at a time; a Sink
+  accepts it into memory, and a separate Server-owned persistence/remote worker
+  drains and batches that journal. Backend failure therefore cannot make
+  `submit_events()` fail; it only grows the Sink queue until Sink-owned pressure
+  policy blocks admission or Event acceptance.
+- Expose Sink queue pressure, backend availability, accepted/durable
+  watermarks, retry state, and undelivered boundaries through Server health
+  without making them business Invocation states.
+- Define how Server health reports a Sink implementation that violates the
+  in-memory acceptance protocol. Core currently logs and detaches that Sink for
+  the affected Invocation so the business result remains authoritative.
 
 ## Performance
 
@@ -158,8 +161,9 @@ should be resolved before building a durable V2 Server on top of Core.
 - Profile the remaining Loop-boundary set construction; Workflow IR now owns
   Edge-id and Loop-containment indexes, but compatibility checks still build a
   few small temporary sets per completed Node.
-- Measure Checkpoint serialization separately from execution once serialization
-  moves to a real Sink worker.
+- Measure Event and Checkpoint capture/serialization separately with realistic
+  payloads. Serialization belongs to Core before immutable Sink handoff;
+  database encoding and writes remain Sink-owned.
 - Add memory benchmarks for many concurrent Sessions and many active Waits.
 
 ## Server and platform boundary

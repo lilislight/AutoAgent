@@ -26,6 +26,7 @@ from autoagent.core import (
 )
 from autoagent.core.executor import NodeExecutor
 from autoagent.core.workflow import BackoffPolicy
+from tests.helpers import decode_checkpoint, decode_events
 
 
 def identity_text(value: str) -> str:
@@ -71,18 +72,14 @@ class CaptureSink:
         self.events: list[Any] = []
         self.checkpoints: list[Any] = []
 
-    async def wait_until_admissible(self, _timeout: float | None) -> bool:
-        return True
-
-    async def submit_events(self, events: tuple[Any, ...]) -> None:
-        self.events.extend(copy.deepcopy(events))
-
-    def offer_checkpoint(self, checkpoint: Any) -> None:
-        self.checkpoints.append(copy.deepcopy(checkpoint))
-
-    def pressure(self) -> Any:
+    async def wait_until_admissible(self) -> None:
         return None
 
+    async def submit_events(self, events: tuple[Any, ...]) -> None:
+        self.events.extend(decode_events(events))
+
+    def offer_checkpoint(self, checkpoint: Any) -> None:
+        self.checkpoints.append(decode_checkpoint(checkpoint))
 
 class IncrementalCoordinatorTests(unittest.TestCase):
     def test_fast_branch_schedules_downstream_before_slow_sibling_finishes(self) -> None:

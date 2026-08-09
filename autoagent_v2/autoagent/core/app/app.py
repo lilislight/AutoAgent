@@ -50,6 +50,8 @@ class AutoAgentApp:
     ) -> None:
         if max_node_executions_per_invocation < 1:
             raise ValueError("max_node_executions_per_invocation must be positive.")
+        if admission_timeout is not None and admission_timeout < 0:
+            raise ValueError("admission_timeout cannot be negative.")
         self._compiler = WorkflowCompiler()
         self._workflow_registry: dict[str, WorkflowIR] = {}
         self._source_workflow_index: dict[int, tuple[Workflow, str]] = {}
@@ -646,19 +648,21 @@ class AutoAgentApp:
         if self._runtime_sink is None:
             return
         try:
-            accepted = await self._runtime_sink.wait_until_admissible(
-                self._admission_timeout
-            )
+            if self._admission_timeout is None:
+                await self._runtime_sink.wait_until_admissible()
+            else:
+                async with asyncio.timeout(self._admission_timeout):
+                    await self._runtime_sink.wait_until_admissible()
         except asyncio.CancelledError:
             raise
+        except TimeoutError as error:
+            raise AdmissionRejectedError(
+                "RuntimeSink did not admit a new Invocation before the Core timeout."
+            ) from error
         except BaseException as error:
             raise AdmissionRejectedError(
                 "RuntimeSink failed while checking new-execution admission."
             ) from error
-        if not accepted:
-            raise AdmissionRejectedError(
-                "RuntimeSink did not admit a new Invocation before the timeout."
-            )
 
     @staticmethod
     def _validate_checkpoint(

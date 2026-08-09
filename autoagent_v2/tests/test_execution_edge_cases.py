@@ -21,14 +21,13 @@ from autoagent.core import (
     ReplicationPolicy,
     ResourcePolicy,
     RetryPolicy,
-    SinkPressure,
     StreamPolicy,
     UserEventMapping,
     WaitOperator,
     Workflow,
     WorkflowCompileError,
 )
-from tests.helpers import identity_int, identity_str
+from tests.helpers import decode_events, identity_int, identity_str
 
 
 class IntSumReducer:
@@ -66,17 +65,14 @@ class CaptureSink:
     def __init__(self) -> None:
         self.events: list[Any] = []
 
-    async def wait_until_admissible(self, timeout: float | None) -> bool:
-        return True
+    async def wait_until_admissible(self) -> None:
+        return None
 
     async def submit_events(self, events: tuple[Any, ...]) -> None:
-        self.events.extend(events)
+        self.events.extend(decode_events(events))
 
     def offer_checkpoint(self, checkpoint: Any) -> None:
         pass
-
-    def pressure(self) -> SinkPressure:
-        return SinkPressure(True)
 
 
 class NodePhaseFailureTests(unittest.TestCase):

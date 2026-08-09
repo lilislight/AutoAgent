@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
+import logging
 import re
 import time
 from collections.abc import Mapping
@@ -12,7 +13,7 @@ from dataclasses import asdict
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
-from ..errors import NodeExecutionLimitExceededError, SinkDeliveryError
+from ..errors import NodeExecutionLimitExceededError
 from ..runtime import (
     AttachedChannel,
     Event,
@@ -26,6 +27,8 @@ from ..runtime import (
     RuntimeEvent,
     RuntimeSink,
     SchedulerCheckpoint,
+    SerializedCheckpoint,
+    SerializedEvent,
     Session,
     StateOperation,
     UserEvent,
@@ -42,6 +45,9 @@ from ..operators import WaitOperator
 from ..workflow import ContextPatch, NodeIR, UserEventMapping, WorkflowIR
 from .node_executor import NodeExecutor
 from .result import NodeExecutionResult, NodePhaseResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class InvocationExecution:
@@ -99,7 +105,7 @@ class InvocationExecution:
             asyncio.Task[NodeExecutionResult], tuple[NodeExecutionRequest, NodeExecution]
         ] = {}
         self.cancel_requested = False
-        self.pending_delivery: tuple[Event, ...] = ()
+        self.pending_delivery: tuple[SerializedEvent, ...] = ()
         self._event_lock = asyncio.Lock()
         self._terminal_lock = asyncio.Lock()
 
@@ -354,54 +360,61 @@ class InvocationExecution:
         default_input = self._default_input(request)
 
         async def progress(kind: str, value: Any) -> None:
-            if kind == "operator_call" and self.event_mode is not EventMode.MINIMAL:
-                self.operator_attempt_counts[node.id] = self.operator_attempt_counts.get(node.id, 0) + 1
-                self.operator_runtime_ns[node.id] = self.operator_runtime_ns.get(node.id, 0) + value.duration_ns
-                resource = node.policy.resource if node.policy else None
+            resource = node.policy.resource if node.policy else None
+            if kind == "operator_call_started":
+                attempted = self.operator_attempt_counts.get(node.id, 0) + 1
                 if (
                     resource
                     and resource.max_operator_attempts_per_invocation is not None
-                    and self.operator_attempt_counts[node.id]
-                    > resource.max_operator_attempts_per_invocation
+                    and attempted > resource.max_operator_attempts_per_invocation
                 ):
                     raise RuntimeError(
                         f"Node {node.id!r} Operator attempt limit exceeded."
                     )
+                self.operator_attempt_counts[node.id] = attempted
+            elif kind == "operator_call":
+                self.operator_runtime_ns[node.id] = (
+                    self.operator_runtime_ns.get(node.id, 0) + value.duration_ns
+                )
+                policy_error: RuntimeError | None = None
                 if (
                     resource
                     and resource.max_runtime_ms_per_invocation is not None
                     and self.operator_runtime_ns[node.id]
                     > resource.max_runtime_ms_per_invocation * 1_000_000
                 ):
-                    raise RuntimeError(
+                    policy_error = RuntimeError(
                         f"Node {node.id!r} Operator runtime limit exceeded."
                     )
-                payload = {
-                    "node_execution_id": str(value.node_execution_id),
-                    "operator_id": value.operator_id,
-                    "unit_kind": value.unit_kind,
-                    "unit_index": value.unit_index,
-                    "attempt": value.attempt,
-                    "idempotency_key": value.idempotency_key,
-                    "error": value.error,
-                    "timing": {
-                        "queue_wait_ns": value.queue_wait_ns,
-                        "handler_ns": value.handler_ns,
-                        "stream_ns": value.stream_ns,
-                        "stream_delivery_ns": value.stream_delivery_ns,
-                    },
-                }
-                if self.event_mode is EventMode.FULL:
-                    payload.update({"input": value.input, "output": value.output})
-                await self._emit_runtime(
-                    event_name="operator_call_completed",
-                    subject_type="operator_call",
-                    subject_id=str(value.id),
-                    status=value.status,
-                    workflow_path=node.workflow_path,
-                    duration_ns=value.duration_ns,
-                    payload=payload,
-                )
+                if self.event_mode is not EventMode.MINIMAL:
+                    payload = {
+                        "node_execution_id": str(value.node_execution_id),
+                        "operator_id": value.operator_id,
+                        "unit_kind": value.unit_kind,
+                        "unit_index": value.unit_index,
+                        "attempt": value.attempt,
+                        "idempotency_key": value.idempotency_key,
+                        "error": value.error,
+                        "timing": {
+                            "queue_wait_ns": value.queue_wait_ns,
+                            "handler_ns": value.handler_ns,
+                            "stream_ns": value.stream_ns,
+                            "stream_delivery_ns": value.stream_delivery_ns,
+                        },
+                    }
+                    if self.event_mode is EventMode.FULL:
+                        payload.update({"input": value.input, "output": value.output})
+                    await self._emit_runtime(
+                        event_name="operator_call_completed",
+                        subject_type="operator_call",
+                        subject_id=str(value.id),
+                        status=value.status,
+                        workflow_path=node.workflow_path,
+                        duration_ns=value.duration_ns,
+                        payload=payload,
+                    )
+                if policy_error is not None:
+                    raise policy_error
             elif kind == "phase" and self.event_mode is EventMode.FULL:
                 phase: NodePhaseResult = value
                 await self._emit_runtime(
@@ -744,16 +757,6 @@ class InvocationExecution:
         self.terminal.set()
 
     async def _finish_failed(self, error: BaseException) -> None:
-        if isinstance(error, SinkDeliveryError):
-            self._clear_waits()
-            self.invocation._update(
-                state=InvocationState.FAILED,
-                error=RuntimeErrorInfo(type=type(error).__name__, message=str(error)),
-                updated_at_ms=now_ms(),
-            )
-            self.boundary.set()
-            self.terminal.set()
-            return
         await self._finish_failed_info(
             RuntimeErrorInfo(type=type(error).__name__, message=str(error))
         )
@@ -762,31 +765,10 @@ class InvocationExecution:
         async with self._terminal_lock:
             if self.invocation.state.terminal:
                 return
-            try:
-                await self._finish_remaining_nodes("invocation_failed")
-                self._clear_waits()
-            except SinkDeliveryError as sink_error:
-                self._clear_waits()
-                self.invocation._update(
-                    state=InvocationState.FAILED,
-                    error=RuntimeErrorInfo(
-                        type=type(sink_error).__name__, message=str(sink_error)
-                    ),
-                    updated_at_ms=now_ms(),
-                )
-                self.boundary.set()
-                self.terminal.set()
-                return
-            try:
-                await self._set_invocation_state(InvocationState.FAILED, error=info)
-            except SinkDeliveryError as sink_error:
-                self.invocation._update(
-                    state=InvocationState.FAILED,
-                    error=RuntimeErrorInfo(type=type(sink_error).__name__, message=str(sink_error)),
-                    updated_at_ms=now_ms(),
-                )
-            else:
-                self.invocation._clear_checkpoint(updated_at_ms=now_ms())
+            await self._finish_remaining_nodes("invocation_failed")
+            self._clear_waits()
+            await self._set_invocation_state(InvocationState.FAILED, error=info)
+            self.invocation._clear_checkpoint(updated_at_ms=now_ms())
             self.boundary.set()
             self.terminal.set()
 
@@ -809,14 +791,8 @@ class InvocationExecution:
                     operations=self._operation(("invocation", "state"), "cancelled"),
                 )
                 self.invocation._clear_checkpoint(updated_at_ms=now_ms())
-            except SinkDeliveryError as error:
+            except asyncio.CancelledError:
                 self._clear_waits()
-                self.invocation._update(
-                    state=InvocationState.CANCELLED,
-                    error=RuntimeErrorInfo(type=type(error).__name__, message=str(error)),
-                    updated_at_ms=now_ms(),
-                )
-                pass
             self.boundary.set()
             self.terminal.set()
             if self.stream is not None:
@@ -888,30 +864,74 @@ class InvocationExecution:
     ) -> None:
         if self.event_mode is EventMode.MINIMAL:
             return
+        if self.sink is None and (
+            self.stream is None
+            or self.stream.event_channel not in {"runtime", "all"}
+        ):
+            return
         if self.event_mode is EventMode.STANDARD:
             operations = ()
             if subject_type == "node_phase":
                 return
             if subject_type == "operator_call" and isinstance(payload, dict):
-                payload = {key: value for key, value in payload.items() if key not in {"input", "output"}}
+                payload = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"input", "output"}
+                }
         async with self._event_lock:
             self.runtime_sequence += 1
-            event = RuntimeEvent.detached(
-                workflow_id=self.workflow.workflow_id,
-                workflow_revision_id=self.workflow.workflow_revision_id,
-                session_id=self.session.id,
-                invocation_id=self.invocation.id,
-                sequence=self.runtime_sequence,
-                event_name=event_name,
-                subject_type=subject_type,
-                subject_id=subject_id,
-                status=status,
-                workflow_path=workflow_path,
-                duration_ns=duration_ns,
-                payload=payload,
-                operations=operations if self.event_mode is EventMode.FULL else (),
-            )
-            await self._deliver(event)
+            try:
+                event = RuntimeEvent.detached(
+                    workflow_id=self.workflow.workflow_id,
+                    workflow_revision_id=self.workflow.workflow_revision_id,
+                    session_id=self.session.id,
+                    invocation_id=self.invocation.id,
+                    sequence=self.runtime_sequence,
+                    event_name=event_name,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    status=status,
+                    workflow_path=workflow_path,
+                    duration_ns=duration_ns,
+                    payload=payload,
+                    operations=(
+                        operations if self.event_mode is EventMode.FULL else ()
+                    ),
+                )
+                serialized = (
+                    SerializedEvent.from_event(event) if self.sink is not None else None
+                )
+            except BaseException as error:
+                logger.exception("Runtime Event capture failed; attempting a gap Event.")
+                try:
+                    event = RuntimeEvent(
+                        workflow_id=self.workflow.workflow_id,
+                        workflow_revision_id=self.workflow.workflow_revision_id,
+                        session_id=self.session.id,
+                        invocation_id=self.invocation.id,
+                        sequence=self.runtime_sequence,
+                        event_name="event_capture_failed",
+                        subject_type=subject_type,
+                        subject_id=subject_id,
+                        status="failed",
+                        workflow_path=workflow_path,
+                        payload={
+                            "original_event_name": event_name,
+                            "error_type": type(error).__name__,
+                        },
+                    )
+                    serialized = (
+                        SerializedEvent.from_event(event)
+                        if self.sink is not None
+                        else None
+                    )
+                except BaseException:
+                    logger.exception(
+                        "Runtime Event gap capture also failed; tracing has a sequence gap."
+                    )
+                    return
+            await self._deliver(event, serialized)
 
     async def _emit_user_mappings(
         self,
@@ -920,6 +940,10 @@ class InvocationExecution:
         contracts: tuple[Any, ...],
         value: Any,
     ) -> None:
+        if self.sink is None and (
+            self.stream is None or self.stream.event_channel not in {"user", "all"}
+        ):
+            return
         for mapping, contract in zip(mappings, contracts, strict=True):
             try:
                 data = await self._call_hook(mapping.transform, copy.deepcopy(value))
@@ -938,47 +962,94 @@ class InvocationExecution:
                 }
             async with self._event_lock:
                 self.user_sequence += 1
-                event = UserEvent.detached(
-                    workflow_id=self.workflow.workflow_id,
-                    workflow_revision_id=self.workflow.workflow_revision_id,
-                    session_id=self.session.id,
-                    invocation_id=self.invocation.id,
-                    sequence=self.user_sequence,
-                    type=event_type,
-                    data=data,
-                    node_id=node.id,
-                    workflow_path=node.workflow_path,
-                )
-                await self._deliver(event)
+                try:
+                    event = UserEvent.detached(
+                        workflow_id=self.workflow.workflow_id,
+                        workflow_revision_id=self.workflow.workflow_revision_id,
+                        session_id=self.session.id,
+                        invocation_id=self.invocation.id,
+                        sequence=self.user_sequence,
+                        type=event_type,
+                        data=data,
+                        node_id=node.id,
+                        workflow_path=node.workflow_path,
+                    )
+                    serialized = (
+                        SerializedEvent.from_event(event)
+                        if self.sink is not None
+                        else None
+                    )
+                except BaseException as error:
+                    logger.exception("User Event capture failed; attempting a gap Event.")
+                    try:
+                        event = UserEvent(
+                            workflow_id=self.workflow.workflow_id,
+                            workflow_revision_id=self.workflow.workflow_revision_id,
+                            session_id=self.session.id,
+                            invocation_id=self.invocation.id,
+                            sequence=self.user_sequence,
+                            type="user_event_capture_failed",
+                            data={
+                                "original_type": event_type,
+                                "error_type": type(error).__name__,
+                            },
+                            node_id=node.id,
+                            workflow_path=node.workflow_path,
+                        )
+                        serialized = (
+                            SerializedEvent.from_event(event)
+                            if self.sink is not None
+                            else None
+                        )
+                    except BaseException:
+                        logger.exception(
+                            "User Event gap capture also failed; stream has a sequence gap."
+                        )
+                        continue
+                await self._deliver(event, serialized)
 
-    async def _deliver(self, event: Event) -> None:
+    async def _deliver(
+        self, event: Event, serialized: SerializedEvent | None
+    ) -> None:
         if self.sink is not None:
-            self.pending_delivery = (*self.pending_delivery, event)
-            try:
-                await self.sink.submit_events(self.pending_delivery)
-            except asyncio.CancelledError:
-                # Cancellation is control flow, not a broken Sink.  Retain the
-                # delivery slot so cancellation convergence can submit the
-                # interrupted Event together with the ordered cancel Events.
-                raise
-            except BaseException as error:
-                raise SinkDeliveryError(
-                    "RuntimeSink failed before accepting Event ownership."
-                ) from error
-            self.pending_delivery = ()
+            if serialized is None:
+                logger.error(
+                    "RuntimeSink was attached without a serialized Event; "
+                    "detaching it from this Invocation."
+                )
+                self.sink = None
+            else:
+                self.pending_delivery = (*self.pending_delivery, serialized)
+                try:
+                    await self.sink.submit_events(self.pending_delivery)
+                except asyncio.CancelledError:
+                    # Cancellation is control flow, not a broken Sink.  Retain the
+                    # delivery slot so cancellation convergence can submit the
+                    # interrupted Event together with the ordered cancel Events.
+                    raise
+                except BaseException:
+                    logger.exception(
+                        "RuntimeSink violated the in-memory acceptance contract; "
+                        "detaching it from this Invocation."
+                    )
+                    self.sink = None
+                self.pending_delivery = ()
         if self.stream is not None:
             await self.stream.publish(event)
 
     def _offer_checkpoint(self, state: InvocationState) -> None:
-        checkpoint = self._checkpoint(state)
-        self.invocation._update(checkpoint=checkpoint, updated_at_ms=now_ms())
-        if self.sink is not None:
-            try:
-                self.sink.offer_checkpoint(checkpoint)
-            except BaseException as error:
-                raise SinkDeliveryError(
-                    "RuntimeSink failed while accepting the latest Checkpoint."
-                ) from error
+        try:
+            checkpoint = self._checkpoint(state)
+            self.invocation._update(checkpoint=checkpoint, updated_at_ms=now_ms())
+            if self.sink is not None:
+                self.sink.offer_checkpoint(
+                    SerializedCheckpoint.from_checkpoint(checkpoint)
+                )
+        except BaseException:
+            logger.exception(
+                "Checkpoint capture or acceptance failed; recoverability is degraded."
+            )
+            self.sink = None
 
     def _checkpoint(self, state: InvocationState) -> RecoveryCheckpoint:
         latest_execution_ids = set(self.latest_output_ids.values())

@@ -265,19 +265,9 @@ class NodeExecutor:
         assert isinstance(node.operator, Operator)
         operators = (node.operator, *node.fallback_operators)
         last_error: BaseException | None = None
-        total_attempts = 0
-        total_runtime_ns = 0
-        resource = node.policy.resource if node.policy else None
-
         for operator in operators:
             for attempt in range(1, max_attempts + 1):
-                total_attempts += 1
-                if (
-                    resource
-                    and resource.max_operator_attempts_per_invocation is not None
-                    and total_attempts > resource.max_operator_attempts_per_invocation
-                ):
-                    raise RuntimeError("Node Operator attempt limit exceeded.")
+                await progress("operator_call_started", None)
                 started = time.perf_counter_ns()
                 status = "completed"
                 error_text = None
@@ -316,7 +306,6 @@ class NodeExecutor:
                     last_error = error
                     error_text = f"{type(error).__name__}: {error}"
                 duration = max(0, time.perf_counter_ns() - started)
-                total_runtime_ns += duration
                 record = OperatorCallRecord(
                     id=uuid4(),
                     node_execution_id=execution.id,
@@ -345,12 +334,6 @@ class NodeExecutor:
                 await progress("operator_call", record)
                 if status == "completed":
                     return output
-                if (
-                    resource
-                    and resource.max_runtime_ms_per_invocation is not None
-                    and total_runtime_ns > resource.max_runtime_ms_per_invocation * 1_000_000
-                ):
-                    raise RuntimeError("Node Operator runtime limit exceeded.")
                 if attempt < max_attempts:
                     await asyncio.sleep(self._retry_delay(retry.backoff if retry else None, attempt))
         assert last_error is not None

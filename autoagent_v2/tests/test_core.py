@@ -20,13 +20,13 @@ from autoagent.core import (
     NodePolicy,
     RecoveryPolicy,
     RuntimeEvent,
-    SinkPressure,
     StreamPolicy,
     WaitOperator,
     Workflow,
     WorkflowRegistrationError,
     UserEventMapping,
 )
+from tests.helpers import decode_checkpoint, decode_events
 from tests.helpers import double, identity_int
 
 
@@ -63,29 +63,28 @@ class RecordingSink:
         self.block_status: str | None = None
         self.block_event_name: str | None = None
 
-    async def wait_until_admissible(self, timeout: float | None) -> bool:
+    async def wait_until_admissible(self) -> None:
         self.admission_calls += 1
-        return self.admissible
+        if not self.admissible:
+            await asyncio.Event().wait()
 
     async def submit_events(self, events: tuple[Any, ...]) -> None:
+        decoded = decode_events(events)
         if self.block_status is not None and any(
             getattr(event, "status", None) == self.block_status
             and (
                 self.block_event_name is None
                 or getattr(event, "event_name", None) == self.block_event_name
             )
-            for event in events
+            for event in decoded
         ):
             if self._event_gate is None:
                 self._event_gate = asyncio.Event()
             await self._event_gate.wait()
-        self.events.extend(events)
+        self.events.extend(decoded)
 
     def offer_checkpoint(self, checkpoint: Any) -> None:
-        self.checkpoints.append(checkpoint)
-
-    def pressure(self) -> SinkPressure:
-        return SinkPressure(accepting_new_executions=self.admissible)
+        self.checkpoints.append(decode_checkpoint(checkpoint))
 
     def release(self, app: AutoAgentApp) -> None:
         gate = self._event_gate
@@ -337,7 +336,7 @@ class SinkAndStreamTests(unittest.TestCase):
 
     def test_admission_failure_creates_no_session(self) -> None:
         sink = RecordingSink(admissible=False)
-        app = AutoAgentApp(runtime_sink=sink)
+        app = AutoAgentApp(runtime_sink=sink, admission_timeout=0.01)
         workflow = linear_workflow()
         app.register_workflow(workflow)
         with self.assertRaises(AdmissionRejectedError):

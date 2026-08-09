@@ -1,34 +1,38 @@
-"""The only durable-output dependency owned by V2 Core."""
+"""The external acceptance boundary used by V2 Core.
+
+Core owns Event/Checkpoint capture and serialization.  A Sink implementation
+normally lives in the future Server/Platform layer and only accepts immutable
+records into its own in-process memory.  Database writes, remote delivery,
+retry, batching, retention, projections, and health reporting are deliberately
+outside this protocol.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol
 
-from .checkpoint import RecoveryCheckpoint
-from .events import Event
-
-
-@dataclass(frozen=True, slots=True)
-class SinkPressure:
-    accepting_new_executions: bool
-    pending_events: int = 0
-    pending_bytes: int = 0
-    backend_available: bool = True
-    reason: str | None = None
+from .checkpoint import SerializedCheckpoint
+from .events import SerializedEvent
 
 
 class RuntimeSink(Protocol):
-    """One App-wide ownership boundary for Events and latest Checkpoints."""
+    """One App-wide in-memory acceptance boundary owned outside Core."""
 
-    async def wait_until_admissible(self, timeout: float | None) -> bool:
-        """Wait until a new Invocation may be created."""
+    async def wait_until_admissible(self) -> None:
+        """Return when a new Invocation may be created.
 
-    async def submit_events(self, events: tuple[Event, ...]) -> None:
-        """Return after accepting ownership of every supplied Event."""
+        The caller owns any admission timeout.  Implementations may wait on
+        their queue-capacity condition but must not perform durable I/O here.
+        """
 
-    def offer_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
-        """Offer a non-blocking latest-wins Checkpoint."""
+    async def submit_events(self, events: tuple[SerializedEvent, ...]) -> None:
+        """Return after atomically accepting every Event into Sink memory.
 
-    def pressure(self) -> SinkPressure:
-        """Return an immediate diagnostic snapshot."""
+        A full Sink queue may suspend this call and therefore pause the current
+        Invocation at an Event boundary.  The method must be cancellation-safe:
+        cancellation cannot leave Core uncertain whether the batch was accepted.
+        Backend delivery failure after return is exclusively Sink-owned.
+        """
+
+    def offer_checkpoint(self, checkpoint: SerializedCheckpoint) -> None:
+        """Non-blockingly offer a latest-wins Checkpoint to Sink memory."""

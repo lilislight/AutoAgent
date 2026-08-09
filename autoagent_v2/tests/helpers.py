@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from autoagent.core import ExecutionContext
+from autoagent.core import SerializedCheckpoint, SerializedEvent
 
 
 def identity_int(value: int) -> int:
@@ -52,3 +53,11 @@ class TextReducer:
 
     def finish(self) -> str:
         return "".join(self._parts)
+
+
+def decode_events(events: tuple[SerializedEvent, ...]) -> list[object]:
+    return [event.decode() for event in events]
+
+
+def decode_checkpoint(checkpoint: SerializedCheckpoint) -> object:
+    return checkpoint.decode()

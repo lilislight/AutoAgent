@@ -16,7 +16,7 @@ from autoagent.core import (
     WaitOperator,
     Workflow,
 )
-from tests.helpers import identity_int, uppercase
+from tests.helpers import decode_checkpoint, decode_events, identity_int, uppercase
 
 
 def inner_value(context: ExecutionContext) -> int:
@@ -36,18 +36,14 @@ class _CheckpointSink:
         self.events: list[Any] = []
         self.checkpoints: list[Any] = []
 
-    async def wait_until_admissible(self, timeout: float | None) -> bool:
-        return True
-
-    async def submit_events(self, events: tuple[Any, ...]) -> None:
-        self.events.extend(events)
-
-    def offer_checkpoint(self, checkpoint: Any) -> None:
-        self.checkpoints.append(checkpoint)
-
-    def pressure(self) -> Any:
+    async def wait_until_admissible(self) -> None:
         return None
 
+    async def submit_events(self, events: tuple[Any, ...]) -> None:
+        self.events.extend(decode_events(events))
+
+    def offer_checkpoint(self, checkpoint: Any) -> None:
+        self.checkpoints.append(decode_checkpoint(checkpoint))
 
 def replay_safe() -> NodePolicy:
     return NodePolicy(recovery=RecoveryPolicy(mode="replay_safe", max_attempts=2))

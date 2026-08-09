@@ -630,7 +630,7 @@ Invocation Coordinator 可以按状态实际提交顺序应用修改、分配 se
 Core 保留 `minimal`、`standard`、`full` 三种采集模式，因为 Full Event 的 Operations、输入输出复制和
 内部阶段构造成本发生在 Core，不能让 Core 永远产生 Full 后再由 Server 丢弃。
 
-- Minimal：只记录 Invocation 级必要事实和最终结果。
+- Minimal：不生成 Runtime Event，只生成 Recovery Checkpoint 和 User Event。
 - Standard：增加图级状态、Node、Edge、Operator Call 和 Timing 事实。
 - Full：增加内部阶段、输入输出和 Runtime Operations，支持详细 Debug、Replay 和 Fork。
 
@@ -642,52 +642,36 @@ Checkpoint 独立于 capture mode。三种模式都可以生成完整 Recovery C
 Core 最多配置一个只写 `RuntimeSink`。Event 使用追加式接纳语义，Checkpoint 使用 latest-wins 语义：
 
 ```python
-Event = RuntimeEvent | UserEvent
-
-
 class RuntimeSink(Protocol):
-    async def wait_until_admissible(
-        self,
-        timeout: float | None,
-    ) -> bool:
+    async def wait_until_admissible(self) -> None:
         """Wait until a new Invocation may be admitted."""
 
     async def submit_events(
         self,
-        events: tuple[Event, ...],
+        events: tuple[SerializedEvent, ...],
     ) -> None:
-        """Return only after ownership of every Event has been accepted."""
+        """Return after atomically accepting every Event into Sink memory."""
 
     def offer_checkpoint(
         self,
-        checkpoint: RecoveryCheckpoint,
+        checkpoint: SerializedCheckpoint,
     ) -> None:
         """Non-blocking latest-wins Checkpoint offer."""
-
-    def pressure(self) -> SinkPressure:
-        """Return an immediate diagnostic pressure snapshot."""
 ```
 
 Core 不解释 high/hard 水位、队列长度、批量大小、重试、spool 或数据库可用性。这些规则全部由具体 Sink
-实现；Core 只依赖上面的行为契约。`SinkPressure` 仅用于状态和诊断，例如：
-
-```python
-@dataclass(frozen=True)
-class SinkPressure:
-    accepting_new_executions: bool
-    pending_events: int
-    pending_bytes: int
-    backend_available: bool
-    reason: str | None = None
-```
+实现；Core 只依赖上面的行为契约。队列水位和持久化健康状态由 Server/Platform 自己查询和暴露，不放进
+最小 `RuntimeSink` 协议。
 
 ### 新执行准入
 
 - `invoke` 和 `recover` 的 Wait、Stream、Submit 入口都必须在分配 Session/Invocation Runtime 前调用
-  `await runtime_sink.wait_until_admissible(timeout)`。
+  `await runtime_sink.wait_until_admissible()`。
+- `admission_timeout` 是 Core/App 的调用参数；Core 在 Sink 调用外侧计时，不能把 timeout 语义委托给
+  每一种 Sink 实现。
 - 同步入口通过同一 Runtime bridge 阻塞等待；不能绕过该检查。
-- 返回 `True` 才创建 Invocation；返回 `False` 或超时表示准入失败，并且不能留下半创建的 Session 或
-  Invocation。
+- Sink 正常返回后才创建 Invocation；Core 超时或 Sink 协议异常表示准入失败，并且不能留下半创建的
+  Session 或 Invocation。
 - Resume 继续既有 Invocation，不属于新执行准入；它产生的 Event 仍受 `submit_events()` 背压。
 - Submit 的“立即”从准入成功后开始计算。它可以在准入阶段等待，但不要求调用者实现外部重试循环。
 - 没有配置 RuntimeSink 时，准入直接通过。
@@ -726,15 +710,17 @@ Invocation Coordinator applies one logical state transition
 - Core 在调用前保留当前 Event 的交付边界，只有 Sink 接管后才释放相关不可变 Event 数据并继续。
 - Sink 的显式降级或丢弃策略只能发生在 Sink 内部，并必须由 Sink 暴露和记录；Core 永远不主动丢弃
   Runtime Event、User Event 或 Cancel Event。
-- Sink 已关闭、实现损坏等不可恢复的基础设施错误不能伪装成成功。Core 停止新的准入，并保留未完成交付
-  的可见失败边界，不能静默继续执行。
+- `submit_events()` 的实现不应接触数据库或网络，因此正常的后端故障不会从该方法抛出。若 Sink 已关闭或
+  实现损坏而违反协议，Core 记录明确错误并对该 Invocation 脱离 Sink；业务执行仍然继续。Server 后续通过
+  自己的健康接口暴露不可观测/不可恢复状态。
 - Waiting 或 Terminal 的 App 调用结果也只能在对应边界 Event 被 Sink 接管后返回；这样“调用成功返回”与
   “Sink 已拥有该执行边界”具有一致含义。
 - Cancel 调用者即使停止等待，也不能取消 Invocation 内部的取消收敛与 Event 交付任务；该任务继续到 Sink
   接管取消 Event，或暴露不可恢复的 Sink 基础设施错误。
 
-因此 Sink 可以在后台序列化、批量写数据库或发送平台；Executor 等待的只是“内存所有权转移”，而不是
-durable acknowledgement。Sink 积压的是已经与 Runtime 解除引用的 Event，而不是完整
+Core 在调用 Sink 前已经完成 Event 序号分配、Runtime value 规范化和不可变 UTF-8 JSON 序列化。Sink
+可以在后台批量写数据库或发送平台；Executor 等待的只是“内存所有权转移”，而不是 durable
+acknowledgement。Sink 积压的是已经与 Runtime 解除引用的序列化 Event，而不是完整
 `InvocationExecution`。
 
 ### 单一 Sink 与日志
@@ -827,7 +813,7 @@ Core 行为：
 
 Server 行为：
 
-- 接收 Checkpoint 后异步序列化和 upsert 最新状态。
+- 接收已经序列化的 Checkpoint 后异步 upsert 最新状态。
 - 可覆盖同一 Invocation 的旧 Checkpoint。
 - 记录 accepted、pending、durable、failed 状态。
 - 从持久化后端读取 Checkpoint 后显式调用 App Recovery API。

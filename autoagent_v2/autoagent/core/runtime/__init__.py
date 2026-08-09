@@ -2,10 +2,19 @@ from .checkpoint import (
     NodeCheckpoint,
     RecoveryCheckpoint,
     SchedulerCheckpoint,
+    SerializedCheckpoint,
     WaitCheckpoint,
 )
 from .context import apply_patch, patch_paths, patches_conflict, readonly_context
-from .events import Event, EventMode, RuntimeEvent, StateOperation, UserEvent, now_ms
+from .events import (
+    Event,
+    EventMode,
+    RuntimeEvent,
+    SerializedEvent,
+    StateOperation,
+    UserEvent,
+    now_ms,
+)
 from .execution import NodeExecution, NodeState, OperatorCallRecord
 from .invocation import (
     Invocation,
@@ -16,11 +25,13 @@ from .invocation import (
     WaitSnapshot,
 )
 from .loop import RuntimeLoop
-from .sink import RuntimeSink, SinkPressure
+from .sink import RuntimeSink
 from .serialization import (
     RuntimeSerializationError,
     decode_runtime_value,
+    decode_json_record,
     encode_runtime_value,
+    encode_json_record,
     json_value,
 )
 from .stream import (
@@ -46,13 +57,14 @@ __all__ = [
     "OperatorCallRecord",
     "RecoveryCheckpoint",
     "SchedulerCheckpoint",
+    "SerializedCheckpoint",
+    "SerializedEvent",
     "RuntimeErrorInfo",
     "RuntimeLoop",
     "RuntimeEvent",
     "RuntimeSink",
     "RuntimeSerializationError",
     "Session",
-    "SinkPressure",
     "StateOperation",
     "UserEvent",
     "WaitCheckpoint",
@@ -64,5 +76,7 @@ __all__ = [
     "readonly_context",
     "json_value",
     "decode_runtime_value",
+    "decode_json_record",
     "encode_runtime_value",
+    "encode_json_record",
 ]

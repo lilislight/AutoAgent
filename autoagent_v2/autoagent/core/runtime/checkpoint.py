@@ -8,7 +8,12 @@ from typing import Any
 from uuid import UUID
 
 from ..scheduler import EdgeResolution, NodeExecutionRequest
-from .serialization import decode_runtime_value, encode_runtime_value
+from .serialization import (
+    decode_json_record,
+    decode_runtime_value,
+    encode_json_record,
+    encode_runtime_value,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,3 +194,40 @@ class RecoveryCheckpoint:
             ),
             created_at_ms=int(value["created_at_ms"]),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SerializedCheckpoint:
+    """Immutable latest-wins Core-to-Sink checkpoint envelope."""
+
+    workflow_id: str
+    workflow_revision_id: str
+    session_id: str
+    invocation_id: UUID
+    invocation_state: str
+    runtime_event_sequence: int
+    user_event_sequence: int
+    created_at_ms: int
+    payload: bytes
+    size_bytes: int
+
+    @classmethod
+    def from_checkpoint(
+        cls, checkpoint: RecoveryCheckpoint
+    ) -> "SerializedCheckpoint":
+        payload = encode_json_record(checkpoint.to_record())
+        return cls(
+            workflow_id=checkpoint.workflow_id,
+            workflow_revision_id=checkpoint.workflow_revision_id,
+            session_id=checkpoint.session_id,
+            invocation_id=checkpoint.invocation_id,
+            invocation_state=checkpoint.invocation_state,
+            runtime_event_sequence=checkpoint.runtime_event_sequence,
+            user_event_sequence=checkpoint.user_event_sequence,
+            created_at_ms=checkpoint.created_at_ms,
+            payload=payload,
+            size_bytes=len(payload),
+        )
+
+    def decode(self) -> RecoveryCheckpoint:
+        return RecoveryCheckpoint.from_record(decode_json_record(self.payload))

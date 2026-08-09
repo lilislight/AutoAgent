@@ -21,8 +21,6 @@ from autoagent.core import (
     Node,
     NodePolicy,
     RecoveryPolicy,
-    SinkDeliveryError,
-    SinkPressure,
     UserEventMapping,
     WaitOperator,
     Workflow,
@@ -35,6 +33,8 @@ from tests.helpers import (
     identity_str,
     increment,
     uppercase,
+    decode_checkpoint,
+    decode_events,
 )
 
 
@@ -78,17 +78,15 @@ class RecordingSink:
         self.events: list[Any] = []
         self.checkpoints: list[Any] = []
 
-    async def wait_until_admissible(self, timeout: float | None) -> bool:
-        return self.admissible
+    async def wait_until_admissible(self) -> None:
+        if not self.admissible:
+            await asyncio.Event().wait()
 
     async def submit_events(self, events: tuple[Any, ...]) -> None:
-        self.events.extend(copy.deepcopy(events))
+        self.events.extend(decode_events(events))
 
     def offer_checkpoint(self, checkpoint: Any) -> None:
-        self.checkpoints.append(copy.deepcopy(checkpoint))
-
-    def pressure(self) -> SinkPressure:
-        return SinkPressure(self.admissible)
+        self.checkpoints.append(decode_checkpoint(checkpoint))
 
 
 class FailingSink(RecordingSink):
@@ -283,7 +281,7 @@ class AppApiTests(unittest.TestCase):
 
     def test_admission_rejection_leaves_no_session_or_invocation(self) -> None:
         sink = RecordingSink(admissible=False)
-        app = AutoAgentApp(runtime_sink=sink)
+        app = AutoAgentApp(runtime_sink=sink, admission_timeout=0.01)
         value = Workflow("rejected", nodes=[Node("node", identity_int)])
         app.register_workflow(value)
         with self.assertRaises(AdmissionRejectedError):
@@ -292,13 +290,14 @@ class AppApiTests(unittest.TestCase):
         self.assertFalse(app._active)
         app.close()
 
-    def test_sink_failure_is_visible_and_does_not_hang_wait_api(self) -> None:
+    def test_sink_protocol_failure_does_not_change_business_result(self) -> None:
         app = AutoAgentApp(runtime_sink=FailingSink())
         value = Workflow("sink-failure", nodes=[Node("node", identity_int)])
         app.register_workflow(value)
         invocation = app.invoke(value, 1)
-        self.assertEqual(invocation.state, InvocationState.FAILED)
-        self.assertEqual(invocation.error.type, SinkDeliveryError.__name__)
+        self.assertEqual(invocation.state, InvocationState.COMPLETED)
+        self.assertEqual(invocation.result(), {"node": 1})
+        self.assertIsNone(invocation.error)
         app.close()
 
     def test_session_reuses_identity_after_terminal_and_keeps_old_handle_valid(self) -> None:

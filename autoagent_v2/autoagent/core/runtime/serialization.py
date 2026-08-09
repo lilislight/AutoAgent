@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from importlib import import_module
+import json
 import math
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,32 @@ from uuid import UUID
 
 class RuntimeSerializationError(TypeError):
     pass
+
+
+def encode_json_record(value: Mapping[str, Any]) -> bytes:
+    """Encode one already-normalized immutable handoff record."""
+
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise RuntimeSerializationError("Runtime record is not JSON serializable.") from error
+
+
+def decode_json_record(value: bytes) -> dict[str, Any]:
+    """Decode one immutable handoff record into a fresh mapping."""
+
+    try:
+        decoded = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeSerializationError("Runtime record is not valid UTF-8 JSON.") from error
+    if not isinstance(decoded, dict):
+        raise RuntimeSerializationError("Runtime record must decode to a mapping.")
+    return decoded
 
 
 def json_value(value: Any) -> Any:

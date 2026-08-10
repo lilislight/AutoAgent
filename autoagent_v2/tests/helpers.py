@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from autoagent.core import ExecutionContext
+from autoagent.core import EdgeConditionContext, InputMappingContext
 from autoagent.core import SerializedCheckpoint, SerializedEvent
 
 
@@ -28,15 +28,15 @@ def uppercase(value: str) -> str:
     return value.upper()
 
 
-def context_input_int(context: ExecutionContext) -> int:
+def context_input_int(context: InputMappingContext) -> int:
     return int(context.invocation_input)
 
 
-def always_true(_context: ExecutionContext) -> bool:
+def always_true(_context: EdgeConditionContext) -> bool:
     return True
 
 
-def always_false(_context: ExecutionContext) -> bool:
+def always_false(_context: EdgeConditionContext) -> bool:
     return False
 
 

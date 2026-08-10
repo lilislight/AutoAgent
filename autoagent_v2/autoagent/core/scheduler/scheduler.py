@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ..errors import LoopControlError
+from ..runtime.state import RuntimeState, StateOperation, StateOperationBatch
 from ..workflow import EdgeIR, LoopRegionIR, WorkflowIR
 from .models import (
     EdgeActivation,
@@ -38,24 +39,149 @@ class SkippedOccurrence:
 class Scheduler:
     """Maintain the current scoped graph cursor without Runtime history."""
 
-    def __init__(self, workflow: WorkflowIR) -> None:
+    def __init__(self, workflow: WorkflowIR, runtime_state: RuntimeState) -> None:
         self.workflow = workflow
-        self.ready: deque[NodeExecutionRequest] = deque()
-        self.resolutions: dict[str, EdgeResolution] = {}
-        self.scheduled: set[str] = set()
-        self.skipped: set[str] = set()
-        self._scheduled_requests: dict[str, NodeExecutionRequest] = {}
-        self._pending_boundaries: set[tuple[str, ExecutionScope]] = set()
+        self._runtime_state = runtime_state
+        self._working: dict[str, object] | None = None
+        self._last_batch: StateOperationBatch | None = None
+
+    @property
+    def ready(self) -> deque[NodeExecutionRequest]:
+        if self._working is not None:
+            return self._working["ready"]  # type: ignore[return-value]
+        active = self._active_requests()
+        return deque(
+            active[key]
+            for key in self._runtime_state.read("scheduler", "ready")
+        )
+
+    @property
+    def resolutions(self) -> dict[str, EdgeResolution]:
+        if self._working is not None:
+            return self._working["resolutions"]  # type: ignore[return-value]
+        return {
+            key: EdgeResolution.from_record(value)
+            for key, value in self._runtime_state.read(
+                "scheduler", "resolutions"
+            ).items()
+        }
+
+    @property
+    def scheduled(self) -> set[str]:
+        if self._working is not None:
+            return self._working["scheduled"]  # type: ignore[return-value]
+        return set(self._runtime_state.read("scheduler", "active_requests"))
+
+    @property
+    def skipped(self) -> set[str]:
+        if self._working is not None:
+            return self._working["skipped"]  # type: ignore[return-value]
+        return set(self._runtime_state.read("scheduler", "skipped"))
+
+    @property
+    def _scheduled_requests(self) -> dict[str, NodeExecutionRequest]:
+        if self._working is not None:
+            return self._working["requests"]  # type: ignore[return-value]
+        return self._active_requests()
+
+    @property
+    def _pending_boundaries(self) -> set[tuple[str, ExecutionScope]]:
+        if self._working is not None:
+            return self._working["boundaries"]  # type: ignore[return-value]
+        return self._decode_boundaries()
+
+    def _active_requests(self) -> dict[str, NodeExecutionRequest]:
+        return {
+            key: NodeExecutionRequest.from_record(value)
+            for key, value in self._runtime_state.read(
+                "scheduler", "active_requests"
+            ).items()
+        }
+
+    def _decode_boundaries(self) -> set[tuple[str, ExecutionScope]]:
+        return {
+            (str(value["region_id"]), tuple(
+                LoopIteration.from_record(frame) for frame in value["scope"]
+            ))
+            for value in self._runtime_state.read(
+                "scheduler", "pending_boundaries"
+            ).values()
+        }
+
+    def _begin(self) -> None:
+        if self._working is not None:
+            # A previous transition raised before commit. Its local mutation
+            # tree was never applied to RuntimeState, so discard it before the
+            # coordinator starts the failure/cancellation convergence step.
+            self._working = None
+        requests = self._active_requests()
+        self._working = {
+            "ready": deque(
+                requests[key]
+                for key in self._runtime_state.read("scheduler", "ready")
+            ),
+            "resolutions": self.resolutions,
+            "scheduled": set(requests),
+            "skipped": self.skipped,
+            "requests": requests,
+            "boundaries": self._decode_boundaries(),
+        }
+
+    def _commit(self) -> None:
+        assert self._working is not None
+        ready = self.ready
+        requests = self._scheduled_requests
+        boundaries = self._pending_boundaries
+        value = {
+            "ready": [item.occurrence for item in ready],
+            "active_requests": {
+                key: request.to_record() for key, request in requests.items()
+            },
+            "resolutions": {
+                key: resolution.to_record()
+                for key, resolution in self.resolutions.items()
+            },
+            "skipped": {key: True for key in sorted(self.skipped)},
+            "pending_boundaries": {
+                f"{region_id}@{scope_key(scope)}": {
+                    "region_id": region_id,
+                    "scope": [frame.to_record() for frame in scope],
+                }
+                for region_id, scope in sorted(
+                    boundaries, key=lambda item: (item[0], scope_key(item[1]))
+                )
+            },
+        }
+        previous = self._runtime_state.read("scheduler")
+        operations = tuple(
+            StateOperation("replace", ("scheduler", key), item)
+            for key, item in value.items()
+            if previous[key] != item
+        )
+        self._working = None
+        self._last_batch = (
+            self._runtime_state.apply(operations) if operations else None
+        )
+
+    def take_last_batch(self) -> StateOperationBatch | None:
+        batch = self._last_batch
+        self._last_batch = None
+        return batch
 
     def initialize(self) -> None:
+        self._begin()
         if self.ready or self.scheduled:
+            self._commit()
             return
         for node_id in self.workflow.entry_node_ids:
             self._enqueue(node_id, (), ())
+        self._commit()
 
     def drain_ready(self) -> tuple[NodeExecutionRequest, ...]:
+        self._begin()
         values = tuple(self.ready)
         self.ready.clear()
+        self._commit()
         return values
 
     def restore(
@@ -66,32 +192,68 @@ class Scheduler:
         scheduled: tuple[str, ...],
         skipped: tuple[str, ...],
     ) -> None:
-        self.ready = deque(ready)
-        self.resolutions = dict(resolutions)
-        self.scheduled = set(scheduled)
-        self.skipped = set(skipped)
-        self._scheduled_requests = {item.occurrence: item for item in ready}
-        self._pending_boundaries = set()
-        for key, resolution in self.resolutions.items():
-            for region in self.workflow.exit_loops(resolution.edge_id):
-                region_scope = self._region_scope(resolution.target_scope, region.id)
-                if region_scope is not None and key == boundary_edge_key(
-                    region.id, resolution.edge_id, region_scope
-                ):
-                    self._pending_boundaries.add((region.id, region_scope))
-            back = self.workflow.back_loop(resolution.edge_id)
-            if back is not None:
-                region_scope = self._region_scope(resolution.target_scope, back.id)
-                if region_scope is not None and key == boundary_edge_key(
-                    back.id, resolution.edge_id, region_scope
-                ):
-                    self._pending_boundaries.add((back.id, region_scope))
+        self._begin()
+        try:
+            self.ready.clear()
+            self.ready.extend(ready)
+            self.resolutions.clear()
+            self.resolutions.update(resolutions)
+            self.scheduled.clear()
+            self.scheduled.update(scheduled)
+            self.skipped.clear()
+            self.skipped.update(skipped)
+            self._scheduled_requests.clear()
+            self._scheduled_requests.update({item.occurrence: item for item in ready})
+            self._pending_boundaries.clear()
+            for key, resolution in self.resolutions.items():
+                for region in self.workflow.exit_loops(resolution.edge_id):
+                    region_scope = self._region_scope(
+                        resolution.target_scope, region.id
+                    )
+                    if region_scope is not None and key == boundary_edge_key(
+                        region.id, resolution.edge_id, region_scope
+                    ):
+                        self._pending_boundaries.add((region.id, region_scope))
+                back = self.workflow.back_loop(resolution.edge_id)
+                if back is not None:
+                    region_scope = self._region_scope(
+                        resolution.target_scope, back.id
+                    )
+                    if region_scope is not None and key == boundary_edge_key(
+                        back.id, resolution.edge_id, region_scope
+                    ):
+                        self._pending_boundaries.add((back.id, region_scope))
+            self._commit()
+        except BaseException:
+            self._working = None
+            raise
 
     def track_active(self, request: NodeExecutionRequest) -> None:
         """Restore a Wait-owned request not present in the ready queue."""
 
+        self._begin()
         self.scheduled.add(request.occurrence)
         self._scheduled_requests[request.occurrence] = request
+        self._commit()
+
+    def abort(self) -> None:
+        """Converge all Scheduler-owned work before Invocation termination."""
+
+        self._begin()
+        self.skipped.update(self.scheduled)
+        self.ready.clear()
+        self.scheduled.clear()
+        self._scheduled_requests.clear()
+        self.resolutions.clear()
+        self._pending_boundaries.clear()
+        self._commit()
+
+    def mark_skipped(self, node_id: str, scope: ExecutionScope = ()) -> None:
+        """Record an otherwise-unseen occurrence as terminally skipped."""
+
+        self._begin()
+        self.skipped.add(occurrence_key(node_id, scope))
+        self._commit()
 
     def resolve_outgoing(
         self,
@@ -99,84 +261,109 @@ class Scheduler:
         source_execution_id: UUID,
         decisions: dict[str, bool],
     ) -> tuple[SkippedOccurrence, ...]:
-        outgoing = self.workflow.outgoing(request.node_id)
-        if set(decisions) != {edge.id for edge in outgoing}:
-            raise ValueError("Decisions must resolve every outgoing Edge exactly once.")
-        self._validate_outgoing(request, decisions)
-        self._complete_request(request)
-        skipped: list[SkippedOccurrence] = []
-        target_scopes = {
-            edge.id: self._target_scope(edge, request.scope) for edge in outgoing
-        }
-        active_ids = {frame.loop_region_id for frame in request.scope}
-        entered_regions: dict[str, ExecutionScope] = {}
-        for edge in outgoing:
-            if not decisions[edge.id]:
-                continue
-            target_scope = target_scopes[edge.id]
-            for frame in target_scope:
-                if frame.loop_region_id in active_ids:
+        self._begin()
+        try:
+            outgoing = self.workflow.outgoing(request.node_id)
+            if set(decisions) != {edge.id for edge in outgoing}:
+                raise ValueError(
+                    "Decisions must resolve every outgoing Edge exactly once."
+                )
+            self._validate_outgoing(request, decisions)
+            self._complete_request(request)
+            skipped: list[SkippedOccurrence] = []
+            target_scopes = {
+                edge.id: self._target_scope(edge, request.scope) for edge in outgoing
+            }
+            active_ids = {frame.loop_region_id for frame in request.scope}
+            entered_regions: dict[str, ExecutionScope] = {}
+            for edge in outgoing:
+                if not decisions[edge.id]:
                     continue
-                region_scope = self._region_scope(target_scope, frame.loop_region_id)
-                assert region_scope is not None
-                entered_regions[frame.loop_region_id] = region_scope
+                target_scope = target_scopes[edge.id]
+                for frame in target_scope:
+                    if frame.loop_region_id in active_ids:
+                        continue
+                    region_scope = self._region_scope(
+                        target_scope, frame.loop_region_id
+                    )
+                    assert region_scope is not None
+                    entered_regions[frame.loop_region_id] = region_scope
 
         # A shared Header may execute before one of its mutually-exclusive
         # sibling scopes exists. Once its selected Body Edge chooses a sibling,
         # the Header's other Exit decisions belong to that new iteration. They
         # must not be written as permanent root-scope skips, because a later
         # iteration may choose those targets.
-        seeded_boundary_edges: set[str] = set()
-        for region_id, region_scope in entered_regions.items():
-            region = self.workflow.loop(region_id)
-            if request.node_id != region.header_node_id:
-                continue
-            for edge in outgoing:
-                if edge.id not in region.exit_edge_ids:
+            seeded_boundary_edges: set[str] = set()
+            for region_id, region_scope in entered_regions.items():
+                region = self.workflow.loop(region_id)
+                if request.node_id != region.header_node_id:
                     continue
+                for edge in outgoing:
+                    if edge.id not in region.exit_edge_ids:
+                        continue
+                    selected = decisions[edge.id]
+                    activation = (
+                        EdgeActivation(
+                            edge.id, request.node_id, source_execution_id
+                        )
+                        if selected
+                        else None
+                    )
+                    self._resolve_boundary(
+                        region, edge, region_scope, selected, activation
+                    )
+                    seeded_boundary_edges.add(edge.id)
+
+            for edge in outgoing:
                 selected = decisions[edge.id]
                 activation = (
                     EdgeActivation(edge.id, request.node_id, source_execution_id)
                     if selected
                     else None
                 )
-                self._resolve_boundary(
-                    region, edge, region_scope, selected, activation
-                )
-                seeded_boundary_edges.add(edge.id)
-
-        for edge in outgoing:
-            selected = decisions[edge.id]
-            activation = (
-                EdgeActivation(edge.id, request.node_id, source_execution_id)
-                if selected
-                else None
-            )
-            boundaries = self._active_boundary_regions(edge, request.scope)
-            for region in boundaries:
-                self._resolve_boundary(
-                    region, edge, request.scope, selected, activation
-                )
-            if boundaries:
-                # A Back/Exit target is committed only when all active work for
-                # its owning Loop boundary has stabilized.
-                continue
-            target_scope = target_scopes[edge.id]
-            if edge.id in seeded_boundary_edges and not selected:
-                target_active_ids = {
-                    frame.loop_region_id for frame in target_scope
-                }
-                if not (target_active_ids & active_ids):
-                    # This false choice belongs only to the newly-entered
-                    # sibling/nested boundary. It does not create a skipped
-                    # occurrence in a Loop that is not active yet.
+                boundaries = self._active_boundary_regions(edge, request.scope)
+                for region in boundaries:
+                    self._resolve_boundary(
+                        region, edge, request.scope, selected, activation
+                    )
+                if boundaries:
+                    # A Back/Exit target is committed only when all active work
+                    # for its owning Loop boundary has stabilized.
                     continue
-            self._resolve(edge, target_scope, selected, activation)
-            skipped.extend(self._try_resolve_target(edge.target, target_scope))
-        skipped.extend(self._finalize_pending_boundaries())
-        return tuple(skipped)
+                target_scope = target_scopes[edge.id]
+                if edge.id in seeded_boundary_edges and not selected:
+                    target_active_ids = {
+                        frame.loop_region_id for frame in target_scope
+                    }
+                    if not (target_active_ids & active_ids):
+                        # This false choice belongs only to the newly-entered
+                        # sibling/nested boundary. It does not create a skipped
+                        # occurrence in a Loop that is not active yet.
+                        continue
+                self._resolve(edge, target_scope, selected, activation)
+                skipped.extend(self._try_resolve_target(edge.target, target_scope))
+            skipped.extend(self._finalize_pending_boundaries())
+            result = tuple(skipped)
+            self._commit()
+            return result
+        except BaseException:
+            self._working = None
+            raise
 
     def skip_outgoing(
+        self, node_id: str, scope: ExecutionScope
+    ) -> tuple[SkippedOccurrence, ...]:
+        self._begin()
+        try:
+            result = self._skip_outgoing(node_id, scope)
+            self._commit()
+            return result
+        except BaseException:
+            self._working = None
+            raise
+
+    def _skip_outgoing(
         self, node_id: str, scope: ExecutionScope
     ) -> tuple[SkippedOccurrence, ...]:
         request = self._scheduled_requests.get(occurrence_key(node_id, scope))
@@ -416,7 +603,7 @@ class Scheduler:
             return []
         self.skipped.add(occurrence)
         result = [SkippedOccurrence(node_id, target_scope)]
-        result.extend(self.skip_outgoing(node_id, target_scope))
+        result.extend(self._skip_outgoing(node_id, target_scope))
         return result
 
     def _expected_incoming(
@@ -572,3 +759,4 @@ class Scheduler:
             ),
             None,
         )
+        self._begin()

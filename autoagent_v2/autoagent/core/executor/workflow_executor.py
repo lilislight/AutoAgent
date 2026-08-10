@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import inspect
 import logging
 import re
 import time
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
@@ -25,25 +24,37 @@ from ..runtime import (
     RecoveryCheckpoint,
     RuntimeErrorInfo,
     RuntimeEvent,
+    RuntimeState,
     RuntimeSink,
     SchedulerCheckpoint,
     SerializedCheckpoint,
     SerializedEvent,
     Session,
     StateOperation,
+    StateOperationBatch,
     UserEvent,
     WaitCheckpoint,
     WaitSnapshot,
-    apply_patch,
+    context_path_from_key,
+    context_path_key,
     now_ms,
     patch_paths,
-    readonly_context,
+    hook_context,
 )
-from ..runtime.serialization import encode_runtime_value
+from ..runtime.serialization import RuntimeValueCodec
 from ..scheduler import NodeExecutionRequest, Scheduler, occurrence_key, scope_key
 from ..operators import WaitOperator
-from ..workflow import ContextPatch, NodeIR, UserEventMapping, WorkflowIR
-from .node_executor import NodeExecutor
+from ..workflow import (
+    ContextPatch,
+    EdgeConditionContext,
+    IncomingActivation,
+    InputMappingContext,
+    NodeIR,
+    OutputBindingContext,
+    UserEventMapping,
+    WorkflowIR,
+)
+from .node_executor import NodeExecutor, _TimedHookFailure
 from .result import NodeExecutionResult, NodePhaseResult
 
 
@@ -69,33 +80,32 @@ class InvocationExecution:
         self.workflow = workflow
         self.session = session
         self.invocation = invocation
-        self.invocation_input = copy.deepcopy(invocation_input)
         self.event_mode = event_mode
         self.sink = sink
         self.stream = stream
         self.node_executor = node_executor
         self.default_max_node_executions = default_max_node_executions
 
-        self.scheduler = Scheduler(workflow)
+        self.runtime_state = RuntimeState.create(
+            workflow_id=workflow.workflow_id,
+            workflow_revision_id=workflow.workflow_revision_id,
+            session_id=session.id,
+            invocation_id=invocation.id,
+            event_mode=event_mode.value,
+            invocation_input=invocation_input,
+            session_context=session.context,
+            session_created_at_ms=session.created_at_ms,
+            invocation_created_at_ms=invocation.created_at_ms,
+        )
+        self.session._attach_runtime_state(self.runtime_state)
+
+        self.scheduler = Scheduler(workflow, self.runtime_state)
         self.scheduler.initialize()
-        self.invocation_context: dict[str, Any] = {}
-        self.node_executions: dict[UUID, NodeExecution] = {}
-        self.outputs: dict[UUID, Any] = {}
-        self.latest_output_ids: dict[str, UUID] = {}
-        self.node_execution_counts: dict[str, int] = {}
-        self.operator_attempt_counts: dict[str, int] = {}
-        self.operator_runtime_ns: dict[str, int] = {}
-        self.waits: dict[UUID, WaitCheckpoint] = {}
+        # Entry readiness is part of the Genesis Checkpoint, not a post-Genesis
+        # Event delta.
+        self.scheduler.take_last_batch()
         self.claimed_waits: set[UUID] = set()
         self.resume_queue: asyncio.Queue[tuple[UUID, Any]] = asyncio.Queue()
-        self.session_context_revision = 0
-        self.invocation_context_revision = 0
-        self.session_path_revisions: dict[tuple[str, ...], int] = {}
-        self.invocation_path_revisions: dict[tuple[str, ...], int] = {}
-        self.runtime_sequence = 0
-        self.user_sequence = 0
-        self.recovery_mode = False
-        self.deferred_error: RuntimeErrorInfo | None = None
 
         self.boundary = asyncio.Event()
         self.terminal = asyncio.Event()
@@ -104,15 +114,67 @@ class InvocationExecution:
         self._worker_context: dict[
             asyncio.Task[NodeExecutionResult], tuple[NodeExecutionRequest, NodeExecution]
         ] = {}
-        self.cancel_requested = False
         self.pending_delivery: tuple[SerializedEvent, ...] = ()
+        self._deferred_operation_batches: list[StateOperationBatch] = []
         self._event_lock = asyncio.Lock()
         self._terminal_lock = asyncio.Lock()
 
     def restore(self, checkpoint: RecoveryCheckpoint) -> None:
-        self.invocation_input = copy.deepcopy(checkpoint.invocation_input)
-        self.session.context = copy.deepcopy(checkpoint.session_context)
-        self.invocation_context = copy.deepcopy(checkpoint.invocation_context)
+        runtime_operations = [
+            StateOperation(
+                "replace", ("session", "context"), checkpoint.session_context
+            ),
+            StateOperation(
+                "replace", ("invocation", "context"), checkpoint.invocation_context
+            ),
+            StateOperation(
+                "replace", ("invocation", "state"), checkpoint.invocation_state
+            ),
+            StateOperation(
+                "replace", ("invocation", "output"), checkpoint.invocation_output
+            ),
+            StateOperation(
+                "replace", ("invocation", "error"), checkpoint.invocation_error
+            ),
+            StateOperation(
+                "replace",
+                ("invocation", "runtime_event_sequence"),
+                checkpoint.runtime_event_sequence,
+            ),
+            StateOperation(
+                "replace",
+                ("invocation", "user_event_sequence"),
+                checkpoint.user_event_sequence,
+            ),
+            StateOperation(
+                "replace", ("invocation", "recovery_mode"), True
+            ),
+        ]
+        for path, version in checkpoint.session_path_revisions.items():
+            runtime_operations.append(
+                StateOperation(
+                    "add",
+                    (
+                        "session",
+                        "context_path_revisions",
+                        context_path_key(path),
+                    ),
+                    version,
+                )
+            )
+        for path, version in checkpoint.invocation_path_revisions.items():
+            runtime_operations.append(
+                StateOperation(
+                    "add",
+                    (
+                        "invocation",
+                        "context_path_revisions",
+                        context_path_key(path),
+                    ),
+                    version,
+                )
+            )
+        self.runtime_state.apply(tuple(runtime_operations))
         scheduler = checkpoint.scheduler_state
         self.scheduler.restore(
             ready=copy.deepcopy(scheduler.ready),
@@ -120,7 +182,8 @@ class InvocationExecution:
             scheduled=scheduler.scheduled,
             skipped=scheduler.skipped,
         )
-        self.node_executions = {
+        self.scheduler.take_last_batch()
+        restored_executions = {
             item.execution_id: NodeExecution(
                 id=item.execution_id,
                 node_id=item.node_id,
@@ -129,21 +192,203 @@ class InvocationExecution:
                     for region_id, iteration in item.scope
                 ),
                 state=item.state,  # type: ignore[arg-type]
+                input=copy.deepcopy(item.input),
+                error=item.error,
+                idempotency_key=item.idempotency_key,
+                started_state_version=item.started_state_version,
+                restart_session_context=copy.deepcopy(item.restart_session_context),
+                restart_invocation_context=copy.deepcopy(
+                    item.restart_invocation_context
+                ),
             )
             for item in checkpoint.node_states
         }
-        self.outputs = copy.deepcopy(checkpoint.required_outputs)
-        self.latest_output_ids = dict(checkpoint.latest_output_ids)
-        self.node_execution_counts = dict(checkpoint.node_execution_counts)
-        self.operator_attempt_counts = dict(checkpoint.operator_attempt_counts)
-        self.operator_runtime_ns = dict(checkpoint.operator_runtime_ns)
-        self.waits = {wait.id: copy.deepcopy(wait) for wait in checkpoint.waits}
-        for wait in self.waits.values():
+        for execution_id, output in checkpoint.required_outputs.items():
+            execution = restored_executions.get(execution_id)
+            if execution is not None:
+                execution.output = copy.deepcopy(output)
+        restored_waits = {
+            wait.id: copy.deepcopy(wait) for wait in checkpoint.waits
+        }
+        for wait in restored_waits.values():
             self.scheduler.track_active(wait.request)
+            self.scheduler.take_last_batch()
+        restored_pending = dict(checkpoint.pending_advances)
+        durable_operations: list[StateOperation] = [
+            StateOperation(
+                "replace",
+                ("counters", "node_executions"),
+                checkpoint.node_execution_counts,
+            ),
+            StateOperation(
+                "replace",
+                ("counters", "operator_attempts"),
+                checkpoint.operator_attempt_counts,
+            ),
+            StateOperation(
+                "replace",
+                ("counters", "operator_runtime_ns"),
+                checkpoint.operator_runtime_ns,
+            ),
+        ]
+        durable_operations.extend(
+            StateOperation(
+                "add",
+                ("node_executions", str(execution.id)),
+                self._node_state_record(execution),
+            )
+            for execution in restored_executions.values()
+        )
+        durable_operations.extend(
+            StateOperation(
+                "add", ("waits", str(wait.id)), self._wait_state_record(wait)
+            )
+            for wait in restored_waits.values()
+        )
+        durable_operations.extend(
+            StateOperation(
+                "add",
+                ("pending_advances", str(execution_id)),
+                request.to_record(),
+            )
+            for execution_id, request in restored_pending.items()
+        )
+        self.runtime_state.apply(tuple(durable_operations))
+        self.runtime_state.restore_state_version(checkpoint.state_version)
         self._publish_waits()
-        self.runtime_sequence = checkpoint.runtime_event_sequence
-        self.user_sequence = checkpoint.user_event_sequence
-        self.recovery_mode = True
+
+    @property
+    def invocation_input(self) -> Any:
+        return self.runtime_state.read("invocation", "input")
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self.runtime_state.read("invocation", "cancel_requested")
+
+    def request_cancel(self) -> None:
+        if self.cancel_requested:
+            return
+        self._defer_operations(
+            (
+                StateOperation(
+                    "replace", ("invocation", "cancel_requested"), True
+                ),
+            )
+        )
+
+    @property
+    def runtime_sequence(self) -> int:
+        return self.runtime_state.read("invocation", "runtime_event_sequence")
+
+    @property
+    def user_sequence(self) -> int:
+        return self.runtime_state.read("invocation", "user_event_sequence")
+
+    @property
+    def invocation_context(self) -> dict[str, Any]:
+        return self.runtime_state.read("invocation", "context")
+
+    @property
+    def node_executions(self) -> dict[UUID, NodeExecution]:
+        return self._execution_views()[0]
+
+    def _execution_views(
+        self,
+    ) -> tuple[dict[UUID, NodeExecution], dict[UUID, Any], dict[str, UUID]]:
+        executions = {
+            UUID(execution_id): self._node_from_state_record(record)
+            for execution_id, record in self.runtime_state.read(
+                "node_executions"
+            ).items()
+        }
+        outputs = {
+            execution_id: execution.output
+            for execution_id, execution in executions.items()
+            if execution.state == "completed"
+        }
+        latest: dict[str, NodeExecution] = {}
+        for execution in executions.values():
+            if execution.state != "completed":
+                continue
+            previous = latest.get(execution.node_id)
+            if (
+                previous is None
+                or execution.logical_occurrence > previous.logical_occurrence
+            ):
+                latest[execution.node_id] = execution
+        return (
+            executions,
+            outputs,
+            {node_id: execution.id for node_id, execution in latest.items()},
+        )
+
+    @property
+    def outputs(self) -> dict[UUID, Any]:
+        return self._execution_views()[1]
+
+    @property
+    def latest_output_ids(self) -> dict[str, UUID]:
+        return self._execution_views()[2]
+
+    @property
+    def node_execution_counts(self) -> dict[str, int]:
+        return self.runtime_state.read("counters", "node_executions")
+
+    @property
+    def operator_attempt_counts(self) -> dict[str, int]:
+        return self.runtime_state.read("counters", "operator_attempts")
+
+    @property
+    def operator_runtime_ns(self) -> dict[str, int]:
+        return self.runtime_state.read("counters", "operator_runtime_ns")
+
+    @property
+    def waits(self) -> dict[UUID, WaitCheckpoint]:
+        return {
+            UUID(wait_id): WaitCheckpoint(
+                id=UUID(record["id"]),
+                node_execution_id=UUID(record["node_execution_id"]),
+                request=NodeExecutionRequest.from_record(record["request"]),
+                payload=record["payload"],
+            )
+            for wait_id, record in self.runtime_state.read("waits").items()
+        }
+
+    @property
+    def pending_advances(self) -> dict[UUID, NodeExecutionRequest]:
+        return {
+            UUID(execution_id): NodeExecutionRequest.from_record(record)
+            for execution_id, record in self.runtime_state.read(
+                "pending_advances"
+            ).items()
+        }
+
+    @property
+    def recovery_mode(self) -> bool:
+        return self.runtime_state.read("invocation", "recovery_mode")
+
+    @property
+    def deferred_error(self) -> RuntimeErrorInfo | None:
+        value = self.runtime_state.read("invocation", "deferred_error")
+        return RuntimeErrorInfo(**value) if value is not None else None
+
+    @property
+    def session_path_revisions(self) -> dict[tuple[str, ...], int]:
+        return {
+            context_path_from_key(path): version
+            for path, version in self.runtime_state.read(
+                "session", "context_path_revisions"
+            ).items()
+        }
+
+    @property
+    def invocation_path_revisions(self) -> dict[tuple[str, ...], int]:
+        return {
+            context_path_from_key(path): version
+            for path, version in self.runtime_state.read(
+                "invocation", "context_path_revisions"
+            ).items()
+        }
 
     @staticmethod
     def _loop_iteration(region_id: str, iteration: int) -> Any:
@@ -155,27 +400,22 @@ class InvocationExecution:
         try:
             if self.stream is not None:
                 await self.stream.wait_started()
-            if recovered:
-                self.recovery_mode = True
-                await self._emit_runtime(
-                    event_name="invocation_recovered",
-                    subject_type="invocation",
-                    subject_id=str(self.invocation.id),
-                    status="running",
-                    operations=self._operation(("invocation", "recovery"), True),
-                )
-            await self._set_invocation_state(InvocationState.RUNNING)
+            if self.invocation.state is not InvocationState.RUNNING:
+                await self._set_invocation_state(InvocationState.RUNNING)
 
             while True:
                 if self.cancel_requested:
                     await self.finish_cancelled()
                     return
+
+                if self.pending_advances:
+                    await self._resume_pending_advances()
+                    continue
                 await self._drain_resume_queue()
 
                 if self.scheduler.ready:
-                    if not self.worker_tasks:
-                        self._offer_checkpoint(InvocationState.RUNNING)
                     requests = self.scheduler.drain_ready()
+                    self._defer_scheduler_batch()
                     requests = await self._filter_recovery_requests(requests)
                     executions = await self._start_batch(requests)
                     for request, execution in zip(requests, executions, strict=True):
@@ -190,7 +430,6 @@ class InvocationExecution:
                 if not self.worker_tasks:
                     if self.waits:
                         await self._set_invocation_state(InvocationState.WAITING)
-                        self._offer_checkpoint(InvocationState.WAITING)
                         self.boundary.set()
                         if self.stream is not None:
                             await self.stream.finish()
@@ -228,7 +467,6 @@ class InvocationExecution:
                     else:
                         await self._commit_result(request, execution, result)
                 if not self.worker_tasks:
-                    self._offer_checkpoint(InvocationState.RUNNING)
                     self._prune_execution_state()
         except asyncio.CancelledError:
             if self.cancel_requested:
@@ -246,13 +484,6 @@ class InvocationExecution:
         try:
             if self.stream is not None:
                 await self.stream.wait_started()
-            await self._emit_runtime(
-                event_name="invocation_recovered",
-                subject_type="invocation",
-                subject_id=str(self.invocation.id),
-                status="waiting",
-                operations=self._operation(("invocation", "recovery"), True),
-            )
         except BaseException as error:
             self.invocation._update(
                 state=InvocationState.FAILED,
@@ -265,6 +496,11 @@ class InvocationExecution:
             if self.stream is not None:
                 await self.stream.finish()
                 self.stream = None
+
+    def has_runnable_recovery_work(self) -> bool:
+        """Whether a restored Checkpoint still has control-flow work to run."""
+
+        return bool(self.scheduler.ready or self.pending_advances)
 
     async def _filter_recovery_requests(
         self, requests: tuple[NodeExecutionRequest, ...]
@@ -291,17 +527,25 @@ class InvocationExecution:
             )
             await self._emit_skipped_occurrence(request.node_id, request.scope, "recovery_blocked")
             self.scheduler.skip_outgoing(request.node_id, request.scope)
+            self._defer_scheduler_batch()
             if self.workflow.policy.failure.mode == "fail_fast":
                 raise RuntimeError(info.message)
-            self.deferred_error = self.deferred_error or info
+            self._set_deferred_error(info)
         return tuple(allowed)
 
     async def _start_batch(
         self, requests: tuple[NodeExecutionRequest, ...]
     ) -> tuple[NodeExecution, ...]:
         executions: list[NodeExecution] = []
+        # Every Node admitted by one Scheduler decision observes the same
+        # Context revision baseline. Runtime Event sequence updates emitted
+        # while materializing the batch must not make later siblings appear
+        # serial, otherwise conflicting parallel Output Bindings can escape
+        # detection merely because their running Events were emitted in order.
+        batch_state_version = self.runtime_state.state_version
         for request in requests:
             node = self.workflow.node(request.node_id)
+            baseline = self._take_recovery_baseline(request)
             count = self.node_execution_counts.get(node.id, 0) + 1
             resource = node.policy.resource if node.policy else None
             allowed = (
@@ -317,7 +561,6 @@ class InvocationExecution:
                     allowed=allowed,
                     scope=scope_key(request.scope),
                 )
-            self.node_execution_counts[node.id] = count
             execution = NodeExecution(
                 node_id=node.id,
                 scope=request.scope,
@@ -331,10 +574,37 @@ class InvocationExecution:
                         f"{node.id}:{occurrence_key(node.id, request.scope)}:{count}",
                     )
                 ),
-                session_context_revision=self.session_context_revision,
-                invocation_context_revision=self.invocation_context_revision,
+                started_state_version=(
+                    baseline.started_state_version
+                    if baseline is not None
+                    else batch_state_version
+                ),
+                restart_session_context=(
+                    copy.deepcopy(baseline.restart_session_context)
+                    if baseline is not None
+                    else copy.deepcopy(self.session.context)
+                ),
+                restart_invocation_context=(
+                    copy.deepcopy(baseline.restart_invocation_context)
+                    if baseline is not None
+                    else copy.deepcopy(self.invocation_context)
+                ),
             )
-            self.node_executions[execution.id] = execution
+            counter_path = ("counters", "node_executions", node.id)
+            self._apply_operations(
+                (
+                    StateOperation(
+                        "replace" if count > 1 else "add",
+                        counter_path,
+                        count,
+                    ),
+                    StateOperation(
+                        "add",
+                        ("node_executions", str(execution.id)),
+                        self._node_state_record(execution),
+                    ),
+                )
+            )
             executions.append(execution)
             await self._emit_runtime(
                 event_name="node_state_changed",
@@ -346,17 +616,41 @@ class InvocationExecution:
                     "node_execution_id": str(execution.id),
                     "scope": self._scope_value(request.scope),
                 },
-                operations=self._operation(
-                    ("node_executions", str(execution.id), "state"), "running"
-                ),
             )
         return tuple(executions)
+
+    def _take_recovery_baseline(
+        self, request: NodeExecutionRequest
+    ) -> NodeExecution | None:
+        if not self.recovery_mode:
+            return None
+        candidates = [
+            execution
+            for execution in self.node_executions.values()
+            if execution.state in {"ready", "running"}
+            and occurrence_key(execution.node_id, execution.scope)
+            == request.occurrence
+        ]
+        if not candidates:
+            return None
+        baseline = max(
+            candidates,
+            key=lambda execution: (execution.logical_occurrence, str(execution.id)),
+        )
+        self._defer_operations(
+            (
+                StateOperation(
+                    "remove", ("node_executions", str(baseline.id))
+                ),
+            )
+        )
+        return baseline
 
     async def _run_node(
         self, request: NodeExecutionRequest, execution: NodeExecution
     ) -> NodeExecutionResult:
         node = self.workflow.node(request.node_id)
-        context = self._hook_context(request)
+        context = self._hook_context(request, execution)
         default_input = self._default_input(request)
 
         async def progress(kind: str, value: Any) -> None:
@@ -371,16 +665,37 @@ class InvocationExecution:
                     raise RuntimeError(
                         f"Node {node.id!r} Operator attempt limit exceeded."
                     )
-                self.operator_attempt_counts[node.id] = attempted
+                path = ("counters", "operator_attempts", node.id)
+                self._apply_operations(
+                    (
+                        StateOperation(
+                            "replace" if attempted > 1 else "add",
+                            path,
+                            attempted,
+                        ),
+                    )
+                )
             elif kind == "operator_call":
-                self.operator_runtime_ns[node.id] = (
+                total_runtime_ns = (
                     self.operator_runtime_ns.get(node.id, 0) + value.duration_ns
+                )
+                runtime_path = ("counters", "operator_runtime_ns", node.id)
+                self._apply_operations(
+                    (
+                        StateOperation(
+                            "replace"
+                            if total_runtime_ns != value.duration_ns
+                            else "add",
+                            runtime_path,
+                            total_runtime_ns,
+                        ),
+                    )
                 )
                 policy_error: RuntimeError | None = None
                 if (
                     resource
                     and resource.max_runtime_ms_per_invocation is not None
-                    and self.operator_runtime_ns[node.id]
+                    and total_runtime_ns
                     > resource.max_runtime_ms_per_invocation * 1_000_000
                 ):
                     policy_error = RuntimeError(
@@ -396,7 +711,9 @@ class InvocationExecution:
                         "idempotency_key": value.idempotency_key,
                         "error": value.error,
                         "timing": {
-                            "queue_wait_ns": value.queue_wait_ns,
+                            "dispatch_wait_ns": value.dispatch_wait_ns,
+                            "executor_wait_ns": value.executor_wait_ns,
+                            "thread_pool_wait_ns": value.thread_pool_wait_ns,
                             "handler_ns": value.handler_ns,
                             "stream_ns": value.stream_ns,
                             "stream_delivery_ns": value.stream_delivery_ns,
@@ -405,27 +722,21 @@ class InvocationExecution:
                     if self.event_mode is EventMode.FULL:
                         payload.update({"input": value.input, "output": value.output})
                     await self._emit_runtime(
-                        event_name="operator_call_completed",
+                        event_name="operator_call_finished",
                         subject_type="operator_call",
                         subject_id=str(value.id),
                         status=value.status,
                         workflow_path=node.workflow_path,
                         duration_ns=value.duration_ns,
+                        started_at_ms=value.started_at_ms,
+                        completed_at_ms=value.completed_at_ms,
                         payload=payload,
                     )
                 if policy_error is not None:
                     raise policy_error
-            elif kind == "phase" and self.event_mode is EventMode.FULL:
+            elif kind == "phase":
                 phase: NodePhaseResult = value
-                await self._emit_runtime(
-                    event_name=phase.name,
-                    subject_type="node_phase",
-                    subject_id=str(execution.id),
-                    status=phase.status,
-                    workflow_path=node.workflow_path,
-                    duration_ns=phase.duration_ns,
-                    payload=phase.payload,
-                )
+                await self._emit_phase(node, execution, phase)
 
         async def stream_chunk(chunk: Any) -> None:
             await self._emit_user_mappings(
@@ -436,7 +747,6 @@ class InvocationExecution:
             )
 
         return await self.node_executor.execute(
-            workflow_revision_id=self.workflow.workflow_revision_id,
             node=node,
             execution=execution,
             default_input=default_input,
@@ -450,6 +760,7 @@ class InvocationExecution:
                 and node.policy.recovery.mode == "idempotent"
                 else None
             ),
+            capture_operator_io=self.event_mode is EventMode.FULL,
         )
 
     async def _commit_result(
@@ -459,34 +770,17 @@ class InvocationExecution:
         result: NodeExecutionResult,
     ) -> None:
         if result.error is not None:
-            execution.state = "failed"
-            execution.error = f"{type(result.error).__name__}: {result.error}"
-            execution.completed_at_ms = now_ms()
-            await self._emit_runtime(
-                event_name="node_state_changed",
-                subject_type="node",
-                subject_id=execution.node_id,
-                status="failed",
-                workflow_path=self.workflow.node(execution.node_id).workflow_path,
-                payload={"node_execution_id": str(execution.id), "error": execution.error},
-                operations=self._operation(
-                    ("node_executions", str(execution.id), "state"), "failed"
-                ),
-            )
-
-            if self.workflow.policy.failure.mode == "fail_fast":
-                raise result.error
-            for skipped in self.scheduler.skip_outgoing(request.node_id, request.scope):
-                await self._emit_skipped_occurrence(skipped.node_id, skipped.scope, "upstream_failed")
-            self.deferred_error = self.deferred_error or RuntimeErrorInfo(
-                type=type(result.error).__name__, message=str(result.error)
-            )
+            await self._commit_failure(request, execution, result, result.error)
             return
         if result.cancelled:
             execution.state = "cancelled"
             return
 
-        self._validate_patch_revision(execution, result.patch)
+        try:
+            self._commit_context_patch(execution, result.patch)
+        except BaseException as error:
+            await self._commit_failure(request, execution, result, error)
+            return
         execution.input = copy.deepcopy(result.mapped_input)
         execution.output = copy.deepcopy(result.output)
         execution.state = "completed"
@@ -495,56 +789,243 @@ class InvocationExecution:
             execution.duration_ns = max(
                 0, time.perf_counter_ns() - execution.started_perf_ns
             )
-        patch_operations = self._patch_operations(result.patch)
-        apply_patch(self.session.context, self.invocation_context, result.patch)
-        self._record_patch_revision(result.patch)
-        self.outputs[execution.id] = copy.deepcopy(result.output)
-        self.latest_output_ids[execution.node_id] = execution.id
-        operations = [
-            StateOperation(
-                op="add",
-                path=("outputs", str(execution.id)),
-                value=copy.deepcopy(result.output),
+        await self._emit_deferred_output_binding(
+            node=self.workflow.node(execution.node_id),
+            execution=execution,
+            result=result,
+        )
+        self._apply_operations(
+            (
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "input"),
+                    result.mapped_input,
+                ),
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "output"),
+                    result.output,
+                ),
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "state"),
+                    "completed",
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_session_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_invocation_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "add",
+                    ("pending_advances", str(execution.id)),
+                    request.to_record(),
+                ),
             )
-        ]
-        operations.extend(patch_operations)
+        )
         await self._emit_runtime(
             event_name="node_state_changed",
             subject_type="node",
             subject_id=execution.node_id,
             status="completed",
             workflow_path=self.workflow.node(execution.node_id).workflow_path,
-            duration_ns=execution.duration_ns,
             payload={"node_execution_id": str(execution.id)},
-            operations=tuple(operations),
         )
+        self._offer_checkpoint(InvocationState.RUNNING)
         node = self.workflow.node(execution.node_id)
         await self._emit_user_mappings(
             node, node.user_event_mappings, node.user_event_contracts, result.output
         )
         await self._advance_completed(request, execution)
 
+    async def _commit_failure(
+        self,
+        request: NodeExecutionRequest,
+        execution: NodeExecution,
+        result: NodeExecutionResult,
+        error: BaseException,
+    ) -> None:
+        node = self.workflow.node(execution.node_id)
+        await self._emit_deferred_output_binding(
+            node=node,
+            execution=execution,
+            result=result,
+            error=error,
+        )
+        execution.state = "failed"
+        execution.error = f"{type(error).__name__}: {error}"
+        execution.completed_at_ms = now_ms()
+        self._apply_operations(
+            (
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "input"),
+                    result.mapped_input,
+                ),
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "state"),
+                    "failed",
+                ),
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "error"),
+                    execution.error,
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_session_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_invocation_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "add",
+                    ("pending_advances", str(execution.id)),
+                    request.to_record(),
+                ),
+            )
+        )
+        await self._emit_runtime(
+            event_name="node_state_changed",
+            subject_type="node",
+            subject_id=execution.node_id,
+            status="failed",
+            workflow_path=node.workflow_path,
+            payload={"node_execution_id": str(execution.id), "error": execution.error},
+        )
+        self._offer_checkpoint(InvocationState.RUNNING)
+        if self.workflow.policy.failure.mode == "fail_fast":
+            self._remove_pending_advance(execution.id)
+            raise error
+        skipped_occurrences = self.scheduler.skip_outgoing(
+            request.node_id, request.scope
+        )
+        self._defer_scheduler_batch()
+        for skipped in skipped_occurrences:
+            await self._emit_skipped_occurrence(
+                skipped.node_id, skipped.scope, "upstream_failed"
+            )
+        self._remove_pending_advance(execution.id)
+        self._set_deferred_error(
+            RuntimeErrorInfo(type=type(error).__name__, message=str(error))
+        )
+
+    async def _emit_deferred_output_binding(
+        self,
+        *,
+        node: NodeIR,
+        execution: NodeExecution,
+        result: NodeExecutionResult,
+        error: BaseException | None = None,
+    ) -> None:
+        for phase in result.deferred_phases:
+            if phase.name != "output_binding_finished":
+                await self._emit_phase(node, execution, phase)
+                continue
+            if error is not None:
+                phase = replace(
+                    phase,
+                    status="failed",
+                    payload={"error": f"{type(error).__name__}: {error}"},
+                )
+            await self._emit_phase(
+                node,
+                execution,
+                phase,
+            )
+        result.deferred_phases.clear()
+
+    async def _emit_phase(
+        self,
+        node: NodeIR,
+        execution: NodeExecution,
+        phase: NodePhaseResult,
+    ) -> None:
+        await self._emit_runtime(
+            event_name=phase.name,
+            subject_type="node_phase",
+            subject_id=str(execution.id),
+            status=phase.status,
+            workflow_path=node.workflow_path,
+            duration_ns=phase.duration_ns,
+            started_at_ms=phase.started_at_ms,
+            completed_at_ms=phase.completed_at_ms,
+            payload={
+                **(phase.payload or {}),
+                "timing": {
+                    "executor_wait_ns": phase.executor_wait_ns,
+                    "thread_pool_wait_ns": phase.thread_pool_wait_ns,
+                    "handler_ns": phase.handler_ns,
+                },
+            },
+        )
+
     async def _advance_completed(
         self, request: NodeExecutionRequest, execution: NodeExecution
     ) -> None:
         decisions: dict[str, bool] = {}
         for edge in self.workflow.outgoing(request.node_id):
+            started_at_ms = now_ms()
             started = time.perf_counter_ns()
+            timing = {
+                "executor_wait_ns": 0,
+                "thread_pool_wait_ns": 0,
+                "handler_ns": 0,
+            }
             try:
                 selected = True
                 if edge.condition is not None:
-                    selected_value = await self._call_hook(
+                    selected_value, timing = await self.node_executor.call_hook_timed(
                         edge.condition,
-                        self._hook_context(
-                            incoming={execution.node_id: execution.output},
-                            edge_id=edge.id,
+                        hook_context(
+                            EdgeConditionContext,
+                            workflow_id=self.workflow.workflow_id,
+                            workflow_revision_id=self.workflow.workflow_revision_id,
                             workflow_path=edge.workflow_path,
+                            session_id=self.session.id,
+                            invocation_id=str(self.invocation.id),
+                            session_context=self.session.context,
+                            invocation_context=self.invocation_context,
+                            invocation_input=self.invocation_input,
+                            edge_id=edge.id,
+                            source_node_id=execution.node_id,
+                            source_execution_id=str(execution.id),
+                            source_scope=execution.scope,
+                            output=execution.output,
                         ),
                     )
                     if not isinstance(selected_value, bool):
                         raise TypeError("Edge condition must return bool.")
                     selected = selected_value
-            except BaseException as error:
+            except _TimedHookFailure as failure:
+                error = failure.cause
+                timing = failure.timing
+                completed_at_ms = now_ms()
                 duration = max(0, time.perf_counter_ns() - started)
                 await self._emit_runtime(
                     event_name="edge_evaluated",
@@ -553,9 +1034,33 @@ class InvocationExecution:
                     status="failed",
                     workflow_path=edge.workflow_path,
                     duration_ns=duration,
-                    payload={"error": f"{type(error).__name__}: {error}"},
+                    started_at_ms=started_at_ms,
+                    completed_at_ms=completed_at_ms,
+                    payload={
+                        "error": f"{type(error).__name__}: {error}",
+                        "timing": timing,
+                    },
+                )
+                raise error
+            except BaseException as error:
+                completed_at_ms = now_ms()
+                duration = max(0, time.perf_counter_ns() - started)
+                await self._emit_runtime(
+                    event_name="edge_evaluated",
+                    subject_type="edge",
+                    subject_id=edge.id,
+                    status="failed",
+                    workflow_path=edge.workflow_path,
+                    duration_ns=duration,
+                    started_at_ms=started_at_ms,
+                    completed_at_ms=completed_at_ms,
+                    payload={
+                        "error": f"{type(error).__name__}: {error}",
+                        "timing": timing,
+                    },
                 )
                 raise
+            completed_at_ms = now_ms()
             duration = max(0, time.perf_counter_ns() - started)
             decisions[edge.id] = selected
             await self._emit_runtime(
@@ -565,11 +1070,51 @@ class InvocationExecution:
                 status="selected" if selected else "not_selected",
                 workflow_path=edge.workflow_path,
                 duration_ns=duration,
-                payload={"source": edge.source, "target": edge.target},
-                operations=self._operation(("edges", edge.id, "selected"), selected),
+                started_at_ms=started_at_ms,
+                completed_at_ms=completed_at_ms,
+                payload={
+                    "source": edge.source,
+                    "target": edge.target,
+                    "timing": timing,
+                },
             )
-        for skipped in self.scheduler.resolve_outgoing(request, execution.id, decisions):
+        skipped_occurrences = self.scheduler.resolve_outgoing(
+            request, execution.id, decisions
+        )
+        # The complete Scheduler transition is emitted with the next semantic
+        # Runtime Event after this Edge decision group.
+        self._defer_scheduler_batch()
+        for skipped in skipped_occurrences:
             await self._emit_skipped_occurrence(skipped.node_id, skipped.scope, "incoming_edges_not_selected")
+        self._remove_pending_advance(execution.id)
+
+    async def _resume_pending_advances(self) -> None:
+        """Continue control flow from terminal Nodes captured before Edge work."""
+
+        for execution_id, request in tuple(self.pending_advances.items()):
+            execution = self.node_executions[execution_id]
+            if execution.state == "completed":
+                await self._advance_completed(request, execution)
+                continue
+            if execution.state == "failed":
+                message = execution.error or f"Node {execution.node_id!r} failed."
+                if self.workflow.policy.failure.mode == "fail_fast":
+                    self._remove_pending_advance(execution_id)
+                    raise RuntimeError(message)
+                self._set_deferred_error(
+                    RuntimeErrorInfo(
+                        type="RecoveredNodeFailure", message=message
+                    )
+                )
+            skipped_occurrences = self.scheduler.skip_outgoing(
+                request.node_id, request.scope
+            )
+            self._defer_scheduler_batch()
+            for skipped in skipped_occurrences:
+                await self._emit_skipped_occurrence(
+                    skipped.node_id, skipped.scope, "upstream_failed"
+                )
+            self._remove_pending_advance(execution_id)
 
     async def _enter_wait(
         self,
@@ -578,6 +1123,7 @@ class InvocationExecution:
         result: NodeExecutionResult,
     ) -> None:
         assert result.waiting
+        execution.input = copy.deepcopy(result.mapped_input)
         execution.state = "waiting"
         wait = WaitCheckpoint(
             id=uuid4(),
@@ -585,7 +1131,25 @@ class InvocationExecution:
             request=request,
             payload=copy.deepcopy(result.wait_payload),
         )
-        self.waits[wait.id] = wait
+        self._apply_operations(
+            (
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "input"),
+                    result.mapped_input,
+                ),
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "state"),
+                    "waiting",
+                ),
+                StateOperation(
+                    "add",
+                    ("waits", str(wait.id)),
+                    self._wait_state_record(wait),
+                ),
+            )
+        )
         self._publish_waits()
         await self._emit_runtime(
             event_name="node_state_changed",
@@ -598,10 +1162,13 @@ class InvocationExecution:
                 "wait_id": str(wait.id),
                 "wait_payload": result.wait_payload,
             },
-            operations=self._operation(
-                ("node_executions", str(execution.id), "state"), "waiting"
-            ),
         )
+        checkpoint_state = (
+            InvocationState.RUNNING
+            if self.worker_tasks or self.scheduler.ready or self.pending_advances
+            else InvocationState.WAITING
+        )
+        self._offer_checkpoint(checkpoint_state)
     async def _complete_resumed_node(self, wait_id: UUID, response: Any) -> None:
         wait = self.waits[wait_id]
         execution = self.node_executions[wait.node_execution_id]
@@ -611,26 +1178,144 @@ class InvocationExecution:
         output = node.operator.response_contract.validate(
             copy.deepcopy(response)
         )
-        encode_runtime_value(output)
-        binding_started = time.perf_counter_ns()
-        try:
-            patch = await self.node_executor.bind_output(
-                node, self._hook_context(wait.request), output
+        RuntimeValueCodec.encode(output)
+        execution.state = "running"
+        execution.restart_session_context = None
+        execution.restart_invocation_context = None
+        execution.started_state_version = self.runtime_state.state_version + 1
+        self._apply_operations(
+            (
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "state"),
+                    "running",
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_session_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_invocation_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "started_state_version",
+                    ),
+                    execution.started_state_version,
+                ),
             )
-        except BaseException as error:
+        )
+        await self._emit_runtime(
+            event_name="node_state_changed",
+            subject_type="node",
+            subject_id=node.id,
+            status="running",
+            workflow_path=node.workflow_path,
+            payload={
+                "node_execution_id": str(execution.id),
+                "wait_id": str(wait_id),
+                "resumed": True,
+            },
+        )
+        binding_started_at_ms = now_ms()
+        binding_started = time.perf_counter_ns()
+        binding_timing = {
+            "executor_wait_ns": 0,
+            "thread_pool_wait_ns": 0,
+            "handler_ns": 0,
+        }
+        try:
+            # Resume is a new Node execution segment. It observes the latest
+            # committed Session/Invocation Context, not the pre-Wait restart
+            # baseline used only for crash replay of an in-flight Node.
+            base_context = self._hook_context(wait.request, execution)
+            binding_context = self.node_executor._derived_context(
+                OutputBindingContext,
+                base_context,
+                input=execution.input,
+                output=output,
+            )
+            if node.output_binding is None:
+                patch = ContextPatch()
+            else:
+                patch, binding_timing = await self.node_executor.call_hook_timed(
+                    node.output_binding, binding_context
+                )
+                if patch is None:
+                    patch = ContextPatch()
+                if not isinstance(patch, ContextPatch):
+                    raise TypeError("Output Binding must return ContextPatch or None.")
+                RuntimeValueCodec.encode(dict(patch.session))
+                RuntimeValueCodec.encode(dict(patch.invocation))
+            self._commit_context_patch(execution, patch)
+        except _TimedHookFailure as failure:
+            error = failure.cause
+            binding_timing = failure.timing
+            completed_at_ms = now_ms()
             duration = max(0, time.perf_counter_ns() - binding_started)
             if node.output_binding is not None:
                 await self._emit_runtime(
-                    event_name="output_binding_completed",
+                    event_name="output_binding_finished",
                     subject_type="node_phase",
                     subject_id=str(execution.id),
                     status="failed",
                     workflow_path=node.workflow_path,
                     duration_ns=duration,
-                    payload={"error": f"{type(error).__name__}: {error}"},
+                    started_at_ms=binding_started_at_ms,
+                    completed_at_ms=completed_at_ms,
+                    payload={
+                        "error": f"{type(error).__name__}: {error}",
+                        "timing": binding_timing,
+                    },
                 )
             execution.state = "failed"
             execution.error = f"{type(error).__name__}: {error}"
+            self._apply_operations(
+                (
+                    StateOperation(
+                        "replace",
+                        ("node_executions", str(execution.id), "state"),
+                        "failed",
+                    ),
+                    StateOperation(
+                        "replace",
+                        ("node_executions", str(execution.id), "error"),
+                        execution.error,
+                    ),
+                    StateOperation(
+                        "replace",
+                        (
+                            "node_executions",
+                            str(execution.id),
+                            "restart_session_context",
+                        ),
+                        None,
+                    ),
+                    StateOperation(
+                        "replace",
+                        (
+                            "node_executions",
+                            str(execution.id),
+                            "restart_invocation_context",
+                        ),
+                        None,
+                    ),
+                )
+            )
             await self._emit_runtime(
                 event_name="node_state_changed",
                 subject_type="node",
@@ -638,34 +1323,131 @@ class InvocationExecution:
                 status="failed",
                 workflow_path=node.workflow_path,
                 payload={"node_execution_id": str(execution.id), "error": execution.error},
-                operations=self._operation(
-                    ("node_executions", str(execution.id), "state"), "failed"
+            )
+            self._offer_checkpoint(InvocationState.RUNNING)
+            raise error
+        except BaseException as error:
+            completed_at_ms = now_ms()
+            duration = max(0, time.perf_counter_ns() - binding_started)
+            if node.output_binding is not None:
+                await self._emit_runtime(
+                    event_name="output_binding_finished",
+                    subject_type="node_phase",
+                    subject_id=str(execution.id),
+                    status="failed",
+                    workflow_path=node.workflow_path,
+                    duration_ns=duration,
+                    started_at_ms=binding_started_at_ms,
+                    completed_at_ms=completed_at_ms,
+                    payload={
+                        "error": f"{type(error).__name__}: {error}",
+                        "timing": binding_timing,
+                    },
+                )
+            execution.state = "failed"
+            execution.error = f"{type(error).__name__}: {error}"
+            self._apply_operations(
+                (
+                    StateOperation(
+                        "replace",
+                        ("node_executions", str(execution.id), "state"),
+                        "failed",
+                    ),
+                    StateOperation(
+                        "replace",
+                        ("node_executions", str(execution.id), "error"),
+                        execution.error,
+                    ),
+                    StateOperation(
+                        "replace",
+                        (
+                            "node_executions",
+                            str(execution.id),
+                            "restart_session_context",
+                        ),
+                        None,
+                    ),
+                    StateOperation(
+                        "replace",
+                        (
+                            "node_executions",
+                            str(execution.id),
+                            "restart_invocation_context",
+                        ),
+                        None,
+                    ),
+                )
+            )
+            await self._emit_runtime(
+                event_name="node_state_changed",
+                subject_type="node",
+                subject_id=node.id,
+                status="failed",
+                workflow_path=node.workflow_path,
+                payload={
+                    "node_execution_id": str(execution.id),
+                    "error": execution.error,
+                },
+            )
+            self._offer_checkpoint(InvocationState.RUNNING)
+            raise
+        execution.output = output
+        execution.state = "completed"
+        execution.completed_at_ms = now_ms()
+        self.claimed_waits.discard(wait_id)
+        self._apply_operations(
+            (
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "output"),
+                    output,
+                ),
+                StateOperation(
+                    "replace",
+                    ("node_executions", str(execution.id), "state"),
+                    "completed",
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_session_context",
+                    ),
+                    None,
+                ),
+                StateOperation(
+                    "replace",
+                    (
+                        "node_executions",
+                        str(execution.id),
+                        "restart_invocation_context",
+                    ),
+                    None,
+                ),
+                StateOperation("remove", ("waits", str(wait_id))),
+                StateOperation(
+                    "add",
+                    ("pending_advances", str(execution.id)),
+                    wait.request.to_record(),
                 ),
             )
-            raise
+        )
+        self._publish_waits()
         if node.output_binding is not None:
+            completed_at_ms = now_ms()
             duration = max(0, time.perf_counter_ns() - binding_started)
             await self._emit_runtime(
-                event_name="output_binding_completed",
+                event_name="output_binding_finished",
                 subject_type="node_phase",
                 subject_id=str(execution.id),
                 status="completed",
                 workflow_path=node.workflow_path,
                 duration_ns=duration,
-                payload={"patch": patch},
+                started_at_ms=binding_started_at_ms,
+                completed_at_ms=completed_at_ms,
+                payload={"patch": patch, "timing": binding_timing},
             )
-        self._validate_patch_revision(execution, patch)
-        patch_operations = self._patch_operations(patch)
-        apply_patch(self.session.context, self.invocation_context, patch)
-        self._record_patch_revision(patch)
-        execution.output = output
-        execution.state = "completed"
-        execution.completed_at_ms = now_ms()
-        self.outputs[execution.id] = copy.deepcopy(output)
-        self.latest_output_ids[node.id] = execution.id
-        self.waits.pop(wait_id)
-        self.claimed_waits.discard(wait_id)
-        self._publish_waits()
         await self._emit_runtime(
             event_name="node_state_changed",
             subject_type="node",
@@ -677,12 +1459,8 @@ class InvocationExecution:
                 "wait_id": str(wait_id),
                 "resumed": True,
             },
-            operations=(
-                *self._operation(("node_executions", str(execution.id), "state"), "completed"),
-                StateOperation("add", ("outputs", str(execution.id)), copy.deepcopy(output)),
-                *patch_operations,
-            ),
         )
+        self._offer_checkpoint(InvocationState.RUNNING)
         await self._emit_user_mappings(
             node, node.user_event_mappings, node.user_event_contracts, output
         )
@@ -717,8 +1495,15 @@ class InvocationExecution:
         self.invocation._update(waits=snapshots, updated_at_ms=now_ms())
 
     def _clear_waits(self) -> None:
-        self.waits.clear()
+        wait_ids = tuple(self.waits)
         self.claimed_waits.clear()
+        if wait_ids:
+            self._defer_operations(
+                tuple(
+                    StateOperation("remove", ("waits", str(wait_id)))
+                    for wait_id in wait_ids
+                )
+            )
         self._publish_waits()
 
     async def _cancel_worker_tasks(self) -> None:
@@ -740,10 +1525,8 @@ class InvocationExecution:
             status="skipped",
             workflow_path=self.workflow.node(node_id).workflow_path,
             payload={"scope": self._scope_value(scope), "reason": reason},
-            operations=self._operation(
-                ("node_occurrences", occurrence_key(node_id, scope), "state"), "skipped"
-            ),
         )
+        self._offer_checkpoint(self.invocation.state)
 
     async def _finish_completed(self) -> None:
         output = {
@@ -752,7 +1535,6 @@ class InvocationExecution:
             if (execution_id := self.latest_output_ids.get(node_id)) in self.outputs
         }
         await self._set_invocation_state(InvocationState.COMPLETED, output=output)
-        self.invocation._clear_checkpoint(updated_at_ms=now_ms())
         self.boundary.set()
         self.terminal.set()
 
@@ -767,30 +1549,28 @@ class InvocationExecution:
                 return
             await self._finish_remaining_nodes("invocation_failed")
             self._clear_waits()
+            self._clear_pending_advances()
             await self._set_invocation_state(InvocationState.FAILED, error=info)
-            self.invocation._clear_checkpoint(updated_at_ms=now_ms())
             self.boundary.set()
             self.terminal.set()
 
     async def finish_cancelled(self) -> None:
         async with self._terminal_lock:
-            if self.invocation.state.terminal:
+            if self.terminal.is_set():
                 return
-            self.cancel_requested = True
+            self.request_cancel()
             for task in tuple(self.worker_tasks):
                 task.cancel()
-            self.invocation._update(state=InvocationState.CANCELLED, updated_at_ms=now_ms())
+            if self.invocation.state is not InvocationState.CANCELLED:
+                self.invocation._update(
+                    state=InvocationState.CANCELLED,
+                    updated_at_ms=now_ms(),
+                )
             try:
                 await self._finish_remaining_nodes("invocation_cancelled")
                 self._clear_waits()
-                await self._emit_runtime(
-                    event_name="invocation_state_changed",
-                    subject_type="invocation",
-                    subject_id=str(self.invocation.id),
-                    status="cancelled",
-                    operations=self._operation(("invocation", "state"), "cancelled"),
-                )
-                self.invocation._clear_checkpoint(updated_at_ms=now_ms())
+                self._clear_pending_advances()
+                await self._set_invocation_state(InvocationState.CANCELLED)
             except asyncio.CancelledError:
                 self._clear_waits()
             self.boundary.set()
@@ -799,10 +1579,39 @@ class InvocationExecution:
                 self.stream.abandon()
 
     async def _finish_remaining_nodes(self, reason: str) -> None:
+        self.scheduler.abort()
+        self._defer_scheduler_batch()
         for execution in tuple(self.node_executions.values()):
             if execution.state not in {"ready", "running", "waiting"}:
                 continue
             execution.state = "cancelled"
+            self._apply_operations(
+                (
+                    StateOperation(
+                        "replace",
+                        ("node_executions", str(execution.id), "state"),
+                        "cancelled",
+                    ),
+                    StateOperation(
+                        "replace",
+                        (
+                            "node_executions",
+                            str(execution.id),
+                            "restart_session_context",
+                        ),
+                        None,
+                    ),
+                    StateOperation(
+                        "replace",
+                        (
+                            "node_executions",
+                            str(execution.id),
+                            "restart_invocation_context",
+                        ),
+                        None,
+                    ),
+                )
+            )
             await self._emit_runtime(
                 event_name="node_state_changed",
                 subject_type="node",
@@ -810,10 +1619,8 @@ class InvocationExecution:
                 status="cancelled",
                 workflow_path=self.workflow.node(execution.node_id).workflow_path,
                 payload={"node_execution_id": str(execution.id), "reason": reason},
-                operations=self._operation(
-                    ("node_executions", str(execution.id), "state"), "cancelled"
-                ),
             )
+            self._offer_checkpoint(self.invocation.state)
         touched = {execution.node_id for execution in self.node_executions.values()}
         for node in self.workflow.nodes:
             already_skipped = any(
@@ -822,6 +1629,8 @@ class InvocationExecution:
             )
             if node.id in touched or already_skipped:
                 continue
+            self.scheduler.mark_skipped(node.id)
+            self._defer_scheduler_batch()
             await self._emit_runtime(
                 event_name="node_state_changed",
                 subject_type="node",
@@ -830,6 +1639,7 @@ class InvocationExecution:
                 workflow_path=node.workflow_path,
                 payload={"reason": reason},
             )
+            self._offer_checkpoint(self.invocation.state)
 
     async def _set_invocation_state(
         self,
@@ -838,17 +1648,43 @@ class InvocationExecution:
         output: dict[str, Any] | None = None,
         error: RuntimeErrorInfo | None = None,
     ) -> None:
-        self.invocation._update(
-            state=state, output=output, error=error, updated_at_ms=now_ms()
-        )
+        timestamp = now_ms()
+        operations = [
+            StateOperation("replace", ("invocation", "state"), state.value),
+            StateOperation(
+                "replace", ("invocation", "updated_at_ms"), timestamp
+            ),
+            StateOperation("replace", ("session", "updated_at_ms"), timestamp),
+        ]
+        if output is not None:
+            operations.append(
+                StateOperation("replace", ("invocation", "output"), output)
+            )
+        if error is not None:
+            operations.append(
+                StateOperation(
+                    "replace", ("invocation", "error"), asdict(error)
+                )
+            )
+        self._apply_operations(tuple(operations))
+        self.session.updated_at_ms = timestamp
+        if not state.terminal:
+            self.invocation._update(
+                state=state, output=output, error=error, updated_at_ms=timestamp
+            )
         await self._emit_runtime(
             event_name="invocation_state_changed",
             subject_type="invocation",
             subject_id=str(self.invocation.id),
             status=state.value,
             payload={"output": output, "error": asdict(error) if error else None},
-            operations=self._operation(("invocation", "state"), state.value),
         )
+        if state.terminal:
+            self._offer_checkpoint(state)
+        if state.terminal:
+            self.invocation._update(
+                state=state, output=output, error=error, updated_at_ms=timestamp
+            )
 
     async def _emit_runtime(
         self,
@@ -859,8 +1695,9 @@ class InvocationExecution:
         status: str | None = None,
         workflow_path: tuple[str, ...] = (),
         duration_ns: int | None = None,
+        started_at_ms: int | None = None,
+        completed_at_ms: int | None = None,
         payload: Any = None,
-        operations: tuple[StateOperation, ...] = (),
     ) -> None:
         if self.event_mode is EventMode.MINIMAL:
             return
@@ -870,67 +1707,82 @@ class InvocationExecution:
         ):
             return
         if self.event_mode is EventMode.STANDARD:
-            operations = ()
-            if subject_type == "node_phase":
-                return
-            if subject_type == "operator_call" and isinstance(payload, dict):
+            if isinstance(payload, dict) and subject_type in {
+                "node_phase",
+                "operator_call",
+            }:
                 payload = {
                     key: value
                     for key, value in payload.items()
-                    if key not in {"input", "output"}
+                    if key
+                    not in {"input", "output", "items", "patch", "wait_payload"}
                 }
+            elif subject_type == "node" and isinstance(payload, dict):
+                payload = {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "wait_payload"
+                }
+            elif subject_type == "invocation" and isinstance(payload, dict):
+                payload = {"error": payload.get("error")}
         async with self._event_lock:
-            self.runtime_sequence += 1
+            deferred_batches = tuple(self._deferred_operation_batches)
+            sequence = self.runtime_sequence + 1
+            sequence_batch = self.runtime_state.apply(
+                (
+                    StateOperation(
+                        "replace",
+                        ("invocation", "runtime_event_sequence"),
+                        sequence,
+                    ),
+                )
+            )
             try:
+                event_operation_batches = (
+                    (
+                        *deferred_batches,
+                        sequence_batch,
+                    )
+                    if self.event_mode is EventMode.FULL
+                    else ()
+                )
                 event = RuntimeEvent.detached(
                     workflow_id=self.workflow.workflow_id,
                     workflow_revision_id=self.workflow.workflow_revision_id,
                     session_id=self.session.id,
                     invocation_id=self.invocation.id,
-                    sequence=self.runtime_sequence,
+                    sequence=sequence,
                     event_name=event_name,
                     subject_type=subject_type,
                     subject_id=subject_id,
                     status=status,
                     workflow_path=workflow_path,
                     duration_ns=duration_ns,
+                    started_at_ms=started_at_ms,
+                    completed_at_ms=completed_at_ms,
                     payload=payload,
-                    operations=(
-                        operations if self.event_mode is EventMode.FULL else ()
+                    operation_batches=(
+                        event_operation_batches
+                        if self.event_mode is EventMode.FULL
+                        and event_operation_batches
+                        else ()
                     ),
                 )
                 serialized = (
                     SerializedEvent.from_event(event) if self.sink is not None else None
                 )
-            except BaseException as error:
-                logger.exception("Runtime Event capture failed; attempting a gap Event.")
-                try:
-                    event = RuntimeEvent(
-                        workflow_id=self.workflow.workflow_id,
-                        workflow_revision_id=self.workflow.workflow_revision_id,
-                        session_id=self.session.id,
-                        invocation_id=self.invocation.id,
-                        sequence=self.runtime_sequence,
-                        event_name="event_capture_failed",
-                        subject_type=subject_type,
-                        subject_id=subject_id,
-                        status="failed",
-                        workflow_path=workflow_path,
-                        payload={
-                            "original_event_name": event_name,
-                            "error_type": type(error).__name__,
-                        },
-                    )
-                    serialized = (
-                        SerializedEvent.from_event(event)
-                        if self.sink is not None
-                        else None
-                    )
-                except BaseException:
-                    logger.exception(
-                        "Runtime Event gap capture also failed; tracing has a sequence gap."
-                    )
-                    return
+            except BaseException:
+                if self.event_mode is EventMode.FULL:
+                    # Business state was already committed. Keep every batch
+                    # plus the failed Event's sequence change so a later Event
+                    # can close the replay gap in exact state-version order.
+                    self._deferred_operation_batches.append(sequence_batch)
+                logger.exception(
+                    "Runtime Event capture failed; execution continues with a sequence gap."
+                )
+                return
+            if deferred_batches:
+                del self._deferred_operation_batches[: len(deferred_batches)]
             await self._deliver(event, serialized)
 
     async def _emit_user_mappings(
@@ -946,11 +1798,13 @@ class InvocationExecution:
             return
         for mapping, contract in zip(mappings, contracts, strict=True):
             try:
-                data = await self._call_hook(mapping.transform, copy.deepcopy(value))
+                data = await self.node_executor.call_hook(
+                    mapping.transform, copy.deepcopy(value)
+                )
                 data = contract.validate(data)
                 if data is None:
                     continue
-                encode_runtime_value(data)
+                RuntimeValueCodec.encode(data)
                 event_type = mapping.type.strip()
                 if re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", event_type) is None:
                     raise ValueError("UserEvent type must be lowercase snake_case.")
@@ -961,14 +1815,23 @@ class InvocationExecution:
                     "error": f"{type(error).__name__}: {error}",
                 }
             async with self._event_lock:
-                self.user_sequence += 1
+                sequence = self.user_sequence + 1
+                self._apply_operations(
+                    (
+                        StateOperation(
+                            "replace",
+                            ("invocation", "user_event_sequence"),
+                            sequence,
+                        ),
+                    )
+                )
                 try:
                     event = UserEvent.detached(
                         workflow_id=self.workflow.workflow_id,
                         workflow_revision_id=self.workflow.workflow_revision_id,
                         session_id=self.session.id,
                         invocation_id=self.invocation.id,
-                        sequence=self.user_sequence,
+                        sequence=sequence,
                         type=event_type,
                         data=data,
                         node_id=node.id,
@@ -987,7 +1850,7 @@ class InvocationExecution:
                             workflow_revision_id=self.workflow.workflow_revision_id,
                             session_id=self.session.id,
                             invocation_id=self.invocation.id,
-                            sequence=self.user_sequence,
+                            sequence=sequence,
                             type="user_event_capture_failed",
                             data={
                                 "original_type": event_type,
@@ -1049,12 +1912,17 @@ class InvocationExecution:
             logger.exception(
                 "Checkpoint capture or acceptance failed; recoverability is degraded."
             )
-            self.sink = None
 
     def _checkpoint(self, state: InvocationState) -> RecoveryCheckpoint:
-        latest_execution_ids = set(self.latest_output_ids.values())
+        executions, outputs, latest_output_ids = self._execution_views()
+        running_requests = tuple(
+            request
+            for task, (request, _) in self._worker_context.items()
+            if not task.done()
+        )
+        latest_execution_ids = set(latest_output_ids.values())
         required_ids = set(latest_execution_ids)
-        for request in self.scheduler.ready:
+        for request in (*self.scheduler.ready, *running_requests):
             required_ids.update(item.source_execution_id for item in request.activations)
         for resolution in self.scheduler.resolutions.values():
             if resolution.activation is not None:
@@ -1064,10 +1932,12 @@ class InvocationExecution:
             required_ids.update(
                 item.source_execution_id for item in wait.request.activations
             )
+        required_ids.update(self.pending_advances)
+        required_ids.update(executions)
         latest_nodes = {
-            execution_id: self.node_executions[execution_id]
+            execution_id: executions[execution_id]
             for execution_id in required_ids
-            if execution_id in self.node_executions
+            if execution_id in executions
         }
         return RecoveryCheckpoint.detached(
             schema_version=1,
@@ -1076,13 +1946,18 @@ class InvocationExecution:
             session_id=self.session.id,
             invocation_id=self.invocation.id,
             invocation_state=state.value,
+            state_version=self.runtime_state.state_version,
             runtime_event_sequence=self.runtime_sequence,
             user_event_sequence=self.user_sequence,
             invocation_input=self.invocation_input,
+            invocation_output=self.runtime_state.read("invocation", "output"),
+            invocation_error=self.runtime_state.read("invocation", "error"),
             session_context=self.session.context,
             invocation_context=self.invocation_context,
+            session_path_revisions=self.session_path_revisions,
+            invocation_path_revisions=self.invocation_path_revisions,
             scheduler_state=SchedulerCheckpoint(
-                ready=tuple(self.scheduler.ready),
+                ready=(*tuple(self.scheduler.ready), *running_requests),
                 resolutions=tuple(self.scheduler.resolutions.items()),
                 scheduled=tuple(sorted(self.scheduler.scheduled)),
                 skipped=tuple(sorted(self.scheduler.skipped)),
@@ -1095,83 +1970,112 @@ class InvocationExecution:
                         (item.loop_region_id, item.iteration) for item in execution.scope
                     ),
                     state=execution.state,
+                    input=execution.input,
+                    error=execution.error,
+                    idempotency_key=execution.idempotency_key,
+                    started_state_version=execution.started_state_version,
+                    restart_session_context=execution.restart_session_context,
+                    restart_invocation_context=execution.restart_invocation_context,
                 )
                 for execution in latest_nodes.values()
             ),
             required_outputs={
-                execution_id: self.outputs[execution_id]
+                execution_id: outputs[execution_id]
                 for execution_id in required_ids
-                if execution_id in self.outputs
+                if execution_id in outputs
             },
-            latest_output_ids=self.latest_output_ids,
+            latest_output_ids=latest_output_ids,
             node_execution_counts=self.node_execution_counts,
             operator_attempt_counts=self.operator_attempt_counts,
             operator_runtime_ns=self.operator_runtime_ns,
             waits=tuple(self.waits.values()),
+            pending_advances=tuple(self.pending_advances.items()),
+            session_created_at_ms=self.session.created_at_ms,
+            invocation_created_at_ms=self.invocation.created_at_ms,
             created_at_ms=now_ms(),
         )
 
     def _prune_execution_state(self) -> None:
-        keep = set(self.latest_output_ids.values())
+        executions, _, latest_output_ids = self._execution_views()
+        keep = set(latest_output_ids.values())
         for request in self.scheduler.ready:
             keep.update(item.source_execution_id for item in request.activations)
-        for wait in self.waits.values():
-            keep.add(wait.node_execution_id)
-        self.outputs = {key: value for key, value in self.outputs.items() if key in keep}
-        self.node_executions = {
-            key: value
-            for key, value in self.node_executions.items()
-            if key in keep or value.state in {"running", "waiting"}
-        }
+        for resolution in self.scheduler.resolutions.values():
+            if resolution.activation is not None:
+                keep.add(resolution.activation.source_execution_id)
+        keep.update(wait.node_execution_id for wait in self.waits.values())
+        keep.update(self.pending_advances)
+        keep.update(
+            execution.id
+            for execution in executions.values()
+            if execution.state in {"ready", "running", "waiting"}
+        )
+        remove = tuple(
+            execution_id
+            for execution_id in executions
+            if execution_id not in keep
+        )
+        if remove:
+            self._defer_operations(
+                tuple(
+                    StateOperation(
+                        "remove", ("node_executions", str(execution_id))
+                    )
+                    for execution_id in remove
+                )
+            )
 
     def _hook_context(
         self,
-        request: NodeExecutionRequest | None = None,
-        *,
-        incoming: dict[str, Any] | None = None,
-        edge_id: str | None = None,
-        workflow_path: tuple[str, ...] | None = None,
-    ) -> Any:
-        visible_outputs = {
-            node_id: self.outputs[execution_id]
-            for node_id, execution_id in self.latest_output_ids.items()
-            if execution_id in self.outputs
-        }
-        exact_incoming = incoming or {}
-        if request is not None:
-            exact_incoming = self._activation_values(request)
-        return readonly_context(
-            session=self.session.context,
-            invocation=self.invocation_context,
-            outputs=visible_outputs,
-            incoming=exact_incoming,
-            invocation_input=self.invocation_input,
-            node_id=request.node_id if request is not None else None,
-            edge_id=edge_id,
-            workflow_path=(
-                workflow_path
-                if workflow_path is not None
-                else self.workflow.node(request.node_id).workflow_path
-                if request is not None
-                else ()
+        request: NodeExecutionRequest,
+        execution: NodeExecution,
+    ) -> InputMappingContext:
+        executions, outputs, _ = self._execution_views()
+        incoming = tuple(
+            IncomingActivation(
+                edge_id=activation.edge_id,
+                source_node_id=activation.source_node_id,
+                source_execution_id=str(activation.source_execution_id),
+                source_scope=executions[activation.source_execution_id].scope,
+                value=outputs[activation.source_execution_id],
+            )
+            for activation in request.activations
+        )
+        return hook_context(
+            InputMappingContext,
+            workflow_id=self.workflow.workflow_id,
+            workflow_revision_id=self.workflow.workflow_revision_id,
+            workflow_path=self.workflow.node(request.node_id).workflow_path,
+            session_id=self.session.id,
+            invocation_id=str(self.invocation.id),
+            session_context=(
+                execution.restart_session_context
+                if execution.restart_session_context is not None
+                else self.session.context
             ),
+            invocation_context=(
+                execution.restart_invocation_context
+                if execution.restart_invocation_context is not None
+                else self.invocation_context
+            ),
+            invocation_input=self.invocation_input,
+            node_id=request.node_id,
+            node_execution_id=str(execution.id),
+            execution_scope=request.scope,
+            incoming=incoming,
         )
 
     def _validate_patch_revision(
         self, execution: NodeExecution, patch: ContextPatch
     ) -> None:
-        for path in patch_paths(patch):
+        for path in sorted(patch_paths(patch)):
             root, relative = path[0], path[1:]
             revisions = (
                 self.session_path_revisions
                 if root == "session"
                 else self.invocation_path_revisions
             )
-            base = (
-                execution.session_context_revision
-                if root == "session"
-                else execution.invocation_context_revision
-            )
+            base = execution.started_state_version
             for changed, revision in revisions.items():
                 size = min(len(relative), len(changed))
                 if relative[:size] == changed[:size] and revision > base:
@@ -1180,21 +2084,27 @@ class InvocationExecution:
                         f"{root}.{'/'.join(relative)}."
                     )
 
-    def _record_patch_revision(self, patch: ContextPatch) -> None:
-        session_paths = {
-            path[1:] for path in patch_paths(patch) if path[0] == "session"
-        }
-        invocation_paths = {
-            path[1:] for path in patch_paths(patch) if path[0] == "invocation"
-        }
-        if session_paths:
-            self.session_context_revision += 1
-            for path in session_paths:
-                self.session_path_revisions[path] = self.session_context_revision
-        if invocation_paths:
-            self.invocation_context_revision += 1
-            for path in invocation_paths:
-                self.invocation_path_revisions[path] = self.invocation_context_revision
+    def _commit_context_patch(
+        self, execution: NodeExecution, patch: ContextPatch
+    ) -> StateOperationBatch | None:
+        self._validate_patch_revision(execution, patch)
+        operations = list(self._patch_operations(patch))
+        if not operations:
+            return None
+        next_version = self.runtime_state.state_version + 1
+        for path in sorted(patch_paths(patch)):
+            root, relative = path[0], path[1:]
+            owner = "session" if root == "session" else "invocation"
+            key = context_path_key(relative)
+            revisions = self.runtime_state.read(owner, "context_path_revisions")
+            operations.append(
+                StateOperation(
+                    "replace" if key in revisions else "add",
+                    (owner, "context_path_revisions", key),
+                    next_version,
+                )
+            )
+        return self._apply_operations(tuple(operations))
 
     def _default_input(self, request: NodeExecutionRequest) -> Any:
         if not request.activations:
@@ -1203,33 +2113,143 @@ class InvocationExecution:
         return next(iter(values.values())) if len(values) == 1 else values
 
     def _activation_values(self, request: NodeExecutionRequest) -> dict[str, Any]:
+        outputs = self.outputs
         source_ids = [item.source_node_id for item in request.activations]
         use_edge_ids = len(source_ids) != len(set(source_ids))
         return {
-            (activation.edge_id if use_edge_ids else activation.source_node_id): self.outputs[
+            (activation.edge_id if use_edge_ids else activation.source_node_id): outputs[
                 activation.source_execution_id
             ]
             for activation in request.activations
         }
 
-    async def _call_hook(self, function: Any, *arguments: Any) -> Any:
-        if inspect.iscoroutinefunction(function):
-            return await function(*arguments)
-        value = await asyncio.to_thread(function, *arguments)
-        return await value if inspect.isawaitable(value) else value
+    def _defer_operations(
+        self, operations: tuple[StateOperation, ...]
+    ) -> StateOperationBatch:
+        return self._apply_operations(operations)
 
-    def _operation(
-        self, path: tuple[str | int, ...], value: Any
-    ) -> tuple[StateOperation, ...]:
-        return (StateOperation("replace", path, copy.deepcopy(value)),)
+    def _apply_operations(
+        self, operations: tuple[StateOperation, ...]
+    ) -> StateOperationBatch:
+        """Apply one business-state batch and record its global commit order."""
+
+        batch = self.runtime_state.apply(operations)
+        if self.event_mode is EventMode.FULL and (
+            self.sink is not None
+            or (
+                self.stream is not None
+                and self.stream.event_channel in {"runtime", "all"}
+            )
+        ):
+            self._deferred_operation_batches.append(batch)
+        return batch
+
+    def _defer_scheduler_batch(self) -> None:
+        batch = self.scheduler.take_last_batch()
+        if batch is None:
+            return
+        if self.event_mode is EventMode.FULL and (
+            self.sink is not None
+            or (
+                self.stream is not None
+                and self.stream.event_channel in {"runtime", "all"}
+            )
+        ):
+            self._deferred_operation_batches.append(batch)
+
+    def _remove_pending_advance(self, execution_id: UUID) -> None:
+        if execution_id not in self.pending_advances:
+            return
+        self._defer_operations(
+            (
+                StateOperation(
+                    "remove", ("pending_advances", str(execution_id))
+                ),
+            )
+        )
+
+    def _clear_pending_advances(self) -> None:
+        execution_ids = tuple(self.pending_advances)
+        if execution_ids:
+            self._defer_operations(
+                tuple(
+                    StateOperation(
+                        "remove", ("pending_advances", str(execution_id))
+                    )
+                    for execution_id in execution_ids
+                )
+            )
+
+    def _set_deferred_error(self, error: RuntimeErrorInfo) -> None:
+        if self.deferred_error is not None:
+            return
+        self._defer_operations(
+            (
+                StateOperation(
+                    "replace",
+                    ("invocation", "deferred_error"),
+                    asdict(error),
+                ),
+            )
+        )
+
+    @classmethod
+    def _node_from_state_record(cls, record: dict[str, Any]) -> NodeExecution:
+        return NodeExecution(
+            id=UUID(record["id"]),
+            node_id=record["node_id"],
+            scope=tuple(
+                cls._loop_iteration(
+                    frame["loop_region_id"], frame["iteration"]
+                )
+                for frame in record["scope"]
+            ),
+            state=record["state"],
+            input=record["input"],
+            output=record["output"],
+            error=record["error"],
+            logical_occurrence=record["logical_occurrence"],
+            idempotency_key=record["idempotency_key"],
+            started_state_version=record["started_state_version"],
+            restart_session_context=record["restart_session_context"],
+            restart_invocation_context=record[
+                "restart_invocation_context"
+            ],
+        )
+
+    @classmethod
+    def _node_state_record(cls, execution: NodeExecution) -> dict[str, Any]:
+        return {
+            "id": str(execution.id),
+            "node_id": execution.node_id,
+            "scope": list(cls._scope_value(execution.scope)),
+            "state": execution.state,
+            "input": execution.input,
+            "output": execution.output,
+            "error": execution.error,
+            "logical_occurrence": execution.logical_occurrence,
+            "idempotency_key": execution.idempotency_key,
+            "started_state_version": execution.started_state_version,
+            "restart_session_context": execution.restart_session_context,
+            "restart_invocation_context": execution.restart_invocation_context,
+        }
+
+    @staticmethod
+    def _wait_state_record(wait: WaitCheckpoint) -> dict[str, Any]:
+        return {
+            "id": str(wait.id),
+            "node_execution_id": str(wait.node_execution_id),
+            "request": wait.request.to_record(),
+            "payload": wait.payload,
+        }
 
     def _patch_operations(self, patch: ContextPatch) -> tuple[StateOperation, ...]:
         values: list[StateOperation] = []
         for root, current, mapping in (
-            ("session_context", self.session.context, patch.session),
-            ("invocation_context", self.invocation_context, patch.invocation),
+            ("session", self.session.context, patch.session),
+            ("invocation", self.invocation_context, patch.invocation),
         ):
-            self._merge_operations(values, (root,), current, mapping)
+            self._merge_operations(values, (root, "context"), current, mapping)
         return tuple(values)
 
     @classmethod
@@ -1259,7 +2279,7 @@ class InvocationExecution:
                 StateOperation(
                     "replace" if exists else "add",
                     key_path,
-                    copy.deepcopy(value),
+                    value,
                 )
             )
 

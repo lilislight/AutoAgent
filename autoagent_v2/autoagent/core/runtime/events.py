@@ -9,7 +9,8 @@ from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import UUID, uuid4
 
-from .serialization import decode_json_record, encode_json_record, json_value
+from .serialization import RuntimeValueCodec, decode_json_record, encode_json_record
+from .state import StateOperation, StateOperationBatch
 
 
 def now_ms() -> int:
@@ -20,20 +21,6 @@ class EventMode(StrEnum):
     MINIMAL = "minimal"
     STANDARD = "standard"
     FULL = "full"
-
-
-@dataclass(frozen=True, slots=True)
-class StateOperation:
-    op: Literal["add", "replace", "remove"]
-    path: tuple[str | int, ...]
-    value: Any = None
-
-    def to_record(self) -> dict[str, Any]:
-        return {"op": self.op, "path": list(self.path), "value": json_value(self.value)}
-
-    @classmethod
-    def from_record(cls, value: dict[str, Any]) -> "StateOperation":
-        return cls(value["op"], tuple(value["path"]), value.get("value"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,14 +36,47 @@ class RuntimeEvent:
     status: str | None = None
     workflow_path: tuple[str, ...] = ()
     duration_ns: int | None = None
+    started_at_ms: int | None = None
+    completed_at_ms: int | None = None
     payload: Any = None
-    operations: tuple[StateOperation, ...] = ()
+    operation_batches: tuple[StateOperationBatch, ...] = ()
     occurred_at_ms: int = field(default_factory=now_ms)
     id: UUID = field(default_factory=uuid4)
+    _persistent_payload: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def operations(self) -> tuple[StateOperation, ...]:
+        """Flatten batches for consumers that do not need atomic boundaries."""
+
+        return tuple(
+            operation
+            for batch in self.operation_batches
+            for operation in batch.operations
+        )
 
     @classmethod
     def detached(cls, **values: Any) -> "RuntimeEvent":
-        return cls(**copy.deepcopy(values))
+        detached = copy.deepcopy(
+            {
+                key: item
+                for key, item in values.items()
+                if key not in {"payload", "operation_batches"}
+            }
+        )
+        captured = RuntimeValueCodec.capture(values.get("payload"))
+        detached["payload"] = captured.transfer_to_runtime()
+        detached["_persistent_payload"] = captured.persistent_value()
+        detached["operation_batches"] = tuple(
+            StateOperationBatch(
+                state_version=batch.state_version,
+                operations=tuple(
+                    StateOperation.capture(operation)
+                    for operation in batch.operations
+                ),
+            )
+            for batch in values.get("operation_batches", ())
+        )
+        return cls(**detached)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -72,8 +92,16 @@ class RuntimeEvent:
             "status": self.status,
             "workflow_path": list(self.workflow_path),
             "duration_ns": self.duration_ns,
-            "payload": json_value(self.payload),
-            "operations": [item.to_record() for item in self.operations],
+            "started_at_ms": self.started_at_ms,
+            "completed_at_ms": self.completed_at_ms,
+            "payload": (
+                self._persistent_payload
+                if self._persistent_payload is not None
+                else RuntimeValueCodec.encode(self.payload)
+            ),
+            "operation_batches": [
+                item.to_record() for item in self.operation_batches
+            ],
             "occurred_at_ms": self.occurred_at_ms,
         }
 
@@ -96,9 +124,20 @@ class RuntimeEvent:
                 if value.get("duration_ns") is not None
                 else None
             ),
-            payload=copy.deepcopy(value.get("payload")),
-            operations=tuple(
-                StateOperation.from_record(item) for item in value.get("operations", [])
+            started_at_ms=(
+                int(value["started_at_ms"])
+                if value.get("started_at_ms") is not None
+                else None
+            ),
+            completed_at_ms=(
+                int(value["completed_at_ms"])
+                if value.get("completed_at_ms") is not None
+                else None
+            ),
+            payload=RuntimeValueCodec.decode(value.get("payload")),
+            operation_batches=tuple(
+                StateOperationBatch.from_record(item)
+                for item in value.get("operation_batches", [])
             ),
             occurred_at_ms=int(value["occurred_at_ms"]),
         )
@@ -117,10 +156,15 @@ class UserEvent:
     workflow_path: tuple[str, ...] = ()
     occurred_at_ms: int = field(default_factory=now_ms)
     id: UUID = field(default_factory=uuid4)
+    _persistent_data: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def detached(cls, **values: Any) -> "UserEvent":
-        return cls(**copy.deepcopy(values))
+        detached = copy.deepcopy({key: item for key, item in values.items() if key != "data"})
+        captured = RuntimeValueCodec.capture(values.get("data"))
+        detached["data"] = captured.transfer_to_runtime()
+        detached["_persistent_data"] = captured.persistent_value()
+        return cls(**detached)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -131,7 +175,11 @@ class UserEvent:
             "invocation_id": str(self.invocation_id),
             "sequence": self.sequence,
             "type": self.type,
-            "data": json_value(self.data),
+            "data": (
+                self._persistent_data
+                if self._persistent_data is not None
+                else RuntimeValueCodec.encode(self.data)
+            ),
             "node_id": self.node_id,
             "workflow_path": list(self.workflow_path),
             "occurred_at_ms": self.occurred_at_ms,
@@ -147,7 +195,7 @@ class UserEvent:
             invocation_id=UUID(str(value["invocation_id"])),
             sequence=int(value["sequence"]),
             type=str(value["type"]),
-            data=copy.deepcopy(value.get("data")),
+            data=RuntimeValueCodec.decode(value.get("data")),
             node_id=str(value["node_id"]),
             workflow_path=tuple(str(item) for item in value.get("workflow_path", [])),
             occurred_at_ms=int(value["occurred_at_ms"]),

@@ -27,12 +27,13 @@ from ..runtime import (
     InvocationState,
     InvocationStream,
     RecoveryCheckpoint,
+    RuntimeErrorInfo,
     RuntimeSink,
     RuntimeLoop,
     Session,
     now_ms,
 )
-from ..runtime.serialization import encode_runtime_value
+from ..runtime.serialization import RuntimeValueCodec
 from ..workflow import Workflow, WorkflowIR
 
 
@@ -44,8 +45,7 @@ class AutoAgentApp:
         *,
         runtime_sink: RuntimeSink | None = None,
         admission_timeout: float | None = 5.0,
-        max_thread_workers: int = 8,
-        max_parallel_units: int = 8,
+        max_executor_concurrency: int = 8,
         max_node_executions_per_invocation: int = 1_000,
     ) -> None:
         if max_node_executions_per_invocation < 1:
@@ -60,8 +60,7 @@ class AutoAgentApp:
         self._reserved_sessions: set[str] = set()
         self._runtime_sink = runtime_sink
         self._node_executor = NodeExecutor(
-            max_thread_workers=max_thread_workers,
-            max_parallel_units=max_parallel_units,
+            max_executor_concurrency=max_executor_concurrency,
         )
         self._admission_timeout = admission_timeout
         self._max_node_executions_per_invocation = (
@@ -385,7 +384,7 @@ class AutoAgentApp:
         stream: AttachedChannel | None,
     ) -> InvocationExecution:
         self._ensure_open()
-        encode_runtime_value(invocation_input)
+        RuntimeValueCodec.encode(invocation_input)
         ir = self._resolve_workflow(workflow)
         identifier = session_id or str(uuid4())
         session = self._sessions.get(identifier)
@@ -488,7 +487,7 @@ class AutoAgentApp:
         if not isinstance(wait_node.operator, WaitOperator):
             raise InvocationStateError("Waiting Invocation does not reference a WaitOperator.")
         response = wait_node.operator.response_contract.validate(response)
-        encode_runtime_value(response)
+        RuntimeValueCodec.encode(response)
         if stream is not None:
             if execution.stream is not None:
                 raise InvocationStateError(
@@ -532,12 +531,6 @@ class AutoAgentApp:
         ir = self._resolve_workflow(checkpoint.workflow_id)
         if ir.workflow_revision_id != checkpoint.workflow_revision_id:
             raise RecoveryError("Checkpoint Workflow Revision is not registered.")
-        if checkpoint.invocation_state in {
-            InvocationState.COMPLETED.value,
-            InvocationState.FAILED.value,
-            InvocationState.CANCELLED.value,
-        }:
-            raise RecoveryError("A terminal Checkpoint cannot be recovered.")
         self._validate_checkpoint(ir, checkpoint)
         existing = self._sessions.get(checkpoint.session_id)
         if checkpoint.session_id in self._reserved_sessions:
@@ -554,17 +547,19 @@ class AutoAgentApp:
             )
         if checkpoint.invocation_id in self._active:
             raise InvocationConflictError("Checkpoint Invocation is already active.")
-        self._reserved_sessions.add(checkpoint.session_id)
-        try:
-            await self._admit()
-        finally:
-            self._reserved_sessions.discard(checkpoint.session_id)
+        terminal = InvocationState(checkpoint.invocation_state).terminal
+        if not terminal:
+            self._reserved_sessions.add(checkpoint.session_id)
+            try:
+                await self._admit()
+            finally:
+                self._reserved_sessions.discard(checkpoint.session_id)
         timestamp = now_ms()
         session = Session(
             id=checkpoint.session_id,
             workflow_id=checkpoint.workflow_id,
             context=dict(checkpoint.session_context),
-            created_at_ms=timestamp,
+            created_at_ms=checkpoint.session_created_at_ms,
             updated_at_ms=timestamp,
         )
         invocation = Invocation(
@@ -572,10 +567,24 @@ class AutoAgentApp:
             workflow_id=checkpoint.workflow_id,
             workflow_revision_id=checkpoint.workflow_revision_id,
             session_id=checkpoint.session_id,
-            created_at_ms=timestamp,
+            created_at_ms=checkpoint.invocation_created_at_ms,
         )
         session.invocation = invocation
         self._sessions[session.id] = session
+        error = (
+            RuntimeErrorInfo(**checkpoint.invocation_error)
+            if checkpoint.invocation_error is not None
+            else None
+        )
+        invocation._update(
+            state=InvocationState(checkpoint.invocation_state),
+            output=checkpoint.invocation_output,
+            error=error,
+            checkpoint=checkpoint,
+            updated_at_ms=timestamp,
+        )
+        if terminal:
+            return invocation
         execution = InvocationExecution(
             workflow=ir,
             session=session,
@@ -589,12 +598,10 @@ class AutoAgentApp:
         )
         execution.restore(checkpoint)
         self._active[invocation.id] = execution
-        invocation._update(
-            state=InvocationState(checkpoint.invocation_state),
-            checkpoint=checkpoint,
-            updated_at_ms=timestamp,
-        )
-        if invocation.state is InvocationState.WAITING:
+        if (
+            invocation.state is InvocationState.WAITING
+            and not execution.has_runnable_recovery_work()
+        ):
             execution.boundary = asyncio.Event()
             execution.task = asyncio.create_task(
                 self._announce_recovered_waiting(execution)
@@ -631,14 +638,24 @@ class AutoAgentApp:
 
     async def _cancel(self, invocation: Invocation | UUID) -> Invocation:
         execution = self._active_execution(invocation)
-        execution.cancel_requested = True
+        execution.request_cancel()
+        # The in-memory Handle reflects the accepted control request
+        # immediately. ``finish_cancelled`` still owns Event convergence and
+        # does not signal terminal completion until the Sink accepts it.
+        execution.invocation._update(
+            state=InvocationState.CANCELLED,
+            updated_at_ms=now_ms(),
+        )
         if execution.stream is not None:
             execution.stream.abandon()
         for task in tuple(execution.worker_tasks):
             task.cancel()
-        if execution.task is not None and not execution.task.done():
-            execution.task.cancel()
-        else:
+        # Cancellation is cooperative at the Invocation coordinator. Active
+        # workers first finalize their cancelled Operator Call Event; the
+        # coordinator then observes the cancelled task and converges the rest
+        # of the Invocation. Cancelling both layers concurrently can interrupt
+        # that final Event before it reaches the Sink.
+        if execution.task is None or execution.task.done():
             asyncio.create_task(execution.finish_cancelled())
         await execution.terminal.wait()
         self._active.pop(execution.invocation.id, None)
@@ -672,6 +689,9 @@ class AutoAgentApp:
             InvocationState.CREATED.value,
             InvocationState.RUNNING.value,
             InvocationState.WAITING.value,
+            InvocationState.COMPLETED.value,
+            InvocationState.FAILED.value,
+            InvocationState.CANCELLED.value,
         }
         if checkpoint.invocation_state not in allowed_states:
             raise RecoveryError(
@@ -779,7 +799,7 @@ class AutoAgentApp:
     async def _close(self) -> None:
         executions = tuple(self._active.values())
         for execution in executions:
-            execution.cancel_requested = True
+            execution.request_cancel()
             if execution.stream is not None:
                 execution.stream.abandon()
             for task in tuple(execution.worker_tasks):

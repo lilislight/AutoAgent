@@ -1,176 +1,149 @@
 # AutoAgent V2 TODO
 
-This file tracks work intentionally deferred from the first standalone V2 Core
-implementation. It is not a compatibility plan for V1.
+This file contains only unfinished V2 work. Completed behavior is documented in
+`workflow.md` and `runtime.md`; this is not a V1 compatibility plan.
 
-## Next Core gate
+## Current milestone: finish Core before Server
 
-The following items were confirmed by the post-implementation V1/V2 audit and
-should be resolved before building a durable V2 Server on top of Core.
+The Workflow control-flow contract, incremental parallel Scheduler, Hook and
+Operator isolation, bounded execution concurrency, Runtime Event vocabulary,
+Checkpoint boundaries, Wait/Resume basics, Sink acceptance boundary, and the
+three Event modes are implemented and covered by the V2 test suite.
 
-### P0 correctness
+The internal canonical Runtime State gate is complete. Genesis plus ordered Full
+Event Operations reconstructs the byte-equivalent terminal Runtime State across
+serial and parallel execution, Context conflicts, fan-in, ordinary and nested
+Loops, Wait/Resume, cancellation, failure, Map/Replication,
+Retry/Fallback/timeout, and multiple Sessions.
 
-- Persist recovery-attempt progress at the pre-Node Checkpoint boundary.
-  `NodeExecutionRequest.recovery_attempt` is incremented only after the current
-  Checkpoint is captured, so repeated crashes can replay the same Node forever
-  despite `RecoveryPolicy.max_attempts`.
+## P0: canonical Runtime State
 
-### P1 completeness
+Completed:
 
-- Restore the selector-less Map compile rule. A non-loop Map may omit its
-  selector only with exactly one unambiguous incoming value. A loop-header Map
-  must separately have one external entry value and one unambiguous back-edge
-  value; multiple external or multiple possible back values require a selector.
-  Replication has no item selector: it requires one logical input, so ambiguous
-  incoming values must be resolved by Input Mapping. Also validate
-  multi-parameter mapped inputs against the Operator argument contract when
-  their structure is statically visible.
-- Record cancelled/interrupted physical Operator Calls in Standard and Full.
-  `OperatorCallRecord.status` already permits `cancelled`, but cancellation
-  currently exits before a Call record/Event is produced. Add async/sync stream
-  close tests and release closable stream sources on timeout and cancellation.
-- Make Workflow Revision identity include callable parameter required/default
-  semantics while continuing to require explicit Operator/Hook version changes
-  for implementation-only changes. Exclude child Workflow display names from
-  the semantic hash, matching top-level Workflow and Node display metadata.
+- the exact versioned Runtime State Schema and strict JSON round trip;
+- one atomic State Operation mutation path for Session, Invocation, Context,
+  Scheduler, Node executions, Waits, pending advances, and counters;
+- a behavior-only Scheduler whose durable cursor lives in Runtime State;
+- atomic ContextPatch data and path-revision commits;
+- one globally ordered Operation buffer shared by all Full Event boundaries;
+- completed-Node compaction and removal of trace-only timing and replay-only
+  Context baselines from terminal Node state;
+- 286 passing V2 tests and replay-equivalence coverage for the scenarios above.
+
+Intentionally deferred by the current design decision:
+
+- replacing the public `RecoveryCheckpoint` record with the raw canonical
+  Runtime State checkpoint record;
+- changing `AutoAgentApp.recover()` to consume only that new record and deleting
+  the current adapter path.
+
+The current Recovery contract remains an adapter over canonical Runtime State.
+Do not implement these two deferred changes until their external API is
+reviewed separately.
+
+## P0 decisions after Runtime State integration
+
+- Define durable `RecoveryPolicy.max_attempts` accounting. Node start is not a
+  Checkpoint boundary, so repeated process crashes can otherwise replay the
+  same unfinished Node without consuming a durable attempt. Choose whether the
+  budget is encoded at the previous durable boundary, supplied as explicit
+  recovery metadata, or documented as process-local.
+- Add one global Invocation execution budget. The existing per-Node limit does
+  not bound a large cycle that spreads work across many different Nodes.
+- Define bounded App shutdown when a Sink never accepts a pending or
+  cancellation Event. Core must surface the failed acceptance boundary without
+  owning Sink queue policy or persistence.
+
+## P1: execution and authoring completeness
+
+### Wait and recovery
+
+- Redesign Wait as an Operator outcome in the ordinary attempt/fallback chain,
+  rather than a special Node category. A fallback may enter Wait; Resume must
+  continue the same logical Node Execution through response validation, latest
+  Context, Output Binding, Event generation, Checkpointing, and outgoing Edge
+  evaluation. Preserve multiple concurrent Wait ids.
 - Add `SessionSnapshot`, `AutoAgentApp.release_session()`, and
-  `AutoAgentApp.restore_session()`. Preserve original Session/Invocation
-  timestamps across explicit recovery and reject snapshots for unregistered
-  Workflow ids.
-- Define bounded App shutdown when a Sink never accepts pending or cancellation
-  Events. Core must expose the failed acceptance boundary without allowing
-  `close()` to wait forever. This does not move queue ownership, pressure
-  policy, or persistence work into Core.
-- Treat an explicitly supplied empty `session_id` deterministically (prefer a
-  validation error); do not silently replace it with a generated UUID.
-- Simplify Node policy composition before stabilizing the authoring API. Fold
-  per-Call timeout, retry attempts, and backoff into one explicit Operator Call
-  policy; move ordered fallback Operators into an explicit fallback policy;
-  rename ResourcePolicy to execution limits with clear Invocation-wide
-  counters; represent Map versus Replication as one mutually exclusive parallel
-  policy. Compile these public settings into one immutable execution plan with
-  a documented attempt order. Separately decide whether an unhandled Operator
-  failure may select a failure Edge to another Node; do not conflate graph-level
-  failure routing with an in-Node fallback Operator.
-- Redesign Runtime/Context ownership before stabilizing Sink and public return
-  contracts. Audit exactly which Runtime state, input/output values, and Context
-  views are passed to hooks, Sinks, Invocation Handles, users, and persistence;
-  define isolation, mutability, lifetime, and serialization at every boundary.
+  `AutoAgentApp.restore_session()`. Preserve timestamps and reject snapshots
+  whose Workflow id is not registered.
+- Document cancellation and idempotency expectations for non-cooperative sync
+  Operators. Python cannot terminate an already-running worker thread.
 
-## Core correctness
+### Workflow input and policy contracts
 
-- Lock down the implemented Checkpoint boundaries independently from Runtime
-  Event boundaries: initialized scheduler state, quiescent scheduler state
-  before the next Node starts, and committed Wait state. Checkpoints must remain
-  latest executable state, not a tracing projection, and the tests must prove
-  that incremental downstream scheduling never captures in-flight Node state.
-- Persist Context path revision metadata in Checkpoints if Checkpoints are ever
-  offered while concurrent Node executions are in flight. Current Core only
-  offers runnable Checkpoints at quiescent scheduling boundaries.
-- Define cancellation convergence for non-cooperative synchronous Operators.
-  Python cannot stop a running worker thread; document idempotency expectations
-  before adding retry behavior around such timeouts.
-- Decide whether a recovered Wait should emit a dedicated recovery Event per
-  Wait or only the current Invocation-level recovery Event.
-- Add a global Invocation execution budget so a large cycle cannot evade the
-  implemented per-Node safety limit by spreading work across many Nodes.
+- Restore the selector-less Map rule. A non-loop Map may omit a Selector only
+  for one unambiguous incoming value. A loop-header Map must independently have
+  one unambiguous external value and one unambiguous Back-Edge value.
+  Replication also requires one logical input unless Input Mapping resolves the
+  ambiguity.
+- Validate statically visible multi-parameter mapped input shapes against the
+  Operator contract.
+- Simplify Node policy composition before freezing the authoring API:
+  consolidate timeout/retry/backoff into an Operator Call policy, make fallback
+  an explicit policy, rename ResourcePolicy to execution limits, and represent
+  Map/Replication as one mutually exclusive parallel policy compiled into an
+  immutable execution plan.
+- Decide whether an unhandled Operator failure may select a graph-level failure
+  Edge. Keep this separate from in-Node fallback Operators.
+- Include callable parameter required/default semantics in Workflow Revision
+  identity. Continue requiring explicit Operator/Hook version changes for
+  implementation-only changes and exclude display-only child Workflow names.
+- Reject an explicitly supplied empty `session_id` instead of silently creating
+  a UUID.
+- Release closable sync and async stream sources on timeout and cancellation.
 
-## Completed Workflow control-flow contract
+## P2: Compiler and Coding-Agent diagnostics
 
-- The control-flow and Loop portion of `workflow.md` is implemented by one
-  Compiler analysis and one scope-aware Scheduler: all-matches DAG fan-out,
-  complete fan-in, reducible SCC analysis, one Back Edge per Loop, nested and
-  same-Header sibling Loop regions, scoped re-entry, cross-level Exit, and
-  deterministic static/runtime conflicts.
-- Parallel Loop boundaries stabilize before committing Back or Exit. Pending
-  transitions survive Wait/Resume, conflicting Back/Exit choices fail
-  atomically, and `LOOP_NO_ROUTE` detects a settled boundary with no route.
-- Every Node inherits a finite Invocation-wide execution limit; Map/Replication
-  units do not consume additional Node executions. The independent
-  conformance suite covers Compiler, Scheduler, Executor, Wait, cancellation,
-  and control-flow safety behavior. The complete data-flow, durability, and
-  performance contract in `workflow.md` remains normative even where P0/P1
-  work in this file is still incomplete.
+- Add structured `Diagnostic` results with stable codes, severity, locations,
+  and hints on top of the existing `WorkflowCompiler`; do not build a second
+  compiler.
+- Derive a deterministic structural snapshot and Mermaid preview from the same
+  Workflow IR and analysis indexes.
+- Add cross-contract diagnostics for mapped inputs, fallback plans, and
+  idempotency-key injection.
+- Decide which analysis helpers are public Core APIs and which belong to the
+  future CLI/Skill layer.
 
-## Compiler and authoring diagnostics
+## P3: local Server and tracing
 
-- Build structured `Diagnostic` output with stable codes, locations, hints, and
-  severity on top of the existing `WorkflowCompiler`; do not create a second
-  compiler implementation.
-- Add a deterministic structural snapshot and Mermaid preview derived from the
-  same Workflow IR and compiler analysis indexes.
-- Add richer cross-contract diagnostics for multi-parameter Operator inputs,
-  fallback policies, and idempotency-key injection.
-- Decide which analysis helpers belong to public Core versus future CLI/Skill
-  packages.
+Start only after the canonical Runtime State gate passes.
 
-## Runtime Events and tracing
+- Implement an in-memory journal Sink. `submit_events()` only accepts immutable
+  records into Sink-owned memory; persistence and remote delivery run in a
+  separate Server worker.
+- Implement local persistence for Events, latest Checkpoints, Workflow
+  Revisions, Sessions, and Invocations without querying Core execution memory.
+- Define the Server reducer and graph projection from the finalized Event and
+  Operation schema.
+- Expose execution APIs (`invoke`, `submit`, `stream`, `resume`, `recover`, and
+  `cancel`) separately from tracing query APIs.
+- Expose Sink queue pressure, accepted/durable watermarks, backend health,
+  retry state, and undelivered boundaries through Server health.
+- Add the local tracing UI only against Server query/stream APIs.
+- Add optional Map/Replication summary projections without removing required
+  physical Operator Call Events.
 
-- The Core/Sink acceptance boundary is implemented. Core assigns per-channel
-  Invocation sequences, captures immutable UTF-8 JSON Event and Checkpoint
-  envelopes, owns admission timeout, and keeps `ResourcePolicy` accounting
-  independent of Event mode.
-- `RuntimeSink` remains a Core protocol with no Core implementation. Executor
-  directly awaits `submit_events()`; normal return means the supplied immutable
-  records have been atomically accepted into Sink-owned memory. A full Sink
-  queue may suspend that call and therefore backpressure Runtime only at an
-  Event boundary.
-- High, Hard, Resume hysteresis, queue capacity/fairness, backend retry, local
-  spool, batching, retention, and database/remote delivery are entirely
-  Sink/Server concerns. `wait_until_admissible()` exposes the Sink's admission
-  decision, while `submit_events()` exposes its execution-backpressure
-  decision. Core neither stores these watermarks nor interprets queue state.
-- Finalize the Runtime Event schema, error/timing contract, reducer contract,
-  and graph projection with the V2 Server/Tracing Service. Current Full
-  Operations are not sufficient to rebuild Scheduler/Wait/counter state into a
-  `RecoveryCheckpoint`, so Replay/Fork and Event-based Checkpoint repair are not
-  implemented yet.
-- Preserve the current mode boundary: `minimal` emits no Runtime Events,
-  `standard` emits graph-level Events and every physical Operator Call without
-  heavy values, and `full` adds phases, state operations, inputs, and outputs.
-- Define optional Map/Replication summary Events without replacing the required
-  per-call Events.
-- Add production in-memory-journal Sink implementations in the V2 Server
-  layer. Core normally submits one execution-boundary Event at a time; a Sink
-  accepts it into memory, and a separate Server-owned persistence/remote worker
-  drains and batches that journal. Backend failure therefore cannot make
-  `submit_events()` fail; it only grows the Sink queue until Sink-owned pressure
-  policy blocks admission or Event acceptance.
-- Expose Sink queue pressure, backend availability, accepted/durable
-  watermarks, retry state, and undelivered boundaries through Server health
-  without making them business Invocation states.
-- Define how Server health reports a Sink implementation that violates the
-  in-memory acceptance protocol. Core currently logs and detaches that Sink for
-  the affected Invocation so the business result remains authoritative.
+## Later platform work
 
-## Performance
+- Add a Platform Sink/connector after the local Server boundary is stable.
+- Design hosted execution, remote Workflow invocation, and remote Operator or
+  Capability references as platform protocols rather than Core dependencies.
+- Add Replay/Fork only after Full Operations can rebuild arbitrary supported
+  Checkpoints and the Server reducer has conformance tests.
 
-- Stop retaining unused `NodeExecutionResult.phases` and
-  `NodeExecutionResult.operator_calls`; progress is already delivered to the
-  coordinator, and the lists duplicate heavy Map inputs/outputs until the whole
-  Node finishes. Compact completed `NodeExecution` objects instead of retaining
-  duplicate mapped input/output already owned by Runtime output state.
-- Replace one-task-per-item Map/Replication execution with a bounded worker
-  queue. A Semaphore limits active Calls but still creates a Task for every
-  selected item, so very large Maps can cause an avoidable memory spike.
-- Benchmark large fan-out/fan-in graphs, nested loops, large Contexts, and slow
-  Sinks using `tests/benchmarks/benchmark_core.py` as the starting harness.
-- Replace eager Session/Invocation Context snapshots with persistent or
-  copy-on-write structures only if profiles show they dominate execution.
-- Consider bounded cleanup for per-Workflow Node semaphores in `NodeExecutor`.
-- Profile the remaining Loop-boundary set construction; Workflow IR now owns
-  Edge-id and Loop-containment indexes, but compatibility checks still build a
-  few small temporary sets per completed Node.
-- Measure Event and Checkpoint capture/serialization separately with realistic
-  payloads. Serialization belongs to Core before immutable Sink handoff;
-  database encoding and writes remain Sink-owned.
-- Add memory benchmarks for many concurrent Sessions and many active Waits.
+## Performance work
 
-## Server and platform boundary
-
-- Implement local Server, persistence, tracing query API, and UI as a separate
-  V2 project layer that consumes Core Events and Checkpoints.
-- Keep execution APIs (`invoke`, `submit`, `stream`, `resume`, `recover`,
-  `cancel`) backed by the same Core coordinator.
-- Design remote Operator, Capability, and Workflow references only after the
-  local Server boundary is stable.
+- Benchmark large fan-out/fan-in, nested Loops, large Contexts, slow Sinks, many
+  concurrent Sessions, and many active Waits.
+- Measure Event and Checkpoint capture/serialization independently with
+  realistic payloads.
+- Profile the current 1 ms thread-future polling path; the latest trivial
+  one-Node benchmark is dominated by fixed per-Invocation overhead.
+- Replace isolated Hook-value deep copies with persistent or copy-on-write
+  values only if profiling proves they dominate real execution.
+- Profile remaining Loop-boundary temporary set construction before adding
+  caches.
+- The current local reference run completes 1,000 one-Node Invocations in about
+  6.0-6.2 seconds in Core-only, Standard, and Full modes. The inherited
+  1,000-iteration safety Loop completes in about 7.2 seconds at roughly 35 MB
+  peak RSS. Treat these as local observations, not CI thresholds.

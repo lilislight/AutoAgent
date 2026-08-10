@@ -19,12 +19,16 @@ from ..operators import (
     callable_id,
 )
 from ..workflow import (
+    AggregationContext,
     ContextPatch,
     Edge,
+    EdgeConditionContext,
     EdgeIR,
-    ExecutionContext,
+    InputMappingContext,
+    ItemSelectorContext,
     Node,
     NodeIR,
+    OutputBindingContext,
     SubworkflowIR,
     Workflow,
     WorkflowIR,
@@ -417,14 +421,12 @@ class WorkflowCompiler:
         if node.output_binding is not None:
             self._validate_output_binding(
                 node.output_binding,
-                output_contract,
                 f"Node {node.id!r} Output Binding",
             )
 
         if node.policy and node.policy.map and node.policy.map.item_selector is not None:
             self._validate_map_selector(
                 node.policy.map.item_selector,
-                mapped_contract,
                 operator.contract.parameters if isinstance(operator, Operator) else (),
                 f"Node {node.id!r} Map item selector",
             )
@@ -480,7 +482,7 @@ class WorkflowCompiler:
         signature, hints = _strict_signature(function, 1, description)
         parameter = tuple(signature.parameters.values())[0]
         _require_exact_annotation(
-            hints.get(parameter.name, parameter.annotation), ExecutionContext,
+            hints.get(parameter.name, parameter.annotation), EdgeConditionContext,
             f"{description} parameter",
         )
         _require_exact_annotation(
@@ -493,7 +495,7 @@ class WorkflowCompiler:
         signature, hints = _strict_signature(function, 1, description)
         parameter = tuple(signature.parameters.values())[0]
         _require_exact_annotation(
-            hints.get(parameter.name, parameter.annotation), ExecutionContext,
+            hints.get(parameter.name, parameter.annotation), InputMappingContext,
             f"{description} parameter",
         )
         try:
@@ -506,26 +508,15 @@ class WorkflowCompiler:
 
     @staticmethod
     def _validate_output_binding(
-        function: Any, output: ValueContract, description: str
+        function: Any, description: str
     ) -> None:
-        signature, hints = _strict_signature(function, 2, description)
-        context_parameter, output_parameter = tuple(signature.parameters.values())
+        signature, hints = _strict_signature(function, 1, description)
+        context_parameter = tuple(signature.parameters.values())[0]
         _require_exact_annotation(
             hints.get(context_parameter.name, context_parameter.annotation),
-            ExecutionContext,
+            OutputBindingContext,
             f"{description} context parameter",
         )
-        try:
-            declared_output = ValueContract.create(
-                hints.get(output_parameter.name, output_parameter.annotation),
-                location=f"{description} output parameter",
-            )
-        except TypeError as error:
-            raise WorkflowCompileError(str(error)) from error
-        if not _same_contract(declared_output, output):
-            raise WorkflowCompileError(
-                f"{description} output parameter does not match the Node output contract."
-            )
         return_annotation = hints.get("return", signature.return_annotation)
         arguments = set(get_args(return_annotation))
         if return_annotation is ContextPatch:
@@ -538,22 +529,17 @@ class WorkflowCompiler:
     @staticmethod
     def _validate_map_selector(
         function: Any,
-        mapped_input: ValueContract | None,
         parameters: tuple[Any, ...],
         description: str,
     ) -> None:
-        signature, hints = _strict_signature(function, 2, description)
-        context_parameter, parameter = tuple(signature.parameters.values())
+        signature, hints = _strict_signature(function, 1, description)
+        context_parameter = tuple(signature.parameters.values())[0]
         _require_exact_annotation(
             hints.get(context_parameter.name, context_parameter.annotation),
-            ExecutionContext,
+            ItemSelectorContext,
             f"{description} context parameter",
         )
         try:
-            input_contract = ValueContract.create(
-                hints.get(parameter.name, parameter.annotation),
-                location=f"{description} parameter",
-            )
             return_annotation = hints.get("return", signature.return_annotation)
             if get_origin(return_annotation) is not list or len(get_args(return_annotation)) != 1:
                 raise TypeError(f"{description} must return list[ItemInput].")
@@ -562,10 +548,6 @@ class WorkflowCompiler:
             )
         except TypeError as error:
             raise WorkflowCompileError(str(error)) from error
-        if mapped_input is not None and not _same_contract(input_contract, mapped_input):
-            raise WorkflowCompileError(
-                f"{description} parameter does not match Input Mapping return."
-            )
         if len(parameters) == 1 and not _same_contract(item_contract, parameters[0].value):
             raise WorkflowCompileError(
                 f"{description} item does not match Operator input contract."
@@ -589,31 +571,20 @@ class WorkflowCompiler:
                 list[unit_output.annotation], location=f"Node {node.id!r} output"
             )
         description = f"Node {node.id!r} output aggregator"
-        signature, hints = _strict_signature(aggregator, 2, description)
-        context_parameter, parameter = tuple(signature.parameters.values())
+        signature, hints = _strict_signature(aggregator, 1, description)
+        context_parameter = tuple(signature.parameters.values())[0]
         _require_exact_annotation(
             hints.get(context_parameter.name, context_parameter.annotation),
-            ExecutionContext,
+            AggregationContext,
             f"{description} context parameter",
         )
-        expected_input = ValueContract.create(
-            list[unit_output.annotation], location=f"{description} input"
-        )
         try:
-            actual_input = ValueContract.create(
-                hints.get(parameter.name, parameter.annotation),
-                location=f"{description} parameter",
-            )
             result = ValueContract.create(
                 hints.get("return", signature.return_annotation),
                 location=f"{description} return",
             )
         except TypeError as error:
             raise WorkflowCompileError(str(error)) from error
-        if not _same_contract(actual_input, expected_input):
-            raise WorkflowCompileError(
-                f"{description} parameter must be list of Operator outputs."
-            )
         return result
 
     @staticmethod

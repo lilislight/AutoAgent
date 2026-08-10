@@ -6,7 +6,7 @@ import asyncio
 import copy
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -141,7 +141,12 @@ class Invocation:
         return self
 
     async def await_done(self, timeout: float | None = None) -> "Invocation":
-        return await asyncio.to_thread(self.wait, timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.state.terminal:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Invocation did not reach a boundary in time.")
+            await asyncio.sleep(0.005)
+        return self
 
     def result(self) -> dict[str, Any]:
         with self._condition:
@@ -187,11 +192,33 @@ class Invocation:
             self._condition.notify_all()
 
 
-@dataclass(slots=True)
 class Session:
-    id: str
-    workflow_id: str
-    context: dict[str, Any] = field(default_factory=dict)
-    invocation: Invocation | None = None
-    created_at_ms: int = 0
-    updated_at_ms: int = 0
+    """Compact Session handle projected from the canonical Runtime State."""
+
+    def __init__(
+        self,
+        *,
+        id: str,
+        workflow_id: str,
+        context: dict[str, Any] | None = None,
+        invocation: Invocation | None = None,
+        created_at_ms: int = 0,
+        updated_at_ms: int = 0,
+    ) -> None:
+        self.id = id
+        self.workflow_id = workflow_id
+        self.invocation = invocation
+        self.created_at_ms = created_at_ms
+        self.updated_at_ms = updated_at_ms
+        self._bootstrap_context = copy.deepcopy(context or {})
+        self._runtime_state: Any = None
+
+    @property
+    def context(self) -> dict[str, Any]:
+        if self._runtime_state is None:
+            return copy.deepcopy(self._bootstrap_context)
+        return self._runtime_state.read("session", "context")
+
+    def _attach_runtime_state(self, runtime_state: Any) -> None:
+        self._runtime_state = runtime_state
+        self._bootstrap_context = {}

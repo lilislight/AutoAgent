@@ -15,7 +15,8 @@ from autoagent.core import (
     ContextPatch,
     Edge,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    OutputBindingContext,
     InvocationConflictError,
     InvocationState,
     Node,
@@ -44,8 +45,8 @@ class StructuredValue:
     temperatures: tuple[int, ...]
 
 
-def bind_invocation_value(_context: ExecutionContext, value: int) -> ContextPatch:
-    return ContextPatch(invocation={"value": value})
+def bind_invocation_value(context: OutputBindingContext) -> ContextPatch:
+    return ContextPatch(invocation={"value": context.output})
 
 
 def int_user_event(value: int) -> dict[str, int]:
@@ -64,11 +65,11 @@ def identity_none(value: None) -> None:
     return value
 
 
-def bind_name(_context: ExecutionContext, _value: None) -> ContextPatch:
+def bind_name(_context: OutputBindingContext) -> ContextPatch:
     return ContextPatch(invocation={"profile": {"name": "Ada"}})
 
 
-def bind_age(_context: ExecutionContext, _value: None) -> ContextPatch:
+def bind_age(_context: OutputBindingContext) -> ContextPatch:
     return ContextPatch(invocation={"profile": {"age": 37}})
 
 
@@ -130,7 +131,7 @@ class EventModeTests(unittest.TestCase):
 
         self.assertTrue(all(getattr(event, "subject_type", None) == "invocation" or hasattr(event, "type") for event in minimal))
         self.assertTrue(any(getattr(event, "subject_type", None) == "node" for event in standard))
-        self.assertFalse(any(getattr(event, "subject_type", None) == "node_phase" for event in standard))
+        self.assertTrue(any(getattr(event, "subject_type", None) == "node_phase" for event in standard))
         self.assertTrue(any(getattr(event, "subject_type", None) == "node_phase" for event in full))
         self.assertTrue(any(getattr(event, "operations", ()) for event in full if hasattr(event, "operations")))
         for events in (minimal, standard, full):
@@ -222,13 +223,21 @@ class EventModeTests(unittest.TestCase):
             operation
             for event in sink.events
             for operation in getattr(event, "operations", ())
-            if operation.path[:1] == ("invocation_context",)
+            if operation.path[:2] == ("invocation", "context")
         ]
         self.assertEqual(
             [(item.op, item.path, item.value) for item in context_operations],
             [
-                ("add", ("invocation_context", "profile"), {"name": "Ada"}),
-                ("add", ("invocation_context", "profile", "age"), 37),
+                (
+                    "add",
+                    ("invocation", "context", "profile"),
+                    {"name": "Ada"},
+                ),
+                (
+                    "add",
+                    ("invocation", "context", "profile", "age"),
+                    37,
+                ),
             ],
         )
         app.close()
@@ -265,7 +274,7 @@ class AppApiTests(unittest.TestCase):
             return value
 
         value = Workflow("concurrent", nodes=[Node("slow", slow)])
-        app = AutoAgentApp(max_thread_workers=2)
+        app = AutoAgentApp(max_executor_concurrency=2)
         app.register_workflow(value)
         first = app.submit_invoke(value, 1, session_id="one")
         second = app.submit_invoke(value, 2, session_id="two")
@@ -313,11 +322,11 @@ class AppApiTests(unittest.TestCase):
         app.close()
 
     def test_session_context_is_shared_by_sequential_invocations_only(self) -> None:
-        def mapping(context: ExecutionContext) -> int:
-            return int(context.session.get("count", 0)) + 1
+        def mapping(context: InputMappingContext) -> int:
+            return int(context.session_context.get("count", 0)) + 1
 
-        def binding(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(session={"count": value})
+        def binding(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(session={"count": context.output})
 
         app = AutoAgentApp()
         value = Workflow(
@@ -456,7 +465,11 @@ class AsyncStreamTests(unittest.IsolatedAsyncioTestCase):
         await app.aclose()
 
     async def test_async_cancel_returns_the_same_handle(self) -> None:
-        started = asyncio.Event()
+        # User callables execute on the App Runtime Loop, not this test's
+        # caller Loop.  ``asyncio.Event`` is not a cross-loop notification
+        # primitive, so use the thread-safe equivalent and poll without
+        # blocking the caller Loop.
+        started = threading.Event()
 
         async def slow(value: int) -> int:
             started.set()
@@ -467,7 +480,9 @@ class AsyncStreamTests(unittest.IsolatedAsyncioTestCase):
         app = AutoAgentApp()
         app.register_workflow(value)
         invocation = await app.asubmit_invoke(value, 1)
-        await asyncio.wait_for(started.wait(), 1)
+        async with asyncio.timeout(1):
+            while not started.is_set():
+                await asyncio.sleep(0.001)
         cancelled = await app.acancel(invocation)
         self.assertIs(cancelled, invocation)
         self.assertEqual(cancelled.state, InvocationState.CANCELLED)

@@ -13,7 +13,8 @@ from autoagent.core import (
     ContextPatch,
     Edge,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    OutputBindingContext,
     InvocationConflictError,
     InvocationState,
     Node,
@@ -161,11 +162,11 @@ class ExecutionTests(unittest.TestCase):
         def right(value: int) -> int:
             return value + 2
 
-        def left_binding(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"left": value})
+        def left_binding(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"left": context.output})
 
-        def right_binding(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"right": value})
+        def right_binding(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"right": context.output})
 
         def join(values: dict[str, int]) -> int:
             return values["left"] + values["right"]
@@ -291,9 +292,9 @@ class AsyncExecutionTests(unittest.IsolatedAsyncioTestCase):
         app.register_workflow(workflow)
 
         async_invocation = await app.ainvoke(workflow, 4, session_id="async")
-        sync_invocation = await asyncio.to_thread(
-            app.invoke, workflow, 5, session_id="sync"
-        )
+        # A sync entrypoint may be used between async calls. It blocks this
+        # caller until Core's independent Runtime Loop reaches the boundary.
+        sync_invocation = app.invoke(workflow, 5, session_id="sync")
 
         self.assertEqual(async_invocation.result(), {"finish": 10})
         self.assertEqual(sync_invocation.result(), {"finish": 12})

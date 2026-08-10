@@ -7,7 +7,11 @@ import unittest
 from workflow_spec_support import (
     ContextPatch,
     Edge,
-    ExecutionContext,
+    InputMappingContext,
+    EdgeConditionContext,
+    AggregationContext,
+    ItemSelectorContext,
+    OutputBindingContext,
     Payload,
     assert_completed,
     assert_runtime_error,
@@ -22,18 +26,15 @@ from autoagent import MapPolicy, NodePolicy, ResourcePolicy
 
 
 def select_five(
-    context: ExecutionContext, payload: Payload
+    context: ItemSelectorContext,
 ) -> list[Payload]:
-    del context
-    del payload
     return [{"unit": unit} for unit in range(5)]
 
 
 def aggregate_units(
-    context: ExecutionContext, outputs: list[Payload]
+    context: AggregationContext,
 ) -> Payload:
-    del context
-    return {"units": len(outputs)}
+    return {"units": len(context.operator_outputs)}
 
 
 class NodeExecutionLimitTests(unittest.TestCase):
@@ -124,39 +125,35 @@ class NodeExecutionLimitTests(unittest.TestCase):
         trace: list[str] = []
 
         def increment_inner(
-            context: ExecutionContext,
-            output: Payload,
+            context: OutputBindingContext,
         ) -> ContextPatch:
-            del output
             return ContextPatch(
                 invocation={
-                    "inner": int(context.invocation.get("inner", 0)) + 1
+                    "inner": int(context.invocation_context.get("inner", 0)) + 1
                 }
             )
 
-        def inner_back(context: ExecutionContext) -> bool:
-            return int(context.invocation.get("inner", 0)) < 2
+        def inner_back(context: EdgeConditionContext) -> bool:
+            return int(context.invocation_context.get("inner", 0)) < 2
 
-        def inner_exit(context: ExecutionContext) -> bool:
-            return int(context.invocation.get("inner", 0)) >= 2
+        def inner_exit(context: EdgeConditionContext) -> bool:
+            return int(context.invocation_context.get("inner", 0)) >= 2
 
         def reset_inner(
-            context: ExecutionContext,
-            output: Payload,
+            context: OutputBindingContext,
         ) -> ContextPatch:
-            del output
             return ContextPatch(
                 invocation={
                     "inner": 0,
-                    "outer": int(context.invocation.get("outer", 0)) + 1,
+                    "outer": int(context.invocation_context.get("outer", 0)) + 1,
                 }
             )
 
-        def outer_back(context: ExecutionContext) -> bool:
-            return int(context.invocation.get("outer", 0)) < 2
+        def outer_back(context: EdgeConditionContext) -> bool:
+            return int(context.invocation_context.get("outer", 0)) < 2
 
-        def outer_exit(context: ExecutionContext) -> bool:
-            return int(context.invocation.get("outer", 0)) >= 2
+        def outer_exit(context: EdgeConditionContext) -> bool:
+            return int(context.invocation_context.get("outer", 0)) >= 2
 
         definition = workflow(
             "nested_counter_scope",

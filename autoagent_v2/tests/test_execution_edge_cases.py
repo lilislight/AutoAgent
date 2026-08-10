@@ -13,7 +13,10 @@ from autoagent.core import (
     ContextPatch,
     Edge,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    ItemSelectorContext,
+    OutputBindingContext,
+    EdgeConditionContext,
     InvocationState,
     MapPolicy,
     Node,
@@ -53,12 +56,12 @@ def identity_none(value: None) -> None:
     return value
 
 
-def empty_items(_context: ExecutionContext, _value: None) -> list[None]:
+def empty_items(_context: ItemSelectorContext) -> list[None]:
     return []
 
 
-def single_text(_context: ExecutionContext, value: str) -> list[str]:
-    return [value]
+def single_text(context: ItemSelectorContext) -> list[str]:
+    return [context.input]
 
 
 class CaptureSink:
@@ -77,7 +80,7 @@ class CaptureSink:
 
 class NodePhaseFailureTests(unittest.TestCase):
     def test_input_mapping_failure_marks_node_and_invocation_failed(self) -> None:
-        def fail(_context: ExecutionContext) -> int:
+        def fail(_context: InputMappingContext) -> int:
             raise ValueError("mapping failed")
 
         sink = CaptureSink()
@@ -91,7 +94,7 @@ class NodePhaseFailureTests(unittest.TestCase):
         self.assertEqual(invocation.state, InvocationState.FAILED)
         self.assertTrue(
             any(
-                event.event_name == "input_mapping_completed"
+                event.event_name == "input_mapping_finished"
                 and event.status == "failed"
                 for event in sink.events
             )
@@ -106,7 +109,7 @@ class NodePhaseFailureTests(unittest.TestCase):
         app.close()
 
     def test_output_binding_failure_rolls_back_the_entire_patch(self) -> None:
-        def fail(_context: ExecutionContext, _value: int) -> ContextPatch:
+        def fail(_context: OutputBindingContext) -> ContextPatch:
             patch = ContextPatch(session={"should_not_exist": True})
             raise ValueError(f"binding failed: {patch}")
 
@@ -122,7 +125,7 @@ class NodePhaseFailureTests(unittest.TestCase):
         app.close()
 
     def test_edge_condition_failure_fails_invocation(self) -> None:
-        def condition(_context: ExecutionContext) -> bool:
+        def condition(_context: EdgeConditionContext) -> bool:
             raise LookupError("condition failed")
 
         sink = CaptureSink()
@@ -167,7 +170,7 @@ class NodePhaseFailureTests(unittest.TestCase):
     def test_output_user_event_is_not_emitted_after_binding_failure(self) -> None:
         sink = CaptureSink()
 
-        def fail(_context: ExecutionContext, _value: int) -> ContextPatch | None:
+        def fail(_context: OutputBindingContext) -> ContextPatch | None:
             raise ValueError("binding failed")
 
         app = AutoAgentApp(runtime_sink=sink)
@@ -328,11 +331,11 @@ class ResourceAndRetryTests(unittest.TestCase):
         def increment(value: int) -> int:
             return value + 1
 
-        def continue_loop(context: ExecutionContext) -> bool:
-            return context.incoming["body"] < 3
+        def continue_loop(context: EdgeConditionContext) -> bool:
+            return context.output < 3
 
-        def exit_loop(context: ExecutionContext) -> bool:
-            return context.incoming["body"] >= 3
+        def exit_loop(context: EdgeConditionContext) -> bool:
+            return context.output >= 3
 
         app = AutoAgentApp()
         value = Workflow(

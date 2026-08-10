@@ -8,7 +8,9 @@ from autoagent.core import (
     ContextPatch,
     Edge,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    EdgeConditionContext,
+    OutputBindingContext,
     InvocationState,
     Node,
     NodePolicy,
@@ -19,8 +21,8 @@ from autoagent.core import (
 from tests.helpers import decode_checkpoint, decode_events, identity_int, uppercase
 
 
-def inner_value(context: ExecutionContext) -> int:
-    return int(context.invocation.get("inner", 0))
+def inner_value(context: InputMappingContext) -> int:
+    return int(context.invocation_context.get("inner", 0))
 
 
 def add_one(value: int) -> int:
@@ -54,31 +56,31 @@ class LoopAndRecoveryTests(unittest.TestCase):
         def inner_body(value: int) -> int:
             return value + 1
 
-        def bind_inner(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"inner": value})
+        def bind_inner(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"inner": context.output})
 
-        def repeat_inner(context: ExecutionContext) -> bool:
-            return context.invocation["inner"] < 2
+        def repeat_inner(context: EdgeConditionContext) -> bool:
+            return context.invocation_context["inner"] < 2
 
-        def leave_inner(context: ExecutionContext) -> bool:
-            return context.invocation["inner"] >= 2
+        def leave_inner(context: EdgeConditionContext) -> bool:
+            return context.invocation_context["inner"] >= 2
 
         def outer_latch(value: int) -> int:
             return value
 
-        def bind_outer(context: ExecutionContext, _value: int) -> ContextPatch:
+        def bind_outer(context: OutputBindingContext) -> ContextPatch:
             return ContextPatch(
                 invocation={
-                    "outer": int(context.invocation.get("outer", 0)) + 1,
+                    "outer": int(context.invocation_context.get("outer", 0)) + 1,
                     "inner": 0,
                 }
             )
 
-        def repeat_outer(context: ExecutionContext) -> bool:
-            return context.invocation["outer"] < 2
+        def repeat_outer(context: EdgeConditionContext) -> bool:
+            return context.invocation_context["outer"] < 2
 
-        def leave_outer(context: ExecutionContext) -> bool:
-            return context.invocation["outer"] >= 2
+        def leave_outer(context: EdgeConditionContext) -> bool:
+            return context.invocation_context["outer"] >= 2
 
         workflow = Workflow(
             "nested-loops",
@@ -112,14 +114,14 @@ class LoopAndRecoveryTests(unittest.TestCase):
         app.close()
 
     def test_parallel_fan_out_join_can_loop_back_to_header(self) -> None:
-        def increment_iteration(context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"iteration": value})
+        def increment_iteration(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"iteration": context.output})
 
-        def continue_loop(context: ExecutionContext) -> bool:
-            return context.invocation["iteration"] < 3
+        def continue_loop(context: EdgeConditionContext) -> bool:
+            return context.invocation_context["iteration"] < 3
 
-        def exit_loop(context: ExecutionContext) -> bool:
-            return context.invocation["iteration"] >= 3
+        def exit_loop(context: EdgeConditionContext) -> bool:
+            return context.invocation_context["iteration"] >= 3
 
         workflow = Workflow(
             "parallel-loop",
@@ -158,11 +160,11 @@ class LoopAndRecoveryTests(unittest.TestCase):
             values.append(value)
             return value + 1
 
-        def more(context: ExecutionContext) -> bool:
-            return context.incoming["body"] < 4
+        def more(context: EdgeConditionContext) -> bool:
+            return context.output < 4
 
-        def done(context: ExecutionContext) -> bool:
-            return context.incoming["body"] >= 4
+        def done(context: EdgeConditionContext) -> bool:
+            return context.output >= 4
 
         workflow = Workflow(
             "exact-loop-input",
@@ -202,9 +204,7 @@ class LoopAndRecoveryTests(unittest.TestCase):
         recovered_app.register_workflow(safe_workflow)
         recovered = recovered_app.recover(initial)
         self.assertEqual(recovered.result(), {"run": 2})
-        # Terminal Handles intentionally discard their heavyweight Checkpoint.
-        # The Sink owns the last recoverable boundary once it accepts it.
-        self.assertIsNone(recovered.latest_checkpoint)
+        self.assertEqual(recovered.latest_checkpoint.invocation_state, "completed")
         recovered_app.close()
 
         blocked_workflow = Workflow(
@@ -246,7 +246,7 @@ class LoopAndRecoveryTests(unittest.TestCase):
         self.assertEqual(recovered.state, InvocationState.WAITING)
         completed = second.resume(recovered, recovered.waits[0].id, "answer")
         self.assertEqual(completed.result(), {"finish": "ANSWER"})
-        self.assertIsNone(completed.latest_checkpoint)
+        self.assertEqual(completed.latest_checkpoint.invocation_state, "completed")
         second.close()
 
 

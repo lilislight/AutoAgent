@@ -36,12 +36,22 @@ class RuntimeLoop:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
-        # ``call_soon_threadsafe`` is safe before ``run_forever`` and writes to
-        # the loop's self-pipe. Publish the initialized loop directly; using a
-        # loop callback for readiness creates a race where the caller can wait
-        # forever before it gets a chance to submit the first coroutine.
-        self._ready.set()
+        # Publish readiness from inside the first Loop turn. Signalling before
+        # ``run_forever`` lets another thread submit while the selector has not
+        # started yet; on some event-loop implementations that first wake-up
+        # can be missed and the initial App call waits forever.
+        loop.call_soon(self._ready.set)
+        # Some hardened/embedded selectors can lose the self-pipe wakeup used
+        # by ``call_soon_threadsafe``. A small watchdog timer guarantees that
+        # cross-thread submissions are observed instead of waiting forever.
+        # Five milliseconds is a latency bound, not a sleep in Workflow work.
+        async def wake_watchdog() -> None:
+            while True:
+                await asyncio.sleep(0.005)
+
+        watchdog = loop.create_task(wake_watchdog())
         loop.run_forever()
+        watchdog.cancel()
         pending = asyncio.all_tasks(loop)
         for task in pending:
             task.cancel()
@@ -59,7 +69,14 @@ class RuntimeLoop:
         return self.submit(coroutine).result()
 
     async def await_result(self, coroutine: Coroutine[Any, Any, T]) -> T:
-        return await asyncio.wrap_future(self.submit(coroutine))
+        future = self.submit(coroutine)
+        # A hardened caller Loop may lose the cross-thread callback wakeup just
+        # like the Runtime Loop. Poll only while this specific Future is
+        # outstanding so async App methods cannot wait forever after Core has
+        # already completed the work.
+        while not future.done():
+            await asyncio.sleep(0.005)
+        return future.result()
 
     def close(self) -> None:
         with self._lock:

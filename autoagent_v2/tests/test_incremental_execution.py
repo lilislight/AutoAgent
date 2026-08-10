@@ -11,7 +11,9 @@ from autoagent.core import (
     AutoAgentApp,
     Edge,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    AggregationContext,
+    ItemSelectorContext,
     InvocationState,
     MapPolicy,
     Node,
@@ -38,17 +40,17 @@ def user_number(value: int) -> int:
 
 
 def select_numbers(
-    context: ExecutionContext, values: list[int]
+    context: ItemSelectorContext,
 ) -> list[int]:
     if context.node_id != "mapped":
         raise AssertionError("selector received the wrong Node location")
-    return values
+    return context.input
 
 
-def aggregate_numbers(context: ExecutionContext, values: list[int]) -> int:
+def aggregate_numbers(context: AggregationContext) -> int:
     if context.node_id != "mapped":
         raise AssertionError("aggregator received the wrong Node location")
-    return sum(values)
+    return sum(context.operator_outputs)
 
 
 def double(value: int) -> int:
@@ -263,7 +265,7 @@ class PolicyAndEventContractTests(unittest.TestCase):
         )
         for mode, expected_runtime in (
             (EventMode.MINIMAL, 0),
-            (EventMode.STANDARD, 7),
+            (EventMode.STANDARD, 9),
             (EventMode.FULL, 9),
         ):
             sink = CaptureSink()

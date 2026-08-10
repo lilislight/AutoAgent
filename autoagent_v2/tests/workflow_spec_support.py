@@ -30,7 +30,11 @@ from autoagent import (  # noqa: E402
     Workflow,
 )
 from autoagent.core import (  # noqa: E402
-    ExecutionContext,
+    AggregationContext,
+    InputMappingContext,
+    EdgeConditionContext,
+    ItemSelectorContext,
+    OutputBindingContext,
     WorkflowCompileError,
     WorkflowCompiler,
 )
@@ -43,27 +47,27 @@ def passthrough(payload: Payload) -> Payload:
     return dict(payload)
 
 
-def use_invocation_input(context: ExecutionContext) -> Payload:
+def use_invocation_input(context: InputMappingContext) -> Payload:
     return dict(context.invocation_input)
 
 
-def always(context: ExecutionContext) -> bool:
+def always(context: EdgeConditionContext) -> bool:
     del context
     return True
 
 
-def never(context: ExecutionContext) -> bool:
+def never(context: EdgeConditionContext) -> bool:
     del context
     return False
 
 
-def conditional_true(context: ExecutionContext) -> bool:
+def conditional_true(context: EdgeConditionContext) -> bool:
     """Semantically true but intentionally opaque to static analysis."""
 
     return bool(context.invocation_input.get("route", 1))
 
 
-def conditional_false(context: ExecutionContext) -> bool:
+def conditional_false(context: EdgeConditionContext) -> bool:
     """Semantically false but intentionally opaque to static analysis."""
 
     return bool(context.invocation_input.get("never", 0))
@@ -163,7 +167,7 @@ def run_workflow(
     *,
     timeout: float = 5.0,
 ) -> tuple[Invocation, Any]:
-    app = AutoAgentApp(max_thread_workers=8, max_parallel_units=8)
+    app = AutoAgentApp(max_executor_concurrency=8)
     try:
         app.register_workflow(definition)
         invocation = app.submit_invoke(

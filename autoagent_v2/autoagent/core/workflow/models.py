@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 from ..operators import Operator, ValueContract, WaitOperator
 from .policy import NodePolicy, WorkflowPolicy
@@ -15,25 +15,83 @@ JsonObject: TypeAlias = dict[str, Any]
 OperatorCallable: TypeAlias = Callable[..., Any | Awaitable[Any]]
 
 
+class LoopIterationView(Protocol):
+    loop_region_id: str
+    iteration: int
+
+
+ExecutionScope: TypeAlias = tuple[LoopIterationView, ...]
+
+
 @dataclass(frozen=True, slots=True)
-class ExecutionContext:
-    """Read-only hook input detached from mutable Runtime dictionaries."""
+class IncomingActivation:
+    """One exact Edge activation visible to the target Node Hook."""
 
-    session: Mapping[str, Any]
-    invocation: Mapping[str, Any]
-    outputs: Mapping[str, Any]
-    incoming: Mapping[str, Any]
+    edge_id: str
+    source_node_id: str
+    source_execution_id: str
+    source_scope: ExecutionScope
+    value: Any
+
+
+@dataclass(frozen=True, slots=True)
+class HookContext:
+    """Common isolated state visible to every user-defined Workflow Hook."""
+
+    workflow_id: str
+    workflow_revision_id: str
+    workflow_path: tuple[str, ...]
+    session_id: str
+    invocation_id: str
+    session_context: Mapping[str, Any]
+    invocation_context: Mapping[str, Any]
     invocation_input: Any
-    node_id: str | None = None
-    edge_id: str | None = None
-    workflow_path: tuple[str, ...] = ()
 
 
-InputMapping: TypeAlias = Callable[[ExecutionContext], Any | Awaitable[Any]]
+@dataclass(frozen=True, slots=True)
+class NodeHookContext(HookContext):
+    node_id: str
+    node_execution_id: str
+    execution_scope: ExecutionScope
+    incoming: Sequence[IncomingActivation]
+
+
+@dataclass(frozen=True, slots=True)
+class InputMappingContext(NodeHookContext):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ItemSelectorContext(NodeHookContext):
+    input: Any
+
+
+@dataclass(frozen=True, slots=True)
+class AggregationContext(NodeHookContext):
+    input: Any
+    operator_outputs: list[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class OutputBindingContext(NodeHookContext):
+    input: Any
+    output: Any
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeConditionContext(HookContext):
+    edge_id: str
+    source_node_id: str
+    source_execution_id: str
+    source_scope: ExecutionScope
+    output: Any
+
+
+InputMapping: TypeAlias = Callable[[InputMappingContext], Any | Awaitable[Any]]
 OutputBinding: TypeAlias = Callable[
-    [ExecutionContext, Any], "ContextPatch | None | Awaitable[ContextPatch | None]"
+    [OutputBindingContext], "ContextPatch | None | Awaitable[ContextPatch | None]"
 ]
-EdgeCondition: TypeAlias = Callable[[ExecutionContext], bool | Awaitable[bool]]
+EdgeCondition: TypeAlias = Callable[[EdgeConditionContext], bool | Awaitable[bool]]
 UserEventTransform: TypeAlias = Callable[[Any], Any | Awaitable[Any]]
 
 

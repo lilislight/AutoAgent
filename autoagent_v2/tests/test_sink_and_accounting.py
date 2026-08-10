@@ -11,12 +11,14 @@ from autoagent.core import (
     AdmissionRejectedError,
     AutoAgentApp,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    ItemSelectorContext,
     InvocationState,
     MapPolicy,
     Node,
     NodePolicy,
     ResourcePolicy,
+    RuntimeEvent,
     SerializedCheckpoint,
     SerializedEvent,
     UserEventMapping,
@@ -40,8 +42,8 @@ def identity_dict(value: dict[str, list[int]]) -> dict[str, list[int]]:
     return value
 
 
-def select_ints(_context: ExecutionContext, values: list[int]) -> list[int]:
-    return values
+def select_ints(context: ItemSelectorContext) -> list[int]:
+    return context.input
 
 
 def user_value(value: int) -> dict[str, int]:
@@ -191,8 +193,31 @@ class SinkContractTests(unittest.TestCase):
         self.assertEqual(invocation.result(), {"node": 7})
         app.close()
 
-    def test_checkpoint_capture_failure_only_degrades_recoverability(self) -> None:
+    def test_full_event_capture_failure_does_not_fail_business_execution(self) -> None:
         app = AutoAgentApp(runtime_sink=EnvelopeSink())
+        workflow = Workflow("operation-capture-failure", nodes=[Node("node", identity_int)])
+        app.register_workflow(workflow)
+
+        with (
+            patch.object(
+                RuntimeEvent,
+                "detached",
+                side_effect=TypeError("cannot capture event"),
+            ),
+            self.assertLogs(
+                "autoagent.core.executor.workflow_executor", level="ERROR"
+            ),
+        ):
+            invocation = app.invoke(workflow, 8, event_mode="full")
+
+        self.assertEqual(invocation.state, InvocationState.COMPLETED)
+        self.assertEqual(invocation.result(), {"node": 8})
+        self.assertGreater(invocation.latest_checkpoint.state_version, 0)
+        app.close()
+
+    def test_checkpoint_capture_failure_only_degrades_recoverability(self) -> None:
+        sink = EnvelopeSink()
+        app = AutoAgentApp(runtime_sink=sink)
         workflow = Workflow("checkpoint-failure", nodes=[Node("node", identity_int)])
         app.register_workflow(workflow)
 
@@ -210,7 +235,45 @@ class SinkContractTests(unittest.TestCase):
 
         self.assertEqual(invocation.state, InvocationState.COMPLETED)
         self.assertEqual(invocation.result(), {"node": 9})
-        self.assertIsNone(invocation.latest_checkpoint)
+        # Local recovery remains available even when this particular Sink
+        # offer cannot be serialized or accepted.
+        self.assertEqual(invocation.latest_checkpoint.invocation_state, "completed")
+        self.assertTrue(
+            any(
+                event.decode().event_name == "invocation_state_changed"
+                and event.decode().status == "completed"
+                for event in sink.events
+                if event.channel == "runtime"
+            )
+        )
+        app.close()
+
+    def test_checkpoint_sink_exception_does_not_detach_event_delivery(self) -> None:
+        sink = EnvelopeSink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow("checkpoint-offer-failure", nodes=[Node("node", identity_int)])
+        app.register_workflow(workflow)
+
+        with (
+            patch.object(
+                sink,
+                "offer_checkpoint",
+                side_effect=RuntimeError("checkpoint queue unavailable"),
+            ),
+            self.assertLogs(
+                "autoagent.core.executor.workflow_executor", level="ERROR"
+            ),
+        ):
+            invocation = app.invoke(workflow, 10, event_mode="full")
+
+        self.assertEqual(invocation.result(), {"node": 10})
+        decoded = [
+            event.decode() for event in sink.events if event.channel == "runtime"
+        ]
+        self.assertTrue(decoded)
+        self.assertEqual(decoded[-1].event_name, "invocation_state_changed")
+        self.assertEqual(decoded[-1].status, "completed")
+        self.assertEqual(invocation.latest_checkpoint.invocation_state, "completed")
         app.close()
 
 
@@ -245,7 +308,7 @@ class ExecutionAccountingTests(unittest.TestCase):
 
     def test_runtime_event_sequences_are_monotonic_after_serialization(self) -> None:
         sink = EnvelopeSink()
-        app = AutoAgentApp(runtime_sink=sink, max_thread_workers=4)
+        app = AutoAgentApp(runtime_sink=sink, max_executor_concurrency=4)
         workflow = Workflow(
             "serialized-sequence",
             nodes=[Node("one", identity_int), Node("two", identity_int)],

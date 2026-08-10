@@ -12,12 +12,15 @@ from autoagent.core import (
     ContextPatch,
     Edge,
     EventMode,
-    ExecutionContext,
+    InputMappingContext,
+    AggregationContext,
+    OutputBindingContext,
     FailurePolicy,
     MapPolicy,
     Node,
     NodePolicy,
     Operator,
+    RecoveryPolicy,
     ReplicationPolicy,
     RetryPolicy,
     TimeoutPolicy,
@@ -27,8 +30,8 @@ from autoagent.core import (
 from tests.helpers import always_false, decode_checkpoint, decode_events, identity_int, increment
 
 
-def sum_values(_context: ExecutionContext, values: list[int]) -> int:
-    return sum(values)
+def sum_values(context: AggregationContext) -> int:
+    return sum(context.operator_outputs)
 
 
 def identity_inputs(values: dict[str, int]) -> dict[str, int]:
@@ -50,6 +53,227 @@ class _Sink:
         self.checkpoints.append(decode_checkpoint(checkpoint))
 
 class ExecutionPolicyTests(unittest.TestCase):
+    def test_full_operator_event_captures_actual_input_before_mutation(self) -> None:
+        seen_keys: list[str] = []
+
+        def mutate(payload: list[int], idempotency_key: str) -> list[int]:
+            seen_keys.append(idempotency_key)
+            payload.append(99)
+            return payload
+
+        sink = _Sink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow(
+            "operator-input-snapshot",
+            nodes=[
+                Node(
+                    "call",
+                    mutate,
+                    policy=NodePolicy(recovery=RecoveryPolicy(mode="idempotent")),
+                )
+            ],
+        )
+        app.register_workflow(workflow)
+
+        invocation = app.invoke(
+            workflow,
+            {"payload": [1]},
+            event_mode=EventMode.FULL,
+        )
+
+        call = next(
+            event for event in sink.events if event.subject_type == "operator_call"
+        )
+        self.assertEqual(call.status, "completed")
+        self.assertEqual(call.payload["input"]["payload"], [1])
+        self.assertEqual(call.payload["output"], [1, 99])
+        self.assertEqual(
+            call.payload["input"]["idempotency_key"],
+            call.payload["idempotency_key"],
+        )
+        self.assertEqual(seen_keys, [call.payload["idempotency_key"]])
+        self.assertLessEqual(call.started_at_ms, call.completed_at_ms)
+        self.assertGreater(call.duration_ns, 0)
+        self.assertEqual(invocation.result(), {"call": [1, 99]})
+        app.close()
+
+    def test_failed_operator_event_preserves_pre_call_input(self) -> None:
+        def mutate_then_fail(payload: list[int]) -> int:
+            payload.append(99)
+            raise ValueError("business failure")
+
+        sink = _Sink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow(
+            "failed-operator-input-snapshot",
+            nodes=[Node("call", mutate_then_fail)],
+        )
+        app.register_workflow(workflow)
+
+        invocation = app.invoke(
+            workflow,
+            {"payload": [1]},
+            event_mode=EventMode.FULL,
+        )
+
+        call_events = [
+            event for event in sink.events if event.subject_type == "operator_call"
+        ]
+        self.assertEqual(len(call_events), 1)
+        self.assertEqual(call_events[0].status, "failed")
+        self.assertEqual(call_events[0].payload["input"], {"payload": [1]})
+        self.assertIsNone(call_events[0].payload["output"])
+        self.assertEqual(invocation.state, "failed")
+        app.close()
+
+    def test_retry_and_fallback_each_receive_fresh_pre_call_input(self) -> None:
+        seen: list[tuple[str, list[int]]] = []
+
+        def primary(payload: list[int]) -> int:
+            seen.append(("primary", list(payload)))
+            payload.append(99)
+            raise ValueError("retry with a clean input")
+
+        def fallback(payload: list[int]) -> int:
+            seen.append(("fallback", list(payload)))
+            payload.append(7)
+            return sum(payload)
+
+        sink = _Sink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow(
+            "isolated-retry-inputs",
+            nodes=[
+                Node(
+                    "call",
+                    Operator(primary, id="primary"),
+                    fallback_operators=(Operator(fallback, id="fallback"),),
+                    policy=NodePolicy(
+                        retry=RetryPolicy(
+                            max_attempts=2,
+                            backoff=BackoffPolicy(initial_delay_ms=0),
+                        )
+                    ),
+                )
+            ],
+        )
+        app.register_workflow(workflow)
+
+        invocation = app.invoke(
+            workflow,
+            {"payload": [1]},
+            event_mode=EventMode.FULL,
+        )
+
+        self.assertEqual(
+            seen,
+            [("primary", [1]), ("primary", [1]), ("fallback", [1])],
+        )
+        call_events = [
+            event for event in sink.events if event.subject_type == "operator_call"
+        ]
+        self.assertEqual(len(call_events), 3)
+        self.assertTrue(
+            all(event.payload["input"] == {"payload": [1]} for event in call_events)
+        )
+        self.assertEqual(invocation.result(), {"call": 8})
+        app.close()
+
+    def test_standard_operator_event_omits_input_and_output(self) -> None:
+        sink = _Sink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow("standard-call-detail", nodes=[Node("call", identity_int)])
+        app.register_workflow(workflow)
+
+        app.invoke(workflow, 3, event_mode=EventMode.STANDARD)
+
+        call = next(
+            event for event in sink.events if event.subject_type == "operator_call"
+        )
+        self.assertNotIn("input", call.payload)
+        self.assertNotIn("output", call.payload)
+        self.assertLessEqual(call.started_at_ms, call.completed_at_ms)
+        app.close()
+
+    def test_timed_out_operator_finalizes_exactly_one_event(self) -> None:
+        async def slow(value: int) -> int:
+            await asyncio.sleep(1)
+            return value
+
+        sink = _Sink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow(
+            "timed-out-call-event",
+            nodes=[Node("call", slow, policy=NodePolicy(timeout=TimeoutPolicy(5)))],
+        )
+        app.register_workflow(workflow)
+
+        invocation = app.invoke(workflow, 1, event_mode=EventMode.STANDARD)
+
+        call_events = [
+            event for event in sink.events if event.subject_type == "operator_call"
+        ]
+        self.assertEqual(len(call_events), 1)
+        self.assertEqual(call_events[0].status, "timed_out")
+        self.assertLessEqual(
+            call_events[0].started_at_ms,
+            call_events[0].completed_at_ms,
+        )
+        self.assertGreater(call_events[0].duration_ns, 0)
+        self.assertTrue(
+            {
+                "dispatch_wait_ns",
+                "executor_wait_ns",
+                "thread_pool_wait_ns",
+                "handler_ns",
+                "stream_ns",
+                "stream_delivery_ns",
+            }
+            <= call_events[0].payload["timing"].keys()
+        )
+        self.assertGreater(call_events[0].payload["timing"]["handler_ns"], 0)
+        self.assertEqual(invocation.state, "failed")
+        app.close()
+
+    def test_cancelled_operator_finalizes_event_before_invocation_cancel(self) -> None:
+        started = threading.Event()
+
+        async def blocking(value: int) -> int:
+            started.set()
+            await asyncio.sleep(10)
+            return value
+
+        sink = _Sink()
+        app = AutoAgentApp(runtime_sink=sink)
+        workflow = Workflow("cancelled-call-event", nodes=[Node("call", blocking)])
+        app.register_workflow(workflow)
+        invocation = app.submit_invoke(workflow, 1, event_mode=EventMode.FULL)
+        self.assertTrue(started.wait(1))
+
+        cancelled = app.cancel(invocation)
+
+        call_events = [
+            event for event in sink.events if event.subject_type == "operator_call"
+        ]
+        self.assertEqual(len(call_events), 1)
+        self.assertEqual(call_events[0].status, "cancelled")
+        self.assertEqual(call_events[0].payload["input"], 1)
+        self.assertIsNone(call_events[0].payload["output"])
+        self.assertLessEqual(
+            call_events[0].started_at_ms,
+            call_events[0].completed_at_ms,
+        )
+        self.assertGreater(call_events[0].duration_ns, 0)
+        self.assertGreater(call_events[0].payload["timing"]["handler_ns"], 0)
+        invocation_cancel_index = next(
+            index
+            for index, event in enumerate(sink.events)
+            if event.subject_type == "invocation" and event.status == "cancelled"
+        )
+        self.assertLess(sink.events.index(call_events[0]), invocation_cancel_index)
+        self.assertEqual(cancelled.state, "cancelled")
+        app.close()
+
     def test_all_skipped_path_completes_with_empty_output(self) -> None:
         workflow = Workflow(
             "dead-end",
@@ -120,7 +344,7 @@ class ExecutionPolicyTests(unittest.TestCase):
             return value * 2
 
         sink = _Sink()
-        app = AutoAgentApp(runtime_sink=sink, max_parallel_units=8)
+        app = AutoAgentApp(runtime_sink=sink)
         workflow = Workflow(
             "map",
             nodes=[
@@ -217,11 +441,11 @@ class ExecutionPolicyTests(unittest.TestCase):
         app.close()
 
     def test_parallel_nested_context_paths_conflict_but_distinct_paths_commit(self) -> None:
-        def binding_a(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"shared": {"a": value}})
+        def binding_a(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"shared": {"a": context.output}})
 
-        def binding_b(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"shared": {"b": value}})
+        def binding_b(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"shared": {"b": context.output}})
 
         workflow = Workflow(
             "nested-distinct",
@@ -238,8 +462,8 @@ class ExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(app.invoke(workflow, 1).state, "completed")
         app.close()
 
-        def conflict(_context: ExecutionContext, value: int) -> ContextPatch:
-            return ContextPatch(invocation={"shared": {"a": value + 1}})
+        def conflict(context: OutputBindingContext) -> ContextPatch:
+            return ContextPatch(invocation={"shared": {"a": context.output + 1}})
 
         workflow.nodes[2].output_binding = conflict
         conflicting = AutoAgentApp()

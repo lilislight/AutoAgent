@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from autoagent.core import AutoAgentApp, Edge, InvocationState, Node, Workflow, WorkflowCompiler
 from autoagent.core.scheduler import Scheduler
+from autoagent.core.runtime import RuntimeState
 from tests.helpers import always_true, identity_int
 
 
@@ -33,7 +34,18 @@ def diamond() -> Workflow:
 
 class SchedulerTests(unittest.TestCase):
     def scheduler(self, value: Workflow) -> Scheduler:
-        scheduler = Scheduler(WorkflowCompiler().compile(value))
+        workflow = WorkflowCompiler().compile(value)
+        state = RuntimeState.create(
+            workflow_id=workflow.workflow_id,
+            workflow_revision_id=workflow.workflow_revision_id,
+            session_id="scheduler-test",
+            invocation_id=UUID("00000000-0000-0000-0000-000000000001"),
+            event_mode="full",
+            invocation_input=None,
+            session_created_at_ms=1,
+            invocation_created_at_ms=1,
+        )
+        scheduler = Scheduler(workflow, state)
         scheduler.initialize()
         return scheduler
 
@@ -50,6 +62,18 @@ class SchedulerTests(unittest.TestCase):
         )
         scheduler.initialize()
         self.assertEqual(scheduler.drain_ready(), ())
+
+    def test_failed_transition_discards_temporary_scheduler_state(self) -> None:
+        scheduler = self.scheduler(diamond())
+        start = scheduler.drain_ready()[0]
+        before = scheduler._runtime_state.checkpoint_record()
+
+        with self.assertRaisesRegex(ValueError, "every outgoing Edge"):
+            scheduler.resolve_outgoing(start, uuid4(), {"start-left": True})
+
+        self.assertIsNone(scheduler._working)
+        self.assertEqual(scheduler._runtime_state.checkpoint_record(), before)
+        self.assertEqual(scheduler.scheduled, {start.occurrence})
 
     def test_fan_out_enqueues_each_selected_target(self) -> None:
         scheduler = self.scheduler(diamond())
@@ -122,11 +146,10 @@ class SchedulerTests(unittest.TestCase):
             {"start-left": True, "start-right": True},
         )
         ready = original.drain_ready()
-        original.ready.extend(ready)
 
         restored = self.scheduler(diamond())
         restored.restore(
-            ready=tuple(original.ready),
+            ready=tuple(ready),
             resolutions=tuple(original.resolutions.items()),
             scheduled=tuple(original.scheduled),
             skipped=tuple(original.skipped),

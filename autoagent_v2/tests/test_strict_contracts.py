@@ -9,7 +9,9 @@ from autoagent.core import (
     AutoAgentApp,
     ContextPatch,
     Edge,
-    ExecutionContext,
+    InputMappingContext,
+    EdgeConditionContext,
+    OutputBindingContext,
     InvocationState,
     Node,
     NodePolicy,
@@ -105,11 +107,11 @@ def lying_output(value: int) -> int:
     return "wrong"  # type: ignore[return-value]
 
 
-def unsafe_patch(_context: ExecutionContext, value: int) -> ContextPatch:
-    return ContextPatch(invocation={"unsafe": object(), "value": value})
+def unsafe_patch(context: OutputBindingContext) -> ContextPatch:
+    return ContextPatch(invocation={"unsafe": object(), "value": context.output})
 
 
-def false_int_condition(_context: ExecutionContext) -> bool:
+def false_int_condition(_context: EdgeConditionContext) -> bool:
     return 1  # type: ignore[return-value]
 
 
@@ -117,17 +119,17 @@ def wrong_user_event(_value: int) -> dict[str, int]:
     return {"count": "wrong"}  # type: ignore[dict-item]
 
 
-def wait_request_mapping(context: ExecutionContext) -> int:
+def wait_request_mapping(context: InputMappingContext) -> int:
     return int(context.invocation_input)
 
 
 def wait_response_binding(
-    _context: ExecutionContext, response: str
+    context: OutputBindingContext,
 ) -> ContextPatch:
-    return ContextPatch(session={"last_response": response})
+    return ContextPatch(session={"last_response": context.output})
 
 
-def wrong_wait_request_mapping(_context: ExecutionContext) -> str:
+def wrong_wait_request_mapping(_context: InputMappingContext) -> str:
     return "wrong"
 
 

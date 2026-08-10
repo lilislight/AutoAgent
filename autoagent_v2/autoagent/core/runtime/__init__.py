@@ -5,15 +5,22 @@ from .checkpoint import (
     SerializedCheckpoint,
     WaitCheckpoint,
 )
-from .context import apply_patch, patch_paths, patches_conflict, readonly_context
+from .context import apply_patch, hook_context, patch_paths, patches_conflict
 from .events import (
     Event,
     EventMode,
     RuntimeEvent,
     SerializedEvent,
-    StateOperation,
     UserEvent,
     now_ms,
+)
+from .state import (
+    RUNTIME_STATE_SCHEMA_VERSION,
+    RuntimeState,
+    StateOperation,
+    StateOperationBatch,
+    context_path_from_key,
+    context_path_key,
 )
 from .execution import NodeExecution, NodeState, OperatorCallRecord
 from .invocation import (
@@ -27,12 +34,13 @@ from .invocation import (
 from .loop import RuntimeLoop
 from .sink import RuntimeSink
 from .serialization import (
+    CapturedRuntimeValue,
     RuntimeSerializationError,
+    RuntimeValueCodec,
     decode_runtime_value,
     decode_json_record,
     encode_runtime_value,
     encode_json_record,
-    json_value,
 )
 from .stream import (
     AsyncInvocationStream,
@@ -43,6 +51,7 @@ from .stream import (
 
 __all__ = [
     "AsyncInvocationStream",
+    "CapturedRuntimeValue",
     "AttachedChannel",
     "Event",
     "EventChannel",
@@ -63,9 +72,15 @@ __all__ = [
     "RuntimeLoop",
     "RuntimeEvent",
     "RuntimeSink",
+    "RuntimeState",
+    "RUNTIME_STATE_SCHEMA_VERSION",
     "RuntimeSerializationError",
+    "RuntimeValueCodec",
     "Session",
     "StateOperation",
+    "StateOperationBatch",
+    "context_path_from_key",
+    "context_path_key",
     "UserEvent",
     "WaitCheckpoint",
     "WaitSnapshot",
@@ -73,8 +88,7 @@ __all__ = [
     "now_ms",
     "patches_conflict",
     "patch_paths",
-    "readonly_context",
-    "json_value",
+    "hook_context",
     "decode_runtime_value",
     "decode_json_record",
     "encode_runtime_value",

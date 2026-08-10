@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 from dataclasses import dataclass
 from enum import Enum
 from uuid import UUID, uuid4
@@ -22,16 +23,18 @@ from autoagent.core import (
     TimeoutPolicy,
     UserEvent,
     WaitOperator,
+    InputMappingContext,
 )
 from autoagent.core.operators import OperatorContract, ValueContract
 from autoagent.core.runtime import (
     RuntimeSerializationError,
+    RuntimeValueCodec,
+    StateOperationBatch,
     apply_patch,
     decode_runtime_value,
     encode_runtime_value,
-    json_value,
     patches_conflict,
-    readonly_context,
+    hook_context,
 )
 from autoagent.core.scheduler import (
     EdgeActivation,
@@ -54,25 +57,6 @@ class Payload:
 
 
 class RuntimeSerializationTests(unittest.TestCase):
-    def test_json_value_normalizes_supported_values(self) -> None:
-        identifier = uuid4()
-        value = {
-            "id": identifier,
-            "enum": Colour.RED,
-            "payload": Payload("sample", (1, 2)),
-            "set": {2, 1},
-        }
-        normalized = json_value(value)
-        self.assertEqual(normalized["id"], str(identifier))
-        self.assertEqual(normalized["enum"], "red")
-        self.assertEqual(normalized["payload"], {"name": "sample", "values": [1, 2]})
-        self.assertEqual(normalized["set"], [1, 2])
-        json.dumps(normalized)
-
-    def test_json_value_rejects_process_local_objects(self) -> None:
-        with self.assertRaises(RuntimeSerializationError):
-            json_value(object())
-
     def test_checkpoint_values_round_trip_exact_container_types(self) -> None:
         identifier = uuid4()
         value = {
@@ -112,19 +96,37 @@ class RuntimeSerializationTests(unittest.TestCase):
 
 
 class ContextTests(unittest.TestCase):
-    def test_readonly_context_is_detached_from_live_values(self) -> None:
+    def test_hook_context_is_detached_from_live_values(self) -> None:
         live = {"nested": {"value": 1}}
-        context = readonly_context(
-            session=live,
-            invocation={},
-            outputs={"node": [1]},
-            incoming={},
+        context = hook_context(
+            InputMappingContext,
+            workflow_id="workflow",
+            workflow_revision_id="revision",
+            workflow_path=(),
+            session_id="session",
+            invocation_id=str(uuid4()),
+            session_context=live,
+            invocation_context={},
             invocation_input={"value": 2},
+            node_id="node",
+            node_execution_id=str(uuid4()),
         )
-        live["nested"]["value"] = 9
-        self.assertEqual(context.session["nested"]["value"], 1)
+        isolated = context.session_context["nested"]
+        isolated["value"] = 9
+        self.assertEqual(live["nested"]["value"], 1)
         with self.assertRaises(TypeError):
-            context.session["new"] = 1  # type: ignore[index]
+            context.session_context["new"] = 1  # type: ignore[index]
+
+    def test_runtime_value_codec_keeps_isolation_separate_from_json(self) -> None:
+        original = Payload("sample", (1, 2))
+        isolated = RuntimeValueCodec.isolate(original)
+        captured = RuntimeValueCodec.capture(original)
+        self.assertEqual(isolated, original)
+        self.assertIsNot(isolated, original)
+        self.assertEqual(
+            RuntimeValueCodec.decode(captured.persistent_value()), original
+        )
+        self.assertIsNot(captured.clone_for_user(), captured.clone_for_user())
 
     def test_apply_patch_recursively_merges_without_aliasing(self) -> None:
         session = {"profile": {"name": "Ada"}}
@@ -285,7 +287,11 @@ class SchedulerModelAndEventTests(unittest.TestCase):
             event_name="changed",
             subject_type="node",
             subject_id="node",
-            operations=(StateOperation("add", ("value",), 1),),
+            operation_batches=(
+                StateOperationBatch(
+                    1, (StateOperation("add", ("value",), 1),)
+                ),
+            ),
         )
         user = UserEvent(
             workflow_id="workflow",
@@ -301,6 +307,36 @@ class SchedulerModelAndEventTests(unittest.TestCase):
         self.assertEqual(UserEvent.from_record(user.to_record()), user)
         json.dumps(runtime.to_record())
         json.dumps(user.to_record())
+
+    def test_detached_event_reuses_captured_persistence_values(self) -> None:
+        runtime = RuntimeEvent.detached(
+            workflow_id="workflow",
+            workflow_revision_id="workflow:revision",
+            session_id="session",
+            invocation_id=uuid4(),
+            sequence=1,
+            event_name="changed",
+            subject_type="node",
+            subject_id="node",
+            payload={"large": list(range(100))},
+            operation_batches=(
+                StateOperationBatch(
+                    1,
+                    (
+                        StateOperation(
+                            "replace", ("context", "large"), list(range(100))
+                        ),
+                    ),
+                ),
+            ),
+        )
+        with patch(
+            "autoagent.core.runtime.serialization.encode_runtime_value",
+            side_effect=AssertionError("captured values were encoded twice"),
+        ):
+            first = runtime.to_record()
+            second = runtime.to_record()
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

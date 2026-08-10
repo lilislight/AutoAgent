@@ -42,6 +42,8 @@ Pull requests should include a short summary, affected documentation areas, and 
 
 Do not overwrite an existing `AGENTS.md`. Keep edits scoped to the requested documentation area, and avoid introducing build or test instructions that are not backed by repository files.
 
+- Treat every request as design discussion unless the user explicitly authorizes implementation with wording such as "开始实现", "开始写代码", or "改一下 xxx". Questions, design confirmation, agreement, or continued discussion do not authorize file changes. Before explicit implementation authorization, perform only read-only investigation and analysis: do not create, edit, delete, format, commit, or otherwise modify repository files. After authorization, modify only the explicitly requested scope.
+
 ## AutoAgent V2 Rewrite
 
 - Treat `autoagent_v2/` as a completely independent new project root for the V2 rewrite.

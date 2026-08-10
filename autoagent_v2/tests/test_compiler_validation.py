@@ -95,9 +95,9 @@ class CompilerValidationTests(unittest.TestCase):
         self.assert_compile_error(
             Workflow(
                 "bad-output",
-                nodes=[Node("node", identity, output_binding=lambda value: None)],  # type: ignore[arg-type]
+                nodes=[Node("node", identity, output_binding=lambda: None)],  # type: ignore[arg-type]
             ),
-            "Output Binding must declare exactly 2",
+            "Output Binding must declare exactly 1",
         )
         self.assert_compile_error(
             Workflow(
@@ -120,7 +120,7 @@ class CompilerValidationTests(unittest.TestCase):
                     )
                 ],
             ),
-            "item selector must declare exactly 2",
+            "item selector must declare exactly 1",
         )
         self.assert_compile_error(
             Workflow(

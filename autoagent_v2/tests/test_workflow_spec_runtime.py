@@ -9,7 +9,9 @@ from workflow_spec_support import (
     AutoAgentApp,
     ContextPatch,
     Edge,
-    ExecutionContext,
+    InputMappingContext,
+    EdgeConditionContext,
+    OutputBindingContext,
     InvocationState,
     Payload,
     always,
@@ -25,81 +27,76 @@ from workflow_spec_support import (
 )
 
 
-def increment_count(context: ExecutionContext, output: Payload) -> ContextPatch:
-    del output
+def increment_count(context: OutputBindingContext) -> ContextPatch:
     return ContextPatch(
-        invocation={"count": int(context.invocation.get("count", 0)) + 1}
+        invocation={"count": int(context.invocation_context.get("count", 0)) + 1}
     )
 
 
-def count_less_than_three(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("count", 0)) < 3
+def count_less_than_three(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("count", 0)) < 3
 
 
-def count_at_least_three(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("count", 0)) >= 3
+def count_at_least_three(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("count", 0)) >= 3
 
 
-def increment_header_count(context: ExecutionContext, output: Payload) -> ContextPatch:
-    del output
+def increment_header_count(context: OutputBindingContext) -> ContextPatch:
     return ContextPatch(
         invocation={
-            "header_count": int(context.invocation.get("header_count", 0)) + 1
+            "header_count": int(context.invocation_context.get("header_count", 0)) + 1
         }
     )
 
 
-def header_count_is_one(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("header_count", 0)) == 1
+def header_count_is_one(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("header_count", 0)) == 1
 
 
-def header_count_is_two(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("header_count", 0)) == 2
+def header_count_is_two(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("header_count", 0)) == 2
 
 
-def header_count_is_three(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("header_count", 0)) >= 3
+def header_count_is_three(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("header_count", 0)) >= 3
 
 
-def increment_inner_count(context: ExecutionContext, output: Payload) -> ContextPatch:
-    del output
+def increment_inner_count(context: OutputBindingContext) -> ContextPatch:
     return ContextPatch(
         invocation={
-            "inner_count": int(context.invocation.get("inner_count", 0)) + 1
+            "inner_count": int(context.invocation_context.get("inner_count", 0)) + 1
         }
     )
 
 
-def inner_count_less_than_two(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("inner_count", 0)) < 2
+def inner_count_less_than_two(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("inner_count", 0)) < 2
 
 
-def inner_count_at_least_two(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("inner_count", 0)) >= 2
+def inner_count_at_least_two(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("inner_count", 0)) >= 2
 
 
 def advance_outer_and_reset_inner(
-    context: ExecutionContext,
-    output: Payload,
+    context: OutputBindingContext,
 ) -> ContextPatch:
-    del output
     return ContextPatch(
         invocation={
-            "outer_count": int(context.invocation.get("outer_count", 0)) + 1,
+            "outer_count": int(context.invocation_context.get("outer_count", 0)) + 1,
             "inner_count": 0,
         }
     )
 
 
-def outer_count_less_than_two(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("outer_count", 0)) < 2
+def outer_count_less_than_two(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("outer_count", 0)) < 2
 
 
-def outer_count_at_least_two(context: ExecutionContext) -> bool:
-    return int(context.invocation.get("outer_count", 0)) >= 2
+def outer_count_at_least_two(context: EdgeConditionContext) -> bool:
+    return int(context.invocation_context.get("outer_count", 0)) >= 2
 
 
-async def async_selected(context: ExecutionContext) -> bool:
+async def async_selected(context: EdgeConditionContext) -> bool:
     return bool(context.invocation_input.get("route", 1))
 
 
@@ -118,7 +115,7 @@ class OrdinaryGraphRuntimeTests(unittest.TestCase):
                 node("b", traced_operator("b", trace, started=b_started, release=release)),
             ],
         )
-        app = AutoAgentApp(max_thread_workers=4, max_parallel_units=4)
+        app = AutoAgentApp(max_executor_concurrency=4)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})
@@ -554,7 +551,7 @@ class LoopDecisionRuntimeTests(unittest.TestCase):
                 node("outside", traced_operator("outside", trace)),
             ],
         )
-        app = AutoAgentApp(max_thread_workers=4, max_parallel_units=4)
+        app = AutoAgentApp(max_executor_concurrency=4)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})

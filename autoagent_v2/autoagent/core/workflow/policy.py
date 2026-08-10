@@ -98,9 +98,10 @@ class ResourcePolicy:
 
 
 MapSelector = Callable[
-    [Any, Any], Iterable[Mapping[str, Any]] | Awaitable[Iterable[Mapping[str, Any]]]
+    [Any],
+    Iterable[Mapping[str, Any]] | Awaitable[Iterable[Mapping[str, Any]]],
 ]
-Aggregator = Callable[[Any, list[Any]], Any | Awaitable[Any]]
+Aggregator = Callable[[Any], Any | Awaitable[Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,10 +148,7 @@ class NodePolicy:
     map: MapPolicy | None = None
     replication: ReplicationPolicy | None = None
     stream: StreamPolicy[Any, Any] | None = None
-    max_concurrency: int | None = None
 
     def __post_init__(self) -> None:
         if self.map is not None and self.replication is not None:
             raise ValueError("Map and Replication cannot be enabled together.")
-        if self.max_concurrency is not None and self.max_concurrency < 1:
-            raise ValueError("max_concurrency must be positive.")

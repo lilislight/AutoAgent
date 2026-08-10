@@ -101,10 +101,19 @@ Calls are internal to one logical Node Execution.
 
 ### Context and Context Patch
 
-An **ExecutionContext** is an immutable snapshot supplied to Workflow hooks. It
-contains Session Context, Invocation Context, visible committed outputs, exact
-incoming Activations, original Invocation input, Node/Edge identity, and
-Workflow path.
+A **HookContext** is the common isolated view supplied to Workflow hooks. It
+contains Session Context, Invocation Context, original Invocation input,
+Workflow/Revision/Session/Invocation identity, and Workflow path. Node Hook
+subtypes add the current Node Execution, execution scope, and exact incoming
+Activations; phase-specific subtypes add only their own input, output, or
+ordered Operator outputs. Edge conditions receive an `EdgeConditionContext`
+with the exact source output and scope.
+
+Hooks do not receive a global output, Node-state, or Edge-state lookup. Data
+from an earlier Node must arrive through an exact Activation or be explicitly
+committed to Session/Invocation Context. Core uses Python `deepcopy` to isolate
+values exposed to user code. JSON encoding/decoding is a separate persistence
+boundary and is never used as a substitute for Hook isolation.
 
 A **ContextPatch** is the only Workflow-level write produced by Output Binding.
 It targets Session Context and/or Invocation Context and is validated and
@@ -280,11 +289,11 @@ IncomingActivation(
 )
 ```
 
-`ExecutionContext.incoming` exposes this exact bundle and may additionally
-provide an Edge-id lookup view. Edge id is the stable key; source Node id alone
-is insufficient because several Edges may share one source. The bundle contains
-only selected Activations. Skipped Edge occurrences are observable through
-Scheduler/Runtime state but never appear as input values.
+`NodeHookContext.incoming` exposes this exact ordered bundle. Edge id is the
+stable key; source Node id alone is insufficient because several Edges may
+share one source. The bundle contains only selected Activations. Skipped Edge
+occurrences are observable through Scheduler/Runtime state but never appear as
+input values.
 
 ### Default Logical Input
 
@@ -303,11 +312,11 @@ that the value contract matches the Operator. Arbitrary Python conditions are
 not generally sufficient proof, so an explicit Input Mapping is normally
 required for a multi-incoming Node.
 
-Input Mapping receives one read-only `ExecutionContext` and returns exactly one
-typed logical input. It may inspect the Activation bundle, Invocation input,
-committed outputs, and Context, but it cannot mutate live Runtime state. Failure
-produces a failed Input Mapping phase followed by a failed Node state; no
-Operator Call is started.
+Input Mapping receives one read-only `InputMappingContext` and returns exactly
+one typed logical input. It may inspect the Activation bundle, Invocation
+input, and Session/Invocation Context, but it cannot mutate live Runtime state.
+Failure produces a failed Input Mapping phase followed by a failed Node state;
+no Operator Call is started.
 
 ### Operator Input and Output
 
@@ -338,9 +347,10 @@ may therefore return an empty mapping.
 
 ### Output Binding Transaction
 
-Output Binding receives the same immutable Context snapshot used for that Node
-Execution plus the validated logical output. It returns `ContextPatch` or no
-patch. Commit follows this order:
+Output Binding receives one `OutputBindingContext`; its `input` and `output`
+fields are isolated Python values, and its common state is the same logical
+snapshot used for that Node Execution. It returns `ContextPatch` or no patch.
+Commit follows this order:
 
 1. execute Output Binding against the isolated snapshot;
 2. validate every patch path and value contract;
@@ -388,7 +398,7 @@ Map first receives the Node's typed logical input. Its Item Selector has the
 contract:
 
 ```text
-(ExecutionContext, LogicalInput) -> finite ordered list[OperatorInput]
+ItemSelectorContext(input=LogicalInput) -> finite ordered list[OperatorInput]
 ```
 
 The selector result is validated before any unit starts. Unit index is the list
@@ -484,7 +494,7 @@ An Edge condition is optional:
 - `condition is None` means the Edge is unconditionally selected whenever its
   source Node completes successfully;
 - otherwise the condition must return `bool` or an awaitable `bool`;
-- conditions receive a read-only `ExecutionContext` view;
+- conditions receive a read-only `EdgeConditionContext` view;
 - every condition for one source Node observes the same committed snapshot;
 - condition evaluation does not move data into the target Node by itself.
 

@@ -11,7 +11,8 @@ from workflow_spec_support import (
     AutoAgentApp,
     ContextPatch,
     Edge,
-    ExecutionContext,
+    InputMappingContext,
+    OutputBindingContext,
     InvocationState,
     Payload,
     assert_completed,
@@ -35,17 +36,15 @@ class ApprovalResponse:
     approved: bool
 
 
-def make_approval_request(context: ExecutionContext) -> ApprovalRequest:
+def make_approval_request(context: InputMappingContext) -> ApprovalRequest:
     del context
     return ApprovalRequest(prompt="approve")
 
 
 def record_approval(
-    context: ExecutionContext,
-    response: ApprovalResponse,
+    context: OutputBindingContext,
 ) -> ContextPatch:
-    del context
-    return ContextPatch(invocation={"approved": response.approved})
+    return ContextPatch(invocation={"approved": context.output.approved})
 
 
 def wait_for_state(invocation, state: InvocationState, timeout: float = 3.0):
@@ -101,7 +100,7 @@ class IncrementalParallelSchedulingTests(unittest.TestCase):
                 ),
             ],
         )
-        app = AutoAgentApp(max_thread_workers=4, max_parallel_units=4)
+        app = AutoAgentApp(max_executor_concurrency=4)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})
@@ -149,7 +148,7 @@ class IncrementalParallelSchedulingTests(unittest.TestCase):
                 ),
             ],
         )
-        app = AutoAgentApp(max_thread_workers=4, max_parallel_units=4)
+        app = AutoAgentApp(max_executor_concurrency=4)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})
@@ -228,7 +227,7 @@ class ParallelLoopBoundaryTests(unittest.TestCase):
             outside_a_started,
             join_takes_back=False,
         )
-        app = AutoAgentApp(max_thread_workers=6, max_parallel_units=6)
+        app = AutoAgentApp(max_executor_concurrency=6)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})
@@ -258,7 +257,7 @@ class ParallelLoopBoundaryTests(unittest.TestCase):
             outside_a_started,
             join_takes_back=True,
         )
-        app = AutoAgentApp(max_thread_workers=6, max_parallel_units=6)
+        app = AutoAgentApp(max_executor_concurrency=6)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})
@@ -285,7 +284,7 @@ class ParallelLoopBoundaryTests(unittest.TestCase):
             outside_a_started,
             join_takes_back=False,
         )
-        app = AutoAgentApp(max_thread_workers=6, max_parallel_units=6)
+        app = AutoAgentApp(max_executor_concurrency=6)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})
@@ -342,7 +341,7 @@ class ParallelLoopBoundaryTests(unittest.TestCase):
                 node("outside_join", traced_operator("outside_join", trace)),
             ],
         )
-        app = AutoAgentApp(max_thread_workers=6, max_parallel_units=6)
+        app = AutoAgentApp(max_executor_concurrency=6)
         try:
             app.register_workflow(definition)
             invocation = app.submit_invoke(definition.id, {"route": 1})

@@ -30,8 +30,9 @@ class NodeExecution:
     operator_attempts: int = 0
     logical_occurrence: int = 1
     idempotency_key: str | None = None
-    session_context_revision: int = 0
-    invocation_context_revision: int = 0
+    started_state_version: int = 0
+    restart_session_context: dict[str, Any] | None = None
+    restart_invocation_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +45,12 @@ class OperatorCallRecord:
     unit_index: int
     attempt: int
     status: Literal["completed", "failed", "timed_out", "cancelled"]
+    started_at_ms: int
+    completed_at_ms: int
     duration_ns: int
-    queue_wait_ns: int = 0
+    dispatch_wait_ns: int = 0
+    executor_wait_ns: int = 0
+    thread_pool_wait_ns: int = 0
     handler_ns: int = 0
     stream_ns: int = 0
     stream_delivery_ns: int = 0

@@ -187,7 +187,7 @@ class AppLifecycleTests(unittest.TestCase):
         self.assertTrue(invocation.session_id)
         app.close()
 
-    def test_terminal_snapshot_is_compact_and_stable(self) -> None:
+    def test_terminal_snapshot_retains_latest_checkpoint(self) -> None:
         app = AutoAgentApp()
         value = workflow()
         app.register_workflow(value)
@@ -195,7 +195,11 @@ class AppLifecycleTests(unittest.TestCase):
         snapshot = invocation.snapshot()
         snapshot.output["node"]["nested"].append(2)  # type: ignore[index]
         self.assertEqual(invocation.output, {"node": {"nested": [1]}})
-        self.assertIsNone(invocation.latest_checkpoint)
+        self.assertIsNotNone(invocation.latest_checkpoint)
+        self.assertEqual(
+            invocation.latest_checkpoint.invocation_state,  # type: ignore[union-attr]
+            InvocationState.COMPLETED.value,
+        )
         app.close()
 
 
@@ -223,20 +227,30 @@ class RecoveryValidationTests(unittest.TestCase):
             app.recover(replace(self.checkpoint, schema_version=2))
         app.close()
 
-    def test_rejects_revision_mismatch_and_terminal_checkpoint(self) -> None:
+    def test_rejects_revision_mismatch(self) -> None:
         app = self.recover_app()
         with self.assertRaisesRegex(RecoveryError, "Revision"):
             app.recover(
                 replace(self.checkpoint, workflow_revision_id="recover:missing")
             )
-        with self.assertRaisesRegex(RecoveryError, "terminal"):
-            app.recover(
-                replace(
-                    self.checkpoint,
-                    invocation_state=InvocationState.COMPLETED.value,
-                )
-            )
         app.close()
+
+    def test_terminal_checkpoint_restores_session_and_result_without_execution(self) -> None:
+        source = AutoAgentApp()
+        value = workflow()
+        source.register_workflow(value)
+        completed = source.invoke(value, {"value": 1}, session_id="terminal")
+        checkpoint = completed.latest_checkpoint
+        self.assertIsNotNone(checkpoint)
+        source.close()
+
+        restored_app = AutoAgentApp()
+        restored_app.register_workflow(value)
+        restored = restored_app.recover(checkpoint)  # type: ignore[arg-type]
+        self.assertEqual(restored.state, InvocationState.COMPLETED)
+        self.assertEqual(restored.result(), {"node": 1})
+        self.assertNotIn(restored.id, restored_app._active)
+        restored_app.close()
 
     def test_rejects_negative_sequences(self) -> None:
         app = self.recover_app()

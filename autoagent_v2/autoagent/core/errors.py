@@ -8,8 +8,24 @@ class AutoAgentError(Exception):
 class WorkflowCompileError(AutoAgentError):
     """The Workflow cannot be compiled into executable IR."""
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        diagnostics: tuple[object, ...] = (),
+        object_type: str | None = None,
+        object_id: str | None = None,
+        field: str | None = None,
+        hint: str | None = None,
+    ) -> None:
         self.code = code
+        self.message = message
+        self.diagnostics = diagnostics
+        self.object_type = object_type
+        self.object_id = object_id
+        self.field = field
+        self.hint = hint
         super().__init__(f"{code}: {message}" if code else message)
 
 
@@ -21,48 +37,9 @@ class LoopControlError(AutoAgentError):
         super().__init__(f"{code}: {message}")
 
 
-class NodeExecutionLimitExceededError(AutoAgentError):
-    """A Node exceeded its Invocation-local execution safety limit."""
+class RuntimeTransitionError(AutoAgentError):
+    """A Runtime Event cannot be atomically applied to the current State."""
 
-    code = "NODE_EXECUTION_LIMIT_EXCEEDED"
-
-    def __init__(
-        self,
-        *,
-        node_id: str,
-        attempted: int,
-        allowed: int,
-        scope: str,
-    ) -> None:
-        self.node_id = node_id
-        self.attempted = attempted
-        self.allowed = allowed
-        self.scope = scope
-        super().__init__(
-            f"{self.code}: Node {node_id!r} attempted execution {attempted}, "
-            f"exceeding the Node execution limit {allowed} in iteration scope {scope}."
-        )
-
-
-class WorkflowRegistrationError(AutoAgentError):
-    """The Workflow conflicts with the App registry."""
-
-
-class WorkflowNotRegisteredError(AutoAgentError):
-    """The requested Workflow is not registered in this App."""
-
-
-class InvocationConflictError(AutoAgentError):
-    """A Session already owns an active Invocation."""
-
-
-class InvocationStateError(AutoAgentError):
-    """The requested operation is invalid for the Invocation state."""
-
-
-class AdmissionRejectedError(AutoAgentError):
-    """The RuntimeSink rejected or timed out new-execution admission."""
-
-
-class RecoveryError(AutoAgentError):
-    """A RecoveryCheckpoint is invalid for the current App."""
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")

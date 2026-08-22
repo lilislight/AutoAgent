@@ -1,85 +1,63 @@
-"""Concrete and framework-owned Operator bindings embedded in Workflow IR."""
+"""Executable Operator and Wait definitions."""
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import partial
-from typing import Any
 
 from .contract import OperatorContract, ValueContract
 
 
 def callable_id(handler: Callable[..., object]) -> str:
-    target = handler.func if isinstance(handler, partial) else handler
-    name = (
-        getattr(target, "__name__", None)
-        or getattr(target, "__qualname__", None)
-        or target.__class__.__name__
+    return str(
+        getattr(handler, "__name__", None)
+        or handler.__class__.__name__
     )
-    return str(name)
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class Operator:
-    handler: Callable[..., object]
     id: str
-    version: str | int
-    contract: OperatorContract = field(repr=False, compare=False)
+    handler: Callable[..., object] = field(repr=False, compare=False)
+    contract: OperatorContract
+    version: str
 
     def __init__(
         self,
         handler: Callable[..., object],
         *,
         id: str | None = None,
-        version: str | int = 1,
+        version: str | int = "1",
     ) -> None:
         if not callable(handler):
             raise TypeError("Operator handler must be callable.")
+        if id is not None and not isinstance(id, str):
+            raise TypeError("Operator id must be a string.")
         operator_id = id or callable_id(handler)
         if not operator_id.strip():
             raise ValueError("Operator id cannot be empty.")
-        try:
-            contract = OperatorContract.from_callable(handler)
-        except (TypeError, ValueError) as error:
-            raise TypeError(f"Operator contract is invalid: {error}") from error
-        object.__setattr__(self, "handler", handler)
         object.__setattr__(self, "id", operator_id)
-        object.__setattr__(self, "version", version)
-        object.__setattr__(self, "contract", contract)
-
-    @classmethod
-    def from_callable(
-        cls,
-        handler: Callable[..., object],
-        *,
-        operator_id: str | None = None,
-        version: str | int = 1,
-    ) -> "Operator":
-        return cls(handler, id=operator_id, version=version)
-
-    @property
-    def signature(self) -> inspect.Signature:
-        return inspect.signature(self.handler)
+        object.__setattr__(self, "handler", handler)
+        object.__setattr__(self, "contract", OperatorContract.from_callable(handler))
+        object.__setattr__(self, "version", str(version))
 
 
 @dataclass(frozen=True, slots=True)
-class WaitOperator:
-    """Framework-owned suspension binding with explicit request/response types."""
+class Wait:
+    """Suspend one NodeOccurrence with durable custom request/response values."""
 
     request_type: object
     response_type: object
-    id: str = field(default="autoagent.wait", init=False)
+    id: str = "autoagent.wait"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("Wait id cannot be empty.")
 
     @property
-    def request_contract(self) -> ValueContract:
-        return ValueContract.create(
-            self.request_type, location="WaitOperator request_type"
-        )
+    def input_contract(self) -> ValueContract:
+        return ValueContract.create(self.request_type, location="Wait request")
 
     @property
-    def response_contract(self) -> ValueContract:
-        return ValueContract.create(
-            self.response_type, location="WaitOperator response_type"
-        )
+    def output_contract(self) -> ValueContract:
+        return ValueContract.create(self.response_type, location="Wait response")

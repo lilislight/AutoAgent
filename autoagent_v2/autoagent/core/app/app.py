@@ -1,820 +1,1182 @@
-"""V2 composition-free Core App and flat Execution API."""
+"""Public facade and component assembly for the standalone V2 Core."""
 
 from __future__ import annotations
 
 import asyncio
-import threading
-from typing import Any
-from uuid import UUID, uuid4
+import time
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, replace
+from typing import Literal, cast
+from uuid import uuid4
 
-from ..compiler import WorkflowCompiler
-from ..errors import (
-    AdmissionRejectedError,
-    InvocationConflictError,
-    InvocationStateError,
-    RecoveryError,
-    WorkflowNotRegisteredError,
-    WorkflowRegistrationError,
-)
-from ..executor import InvocationExecution, NodeExecutor
-from ..operators import WaitOperator
+from ..compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
+from ..errors import RuntimeTransitionError
+from ..executor import CapabilityResolver, NodeExecutor, WorkflowExecutor
+from ..operators import Operator, OperatorRegistry, Wait
 from ..runtime import (
-    AsyncInvocationStream,
-    AttachedChannel,
-    EventMode,
-    EventChannel,
-    Invocation,
-    InvocationState,
-    InvocationStream,
-    RecoveryCheckpoint,
+    InMemoryEventJournal,
+    InMemoryUserEventJournal,
+    InvocationCancelled,
+    InvocationFailed,
+    InvocationOpened,
+    InvocationRecoveryRequested,
+    InvocationStarted,
     RuntimeErrorInfo,
-    RuntimeSink,
-    RuntimeLoop,
-    Session,
-    now_ms,
+    RuntimeEvent,
+    RuntimeState,
+    SessionOpened,
+    StateReducer,
+    TaskRuntime,
+    UserEvent,
+    WaitResumed,
+    WaitState,
+    thaw,
 )
-from ..runtime.serialization import RuntimeValueCodec
-from ..workflow import Workflow, WorkflowIR
+from ..scheduler import Scheduler
+from ..workflow import Capability, ChildInvocationHandle, Workflow, WorkflowIR
+from .ports import (
+    Clock,
+    NodeExecutorPort,
+    OperatorRegistryPort,
+    RuntimeJournalPort,
+    SchedulerPort,
+    UserEventJournalPort,
+)
+from .runtime_loop import RuntimeLoop
+from .stream import AttachedStream, InvocationStream, is_stream_end
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationResult:
+    session_id: str
+    invocation_id: str
+    status: Literal["running", "waiting", "completed", "failed", "cancelled"]
+    output: object = None
+    error: RuntimeErrorInfo | None = None
+    waits: tuple[WaitState, ...] = ()
+    events: tuple[RuntimeEvent, ...] = ()
+    user_events: tuple[UserEvent, ...] = ()
+    next_event_cursor: int = 0
+    next_user_event_cursor: int = 0
+
+
+StreamItem = RuntimeEvent | UserEvent | InvocationResult
 
 
 class AutoAgentApp:
-    """Compile once, register one Revision per Workflow id, then execute."""
+    """Compile, invoke, recover and observe V2 Core Workflows.
+
+    Execution algorithms live in WorkflowExecutor and NodeExecutor. The App
+    owns only registries, public lifecycle methods and component assembly.
+    """
 
     def __init__(
         self,
         *,
-        runtime_sink: RuntimeSink | None = None,
-        admission_timeout: float | None = 5.0,
-        max_executor_concurrency: int = 8,
+        max_operator_concurrency: int = 32,
         max_node_executions_per_invocation: int = 1_000,
+        capability_resolver: CapabilityResolver | None = None,
+        runtime_journal: RuntimeJournalPort | None = None,
+        user_event_journal: UserEventJournalPort | None = None,
+        scheduler: SchedulerPort | None = None,
+        node_executor: NodeExecutorPort | None = None,
+        clock_ns: Clock | None = None,
+        operator_registry: OperatorRegistryPort | None = None,
     ) -> None:
-        if max_node_executions_per_invocation < 1:
+        if (
+            not isinstance(max_operator_concurrency, int)
+            or isinstance(max_operator_concurrency, bool)
+            or max_operator_concurrency < 1
+        ):
+            raise ValueError("max_operator_concurrency must be positive.")
+        if (
+            not isinstance(max_node_executions_per_invocation, int)
+            or isinstance(max_node_executions_per_invocation, bool)
+            or max_node_executions_per_invocation < 1
+        ):
             raise ValueError("max_node_executions_per_invocation must be positive.")
-        if admission_timeout is not None and admission_timeout < 0:
-            raise ValueError("admission_timeout cannot be negative.")
         self._compiler = WorkflowCompiler()
-        self._workflow_registry: dict[str, WorkflowIR] = {}
-        self._source_workflow_index: dict[int, tuple[Workflow, str]] = {}
-        self._sessions: dict[str, Session] = {}
-        self._active: dict[UUID, InvocationExecution] = {}
-        self._reserved_sessions: set[str] = set()
-        self._runtime_sink = runtime_sink
-        self._node_executor = NodeExecutor(
-            max_executor_concurrency=max_executor_concurrency,
-        )
-        self._admission_timeout = admission_timeout
-        self._max_node_executions_per_invocation = (
-            max_node_executions_per_invocation
-        )
-        self._runtime = RuntimeLoop()
-        self._registry_lock = threading.RLock()
-        self._closed = False
-
-    def register_workflow(self, workflow: Workflow) -> None:
-        """Compile and atomically register an immutable WorkflowIR."""
-
-        if self._closed:
-            raise RuntimeError("App is closed.")
-        compiled = self._compiler.compile(workflow)
-        with self._registry_lock:
-            existing = self._workflow_registry.get(compiled.workflow_id)
-            if existing is not None:
-                if existing.workflow_revision_id != compiled.workflow_revision_id:
-                    raise WorkflowRegistrationError(
-                        f"Workflow {compiled.workflow_id!r} already has Revision "
-                        f"{existing.workflow_revision_id!r} in this App."
-                    )
-                self._source_workflow_index[id(workflow)] = (
-                    workflow,
-                    compiled.workflow_id,
-                )
-                return
-            self._workflow_registry[compiled.workflow_id] = compiled
-            self._source_workflow_index[id(workflow)] = (
-                workflow,
-                compiled.workflow_id,
+        self._workflows: dict[str, WorkflowIR] = {}
+        self._workflow_definition_snapshots: dict[
+            str, WorkflowDefinitionSnapshot
+        ] = {}
+        self._latest_workflow_revision: dict[str, str] = {}
+        self._journal = runtime_journal or InMemoryEventJournal()
+        self._user_event_journal = user_event_journal or InMemoryUserEventJournal()
+        self._scheduler = scheduler or Scheduler()
+        if (
+            node_executor is not None
+            and node_executor.max_operator_concurrency
+            > max_operator_concurrency
+        ):
+            raise ValueError(
+                "Injected NodeExecutor concurrency cannot exceed the App limit."
             )
+        self._node_executor = node_executor or NodeExecutor(
+            max_operator_concurrency=max_operator_concurrency
+        )
+        self._clock_ns = clock_ns or time.time_ns
+        self._operator_registry = operator_registry or OperatorRegistry()
+        self._task_runtime = TaskRuntime()
+        self._workflow_executor = WorkflowExecutor(
+            journal=self._journal,
+            scheduler=self._scheduler,
+            node_executor=self._node_executor,  # type: ignore[arg-type]
+            task_runtime=self._task_runtime,
+            operator_registry=self._operator_registry,
+            emit=self._emit,
+            emit_user=self._emit_user,
+            max_node_executions_per_invocation=(
+                max_node_executions_per_invocation
+            ),
+            capability_resolver=capability_resolver,
+        )
+        self._closed = False
+        self._runtime_loop = RuntimeLoop()
+        self._attached_streams: dict[str, AttachedStream] = {}
+        self._attached_stream_tasks: dict[str, asyncio.Task[None]] = {}
+
+    # ------------------------------------------------------------------
+    # Definition and implementation registries
+
+    def register_workflow(self, workflow: Workflow) -> WorkflowIR:
+        self._ensure_open()
+        result = self._compiler.compile(workflow)
+        compiled = result.require_workflow_ir()
+        self._register_ir(compiled)
+        return compiled
+
+    def workflow_definition_snapshot(
+        self, workflow_id_or_revision_id: str
+    ) -> WorkflowDefinitionSnapshot:
+        """Return the portable snapshot for one registered Workflow revision."""
+
+        self._ensure_open()
+        revision_id = self._latest_workflow_revision.get(
+            workflow_id_or_revision_id, workflow_id_or_revision_id
+        )
+        snapshot = self._workflow_definition_snapshots.get(revision_id)
+        if snapshot is None:
+            raise RuntimeTransitionError(
+                "WORKFLOW_NOT_REGISTERED",
+                f"Workflow {workflow_id_or_revision_id!r} is not registered.",
+            )
+        return snapshot
+
+    @property
+    def operator_registry(self) -> OperatorRegistryPort:
+        return self._operator_registry
+
+    def register_capability(self, capability: Capability) -> Capability:
+        self._ensure_open()
+        self._operator_registry.bind_capability(capability)
+        return capability
+
+    def register_operator(
+        self,
+        operator: Operator | Callable[..., object],
+        *,
+        capability_id: str,
+        operator_id: str | None = None,
+        priority: int = 0,
+        enabled: bool = True,
+        default: bool = False,
+    ) -> Operator:
+        self._ensure_open()
+        compiled = (
+            operator
+            if isinstance(operator, Operator)
+            else Operator(operator, id=operator_id)
+        )
+        return self._operator_registry.register(
+            compiled,
+            capability_id=capability_id,
+            priority=priority,
+            enabled=enabled,
+            default=default,
+        )
+
+    def set_operator_enabled(self, operator_id: str, enabled: bool) -> None:
+        self._ensure_open()
+        self._operator_registry.set_enabled(operator_id, enabled)
+
+    # ------------------------------------------------------------------
+    # Invocation public API
 
     def invoke(
         self,
         workflow: Workflow | str,
-        invocation_input: Any,
+        value: object,
         *,
         session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-    ) -> Invocation:
-        return self._runtime.run(
+        session_context: dict[str, object] | None = None,
+        entry_node_id: str | None = None,
+    ) -> InvocationResult:
+        return self._run(
             self._invoke(
                 workflow,
-                invocation_input,
+                value,
                 session_id=session_id,
-                event_mode=event_mode,
-                wait=True,
+                session_context=session_context,
+                entry_node_id=entry_node_id,
             )
         )
 
     async def ainvoke(
         self,
         workflow: Workflow | str,
-        invocation_input: Any,
+        value: object,
         *,
         session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-    ) -> Invocation:
-        return await self._runtime.await_result(
-            self._invoke(
-                workflow,
-                invocation_input,
-                session_id=session_id,
-                event_mode=event_mode,
-                wait=True,
+        session_context: dict[str, object] | None = None,
+        entry_node_id: str | None = None,
+    ) -> InvocationResult:
+        return await self._await(
+            self._submit(
+                self._invoke(
+                    workflow,
+                    value,
+                    session_id=session_id,
+                    session_context=session_context,
+                    entry_node_id=entry_node_id,
+                )
             )
         )
 
     def submit_invoke(
         self,
         workflow: Workflow | str,
-        invocation_input: Any,
+        value: object,
         *,
         session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-    ) -> Invocation:
-        return self._runtime.run(
+        session_context: dict[str, object] | None = None,
+        entry_node_id: str | None = None,
+    ) -> InvocationResult:
+        return self._run(
             self._invoke(
                 workflow,
-                invocation_input,
+                value,
                 session_id=session_id,
-                event_mode=event_mode,
-                wait=False,
+                session_context=session_context,
+                entry_node_id=entry_node_id,
+                wait_for_boundary=False,
             )
         )
 
     async def asubmit_invoke(
         self,
         workflow: Workflow | str,
-        invocation_input: Any,
+        value: object,
         *,
         session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-    ) -> Invocation:
-        return await self._runtime.await_result(
-            self._invoke(
-                workflow,
-                invocation_input,
-                session_id=session_id,
-                event_mode=event_mode,
-                wait=False,
+        session_context: dict[str, object] | None = None,
+        entry_node_id: str | None = None,
+    ) -> InvocationResult:
+        return await self._await(
+            self._submit(
+                self._invoke(
+                    workflow,
+                    value,
+                    session_id=session_id,
+                    session_context=session_context,
+                    entry_node_id=entry_node_id,
+                    wait_for_boundary=False,
+                )
             )
         )
 
-    def stream_invoke(
+    def stream(
         self,
         workflow: Workflow | str,
-        invocation_input: Any,
+        value: object,
         *,
         session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-        event_channel: EventChannel = "user",
-    ) -> InvocationStream:
-        invocation, channel = self._runtime.run(
-            self._stream_invoke(
-                workflow,
-                invocation_input,
-                session_id=session_id,
-                event_mode=event_mode,
-                event_channel=event_channel,
-            )
-        )
-        return self._sync_stream(invocation, channel)
+        session_context: dict[str, object] | None = None,
+        entry_node_id: str | None = None,
+    ) -> InvocationStream[StreamItem]:
+        """Run one Invocation through a strict synchronous Event stream."""
 
-    async def astream_invoke(
-        self,
-        workflow: Workflow | str,
-        invocation_input: Any,
-        *,
-        session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-        event_channel: EventChannel = "user",
-    ) -> AsyncInvocationStream:
-        invocation, channel = await self._runtime.await_result(
-            self._stream_invoke(
+        session, channel = self._run(
+            self._start_attached_stream(
                 workflow,
-                invocation_input,
+                value,
                 session_id=session_id,
-                event_mode=event_mode,
-                event_channel=event_channel,
+                session_context=session_context,
+                entry_node_id=entry_node_id,
             )
         )
-        return self._async_stream(invocation, channel)
+
+        def close() -> None:
+            if not self._closed:
+                self._run(self._abandon_attached_stream(session, channel))
+
+        return InvocationStream(
+            receive=lambda: self._run(channel.receive()),
+            close=close,
+        )
+
+    async def astream(
+        self,
+        workflow: Workflow | str,
+        value: object,
+        *,
+        session_id: str | None = None,
+        session_context: dict[str, object] | None = None,
+        entry_node_id: str | None = None,
+    ) -> AsyncIterator[StreamItem]:
+        """Run one Invocation through a strict caller-driven Event stream."""
+
+        session, channel = await self._await(
+            self._submit(
+                self._start_attached_stream(
+                    workflow,
+                    value,
+                    session_id=session_id,
+                    session_context=session_context,
+                    entry_node_id=entry_node_id,
+                )
+            )
+        )
+        try:
+            while True:
+                item = await self._await(self._submit(channel.receive()))
+                if is_stream_end(item):
+                    return
+                yield cast(StreamItem, item)
+        finally:
+            if not self._closed:
+                await self._await(
+                    self._submit(self._abandon_attached_stream(session, channel))
+                )
 
     def resume(
-        self, invocation: Invocation | UUID, wait_id: UUID, response: Any
-    ) -> Invocation:
-        return self._runtime.run(
-            self._resume(invocation, wait_id, response, wait=True)
-        )
+        self, session_id: str, wait_id: str, response: object
+    ) -> InvocationResult:
+        return self._run(self._resume(session_id, wait_id, response))
 
     async def aresume(
-        self, invocation: Invocation | UUID, wait_id: UUID, response: Any
-    ) -> Invocation:
-        return await self._runtime.await_result(
-            self._resume(invocation, wait_id, response, wait=True)
+        self, session_id: str, wait_id: str, response: object
+    ) -> InvocationResult:
+        return await self._await(
+            self._submit(self._resume(session_id, wait_id, response))
         )
 
     def submit_resume(
-        self, invocation: Invocation | UUID, wait_id: UUID, response: Any
-    ) -> Invocation:
-        return self._runtime.run(
-            self._resume(invocation, wait_id, response, wait=False)
+        self, session_id: str, wait_id: str, response: object
+    ) -> InvocationResult:
+        return self._run(
+            self._resume(
+                session_id, wait_id, response, wait_for_boundary=False
+            )
         )
 
     async def asubmit_resume(
-        self, invocation: Invocation | UUID, wait_id: UUID, response: Any
-    ) -> Invocation:
-        return await self._runtime.await_result(
-            self._resume(invocation, wait_id, response, wait=False)
+        self, session_id: str, wait_id: str, response: object
+    ) -> InvocationResult:
+        return await self._await(
+            self._submit(
+                self._resume(
+                    session_id, wait_id, response, wait_for_boundary=False
+                )
+            )
         )
 
-    def stream_resume(
+    def cancel(
+        self, session_id: str, reason: str | None = None
+    ) -> InvocationResult:
+        return self._run(self._cancel(session_id, reason))
+
+    async def acancel(
+        self, session_id: str, reason: str | None = None
+    ) -> InvocationResult:
+        return await self._await(self._submit(self._cancel(session_id, reason)))
+
+    def recover(self, session_id: str) -> InvocationResult:
+        return self._run(self._recover(session_id))
+
+    async def arecover(self, session_id: str) -> InvocationResult:
+        return await self._await(self._submit(self._recover(session_id)))
+
+    def recover_events(
+        self, workflow: Workflow | str, events: tuple[RuntimeEvent, ...]
+    ) -> InvocationResult:
+        return self._run(self._recover_events(workflow, events))
+
+    def wait(
         self,
-        invocation: Invocation | UUID,
-        wait_id: UUID,
-        response: Any,
+        session_id: str,
+        timeout: float | None = None,
         *,
-        event_channel: EventChannel = "user",
-    ) -> InvocationStream:
-        handle, channel = self._runtime.run(
-            self._stream_resume(invocation, wait_id, response, event_channel)
+        event_cursor: int = 0,
+        user_event_cursor: int = 0,
+    ) -> InvocationResult:
+        return self._run(
+            self._wait(
+                session_id,
+                timeout,
+                event_cursor=event_cursor,
+                user_event_cursor=user_event_cursor,
+            )
         )
-        return self._sync_stream(handle, channel)
 
-    async def astream_resume(
+    async def await_result(
         self,
-        invocation: Invocation | UUID,
-        wait_id: UUID,
-        response: Any,
+        session_id: str,
+        timeout: float | None = None,
         *,
-        event_channel: EventChannel = "user",
-    ) -> AsyncInvocationStream:
-        handle, channel = await self._runtime.await_result(
-            self._stream_resume(invocation, wait_id, response, event_channel)
-        )
-        return self._async_stream(handle, channel)
-
-    def recover(
-        self, checkpoint: RecoveryCheckpoint, *, event_mode: EventMode | str = EventMode.STANDARD
-    ) -> Invocation:
-        return self._runtime.run(
-            self._recover(checkpoint, event_mode=event_mode, wait=True)
-        )
-
-    async def arecover(
-        self, checkpoint: RecoveryCheckpoint, *, event_mode: EventMode | str = EventMode.STANDARD
-    ) -> Invocation:
-        return await self._runtime.await_result(
-            self._recover(checkpoint, event_mode=event_mode, wait=True)
+        event_cursor: int = 0,
+        user_event_cursor: int = 0,
+    ) -> InvocationResult:
+        return await self._await(
+            self._submit(
+                self._wait(
+                    session_id,
+                    timeout,
+                    event_cursor=event_cursor,
+                    user_event_cursor=user_event_cursor,
+                )
+            )
         )
 
-    def submit_recover(
-        self, checkpoint: RecoveryCheckpoint, *, event_mode: EventMode | str = EventMode.STANDARD
-    ) -> Invocation:
-        return self._runtime.run(
-            self._recover(checkpoint, event_mode=event_mode, wait=False)
+    # ------------------------------------------------------------------
+    # Observation and child API
+
+    def child_status(self, handle: ChildInvocationHandle) -> InvocationResult:
+        return self._run(self._child_status(handle))
+
+    async def achild_status(
+        self, handle: ChildInvocationHandle
+    ) -> InvocationResult:
+        return await self._await(self._submit(self._child_status(handle)))
+
+    def child_handles(
+        self, parent_invocation_id: str
+    ) -> tuple[ChildInvocationHandle, ...]:
+        return self._run(self._list_child_handles(parent_invocation_id))
+
+    async def achild_handles(
+        self, parent_invocation_id: str
+    ) -> tuple[ChildInvocationHandle, ...]:
+        return await self._await(
+            self._submit(self._list_child_handles(parent_invocation_id))
         )
 
-    async def asubmit_recover(
-        self, checkpoint: RecoveryCheckpoint, *, event_mode: EventMode | str = EventMode.STANDARD
-    ) -> Invocation:
-        return await self._runtime.await_result(
-            self._recover(checkpoint, event_mode=event_mode, wait=False)
+    def wait_child(
+        self, handle: ChildInvocationHandle, timeout: float | None = None
+    ) -> InvocationResult:
+        return self._run(self._wait_child(handle, timeout))
+
+    async def await_child(
+        self, handle: ChildInvocationHandle, timeout: float | None = None
+    ) -> InvocationResult:
+        return await self._await(self._submit(self._wait_child(handle, timeout)))
+
+    def cancel_child(
+        self, handle: ChildInvocationHandle, reason: str | None = None
+    ) -> InvocationResult:
+        return self._run(self._cancel_child(handle, reason))
+
+    async def acancel_child(
+        self, handle: ChildInvocationHandle, reason: str | None = None
+    ) -> InvocationResult:
+        return await self._await(
+            self._submit(self._cancel_child(handle, reason))
         )
 
-    def stream_recover(
-        self,
-        checkpoint: RecoveryCheckpoint,
-        *,
-        event_mode: EventMode | str = EventMode.STANDARD,
-        event_channel: EventChannel = "user",
-    ) -> InvocationStream:
-        invocation, channel = self._runtime.run(
-            self._stream_recover(checkpoint, event_mode, event_channel)
-        )
-        return self._sync_stream(invocation, channel)
-
-    async def astream_recover(
-        self,
-        checkpoint: RecoveryCheckpoint,
-        *,
-        event_mode: EventMode | str = EventMode.STANDARD,
-        event_channel: EventChannel = "user",
-    ) -> AsyncInvocationStream:
-        invocation, channel = await self._runtime.await_result(
-            self._stream_recover(checkpoint, event_mode, event_channel)
-        )
-        return self._async_stream(invocation, channel)
-
-    def cancel(self, invocation: Invocation | UUID) -> Invocation:
-        return self._runtime.run(self._cancel(invocation))
-
-    async def acancel(self, invocation: Invocation | UUID) -> Invocation:
-        return await self._runtime.await_result(self._cancel(invocation))
+    # ------------------------------------------------------------------
+    # Lifecycle
 
     def close(self) -> None:
         if self._closed:
             return
-        self._runtime.run(self._close())
-        self._runtime.close()
+        self._run(self._close())
+        self._runtime_loop.close()
+        self._node_executor.close()
         self._closed = True
 
     async def aclose(self) -> None:
         if self._closed:
             return
-        await self._runtime.await_result(self._close())
-        self._runtime.close()
+        await self._await(self._submit(self._close()))
+        self._runtime_loop.close()
+        self._node_executor.close()
         self._closed = True
+
+    # ------------------------------------------------------------------
+    # Runtime-loop operations
+
+    async def _start_attached_stream(
+        self,
+        workflow: Workflow | str,
+        value: object,
+        *,
+        session_id: str | None,
+        session_context: dict[str, object] | None,
+        entry_node_id: str | None,
+    ) -> tuple[str, AttachedStream]:
+        session = session_id or str(uuid4())
+        if session in self._attached_streams:
+            raise RuntimeTransitionError(
+                "INVOCATION_STREAM_ATTACHED",
+                "Session already has an attached Invocation stream.",
+            )
+        channel = AttachedStream()
+        self._attached_streams[session] = channel
+
+        async def run() -> None:
+            error: BaseException | None = None
+            try:
+                result = await self._invoke(
+                    workflow,
+                    value,
+                    session_id=session,
+                    session_context=session_context,
+                    entry_node_id=entry_node_id,
+                )
+                await channel.publish(
+                    replace(result, events=(), user_events=())
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException as caught:
+                error = caught
+            finally:
+                await channel.finish(error)
+                if self._attached_streams.get(session) is channel:
+                    self._attached_streams.pop(session, None)
+                self._attached_stream_tasks.pop(session, None)
+
+        task = asyncio.create_task(run())
+        self._attached_stream_tasks[session] = task
+        return session, channel
+
+    async def _abandon_attached_stream(
+        self, session_id: str, channel: AttachedStream
+    ) -> None:
+        if self._attached_streams.get(session_id) is channel:
+            self._attached_streams.pop(session_id, None)
+        channel.abandon()
+        task = self._attached_stream_tasks.get(session_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _invoke(
         self,
         workflow: Workflow | str,
-        invocation_input: Any,
-        *,
-        session_id: str | None = None,
-        event_mode: EventMode | str = EventMode.STANDARD,
-        wait: bool,
-    ) -> Invocation:
-        execution = await self._create_execution(
-            workflow,
-            invocation_input,
-            session_id=session_id,
-            event_mode=EventMode(event_mode),
-            stream=None,
-        )
-        self._launch(execution)
-        if wait:
-            await execution.boundary.wait()
-        return execution.invocation
-
-    async def _stream_invoke(
-        self,
-        workflow: Workflow | str,
-        invocation_input: Any,
+        value: object,
         *,
         session_id: str | None,
-        event_mode: EventMode | str,
-        event_channel: EventChannel,
-    ) -> tuple[Invocation, AttachedChannel]:
-        channel = AttachedChannel(event_channel)
-        execution = await self._create_execution(
-            workflow,
-            invocation_input,
-            session_id=session_id,
-            event_mode=EventMode(event_mode),
-            stream=channel,
+        session_context: dict[str, object] | None,
+        entry_node_id: str | None,
+        wait_for_boundary: bool = True,
+    ) -> InvocationResult:
+        compiled = self._resolve_workflow(workflow)
+        session = session_id or str(uuid4())
+        state = self._journal.state(session)
+        event_cursor = state.sequence
+        if state.session is None:
+            await self._emit(
+                session,
+                None,
+                SessionOpened(compiled.workflow_id, session_context or {}),
+            )
+        elif state.session.workflow_id != compiled.workflow_id:
+            raise RuntimeTransitionError(
+                "SESSION_WORKFLOW_MISMATCH",
+                "Session belongs to another Workflow.",
+            )
+        elif session_context is not None:
+            raise RuntimeTransitionError(
+                "SESSION_CONTEXT_ALREADY_OPEN",
+                "session_context can only be provided when opening a new Session.",
+            )
+        elif state.invocation is not None and not state.invocation.terminal:
+            raise RuntimeTransitionError(
+                "SESSION_INVOCATION_ACTIVE",
+                "Session already has an active Invocation.",
+            )
+        invocation_id = str(uuid4())
+        entry = entry_node_id or _single_entry(compiled)
+        opened = await self._emit(
+            session,
+            invocation_id,
+            InvocationOpened(compiled.workflow_revision_id, entry, value),
         )
-        self._launch(execution)
-        return execution.invocation, channel
-
-    async def _create_execution(
-        self,
-        workflow: Workflow | str,
-        invocation_input: Any,
-        *,
-        session_id: str | None,
-        event_mode: EventMode,
-        stream: AttachedChannel | None,
-    ) -> InvocationExecution:
-        self._ensure_open()
-        RuntimeValueCodec.encode(invocation_input)
-        ir = self._resolve_workflow(workflow)
-        identifier = session_id or str(uuid4())
-        session = self._sessions.get(identifier)
-        timestamp = now_ms()
-        if identifier in self._reserved_sessions:
-            raise InvocationConflictError(
-                f"Session {identifier!r} is already accepting an Invocation."
-            )
-        if session is not None and session.workflow_id != ir.workflow_id:
-            raise InvocationConflictError(
-                f"Session {identifier!r} belongs to Workflow {session.workflow_id!r}."
-            )
-        if session is not None and session.invocation is not None and not session.invocation.done():
-            raise InvocationConflictError(
-                f"Session {identifier!r} already has an active Invocation."
-            )
-        self._reserved_sessions.add(identifier)
-        try:
-            await self._admit()
-        finally:
-            self._reserved_sessions.discard(identifier)
-        session = self._sessions.get(identifier)
-        created_session = session is None
-        previous_invocation = session.invocation if session is not None else None
-        if session is None:
-            session = Session(
-                id=identifier,
-                workflow_id=ir.workflow_id,
-                created_at_ms=timestamp,
-                updated_at_ms=timestamp,
-            )
-            self._sessions[identifier] = session
-        elif session.invocation is not None and not session.invocation.done():
-            raise InvocationConflictError(
-                f"Session {identifier!r} already has an active Invocation."
-            )
-
-        invocation = Invocation(
-            invocation_id=uuid4(),
-            workflow_id=ir.workflow_id,
-            workflow_revision_id=ir.workflow_revision_id,
-            session_id=session.id,
-            created_at_ms=timestamp,
+        started = await self._emit(
+            session, invocation_id, InvocationStarted(), opened.id
         )
-        session.invocation = invocation
-        session.updated_at_ms = timestamp
-        execution = InvocationExecution(
-            workflow=ir,
-            session=session,
-            invocation=invocation,
-            invocation_input=invocation_input,
-            event_mode=event_mode,
-            sink=self._runtime_sink,
-            stream=stream,
-            node_executor=self._node_executor,
-            default_max_node_executions=self._max_node_executions_per_invocation,
+        await self._emit(
+            session,
+            invocation_id,
+            self._scheduler.initialize(compiled, self._journal.state(session)),
+            started.id,
         )
-        self._active[invocation.id] = execution
-        try:
-            execution._offer_checkpoint(InvocationState.CREATED)
-        except BaseException:
-            self._active.pop(invocation.id, None)
-            if created_session:
-                self._sessions.pop(identifier, None)
-            else:
-                session.invocation = previous_invocation
-            raise
-        return execution
-
-    def _launch(self, execution: InvocationExecution, *, recovered: bool = False) -> None:
-        execution.boundary = asyncio.Event()
-        execution.task = asyncio.create_task(self._drive(execution, recovered=recovered))
-
-    async def _drive(self, execution: InvocationExecution, *, recovered: bool) -> None:
-        await execution.run(recovered=recovered)
-        if execution.invocation.done():
-            self._active.pop(execution.invocation.id, None)
+        task = self._start_drive(compiled, session, invocation_id)
+        if wait_for_boundary:
+            try:
+                await task
+            except asyncio.CancelledError:
+                current = self._journal.state(session).invocation
+                if current is not None and not current.terminal:
+                    await self._emit(
+                        session,
+                        invocation_id,
+                        InvocationCancelled("Invocation caller cancelled."),
+                    )
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+        return self._result(session, event_cursor, 0)
 
     async def _resume(
         self,
-        invocation: Invocation | UUID,
-        wait_id: UUID,
-        response: Any,
+        session_id: str,
+        wait_id: str,
+        response: object,
         *,
-        wait: bool,
-        stream: AttachedChannel | None = None,
-    ) -> Invocation:
-        execution = self._active_execution(invocation)
-        if execution.invocation.state not in {
-            InvocationState.RUNNING,
-            InvocationState.WAITING,
-        }:
-            raise InvocationStateError("Only a Running or Waiting Invocation can be resumed.")
-        active_wait = execution.waits.get(wait_id)
-        if active_wait is None:
-            raise InvocationStateError(f"Wait {wait_id} is not active.")
-        wait_node = execution.workflow.node(
-            execution.node_executions[active_wait.node_execution_id].node_id
-        )
-        if not isinstance(wait_node.operator, WaitOperator):
-            raise InvocationStateError("Waiting Invocation does not reference a WaitOperator.")
-        response = wait_node.operator.response_contract.validate(response)
-        RuntimeValueCodec.encode(response)
-        if stream is not None:
-            if execution.stream is not None:
-                raise InvocationStateError(
-                    "Invocation already has an attached Event stream."
-                )
-            execution.stream = stream
-        try:
-            execution.claim_wait(wait_id, response)
-        except (KeyError, RuntimeError) as error:
-            raise InvocationStateError(str(error)) from error
-        if execution.task is None or execution.task.done():
-            self._launch(execution)
-        if wait:
-            await execution.boundary.wait()
-        return execution.invocation
-
-    async def _stream_resume(
-        self,
-        invocation: Invocation | UUID,
-        wait_id: UUID,
-        response: Any,
-        event_channel: EventChannel,
-    ) -> tuple[Invocation, AttachedChannel]:
-        channel = AttachedChannel(event_channel)
-        handle = await self._resume(
-            invocation, wait_id, response, wait=False, stream=channel
-        )
-        return handle, channel
-
-    async def _recover(
-        self,
-        checkpoint: RecoveryCheckpoint,
-        *,
-        event_mode: EventMode | str,
-        wait: bool,
-        stream: AttachedChannel | None = None,
-    ) -> Invocation:
-        self._ensure_open()
-        if checkpoint.schema_version != 1:
-            raise RecoveryError("Unsupported RecoveryCheckpoint schema version.")
-        ir = self._resolve_workflow(checkpoint.workflow_id)
-        if ir.workflow_revision_id != checkpoint.workflow_revision_id:
-            raise RecoveryError("Checkpoint Workflow Revision is not registered.")
-        self._validate_checkpoint(ir, checkpoint)
-        existing = self._sessions.get(checkpoint.session_id)
-        if checkpoint.session_id in self._reserved_sessions:
-            raise InvocationConflictError(
-                f"Session {checkpoint.session_id!r} is already accepting an Invocation."
+        wait_for_boundary: bool = True,
+    ) -> InvocationResult:
+        state = self._journal.state(session_id)
+        invocation = _active_invocation(state)
+        event_cursor = state.sequence
+        user_cursor = self._last_user_sequence(invocation.id)
+        wait_state = invocation.scheduler.waits.get(wait_id)
+        if wait_state is None or wait_state.status != "waiting":
+            raise RuntimeTransitionError(
+                "WAIT_NOT_WAITING", f"Wait {wait_id!r} is not waiting."
             )
-        if existing is not None and existing.workflow_id != checkpoint.workflow_id:
-            raise InvocationConflictError(
-                f"Session {checkpoint.session_id!r} belongs to Workflow {existing.workflow_id!r}."
+        workflow = self._workflow_for_state(state)
+        occurrence = invocation.scheduler.occurrences[wait_state.occurrence_id]
+        node = workflow.node(occurrence.node_id)
+        if not isinstance(node.executable, Wait):
+            raise RuntimeTransitionError(
+                "WAIT_NODE_INVALID", "Wait belongs to a non-Wait Node."
             )
-        if existing is not None and existing.invocation is not None and not existing.invocation.done():
-            raise InvocationConflictError(
-                f"Session {checkpoint.session_id!r} already has an active Invocation."
-            )
-        if checkpoint.invocation_id in self._active:
-            raise InvocationConflictError("Checkpoint Invocation is already active.")
-        terminal = InvocationState(checkpoint.invocation_state).terminal
-        if not terminal:
-            self._reserved_sessions.add(checkpoint.session_id)
-            try:
-                await self._admit()
-            finally:
-                self._reserved_sessions.discard(checkpoint.session_id)
-        timestamp = now_ms()
-        session = Session(
-            id=checkpoint.session_id,
-            workflow_id=checkpoint.workflow_id,
-            context=dict(checkpoint.session_context),
-            created_at_ms=checkpoint.session_created_at_ms,
-            updated_at_ms=timestamp,
+        validated = node.executable.output_contract.validate(response)
+        await self._emit(
+            session_id,
+            invocation.id,
+            WaitResumed(wait_id, validated),
         )
-        invocation = Invocation(
-            invocation_id=checkpoint.invocation_id,
-            workflow_id=checkpoint.workflow_id,
-            workflow_revision_id=checkpoint.workflow_revision_id,
-            session_id=checkpoint.session_id,
-            created_at_ms=checkpoint.invocation_created_at_ms,
-        )
-        session.invocation = invocation
-        self._sessions[session.id] = session
-        error = (
-            RuntimeErrorInfo(**checkpoint.invocation_error)
-            if checkpoint.invocation_error is not None
-            else None
-        )
-        invocation._update(
-            state=InvocationState(checkpoint.invocation_state),
-            output=checkpoint.invocation_output,
-            error=error,
-            checkpoint=checkpoint,
-            updated_at_ms=timestamp,
-        )
-        if terminal:
-            return invocation
-        execution = InvocationExecution(
-            workflow=ir,
-            session=session,
-            invocation=invocation,
-            invocation_input=checkpoint.invocation_input,
-            event_mode=EventMode(event_mode),
-            sink=self._runtime_sink,
-            stream=stream,
-            node_executor=self._node_executor,
-            default_max_node_executions=self._max_node_executions_per_invocation,
-        )
-        execution.restore(checkpoint)
-        self._active[invocation.id] = execution
-        if (
-            invocation.state is InvocationState.WAITING
-            and not execution.has_runnable_recovery_work()
-        ):
-            execution.boundary = asyncio.Event()
-            execution.task = asyncio.create_task(
-                self._announce_recovered_waiting(execution)
-            )
-            if wait:
-                await execution.boundary.wait()
+        task = self._task_runtime.task(session_id)
+        if task is None:
+            task = self._start_drive(workflow, session_id, invocation.id)
         else:
-            self._launch(execution, recovered=True)
-            if wait:
-                await execution.boundary.wait()
-        return invocation
+            self._task_runtime.wake(session_id)
+        if wait_for_boundary:
+            await task
+        return self._result(session_id, event_cursor, user_cursor)
 
-    async def _announce_recovered_waiting(
-        self, execution: InvocationExecution
-    ) -> None:
-        await execution.announce_recovered_waiting()
-        if execution.invocation.done():
-            self._active.pop(execution.invocation.id, None)
-
-    async def _stream_recover(
-        self,
-        checkpoint: RecoveryCheckpoint,
-        event_mode: EventMode | str,
-        event_channel: EventChannel,
-    ) -> tuple[Invocation, AttachedChannel]:
-        channel = AttachedChannel(event_channel)
-        invocation = await self._recover(
-            checkpoint,
-            event_mode=event_mode,
-            wait=False,
-            stream=channel,
+    async def _cancel(
+        self, session_id: str, reason: str | None
+    ) -> InvocationResult:
+        state = self._journal.state(session_id)
+        invocation = _active_invocation(state)
+        event_cursor = state.sequence
+        user_cursor = self._last_user_sequence(invocation.id)
+        await self._emit(
+            session_id, invocation.id, InvocationCancelled(reason)
         )
-        return invocation, channel
-
-    async def _cancel(self, invocation: Invocation | UUID) -> Invocation:
-        execution = self._active_execution(invocation)
-        execution.request_cancel()
-        # The in-memory Handle reflects the accepted control request
-        # immediately. ``finish_cancelled`` still owns Event convergence and
-        # does not signal terminal completion until the Sink accepts it.
-        execution.invocation._update(
-            state=InvocationState.CANCELLED,
-            updated_at_ms=now_ms(),
-        )
-        if execution.stream is not None:
-            execution.stream.abandon()
-        for task in tuple(execution.worker_tasks):
+        self._task_runtime.signal_update(invocation.id)
+        task = self._task_runtime.task(session_id)
+        if task is not None:
             task.cancel()
-        # Cancellation is cooperative at the Invocation coordinator. Active
-        # workers first finalize their cancelled Operator Call Event; the
-        # coordinator then observes the cancelled task and converges the rest
-        # of the Invocation. Cancelling both layers concurrently can interrupt
-        # that final Event before it reaches the Sink.
-        if execution.task is None or execution.task.done():
-            asyncio.create_task(execution.finish_cancelled())
-        await execution.terminal.wait()
-        self._active.pop(execution.invocation.id, None)
-        return execution.invocation
+            await asyncio.gather(task, return_exceptions=True)
+        return self._result(session_id, event_cursor, user_cursor)
 
-    async def _admit(self) -> None:
-        if self._runtime_sink is None:
-            return
-        try:
-            if self._admission_timeout is None:
-                await self._runtime_sink.wait_until_admissible()
-            else:
-                async with asyncio.timeout(self._admission_timeout):
-                    await self._runtime_sink.wait_until_admissible()
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError as error:
-            raise AdmissionRejectedError(
-                "RuntimeSink did not admit a new Invocation before the Core timeout."
-            ) from error
-        except BaseException as error:
-            raise AdmissionRejectedError(
-                "RuntimeSink failed while checking new-execution admission."
-            ) from error
+    async def _recover(self, session_id: str) -> InvocationResult:
+        state = self._journal.state(session_id)
+        invocation = _active_invocation(state)
+        workflow = self._workflow_for_state(state)
+        if self._task_runtime.is_live(session_id):
+            raise RuntimeTransitionError(
+                "INVOCATION_STILL_LIVE",
+                "Recovery cannot run while this App owns the Invocation task.",
+            )
+        event_cursor = state.sequence
+        user_cursor = self._last_user_sequence(invocation.id)
+        recovery_error = self._recovery_error(workflow, state)
+        if recovery_error is not None:
+            await self._emit(
+                session_id, invocation.id, InvocationFailed(recovery_error)
+            )
+            return self._result(session_id, event_cursor, user_cursor)
+        await self._emit(
+            session_id, invocation.id, InvocationRecoveryRequested()
+        )
+        task = self._start_drive(workflow, session_id, invocation.id)
+        await task
+        return self._result(session_id, event_cursor, user_cursor)
+
+    async def _recover_events(
+        self, workflow: Workflow | str, events: tuple[RuntimeEvent, ...]
+    ) -> InvocationResult:
+        if not events:
+            raise ValueError("Recovery requires at least one Runtime Event.")
+        if any(event.from_state_version is None for event in events):
+            raise RuntimeTransitionError(
+                "RECOVERY_EVENT_UNSEALED",
+                "Recovery requires persisted Runtime Events with State Operation Batches.",
+            )
+        session_id = events[0].session_id
+        if self._journal.state(session_id).session is not None:
+            raise RuntimeTransitionError(
+                "RECOVERY_SESSION_EXISTS",
+                "Recovery target Session already exists.",
+            )
+        state = StateReducer().reduce(events)
+        invocation = state.invocation
+        if invocation is None:
+            raise RuntimeTransitionError(
+                "RECOVERY_INVOCATION_MISSING",
+                "Runtime Event prefix has no Invocation.",
+            )
+        compiled = self._resolve_workflow(
+            workflow, required_revision_id=invocation.workflow_revision_id
+        )
+        if state.session is None or state.session.workflow_id != compiled.workflow_id:
+            raise RuntimeTransitionError(
+                "RECOVERY_WORKFLOW_MISMATCH",
+                "Runtime Events belong to another Workflow.",
+            )
+        if invocation.workflow_revision_id != compiled.workflow_revision_id:
+            raise RuntimeTransitionError(
+                "RECOVERY_REVISION_MISMATCH",
+                "Runtime Events use another Workflow Revision.",
+            )
+        self._journal.append_many(events)
+        event_cursor = state.sequence
+        user_cursor = self._last_user_sequence(invocation.id)
+        if invocation.terminal:
+            return self._result(session_id, 0, 0)
+        if invocation.status == "created":
+            await self._emit(session_id, invocation.id, InvocationStarted())
+            state = self._journal.state(session_id)
+            invocation = _active_invocation(state)
+        if not invocation.scheduler.initialized:
+            await self._emit(
+                session_id,
+                invocation.id,
+                self._scheduler.initialize(
+                    compiled, self._journal.state(session_id)
+                ),
+            )
+        else:
+            recovery_error = self._recovery_error(
+                compiled, self._journal.state(session_id)
+            )
+            if recovery_error is not None:
+                await self._emit(
+                    session_id,
+                    invocation.id,
+                    InvocationFailed(recovery_error),
+                )
+                return self._result(session_id, event_cursor, user_cursor)
+            await self._emit(
+                session_id, invocation.id, InvocationRecoveryRequested()
+            )
+        task = self._start_drive(
+            compiled, session_id, invocation.id
+        )
+        await task
+        return self._result(session_id, event_cursor, user_cursor)
 
     @staticmethod
-    def _validate_checkpoint(
-        workflow: WorkflowIR, checkpoint: RecoveryCheckpoint
-    ) -> None:
-        allowed_states = {
-            InvocationState.CREATED.value,
-            InvocationState.RUNNING.value,
-            InvocationState.WAITING.value,
-            InvocationState.COMPLETED.value,
-            InvocationState.FAILED.value,
-            InvocationState.CANCELLED.value,
-        }
-        if checkpoint.invocation_state not in allowed_states:
-            raise RecoveryError(
-                f"Checkpoint Invocation state {checkpoint.invocation_state!r} is invalid."
+    def _recovery_error(
+        workflow: WorkflowIR, state: RuntimeState
+    ) -> RuntimeErrorInfo | None:
+        invocation = state.invocation
+        if invocation is None:
+            return RuntimeErrorInfo(
+                "RecoveryStateInvalid", "Invocation is missing."
             )
-        if checkpoint.runtime_event_sequence < 0 or checkpoint.user_event_sequence < 0:
-            raise RecoveryError("Checkpoint Event sequences cannot be negative.")
-        known_nodes = {node.id for node in workflow.nodes}
-        known_edges = {edge.id for edge in workflow.edges}
-        for request in checkpoint.scheduler_state.ready:
-            if request.node_id not in known_nodes:
-                raise RecoveryError(
-                    f"Checkpoint references unknown ready Node {request.node_id!r}."
+        for occurrence in invocation.scheduler.occurrences.values():
+            if occurrence.status != "running":
+                continue
+            recovery = workflow.node(occurrence.node_id).recovery_mode
+            if recovery.mode == "never":
+                return RuntimeErrorInfo(
+                    "RecoveryNotAllowed",
+                    f"Node {occurrence.node_id!r} does not permit crash replay.",
                 )
-            for activation in request.activations:
-                if activation.edge_id not in known_edges:
-                    raise RecoveryError(
-                        f"Checkpoint references unknown Edge {activation.edge_id!r}."
-                    )
-                if activation.source_execution_id not in checkpoint.required_outputs:
-                    raise RecoveryError(
-                        "Checkpoint is missing an output required by its Scheduler."
-                    )
-        for _, resolution in checkpoint.scheduler_state.resolutions:
-            if resolution.edge_id not in known_edges:
-                raise RecoveryError(
-                    f"Checkpoint references unknown Edge {resolution.edge_id!r}."
+            if occurrence.recovery_attempts >= recovery.max_attempts:
+                return RuntimeErrorInfo(
+                    "RecoveryAttemptsExceeded",
+                    f"Node {occurrence.node_id!r} exhausted crash recovery attempts.",
                 )
-        for node_id, execution_id in checkpoint.latest_output_ids.items():
-            if node_id not in known_nodes or execution_id not in checkpoint.required_outputs:
-                raise RecoveryError("Checkpoint latest-output index is inconsistent.")
-        waits = checkpoint.waits
-        if checkpoint.invocation_state == InvocationState.WAITING.value and not waits:
-            raise RecoveryError("A Waiting Checkpoint must contain wait state.")
-        wait_ids: set[UUID] = set()
-        wait_execution_ids: set[UUID] = set()
-        node_states = {item.execution_id: item for item in checkpoint.node_states}
-        for wait in waits:
-            if wait.id in wait_ids:
-                raise RecoveryError("Checkpoint contains duplicate Wait ids.")
-            wait_ids.add(wait.id)
-            if wait.node_execution_id in wait_execution_ids:
-                raise RecoveryError("Checkpoint contains duplicate Wait executions.")
-            wait_execution_ids.add(wait.node_execution_id)
-            if wait.request.node_id not in known_nodes:
-                raise RecoveryError("Checkpoint wait state references an unknown Node.")
-            node_state = node_states.get(wait.node_execution_id)
-            if node_state is None:
-                raise RecoveryError(
-                    "Checkpoint wait state is missing its NodeExecution state."
-                )
-            if node_state.node_id != wait.request.node_id or node_state.state != "waiting":
-                raise RecoveryError("Checkpoint Wait and NodeExecution state disagree.")
-            node = workflow.node(wait.request.node_id)
-            if not isinstance(node.operator, WaitOperator):
-                raise RecoveryError("Checkpoint Wait does not reference a WaitOperator.")
-            try:
-                node.operator.request_contract.validate(wait.payload)
-            except TypeError as error:
-                raise RecoveryError("Checkpoint Wait payload is invalid.") from error
+        return None
 
-    def _resolve_workflow(self, workflow: Workflow | str) -> WorkflowIR:
-        with self._registry_lock:
-            if isinstance(workflow, Workflow):
-                indexed = self._source_workflow_index.get(id(workflow))
-                if indexed is None or indexed[0] is not workflow:
-                    raise WorkflowNotRegisteredError(
-                        "The source Workflow object is not registered in this App."
-                    )
-                workflow_id = indexed[1]
-            else:
-                workflow_id = workflow
+    async def _wait(
+        self,
+        session_id: str,
+        timeout: float | None,
+        *,
+        event_cursor: int,
+        user_event_cursor: int,
+    ) -> InvocationResult:
+        state = self._journal.state(session_id)
+        if state.invocation is None:
+            raise RuntimeTransitionError(
+                "INVOCATION_UNKNOWN", "Invocation does not exist."
+            )
+        task = self._task_runtime.task(session_id)
+        if task is not None:
             try:
-                return self._workflow_registry[workflow_id]
-            except KeyError as error:
-                raise WorkflowNotRegisteredError(
-                    f"Workflow {workflow_id!r} is not registered."
+                await asyncio.wait_for(asyncio.shield(task), timeout)
+            except TimeoutError as error:
+                raise TimeoutError(
+                    "Invocation did not reach a boundary in time."
                 ) from error
-
-    def _active_execution(self, invocation: Invocation | UUID) -> InvocationExecution:
-        invocation_id = invocation.id if isinstance(invocation, Invocation) else invocation
-        try:
-            return self._active[invocation_id]
-        except KeyError as error:
-            raise InvocationStateError("Invocation is not active in this App.") from error
-
-    def _sync_stream(
-        self, invocation: Invocation, channel: AttachedChannel
-    ) -> InvocationStream:
-        return InvocationStream(
-            invocation=invocation,
-            receive=lambda: self._runtime.run(channel.receive()),
-            close=lambda: self.cancel(invocation),
+        return self._result(
+            session_id, event_cursor, user_event_cursor
         )
 
-    def _async_stream(
-        self, invocation: Invocation, channel: AttachedChannel
-    ) -> AsyncInvocationStream:
-        return AsyncInvocationStream(
-            invocation=invocation,
-            receive=lambda: self._runtime.await_result(channel.receive()),
-            close=lambda: self.acancel(invocation),
+    async def _list_child_handles(
+        self, parent_invocation_id: str
+    ) -> tuple[ChildInvocationHandle, ...]:
+        return tuple(
+            cast(
+                ChildInvocationHandle,
+                {
+                    "session_id": item.session_id,
+                    "invocation_id": item.invocation_id,
+                    "workflow_id": item.workflow_id,
+                    "workflow_revision_id": item.workflow_revision_id,
+                },
+            )
+            for item in self._journal.child_links(parent_invocation_id)
         )
+
+    async def _child_status(
+        self, handle: ChildInvocationHandle
+    ) -> InvocationResult:
+        session_id, _invocation_id = self._validate_child_handle(handle)
+        return self._result(session_id, 0, 0)
+
+    async def _wait_child(
+        self, handle: ChildInvocationHandle, timeout: float | None
+    ) -> InvocationResult:
+        session_id, _invocation_id = self._validate_child_handle(handle)
+        task = self._task_runtime.task(session_id)
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout)
+            except TimeoutError as error:
+                raise TimeoutError(
+                    "Child Invocation did not reach a boundary in time."
+                ) from error
+        return self._result(session_id, 0, 0)
+
+    async def _cancel_child(
+        self, handle: ChildInvocationHandle, reason: str | None
+    ) -> InvocationResult:
+        session_id, _invocation_id = self._validate_child_handle(handle)
+        return await self._cancel(session_id, reason)
 
     async def _close(self) -> None:
-        executions = tuple(self._active.values())
-        for execution in executions:
-            execution.request_cancel()
-            if execution.stream is not None:
-                execution.stream.abandon()
-            for task in tuple(execution.worker_tasks):
-                task.cancel()
-            if execution.task is not None and not execution.task.done():
-                execution.task.cancel()
-            else:
-                asyncio.create_task(execution.finish_cancelled())
-        if executions:
-            await asyncio.gather(
-                *(execution.terminal.wait() for execution in executions)
+        for channel in tuple(self._attached_streams.values()):
+            channel.abandon()
+        self._attached_streams.clear()
+        for session_id in self._task_runtime.active_sessions():
+            state = self._journal.state(session_id)
+            invocation = state.invocation
+            if invocation is not None and not invocation.terminal:
+                await self._emit(
+                    session_id,
+                    invocation.id,
+                    InvocationCancelled("AutoAgentApp closed."),
+                )
+        await self._task_runtime.cancel_all()
+
+    # ------------------------------------------------------------------
+    # Small facade helpers
+
+    def _start_drive(
+        self,
+        workflow: WorkflowIR,
+        session_id: str,
+        invocation_id: str,
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(
+            self._workflow_executor.drive(workflow, session_id)
+        )
+        self._task_runtime.track(session_id, invocation_id, task)
+        return task
+
+    async def _emit(
+        self,
+        session_id: str,
+        invocation_id: str | None,
+        payload: object,
+        causation_id: str | None = None,
+    ) -> RuntimeEvent:
+        channel = self._attached_streams.get(session_id)
+
+        def commit() -> RuntimeEvent:
+            state = self._journal.state(session_id)
+            previous_sequence = state.sequence
+            event = RuntimeEvent(
+                session_id=session_id,
+                invocation_id=invocation_id,
+                sequence=state.sequence + 1,
+                occurred_at_ns=self._clock_ns(),
+                payload=payload,  # type: ignore[arg-type]
+                causation_id=(
+                    causation_id
+                    if causation_id is not None
+                    else state.last_event_id
+                ),
             )
-        self._active.clear()
-        self._node_executor.close()
+            self._journal.append(event)
+            if channel is None:
+                return event
+            self._journal.flush(session_id)
+            return next(
+                item
+                for item in reversed(self._journal.events(session_id))
+                if item.sequence > previous_sequence
+            )
+
+        if channel is None:
+            return commit()
+        return cast(RuntimeEvent, await channel.publish_created(commit))
+
+    async def _emit_user(
+        self,
+        session_id: str,
+        invocation_id: str,
+        kind: str,
+        payload: object,
+        occurrence_id: str | None = None,
+    ) -> UserEvent:
+        def commit() -> UserEvent:
+            return self._user_event_journal.emit(
+                session_id=session_id,
+                invocation_id=invocation_id,
+                kind=kind,
+                payload=payload,
+                occurrence_id=occurrence_id,
+                occurred_at_ns=self._clock_ns(),
+            )
+
+        channel = self._attached_streams.get(session_id)
+        if channel is None:
+            return commit()
+        return cast(UserEvent, await channel.publish_created(commit))
+
+    def _result(
+        self,
+        session_id: str,
+        event_cursor: int,
+        user_event_cursor: int,
+    ) -> InvocationResult:
+        self._journal.flush(session_id)
+        state = self._journal.state(session_id)
+        invocation = state.invocation
+        assert invocation is not None
+        all_user_events = self._user_event_journal.events(invocation.id)
+        latest_user_sequence = (
+            all_user_events[-1].sequence if all_user_events else 0
+        )
+        _validate_cursor("event_cursor", event_cursor, state.sequence)
+        _validate_cursor(
+            "user_event_cursor", user_event_cursor, latest_user_sequence
+        )
+        runtime_events = tuple(
+            event
+            for event in self._journal.events(session_id)
+            if event.sequence > event_cursor
+        )
+        user_events = tuple(
+            event
+            for event in all_user_events
+            if event.sequence > user_event_cursor
+        )
+        return InvocationResult(
+            session_id=session_id,
+            invocation_id=invocation.id,
+            status=invocation.status,
+            output=thaw(invocation.output),
+            error=invocation.error,
+            waits=tuple(invocation.scheduler.waits.values()),
+            events=runtime_events,
+            user_events=user_events,
+            next_event_cursor=state.sequence,
+            next_user_event_cursor=latest_user_sequence,
+        )
+
+    def _last_user_sequence(self, invocation_id: str) -> int:
+        events = self._user_event_journal.events(invocation_id)
+        return events[-1].sequence if events else 0
+
+    def _validate_child_handle(
+        self, handle: ChildInvocationHandle
+    ) -> tuple[str, str]:
+        if not isinstance(handle, Mapping):
+            raise TypeError("Child Invocation Handle must be a mapping.")
+        required = {
+            "session_id",
+            "invocation_id",
+            "workflow_id",
+            "workflow_revision_id",
+        }
+        if set(handle) != required or any(
+            not isinstance(handle.get(key), str) or not handle[key]
+            for key in required
+        ):
+            raise RuntimeTransitionError(
+                "CHILD_HANDLE_INVALID",
+                "Child Invocation Handle is incomplete.",
+            )
+        invocation_id = handle["invocation_id"]
+        link = self._journal.child_link(invocation_id)
+        if link is None or {
+            "session_id": link.session_id,
+            "invocation_id": link.invocation_id,
+            "workflow_id": link.workflow_id,
+            "workflow_revision_id": link.workflow_revision_id,
+        } != dict(handle):
+            raise RuntimeTransitionError(
+                "CHILD_HANDLE_UNKNOWN",
+                "Child Invocation Handle is not present in Runtime Event history.",
+            )
+        state = self._journal.state(link.session_id)
+        if (
+            state.session is None
+            or state.invocation is None
+            or state.session.workflow_id != link.workflow_id
+            or state.invocation.id != invocation_id
+            or state.invocation.workflow_revision_id
+            != link.workflow_revision_id
+        ):
+            raise RuntimeTransitionError(
+                "CHILD_HANDLE_UNKNOWN",
+                "Child Invocation Handle does not identify current child state.",
+            )
+        return link.session_id, invocation_id
+
+    def _register_ir(self, workflow: WorkflowIR) -> None:
+        existing = self._workflows.get(workflow.workflow_revision_id)
+        if (
+            existing is not None
+            and existing.definition_hash != workflow.definition_hash
+        ):
+            raise RuntimeTransitionError(
+                "WORKFLOW_REVISION_CONFLICT",
+                f"Workflow Revision {workflow.workflow_revision_id!r} was reused.",
+            )
+        self._workflows[workflow.workflow_revision_id] = workflow
+        self._workflow_definition_snapshots[workflow.workflow_revision_id] = (
+            WorkflowDefinitionSnapshot.from_workflow_ir(workflow)
+        )
+        self._latest_workflow_revision[workflow.workflow_id] = (
+            workflow.workflow_revision_id
+        )
+        for node in workflow.nodes:
+            if isinstance(node.executable, WorkflowIR):
+                self._register_ir(node.executable)
+            elif isinstance(node.executable, Capability):
+                self._operator_registry.bind_capability(node.executable)
+
+    def _workflow_for_state(self, state: RuntimeState) -> WorkflowIR:
+        if state.session is None:
+            raise RuntimeTransitionError(
+                "SESSION_UNKNOWN", "Session does not exist."
+            )
+        invocation = state.invocation
+        revision_id = (
+            invocation.workflow_revision_id
+            if invocation is not None
+            else self._latest_workflow_revision.get(state.session.workflow_id)
+        )
+        workflow = self._workflows.get(revision_id or "")
+        if workflow is None:
+            raise RuntimeTransitionError(
+                "WORKFLOW_NOT_REGISTERED", "Workflow is not registered."
+            )
+        return workflow
+
+    def _resolve_workflow(
+        self,
+        value: Workflow | str,
+        *,
+        required_revision_id: str | None = None,
+    ) -> WorkflowIR:
+        if isinstance(value, Workflow):
+            workflow = self.register_workflow(value)
+            if (
+                required_revision_id is not None
+                and workflow.workflow_revision_id != required_revision_id
+            ):
+                raise RuntimeTransitionError(
+                    "RECOVERY_REVISION_MISMATCH",
+                    "Workflow object does not match the required Revision.",
+                )
+            return workflow
+        if required_revision_id is not None:
+            exact = self._workflows.get(required_revision_id)
+            if exact is not None and value in {
+                exact.workflow_id,
+                exact.workflow_revision_id,
+            }:
+                return exact
+        workflow = self._workflows.get(value)
+        if workflow is None:
+            revision_id = self._latest_workflow_revision.get(value)
+            workflow = self._workflows.get(revision_id or "")
+        if workflow is None:
+            raise RuntimeTransitionError(
+                "WORKFLOW_NOT_REGISTERED",
+                f"Workflow {value!r} is not registered.",
+            )
+        return workflow
+
+    def _submit(self, coroutine):
+        self._ensure_open()
+        return self._runtime_loop.submit(coroutine)
+
+    async def _await(self, future):
+        return await self._runtime_loop.wait(future)
+
+    def _run(self, coroutine):
+        self._ensure_open()
+        return self._runtime_loop.run(coroutine)
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError("App is closed.")
+            raise RuntimeError("AutoAgentApp is closed.")
+
+
+def _single_entry(workflow: WorkflowIR) -> str:
+    if len(workflow.entry_node_ids) != 1:
+        raise RuntimeTransitionError(
+            "INVOCATION_ENTRY_REQUIRED",
+            "Workflow with multiple Entries requires entry_node_id.",
+        )
+    return workflow.entry_node_ids[0]
+
+
+def _active_invocation(state: RuntimeState):
+    invocation = state.invocation
+    if invocation is None or invocation.status not in {"running", "waiting"}:
+        raise RuntimeTransitionError(
+            "INVOCATION_NOT_RUNNING", "Invocation is not running."
+        )
+    return invocation
+
+
+def _validate_cursor(name: str, value: int, maximum: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer.")
+    if value > maximum:
+        raise ValueError(f"{name} cannot be ahead of the current Event stream.")
+
+
+__all__ = [
+    "AutoAgentApp",
+    "CapabilityResolver",
+    "InvocationResult",
+    "InvocationStream",
+    "StreamItem",
+]

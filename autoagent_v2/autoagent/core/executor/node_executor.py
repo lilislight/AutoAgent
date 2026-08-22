@@ -1,894 +1,690 @@
-"""Policy-aware execution of one logical Node occurrence."""
+"""Transient execution of one NodeOccurrence.
+
+Python Tasks, generators and thread-pool work remain in this module. Durable
+progress is exposed only as semantic OperatorCall payloads.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-import random
+import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import Any, Literal
-from uuid import UUID, uuid4
+from collections import deque
+from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import Executor, Future
+from uuid import uuid4
 
-from ..operators import Operator, WaitOperator, is_stream_value
-from ..runtime import NodeExecution, OperatorCallRecord
-from ..runtime.serialization import RuntimeValueCodec
+from ..operators import Operator, ValueContract, is_stream_value
+from ..runtime.events import (
+    OperatorCallCompleted,
+    OperatorCallFailed,
+    OperatorCallStarted,
+    RuntimeErrorInfo,
+)
+from ..runtime.values import freeze
 from ..workflow import (
     AggregationContext,
+    Capability,
+    ConditionContext,
     ContextPatch,
+    EdgeIR,
+    ErrorInfo,
     InputMappingContext,
-    ItemSelectorContext,
     NodeIR,
     OutputBindingContext,
+    StreamContext,
+    WorkflowIR,
 )
-from .result import NodeExecutionResult, NodePhaseResult
+from .future import await_concurrent_future
+from .result import ExecutionMetrics, NodeExecutionResult
 
 
-ProgressCallback = Callable[[str, Any], Awaitable[None]]
-StreamCallback = Callable[[Any], Awaitable[None]]
+CallEvent = OperatorCallStarted | OperatorCallCompleted | OperatorCallFailed
+CallEventHandler = Callable[[CallEvent], Awaitable[None]]
+StreamChunkHandler = Callable[[object], Awaitable[None]]
 
 
-class _TimedHookFailure(Exception):
-    """Internal carrier preserving timing without changing public Hook errors."""
-
-    def __init__(self, cause: BaseException, timing: dict[str, int]) -> None:
-        super().__init__(str(cause))
-        self.cause = cause
-        self.timing = timing
+async def _ignore_event(_event: CallEvent) -> None:
+    return None
 
 
-@dataclass(slots=True)
-class _AttemptTiming:
-    """Mutable timing markers that survive timeout and cancellation."""
-
-    executor_wait_ns: int = 0
-    thread_pool_wait_ns: int = 0
-    handler_ns: int = 0
-    stream_ns: int = 0
-    stream_delivery_ns: int = 0
-    handler_started_ns: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _OperatorCallDraft:
-    """Call identity and immutable pre-call data finalized into one record."""
-
-    id: UUID
-    node_execution_id: UUID
-    node_id: str
-    operator_id: str
-    unit_kind: str
-    unit_index: int
-    attempt: int
-    started_at_ms: int
-    started_perf_ns: int
-    input: Any
-    idempotency_key: str | None
-
-    def finalize(
-        self,
-        *,
-        status: Literal["completed", "failed", "timed_out", "cancelled"],
-        output: Any,
-        error: str | None,
-        dispatch_wait_ns: int,
-        executor_wait_ns: int,
-        thread_pool_wait_ns: int,
-        handler_ns: int,
-        stream_ns: int,
-        stream_delivery_ns: int,
-    ) -> OperatorCallRecord:
-        return OperatorCallRecord(
-            id=self.id,
-            node_execution_id=self.node_execution_id,
-            node_id=self.node_id,
-            operator_id=self.operator_id,
-            unit_kind=self.unit_kind,
-            unit_index=self.unit_index,
-            attempt=self.attempt,
-            status=status,
-            started_at_ms=self.started_at_ms,
-            completed_at_ms=time.time_ns() // 1_000_000,
-            duration_ns=max(0, time.perf_counter_ns() - self.started_perf_ns),
-            dispatch_wait_ns=dispatch_wait_ns,
-            executor_wait_ns=executor_wait_ns,
-            thread_pool_wait_ns=thread_pool_wait_ns,
-            handler_ns=handler_ns,
-            stream_ns=stream_ns,
-            stream_delivery_ns=stream_delivery_ns,
-            input=self.input,
-            output=output,
-            error=error,
-            idempotency_key=self.idempotency_key,
-        )
+async def _ignore_chunk(_chunk: object) -> None:
+    return None
 
 
 class NodeExecutor:
-    """Run hooks and Operators without mutating shared Runtime state."""
+    """Execute Operator, Map and Stream semantics without owning Runtime State."""
 
-    def __init__(self, *, max_executor_concurrency: int = 8) -> None:
-        if max_executor_concurrency < 1:
-            raise ValueError("max_executor_concurrency must be positive.")
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=max_executor_concurrency,
-            thread_name_prefix="autoagent-executor",
-        )
-        # Every user-defined Hook and Operator shares one App-wide execution
-        # budget. Sync callables use the same bounded pool; async callables run
-        # on the Runtime Loop while holding the same semaphore slot.
-        self._executor_semaphore = asyncio.Semaphore(max_executor_concurrency)
-        self._max_executor_concurrency = max_executor_concurrency
+    def __init__(self, *, max_operator_concurrency: int = 32) -> None:
+        if (
+            not isinstance(max_operator_concurrency, int)
+            or isinstance(max_operator_concurrency, bool)
+            or max_operator_concurrency < 1
+        ):
+            raise ValueError("max_operator_concurrency must be positive.")
+        self._max_operator_concurrency = max_operator_concurrency
+        self._operator_capacity = asyncio.Semaphore(max_operator_concurrency)
+        self._pool = _BurstThreadPool(max_operator_concurrency)
+        self._closed = False
 
-    async def execute(
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            # Python cannot terminate a non-cooperative synchronous handler.
+            # Workers are daemon threads, so App shutdown cancels queued work
+            # and does not wait forever for an external blocking call.
+            self._pool.shutdown(wait=False, cancel_futures=True)
+
+    @property
+    def max_operator_concurrency(self) -> int:
+        return self._max_operator_concurrency
+
+    async def call_hook(
+        self, handler: Callable[..., object], *args: object
+    ) -> object:
+        if self._closed:
+            raise RuntimeError("NodeExecutor is closed.")
+        return await _invoke(self._pool, handler, *args)
+
+    async def map_input(
         self,
-        *,
         node: NodeIR,
-        execution: NodeExecution,
-        default_input: Any,
-        context: InputMappingContext,
-        progress: ProgressCallback,
-        stream_chunk: StreamCallback,
-        idempotency_key: str | None = None,
-        capture_operator_io: bool = False,
-    ) -> NodeExecutionResult:
-        result = NodeExecutionResult()
-        try:
-            await self._execute(
-                node, execution, default_input, context, result, progress,
-                stream_chunk, idempotency_key, capture_operator_io
+        *,
+        invocation_input: object,
+        incoming: dict[str, object],
+        invocation_context: object,
+        session_context: object,
+    ) -> object:
+        if node.input_mapping is None:
+            if not incoming:
+                value = invocation_input
+            elif len(incoming) == 1:
+                value = next(iter(incoming.values()))
+            else:
+                raise RuntimeError("Multi-input Node requires Input Mapping.")
+        else:
+            value = await _invoke(
+                self._pool,
+                node.input_mapping,
+                InputMappingContext(
+                    invocation_context=_mapping(invocation_context),
+                    session_context=_mapping(session_context),
+                    invocation_input=invocation_input,
+                    incoming=incoming,
+                ),
             )
-        except asyncio.CancelledError:
-            raise
-        except BaseException as error:
-            result.error = error
-        return result
+        if node.map is None and node.input_contract is not None:
+            value = node.input_contract.validate(value)
+        return value
 
     async def bind_output(
         self,
         node: NodeIR,
-        context: OutputBindingContext,
+        output: object,
+        *,
+        invocation_context: object,
+        session_context: object,
     ) -> ContextPatch:
         if node.output_binding is None:
             return ContextPatch()
-        patch = await self._call_hook(node.output_binding, context)
+        patch = await _invoke(
+            self._pool,
+            node.output_binding,
+            OutputBindingContext(
+                invocation_context=_mapping(invocation_context),
+                session_context=_mapping(session_context),
+                output=freeze(output),
+            ),
+        )
         if patch is None:
             return ContextPatch()
         if not isinstance(patch, ContextPatch):
             raise TypeError("Output Binding must return ContextPatch or None.")
-        RuntimeValueCodec.encode(dict(patch.session))
-        RuntimeValueCodec.encode(dict(patch.invocation))
         return patch
 
-    async def _execute(
+    async def select_edges(
+        self,
+        edges: tuple[EdgeIR, ...],
+        *,
+        source_status: str,
+        source_node_id: str,
+        output: object | None,
+        error: ErrorInfo | None,
+        invocation_context: object,
+        session_context: object,
+    ) -> set[str]:
+        selected: set[str] = set()
+        context = ConditionContext(
+            invocation_context=_mapping(invocation_context),
+            session_context=_mapping(session_context),
+            source_node_id=source_node_id,
+            output=freeze(output),
+            error=error,
+        )
+        for edge in edges:
+            if edge.on != source_status:
+                continue
+            if edge.condition is None:
+                selected.add(edge.id)
+                continue
+            decision = await _invoke(self._pool, edge.condition, context)
+            if type(decision) is not bool:
+                raise TypeError("Edge Condition must return bool.")
+            if decision:
+                selected.add(edge.id)
+        return selected
+
+    async def execute(
         self,
         node: NodeIR,
-        execution: NodeExecution,
-        default_input: Any,
-        context: InputMappingContext,
-        result: NodeExecutionResult,
-        progress: ProgressCallback,
-        stream_chunk: StreamCallback,
-        idempotency_key: str | None,
-        capture_operator_io: bool,
-    ) -> None:
-        result.mapped_input = await self._phase(
-            "input_mapping_finished",
-            node.input_mapping,
-            (context,),
-            default=default_input,
-            result=result,
-            progress=progress,
-            payload_name="input",
-        )
-
-        if isinstance(node.operator, WaitOperator):
-            result.wait_payload = node.operator.request_contract.validate(
-                result.mapped_input
+        occurrence_id: str,
+        value: object,
+        *,
+        invocation_context: object = None,
+        session_context: object = None,
+        on_call_event: CallEventHandler = _ignore_event,
+        on_stream_chunk: StreamChunkHandler = _ignore_chunk,
+        max_calls: int | None = None,
+    ) -> NodeExecutionResult:
+        if self._closed:
+            raise RuntimeError("NodeExecutor is closed.")
+        if isinstance(node.executable, (Capability, WorkflowIR)):
+            raise TypeError(
+                f"Node {node.id!r} requires a dispatcher owned by AutoAgentApp."
             )
-            RuntimeValueCodec.encode(result.wait_payload)
-            result.waiting = True
-            return
+        if not isinstance(node.executable, Operator):
+            raise TypeError(f"Node {node.id!r} is not directly executable.")
 
-        units, unit_kind = await self._prepare_units(
-            node, result.mapped_input, context, result, progress
-        )
-        outputs = await self._execute_units(
-            node=node,
-            execution=execution,
-            units=units,
-            unit_kind=unit_kind,
-            result=result,
-            progress=progress,
-            stream_chunk=stream_chunk,
-            idempotency_key=idempotency_key,
-            capture_operator_io=capture_operator_io,
-        )
-        if unit_kind == "normal":
-            output = outputs[0]
+        started = time.perf_counter_ns()
+        peak = 0
+        active = 0
+        lock = asyncio.Lock()
+        budget_lock = asyncio.Lock()
+        remaining_calls = max_calls
+
+        async def consume_call() -> bool:
+            nonlocal remaining_calls
+            if remaining_calls is None:
+                return True
+            async with budget_lock:
+                if remaining_calls < 1:
+                    return False
+                remaining_calls -= 1
+                return True
+
+        async def run_unit(index: int, item: object) -> tuple[object, int]:
+            nonlocal active, peak
+            async with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                return await self._call(
+                    node,
+                    occurrence_id,
+                    index,
+                    item,
+                    invocation_context,
+                    session_context,
+                    on_call_event,
+                    on_stream_chunk,
+                    consume_call,
+                )
+            finally:
+                async with lock:
+                    active -= 1
+
+        if node.map is None:
+            unit_results = [await run_unit(0, value)]
         else:
-            policy = node.policy
-            aggregator = (
-                policy.map.output_aggregator
-                if policy and policy.map
-                else policy.replication.output_aggregator
-                if policy and policy.replication
-                else None
+            if not isinstance(value, list):
+                raise TypeError("Map Node input must be a list of Operator inputs.")
+            limit = min(
+                len(value) or 1,
+                node.map.max_parallelism or self._max_operator_concurrency,
+                self._max_operator_concurrency,
             )
-            aggregation_context = self._derived_context(
-                AggregationContext,
-                context,
-                input=result.mapped_input,
-                operator_outputs=outputs,
-            )
-            output = await self._phase(
-                "aggregation_finished",
-                aggregator,
-                (aggregation_context,),
-                default=outputs,
-                result=result,
-                progress=progress,
-                payload_name="output",
-            )
-        output = node.output_contract.validate(output)
-        RuntimeValueCodec.encode(output)
-        result.output = output
+            unit_results: list[tuple[object, int] | None] = [None] * len(value)
+            next_index = 0
+            index_lock = asyncio.Lock()
 
-        binding_context = self._derived_context(
-            OutputBindingContext,
-            context,
-            input=result.mapped_input,
-            output=output,
-        )
-        patch = await self._phase(
-            "output_binding_finished",
-            node.output_binding,
-            (binding_context,),
-            default=ContextPatch(),
-            result=result,
-            progress=progress,
-            payload_name="patch",
-        )
-        if patch is None:
-            patch = ContextPatch()
-        if not isinstance(patch, ContextPatch):
-            raise TypeError("Output Binding must return ContextPatch or None.")
-        RuntimeValueCodec.encode(dict(patch.session))
-        RuntimeValueCodec.encode(dict(patch.invocation))
-        result.patch = patch
+            async def worker() -> None:
+                nonlocal next_index
+                while True:
+                    async with index_lock:
+                        if next_index >= len(value):
+                            return
+                        index = next_index
+                        next_index += 1
+                    unit_results[index] = await run_unit(index, value[index])
 
-    async def _prepare_units(
+            tasks = tuple(asyncio.create_task(worker()) for _ in range(limit))
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                # A Map is one NodeOccurrence. It cannot become terminal while
+                # physical calls from the same occurrence are still live.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            unit_results = [item for item in unit_results if item is not None]
+
+        outputs = [item[0] for item in unit_results]
+        call_count = sum(item[1] for item in unit_results)
+        output: object
+        if node.map is None:
+            output = outputs[0]
+        elif node.map.aggregate is None:
+            output = outputs
+        else:
+            context = AggregationContext(
+                invocation_context=_mapping(invocation_context),
+                session_context=_mapping(session_context),
+                inputs=tuple(value),  # type: ignore[arg-type]
+                outputs=tuple(outputs),
+            )
+            output = await _invoke(self._pool, node.map.aggregate, context)
+        if node.output_contract is not None:
+            output = node.output_contract.to_record(output)
+        return NodeExecutionResult(
+            output,
+            ExecutionMetrics(
+                duration_ns=max(0, time.perf_counter_ns() - started),
+                call_count=call_count,
+                peak_parallelism=peak,
+            ),
+        )
+
+    async def _call(
         self,
         node: NodeIR,
-        mapped_input: Any,
-        context: InputMappingContext,
-        result: NodeExecutionResult,
-        progress: ProgressCallback,
-    ) -> tuple[list[Any], str]:
-        policy = node.policy
-        if policy and policy.map:
-            selector_context = self._derived_context(
-                ItemSelectorContext, context, input=mapped_input
-            )
-            selected = await self._phase(
-                "item_selection_finished",
-                policy.map.item_selector,
-                (selector_context,),
-                default=mapped_input,
-                result=result,
-                progress=progress,
-                payload_name="items",
-            )
-            if not isinstance(selected, list):
-                raise TypeError("Map item selection must return list[ItemInput].")
-            return selected, "map_item"
-        if policy and policy.replication:
-            # Units only reference the immutable-by-ownership mapped input.
-            # Each physical Operator attempt isolates it immediately before
-            # invocation, avoiding an eager copy for every Replica here.
-            return [mapped_input] * policy.replication.count, "replica"
-        return [mapped_input], "normal"
-
-    async def _execute_units(
-        self,
-        *,
-        node: NodeIR,
-        execution: NodeExecution,
-        units: list[Any],
-        unit_kind: str,
-        result: NodeExecutionResult,
-        progress: ProgressCallback,
-        stream_chunk: StreamCallback,
-        idempotency_key: str | None,
-        capture_operator_io: bool,
-    ) -> list[Any]:
-        if not units:
-            return []
-        policy = node.policy
-        configured = (
-            policy.map.max_parallelism
-            if policy and policy.map
-            else policy.replication.max_parallelism
-            if policy and policy.replication
-            else None
-        )
-        limit = min(
-            len(units),
-            configured or self._max_executor_concurrency,
-            self._max_executor_concurrency,
-        )
-        queue: asyncio.Queue[tuple[int, Any, int, int] | None] = asyncio.Queue()
-        for index, value in enumerate(units):
-            queue.put_nowait(
-                (index, value, time.time_ns() // 1_000_000, time.perf_counter_ns())
-            )
-        for _ in range(max(1, limit)):
-            queue.put_nowait(None)
-        outputs: list[Any] = [None] * len(units)
-
-        async def worker() -> None:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    return
-                index, value, scheduled_at_ms, scheduled_perf_ns = item
-                outputs[index] = await self._execute_unit(
-                    node=node,
-                    execution=execution,
-                    # ``_execute_unit`` isolates the baseline separately for
-                    # every physical Retry/Fallback attempt. Copying here as
-                    # well would traverse every unit input twice.
-                    value=value,
-                    unit_kind=unit_kind,
-                    unit_index=index,
-                    scheduled_at_ms=scheduled_at_ms,
-                    scheduled_perf_ns=scheduled_perf_ns,
-                    result=result,
-                    progress=progress,
-                    stream_chunk=stream_chunk,
-                    idempotency_key=idempotency_key,
-                    capture_operator_io=capture_operator_io,
-                )
-
-        tasks = [asyncio.create_task(worker()) for _ in range(max(1, limit))]
-        try:
-            await asyncio.gather(*tasks)
-            return outputs
-        except BaseException:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-
-    async def _execute_unit(
-        self,
-        *,
-        node: NodeIR,
-        execution: NodeExecution,
-        value: Any,
-        unit_kind: str,
+        occurrence_id: str,
         unit_index: int,
-        scheduled_at_ms: int,
-        scheduled_perf_ns: int,
-        result: NodeExecutionResult,
-        progress: ProgressCallback,
-        stream_chunk: StreamCallback,
-        idempotency_key: str | None,
-        capture_operator_io: bool,
-    ) -> Any:
-        retry = node.policy.retry if node.policy and node.policy.retry else None
-        max_attempts = retry.max_attempts if retry else 1
-        assert isinstance(node.operator, Operator)
-        operators = (node.operator, *node.fallback_operators)
+        value: object,
+        invocation_context: object,
+        session_context: object,
+        on_call_event: CallEventHandler,
+        on_stream_chunk: StreamChunkHandler,
+        consume_call: Callable[[], Awaitable[bool]],
+    ) -> tuple[object, int]:
+        primary = node.executable
+        assert isinstance(primary, Operator)
+        policy = node.operator_policy
+        retry = policy.retry if policy is not None else None
+        max_attempts = retry.max_attempts if retry is not None else 1
+        operators = (primary, *(policy.fallback if policy is not None else ()))
+        calls = 0
         last_error: BaseException | None = None
-        first_physical_attempt = True
-        for operator in operators:
+        for operator_index, operator in enumerate(operators):
             for attempt in range(1, max_attempts + 1):
-                call_id = uuid4()
-                await progress("operator_call_started", call_id)
-                call_started_perf_ns = time.perf_counter_ns()
-                call_started_at_ms = (
-                    scheduled_at_ms
-                    if first_physical_attempt
-                    else time.time_ns() // 1_000_000
+                if not await consume_call():
+                    raise RuntimeError("Operator Call limit exceeded for this Invocation.")
+                calls += 1
+                reason = (
+                    "fallback"
+                    if operator_index > 0
+                    else "retry"
+                    if attempt > 1
+                    else "normal"
                 )
-                call_duration_start_ns = (
-                    scheduled_perf_ns if first_physical_attempt else call_started_perf_ns
-                )
-                dispatch_wait_ns = (
-                    max(0, call_started_perf_ns - scheduled_perf_ns)
-                    if first_physical_attempt
-                    else 0
-                )
-                effective_idempotency_key = (
-                    f"{idempotency_key}:{unit_kind}:{unit_index}"
-                    if idempotency_key is not None
-                    else None
-                )
-                call_input = self._with_idempotency_key(
-                    # Every physical attempt owns a fresh value. A failed
-                    # primary Call may mutate its arguments, but that must not
-                    # alter a Retry or Fallback input for the same unit.
-                    RuntimeValueCodec.isolate(value),
-                    idempotency_key=effective_idempotency_key,
-                    operator=operator,
-                )
-                draft = _OperatorCallDraft(
-                    id=call_id,
-                    node_execution_id=execution.id,
-                    node_id=node.id,
-                    operator_id=operator.id,
-                    unit_kind=unit_kind,
-                    unit_index=unit_index,
-                    attempt=attempt,
-                    started_at_ms=call_started_at_ms,
-                    started_perf_ns=call_duration_start_ns,
-                    input=(
-                        RuntimeValueCodec.isolate(call_input)
-                        if capture_operator_io
-                        else None
-                    ),
-                    idempotency_key=effective_idempotency_key,
-                )
-                status: Literal["completed", "failed", "timed_out", "cancelled"] = (
-                    "completed"
-                )
-                error_text = None
-                executor_wait_ns = 0
-                thread_pool_wait_ns = 0
-                handler_ns = 0
-                stream_ns = 0
-                stream_delivery_ns = 0
-                output = None
-                cancellation: asyncio.CancelledError | None = None
-                attempt_timing = _AttemptTiming()
                 try:
-                    output = await self._invoke_attempt(
-                        operator, call_input, node, stream_chunk, attempt_timing
+                    output = await self._call_once(
+                        node,
+                        operator,
+                        occurrence_id,
+                        unit_index,
+                        value,
+                        attempt,
+                        reason,
+                        invocation_context,
+                        session_context,
+                        on_call_event,
+                        on_stream_chunk,
                     )
-                except asyncio.TimeoutError:
-                    status = "timed_out"
-                    last_error = TimeoutError(
-                        f"Operator {operator.id!r} exceeded its timeout."
-                    )
-                    error_text = str(last_error)
-                except asyncio.CancelledError as error:
-                    status = "cancelled"
-                    cancellation = error
-                    error_text = "Operator call was cancelled."
+                    return output, calls
+                except asyncio.CancelledError:
+                    raise
                 except BaseException as error:
-                    status = "failed"
                     last_error = error
-                    error_text = f"{type(error).__name__}: {error}"
-                executor_wait_ns = attempt_timing.executor_wait_ns
-                thread_pool_wait_ns = attempt_timing.thread_pool_wait_ns
-                handler_ns = attempt_timing.handler_ns
-                stream_ns = attempt_timing.stream_ns
-                stream_delivery_ns = attempt_timing.stream_delivery_ns
-                record = draft.finalize(
-                    status=status,
-                    dispatch_wait_ns=dispatch_wait_ns,
-                    executor_wait_ns=executor_wait_ns,
-                    thread_pool_wait_ns=thread_pool_wait_ns,
-                    handler_ns=handler_ns,
-                    stream_ns=stream_ns,
-                    stream_delivery_ns=stream_delivery_ns,
-                    output=(
-                        output
-                        if capture_operator_io and status == "completed"
-                        else None
-                    ),
-                    error=error_text,
-                )
-                first_physical_attempt = False
-                execution.operator_attempts += 1
-                await progress("operator_call", record)
-                if cancellation is not None:
-                    raise cancellation
-                if status == "completed":
-                    return output
-                if attempt < max_attempts:
-                    await asyncio.sleep(
-                        self._retry_delay(retry.backoff if retry else None, attempt)
-                    )
+                    if attempt < max_attempts and retry is not None and retry.backoff is not None:
+                        delay = retry.backoff.delay_seconds(attempt - 1)
+                        if delay:
+                            await asyncio.sleep(delay)
         assert last_error is not None
         raise last_error
 
-    @staticmethod
-    def _with_idempotency_key(
-        value: Any, *, idempotency_key: str | None, operator: Operator
-    ) -> Any:
-        if idempotency_key is None:
-            return value
-        if not any(
-            parameter.name == "idempotency_key"
-            for parameter in operator.contract.parameters
-        ):
-            return value
-        if not isinstance(value, Mapping):
-            raise TypeError(
-                "An idempotent Operator input must be a mapping so Core can inject "
-                "idempotency_key."
-            )
-        enriched = dict(value)
-        supplied = enriched.get("idempotency_key")
-        if supplied is not None and supplied != idempotency_key:
-            raise ValueError("Input cannot override Core's idempotency_key.")
-        enriched["idempotency_key"] = idempotency_key
-        return enriched
-
-    async def _invoke_attempt(
+    async def _call_once(
         self,
-        operator: Operator,
-        value: Any,
         node: NodeIR,
-        stream_chunk: StreamCallback,
-        timing: _AttemptTiming,
-    ) -> Any:
-        async def call() -> Any:
-            admission_started = time.perf_counter_ns()
-            acquired = False
-            handler = operator.handler
-            try:
-                try:
-                    await self._executor_semaphore.acquire()
-                    acquired = True
-                finally:
-                    timing.executor_wait_ns = max(
-                        0, time.perf_counter_ns() - admission_started
-                    )
-                if inspect.iscoroutinefunction(handler):
-                    started = time.perf_counter_ns()
-                    timing.handler_started_ns = started
-                    try:
-                        output = await self._invoke_handler(operator, value)
-                    finally:
-                        timing.handler_ns = max(
-                            0, time.perf_counter_ns() - started
-                        )
-                else:
-                    submitted = time.perf_counter_ns()
-                    loop = asyncio.get_running_loop()
-                    output = await self._await_thread_future(
-                        loop.run_in_executor(
-                            self._thread_pool,
-                            self._invoke_handler_tracked,
-                            operator,
-                            value,
-                            submitted,
-                            timing,
-                        )
-                    )
-                    if inspect.isawaitable(output):
-                        await_started = time.perf_counter_ns()
-                        try:
-                            output = await output
-                        finally:
-                            timing.handler_ns += max(
-                                0, time.perf_counter_ns() - await_started
-                            )
-                stream_policy = node.policy.stream if node.policy else None
-                if stream_policy is not None:
-                    if not is_stream_value(output):
-                        raise TypeError(
-                            "A Node with StreamPolicy must return Iterator or AsyncIterator."
-                        )
-                    stream_started = time.perf_counter_ns()
-                    try:
-                        output, timing.stream_delivery_ns = await self._consume_stream(
-                            output, operator, node, stream_chunk
-                        )
-                    finally:
-                        timing.stream_ns = max(
-                            0,
-                            time.perf_counter_ns()
-                            - stream_started
-                            - timing.stream_delivery_ns,
-                        )
-                elif is_stream_value(output):
-                    raise TypeError(
-                        "A streaming Operator requires NodePolicy(stream=StreamPolicy(...))."
-                    )
-                else:
-                    assert operator.contract.output is not None
-                    output = operator.contract.output.validate(output)
-                    RuntimeValueCodec.encode(output)
-                return output
-            finally:
-                if timing.handler_started_ns is not None and timing.handler_ns == 0:
-                    timing.handler_ns = max(
-                        0, time.perf_counter_ns() - timing.handler_started_ns
-                    )
-                if acquired:
-                    self._executor_semaphore.release()
+        operator: Operator,
+        occurrence_id: str,
+        unit_index: int,
+        value: object,
+        attempt: int,
+        reason: str,
+        invocation_context: object,
+        session_context: object,
+        on_call_event: CallEventHandler,
+        on_stream_chunk: StreamChunkHandler,
+    ) -> object:
+        await self._operator_capacity.acquire()
+        release_deferred = False
 
-        timeout = (
-            node.policy.timeout.timeout_ms / 1000
-            if node.policy and node.policy.timeout
+        def defer_release(future: Future[object]) -> None:
+            nonlocal release_deferred
+            release_deferred = True
+            asyncio.create_task(
+                _release_capacity_after_future(future, self._operator_capacity)
+            )
+
+        try:
+            return await self._call_once_admitted(
+                node,
+                operator,
+                occurrence_id,
+                unit_index,
+                value,
+                attempt,
+                reason,
+                invocation_context,
+                session_context,
+                on_call_event,
+                on_stream_chunk,
+                defer_release,
+            )
+        finally:
+            if not release_deferred:
+                self._operator_capacity.release()
+
+    async def _call_once_admitted(
+        self,
+        node: NodeIR,
+        operator: Operator,
+        occurrence_id: str,
+        unit_index: int,
+        value: object,
+        attempt: int,
+        reason: str,
+        invocation_context: object,
+        session_context: object,
+        on_call_event: CallEventHandler,
+        on_stream_chunk: StreamChunkHandler,
+        defer_release: Callable[[Future[object]], None],
+    ) -> object:
+        validated = (
+            operator.contract.input.validate(value)
+            if operator.contract.input is not None
             else None
         )
-        return await asyncio.wait_for(call(), timeout) if timeout else await call()
-
-    @staticmethod
-    def _invoke_handler_tracked(
-        operator: Operator,
-        value: Any,
-        submitted_ns: int,
-        timing: _AttemptTiming,
-    ) -> Any:
-        started = time.perf_counter_ns()
-        timing.thread_pool_wait_ns = max(0, started - submitted_ns)
-        timing.handler_started_ns = started
-        try:
-            return NodeExecutor._invoke_handler_sync(operator, value)
-        finally:
-            timing.handler_ns = max(0, time.perf_counter_ns() - started)
-
-    @staticmethod
-    async def _invoke_handler(operator: Operator, value: Any) -> Any:
-        output = NodeExecutor._invoke_handler_sync(operator, value)
-        return await output if inspect.isawaitable(output) else output
-
-    @staticmethod
-    def _invoke_handler_sync(operator: Operator, value: Any) -> Any:
-        arguments, keywords = operator.contract.prepare_call(value)
-        return operator.handler(*arguments, **keywords)
-
-    async def _consume_stream(
-        self,
-        source: object,
-        operator: Operator,
-        node: NodeIR,
-        stream_chunk: StreamCallback,
-    ) -> tuple[Any, int]:
-        policy = node.policy.stream if node.policy else None
-        assert policy is not None and operator.contract.stream_chunk is not None
-        reducer = policy.reducer()
-        delivery_ns = 0
-        if hasattr(source, "__aiter__"):
-            async for raw_chunk in source:  # type: ignore[union-attr]
-                chunk = operator.contract.stream_chunk.validate(raw_chunk)
-                RuntimeValueCodec.encode(chunk)
-                value = reducer.add(chunk)
-                if value is not None:
-                    raise TypeError("StreamReducer.add() must return None.")
-                started = time.perf_counter_ns()
-                await stream_chunk(chunk)
-                delivery_ns += max(0, time.perf_counter_ns() - started)
-        else:
-            iterator = iter(source)  # type: ignore[arg-type]
-            while True:
-                exists, raw_chunk = await self._await_thread_future(
-                    asyncio.get_running_loop().run_in_executor(
-                        self._thread_pool, self._next, iterator
-                    )
-                )
-                if not exists:
-                    break
-                chunk = operator.contract.stream_chunk.validate(raw_chunk)
-                RuntimeValueCodec.encode(chunk)
-                value = reducer.add(chunk)
-                if value is not None:
-                    raise TypeError("StreamReducer.add() must return None.")
-                started = time.perf_counter_ns()
-                await stream_chunk(chunk)
-                delivery_ns += max(0, time.perf_counter_ns() - started)
-        output = reducer.finish()
-        if inspect.isawaitable(output):
-            raise TypeError("StreamReducer.finish() must be synchronous.")
-        output = node.output_contract.validate(output)
-        RuntimeValueCodec.encode(output)
-        return output, delivery_ns
-
-    @staticmethod
-    def _next(iterator: Any) -> tuple[bool, Any]:
-        try:
-            return True, next(iterator)
-        except StopIteration:
-            return False, None
-
-    async def _phase(
-        self,
-        name: str,
-        function: Callable[..., Any] | None,
-        arguments: tuple[Any, ...],
-        *,
-        default: Any,
-        result: NodeExecutionResult,
-        progress: ProgressCallback,
-        payload_name: str,
-    ) -> Any:
-        if function is None:
-            return default
-        started_at_ms = time.time_ns() // 1_000_000
-        started = time.perf_counter_ns()
-        try:
-            value, timing = await self.call_hook_timed(function, *arguments)
-        except _TimedHookFailure as failure:
-            error = failure.cause
-            completed_at_ms = time.time_ns() // 1_000_000
-            duration = max(0, time.perf_counter_ns() - started)
-            phase = NodePhaseResult(
-                name=name,
-                status="failed",
-                started_at_ms=started_at_ms,
-                completed_at_ms=completed_at_ms,
-                duration_ns=duration,
-                executor_wait_ns=failure.timing["executor_wait_ns"],
-                thread_pool_wait_ns=failure.timing["thread_pool_wait_ns"],
-                handler_ns=failure.timing["handler_ns"],
-                payload={"error": f"{type(error).__name__}: {error}"},
+        call_id = str(uuid4())
+        await on_call_event(
+            OperatorCallStarted(
+                call_id,
+                occurrence_id,
+                operator.id,
+                unit_index,
+                (
+                    operator.contract.input.to_record(validated)
+                    if operator.contract.input is not None
+                    else None
+                ),
+                attempt,
+                reason,  # type: ignore[arg-type]
             )
-            if name == "output_binding_finished":
-                result.deferred_phases.append(phase)
-            else:
-                await progress("phase", phase)
+        )
+        async def invoke_and_validate() -> tuple[object, ValueContract]:
+            returned = await _invoke_handler(
+                self._pool, operator, validated, defer_release
+            )
+            if node.stream is not None:
+                returned = await self._reduce_stream(
+                    node,
+                    operator,
+                    returned,
+                    value,
+                    invocation_context,
+                    session_context,
+                    on_stream_chunk,
+                )
+            elif is_stream_value(returned):
+                raise TypeError("Streaming Operator requires Node.stream.")
+            contract = (
+                node.output_contract
+                if node.stream is not None
+                else operator.contract.output
+            )
+            if contract is None:
+                raise TypeError("Operator output contract is unavailable.")
+            return contract.validate(returned), contract
+
+        try:
+            timeout_ms = (
+                node.operator_policy.timeout_ms
+                if node.operator_policy is not None
+                else None
+            )
+            output, contract = (
+                await asyncio.wait_for(invoke_and_validate(), timeout_ms / 1000)
+                if timeout_ms is not None
+                else await invoke_and_validate()
+            )
+        except asyncio.CancelledError:
+            error = RuntimeErrorInfo("CancelledError", "Operator Call was cancelled.")
+            await asyncio.shield(on_call_event(OperatorCallFailed(call_id, error)))
             raise
-        completed_at_ms = time.time_ns() // 1_000_000
-        duration = max(0, time.perf_counter_ns() - started)
-        phase = NodePhaseResult(
-            name=name,
-            status="completed",
-            started_at_ms=started_at_ms,
-            completed_at_ms=completed_at_ms,
-            duration_ns=duration,
-            executor_wait_ns=timing["executor_wait_ns"],
-            thread_pool_wait_ns=timing["thread_pool_wait_ns"],
-            handler_ns=timing["handler_ns"],
-            payload={payload_name: value},
+        except BaseException as exc:
+            error = RuntimeErrorInfo(type(exc).__name__, str(exc) or type(exc).__name__)
+            await on_call_event(OperatorCallFailed(call_id, error))
+            raise
+        await on_call_event(OperatorCallCompleted(call_id, contract.to_record(output)))
+        return output
+
+    async def _reduce_stream(
+        self,
+        node: NodeIR,
+        operator: Operator,
+        returned: object,
+        value: object,
+        invocation_context: object,
+        session_context: object,
+        on_stream_chunk: StreamChunkHandler,
+    ) -> object:
+        if not is_stream_value(returned):
+            raise TypeError("Stream Node Operator must return Iterator or AsyncIterator.")
+        assert node.stream is not None
+        context = StreamContext(
+            invocation_context=_mapping(invocation_context),
+            session_context=_mapping(session_context),
+            input=value,
         )
-        if name == "output_binding_finished":
-            result.deferred_phases.append(phase)
-        else:
-            await progress("phase", phase)
-        return value
-
-    async def _call_hook(self, function: Callable[..., Any], *arguments: Any) -> Any:
-        return await self.call_hook(function, *arguments)
-
-    async def call_hook(self, function: Callable[..., Any], *arguments: Any) -> Any:
-        """Run one Hook under the same global execution budget as Operators."""
-
+        reducer = node.stream.reducer
+        state = await _invoke(self._pool, reducer.initial, context)
+        stream_error: BaseException | None = None
         try:
-            value, _ = await self.call_hook_timed(function, *arguments)
-        except _TimedHookFailure as failure:
-            raise failure.cause
-        return value
-
-    async def call_hook_timed(
-        self, function: Callable[..., Any], *arguments: Any
-    ) -> tuple[Any, dict[str, int]]:
-        """Run a Hook and report waits separately from user handler time."""
-
-        admission_started = time.perf_counter_ns()
-        await self._executor_semaphore.acquire()
-        executor_wait_ns = max(0, time.perf_counter_ns() - admission_started)
-        try:
-            if inspect.iscoroutinefunction(function):
-                handler_started = time.perf_counter_ns()
-                try:
-                    value = await function(*arguments)
-                except BaseException as error:
-                    raise _TimedHookFailure(
-                        error,
-                        {
-                            "executor_wait_ns": executor_wait_ns,
-                            "thread_pool_wait_ns": 0,
-                            "handler_ns": max(
-                                0, time.perf_counter_ns() - handler_started
-                            ),
-                        },
-                    ) from error
-                return value, {
-                    "executor_wait_ns": executor_wait_ns,
-                    "thread_pool_wait_ns": 0,
-                    "handler_ns": max(0, time.perf_counter_ns() - handler_started),
-                }
-            loop = asyncio.get_running_loop()
-            submitted = time.perf_counter_ns()
-            ok, value, worker_started, worker_finished = await self._await_thread_future(
-                loop.run_in_executor(
-                    self._thread_pool,
-                    self._call_hook_sync_timed,
-                    function,
-                    *arguments,
-                )
-            )
-            # Callable instances and ordinary functions may return an Awaitable
-            # even when inspect cannot identify them as coroutine functions.
-            handler_ns = max(0, worker_finished - worker_started)
-            timing = {
-                "executor_wait_ns": executor_wait_ns,
-                "thread_pool_wait_ns": max(0, worker_started - submitted),
-                "handler_ns": handler_ns,
-            }
-            if not ok:
-                assert isinstance(value, BaseException)
-                raise _TimedHookFailure(value, timing) from value
-            if inspect.isawaitable(value):
-                await_started = time.perf_counter_ns()
-                try:
-                    value = await value
-                except BaseException as error:
-                    timing["handler_ns"] += max(
-                        0, time.perf_counter_ns() - await_started
-                    )
-                    raise _TimedHookFailure(error, timing) from error
-                handler_ns += max(0, time.perf_counter_ns() - await_started)
-            return value, {
-                "executor_wait_ns": executor_wait_ns,
-                "thread_pool_wait_ns": max(0, worker_started - submitted),
-                "handler_ns": handler_ns,
-            }
-        finally:
-            self._executor_semaphore.release()
-
-    @staticmethod
-    def _call_hook_sync_timed(
-        function: Callable[..., Any], *arguments: Any
-    ) -> tuple[bool, Any, int, int]:
-        started = time.perf_counter_ns()
-        try:
-            value = function(*arguments)
+            if hasattr(returned, "__anext__"):
+                async for chunk in returned:  # type: ignore[union-attr]
+                    if operator.contract.stream_chunk is not None:
+                        chunk = operator.contract.stream_chunk.validate(
+                            chunk
+                        )
+                        emitted_chunk = operator.contract.stream_chunk.to_record(
+                            chunk
+                        )
+                    else:
+                        emitted_chunk = chunk
+                    await on_stream_chunk(emitted_chunk)
+                    state = await _invoke(self._pool, reducer.add, context, state, chunk)
+            else:
+                iterator = iter(returned)  # type: ignore[arg-type]
+                while True:
+                    present, chunk = await _run_sync(self._pool, _next_item, iterator)
+                    if not present:
+                        break
+                    if operator.contract.stream_chunk is not None:
+                        chunk = operator.contract.stream_chunk.validate(
+                            chunk
+                        )
+                        emitted_chunk = operator.contract.stream_chunk.to_record(
+                            chunk
+                        )
+                    else:
+                        emitted_chunk = chunk
+                    await on_stream_chunk(emitted_chunk)
+                    state = await _invoke(self._pool, reducer.add, context, state, chunk)
         except BaseException as error:
-            return False, error, started, time.perf_counter_ns()
-        return True, value, started, time.perf_counter_ns()
+            stream_error = error
+            raise
+        finally:
+            try:
+                await _close_stream_source(self._pool, returned)
+            except BaseException:
+                if stream_error is None:
+                    raise
+        return await _invoke(self._pool, reducer.finish, context, state)
 
-    @staticmethod
-    async def _await_thread_future(future: asyncio.Future[Any]) -> Any:
-        """Bound lost selector wakeups only while thread-pool work is active."""
 
-        while not future.done():
-            await asyncio.sleep(0.001)
-        return future.result()
-
-    @staticmethod
-    def _derived_context(
-        context_type: type[Any], context: InputMappingContext, **values: Any
-    ) -> Any:
-        if context_type is ItemSelectorContext:
-            values["input"] = RuntimeValueCodec.isolate(values["input"])
-        elif context_type is OutputBindingContext:
-            values["input"] = RuntimeValueCodec.isolate(values["input"])
-            values["output"] = RuntimeValueCodec.isolate(values["output"])
-        elif context_type is AggregationContext:
-            values["input"] = RuntimeValueCodec.isolate(values["input"])
-            # operator_outputs is already a private, unit-index ordered working
-            # list for this Aggregator and is intentionally writable.
-        return context_type(
-            workflow_id=context.workflow_id,
-            workflow_revision_id=context.workflow_revision_id,
-            workflow_path=context.workflow_path,
-            session_id=context.session_id,
-            invocation_id=context.invocation_id,
-            session_context=context.session_context,
-            invocation_context=context.invocation_context,
-            invocation_input=context.invocation_input,
-            node_id=context.node_id,
-            node_execution_id=context.node_execution_id,
-            execution_scope=context.execution_scope,
-            incoming=context.incoming,
-            **values,
+async def _invoke_handler(
+    pool: Executor,
+    operator: Operator,
+    value: object,
+    defer_release: Callable[[Future[object]], None],
+) -> object:
+    handler = operator.handler
+    if inspect.iscoroutinefunction(handler) or inspect.isasyncgenfunction(handler):
+        returned = handler() if operator.contract.input is None else handler(value)
+    else:
+        returned = await _run_sync(
+            pool,
+            handler if operator.contract.input is None else lambda: handler(value),
+            defer_release=defer_release,
         )
+    if inspect.isawaitable(returned):
+        return await returned
+    return returned
 
-    @staticmethod
-    def _retry_delay(backoff: Any, retry_index: int) -> float:
-        if backoff is None:
-            return 0.0
-        delay = float(backoff.initial_delay_ms)
-        if backoff.mode == "linear":
-            delay *= retry_index
-        elif backoff.mode == "exponential":
-            delay *= backoff.multiplier ** (retry_index - 1)
-        if backoff.max_delay_ms is not None:
-            delay = min(delay, backoff.max_delay_ms)
-        if backoff.jitter == "full":
-            delay = random.uniform(0, delay)
-        elif backoff.jitter == "equal":
-            delay = delay / 2 + random.uniform(0, delay / 2)
-        return delay / 1000
 
-    def close(self) -> None:
-        self._thread_pool.shutdown(wait=False, cancel_futures=True)
+async def _invoke(
+    pool: Executor, handler: Callable[..., object], *args: object
+) -> object:
+    if inspect.iscoroutinefunction(handler):
+        return await handler(*args)  # type: ignore[misc]
+    returned = await _run_sync(pool, handler, *args)
+    if inspect.isawaitable(returned):
+        return await returned
+    return returned
+
+
+async def _run_sync(
+    pool: Executor,
+    handler: Callable[..., object],
+    *args: object,
+    defer_release: Callable[[Future[object]], None] | None = None,
+) -> object:
+    future = pool.submit(handler, *args)
+    # This cancels queued work when the caller is cancelled. Python cannot
+    # forcibly interrupt a sync callable that has already entered user code.
+    try:
+        return await await_concurrent_future(future)
+    except asyncio.CancelledError:
+        if defer_release is not None and not future.done():
+            defer_release(future)
+        raise
+
+
+async def _release_capacity_after_future(
+    future: Future[object], capacity: asyncio.Semaphore
+) -> None:
+    try:
+        await await_concurrent_future(future)
+    except BaseException:
+        pass
+    finally:
+        capacity.release()
+
+
+async def _close_stream_source(pool: Executor, source: object) -> None:
+    close = getattr(source, "aclose", None)
+    if not callable(close):
+        close = getattr(source, "close", None)
+    if callable(close):
+        await _invoke(pool, close)
+
+
+class _BurstThreadPool(Executor):
+    """Lazy bounded workers that exit when the current work burst is drained.
+
+    Workers never wait for a future notification: they drain queued work and
+    exit. This keeps idle resource use bounded and isolates worker lifecycle
+    from Node execution semantics.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        self._max_workers = max_workers
+        self._jobs: deque[tuple[Future[object], Callable[[], object]]] = deque()
+        self._lock = threading.Lock()
+        self._threads: set[threading.Thread] = set()
+        self._active_workers = 0
+        self._closed = False
+
+    def submit(self, fn, /, *args, **kwargs):
+        future: Future[object] = Future()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Operator thread pool is closed.")
+            self._jobs.append((future, lambda: fn(*args, **kwargs)))
+            if self._active_workers < self._max_workers:
+                thread = threading.Thread(
+                    target=self._worker,
+                    name=f"autoagent-operator-{self._active_workers}",
+                    daemon=True,
+                )
+                self._active_workers += 1
+                self._threads.add(thread)
+                thread.start()
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if cancel_futures:
+                while self._jobs:
+                    future, _call = self._jobs.popleft()
+                    future.cancel()
+            threads = tuple(self._threads)
+        if wait:
+            for thread in threads:
+                thread.join()
+
+    def _worker(self) -> None:
+        while True:
+            with self._lock:
+                if not self._jobs:
+                    self._active_workers -= 1
+                    self._threads.discard(threading.current_thread())
+                    return
+                job = self._jobs.popleft()
+            future, call = job
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(call())
+            except BaseException as error:
+                future.set_exception(error)
+
+
+def _next_item(iterator: Iterator[object]) -> tuple[bool, object | None]:
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None
+
+
+def _mapping(value: object):
+    from collections.abc import Mapping
+
+    return value if isinstance(value, Mapping) else {}

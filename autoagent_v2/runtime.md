@@ -1,271 +1,84 @@
-# AutoAgent V2 Runtime, Operations, Checkpoints, and Events
+# Runtime、State Operation 与 Event
 
-## Purpose
+## 两层模型
 
-This document is the normative contract for V2 execution state, state changes,
-recovery checkpoints, and Runtime Events. The implementation must prefer the
-smallest correct representation. Derived indexes, caches, and duplicated state
-are added only after a benchmark demonstrates that they are necessary.
+Runtime State 的权威变更和持久化记录是两个不同层次：
 
-## Core invariants
+```text
+Runtime 行为
+  -> StateOperation
+  -> StateOperationBatch              # 原子状态提交
+  -> StateReducer
+  -> RuntimeState
+  -> pending batches + Runtime Logs
+  -> RuntimeEvent                     # 可调节的记录信封
+```
 
-1. Each Session owns one independent Runtime State.
-2. Runtime State is the only authoritative execution state.
-3. Scheduler and Executor objects contain behavior and infrastructure only.
-   They do not own mutable Workflow execution state.
-4. Every Runtime State modification is an ordered `StateOperation` applied by
-   the Session's single Runtime coordinator.
-5. A batch of State Operations is validated and applied atomically.
-6. A Checkpoint is the complete JSON representation of one Session Runtime
-   State. `app.recover(checkpoint)` restores both the Session and its current
-   Invocation.
-7. Hook and Operator arguments are isolated Python copies. They are temporary
-   execution data and never become Runtime State by accident.
-8. Runtime Event boundaries and Checkpoint boundaries are independent from
-   State Operation boundaries.
+`StateReducer.apply_batch()` 只解释 `StateOperationBatch`，不根据 Event 名称重新运行
+旧版调度、Policy 或执行逻辑。语义转换对象只用于当前版本规划 State Operation；
+持久化后的重放以 Event 中的 Operation Batch 为准。
 
-## Recovery equivalence
+## State Operation Batch
 
-After encoding a Runtime State to a Checkpoint and recovering it in a new App,
-Core must make the same control-flow decisions as the original process given
-the same Workflow Revision and the same external Operator results.
+`StateOperation` 使用严格的 `add | replace | remove`、规范 State 路径和可持久化值。
+`StateOperationBatch` 包含：
 
-Any value that can change post-recovery behavior belongs in Runtime State. This
-includes ordered Scheduler work, unresolved activations, fan-in state, Loop
-scope and iteration, Wait state, Context, Node state and committed output,
-idempotency identity, retry state that must survive Node replay, cancellation,
-and semantic deadlines.
+```text
+id
+from_state_version
+to_state_version
+occurred_at_ns
+operations[]
+```
 
-Process infrastructure does not belong in Runtime State. Tasks, futures,
-locks, semaphores, thread pools, HTTP clients, provider clients, and temporary
-Hook or Operator inputs are recreated after recovery. Concurrency settings may
-change throughput but must not change logical result ordering.
+一个 Batch 必须把版本精确推进一位。Reducer 先在候选记录上应用全部 Operation，
+再恢复并校验完整 typed RuntimeState；任一 Operation 或 State schema 校验失败时，
+旧 State 保持不变。
 
-## Minimal Runtime State
+## Runtime Event
 
-The canonical Session Runtime contains only:
+Runtime Event 是 UI、Trace、持久化和恢复使用的信封，包含：
 
-- `state_version` for ordered atomic commits and parallel Context conflict
-  detection;
-- Session identity, Workflow identity, Session Context, and Context write
-  versions;
-- current/latest Invocation identity, Workflow Revision, mode, state, input,
-  Invocation Context, output, error, cancellation and recovery state;
-- Scheduler ready work, unresolved activations, fan-in decisions, execution
-  scopes, and Loop instances;
-- Node executions with identity, Node identity, scope, state, incoming
-  activations, start version, committed output, error, and stable idempotency
-  identity;
-- scoped Edge decisions needed by the Scheduler;
-- active Waits.
+```text
+session event sequence
+from_state_version / to_state_version
+有序 StateOperationBatch[]
+有序 RuntimeLog[]
+```
 
-Trace-only timing, Hook phase values, formatting, duplicated running/completed
-indexes, and other derivable caches are excluded. Completed Operator input and
-output are Event data, not permanent Checkpoint state. If Node-level recovery
-restarts an unfinished Node, its Input Mapping, Selector, Operator calls,
-Aggregation, and Output Binding are executed again.
+Runtime Log 记录语义名称、身份、因果、时间和对应 `state_version`。一个 Event 可以
+携带一个或多个 Batch，也可以只记录没有改变 State 的观察点。
 
-## State Operations
+Full 模式当前使用 `journal.append()`，即每次转换立即 `stage + flush`。Journal 同时
+提供独立 `stage()` 和 `flush()`：后续 Standard/Minimal 或宿主 Capture Policy 可以
+调整 Event 边界，而不改变状态正确性。pending Batch 已在进程内 State 生效，但在
+形成并被外部可靠保存的 Event 前不具备进程崩溃恢复能力，这一段就是明确的恢复窗口。
 
-V2 uses the JSON Patch-compatible subset `add`, `replace`, and `remove`.
-Operation paths are stable tuple paths rooted in the canonical Runtime State.
-Operations in one batch are ordered. The batch is preflighted in full and then
-applied without awaiting, so either every Operation commits or none does.
+## Replay 与 Recovery
 
-Parallel Node workers never mutate Runtime State. They return results to the
-single Session coordinator. A Node records `started_state_version`. A Context
-write conflicts when an overlapping path was written at a version newer than
-that start version. Same, ancestor, and descendant paths overlap. Serial Nodes
-may overwrite a path because they start after the earlier commit.
+- `replay(through_sequence=N)` 恢复到第 N 个 Runtime Event。
+- `replay(through_state_version=V)` 可以停在某个 Event 内第 V 个 Batch 之后。
+- `append_many()` 先在隔离 State 上验证完整 Event 前缀，再一次性导入 Journal；
+  中间冲突不会留下半个恢复 Session。
+- UI Replay 可以查看任意已持久化 State version；执行 Recovery 仍需遵守 Node 的
+  `recovery_mode`，不能把所有可重放状态都当作安全续跑点。
+- Wait 保持 waiting；进程恢复时 running OperatorCall 标记为 lost，只有允许安全
+  重放的 NodeOccurrence 才重新 Ready。
 
-The first implementation does not contain a general Operation optimizer.
-ContextPatch duplicate or overlapping paths are rejected for correctness.
-Operation coalescing is added only after measurement.
+## 原子业务边界
 
-## ContextPatch
+Node 成功终态的同一 Batch 同时包含：
 
-Output Binding returns the small user-facing `ContextPatch`; user code never
-constructs State Operations. Core validates the patch, detects parallel write
-conflicts, captures Runtime-owned values, encodes the same values for durable
-use, and converts the patch plus path-write metadata into ordered Operations.
-Context changes and Node terminal state commit atomically.
+```text
+Node Output + ContextPatch + Edge/Scheduler Delta
+```
 
-## Checkpoints
+并行 ContextPatch 使用 Node 的 `started_state_version` 与路径版本检测相同、祖先和
+子路径写冲突。Event sequence 只标识持久化信封，不再承担 Context 冲突版本。
 
-Core creates a complete latest Checkpoint at these boundaries:
+## Core 边界
 
-1. Genesis, before the Invocation executes a Node;
-2. after a Node enters `completed`, `failed`, `skipped`, or `cancelled`;
-3. after a Wait is established;
-4. after the Invocation enters a terminal state.
-
-Resume acceptance does not create a Checkpoint. Completion of the resumed Wait
-Node does. Cancel request acceptance does not create a Checkpoint. Invocation
-terminal convergence does.
-
-If a process fails after a Node-terminal Checkpoint but before outgoing Edges
-are evaluated, or after they were evaluated only in process memory, recovery
-starts from the completed Node and evaluates its unresolved outgoing Edges
-again. The Node is not executed again. Edge evaluation is deliberately not a
-Checkpoint boundary.
-
-Concretely, that Checkpoint stores the completed Node occurrence together with
-one pending control-flow advance. Recovery sees that the Node result is already
-committed, consumes the pending advance, and evaluates the outgoing Edges. Any
-Scheduler mutations made after the Checkpoint are absent and are therefore
-recomputed. This is safe under the Workflow rule that Edge conditions are
-side-effect-free decisions over their supplied Context. Core cannot prevent a
-Python condition from reading or mutating process globals; doing so makes
-recovery nondeterministic and is an authoring error.
-
-A Wait boundary does not imply that the whole Invocation is waiting. If sibling
-Nodes or pending control-flow advances remain runnable, the Checkpoint keeps the
-Invocation state `running`, preserves the Wait, and captures every unfinished
-sibling for replay. It uses `waiting` only when no runnable work remains.
-Recovery must inspect the restored Scheduler cursor rather than treating the
-presence of a Wait as global quiescence. Resume runs the waiting Node's
-Output Binding against the latest committed Session and Invocation Context.
-
-Every generated Checkpoint replaces `Invocation.last_checkpoint` and is also
-offered to the Sink in every Event mode. A Sink may coalesce checkpoints and
-persist only the latest one. In Full mode it may additionally sample
-intermediate Checkpoints to accelerate replay.
-
-Terminal Invocations retain their final Checkpoint. Recovering a terminal
-Checkpoint restores the Session Context and compact Invocation Handle but does
-not launch Scheduler or Executor work.
-
-### Boundary decision table
-
-| Runtime point | Checkpoint | Reason |
-| --- | --- | --- |
-| Invocation accepted, before first Node | yes | Genesis recovery source |
-| Invocation changes to `running` | no | Genesis already contains the pre-run state |
-| Node changes to `running` | no | an unfinished Node is replayed from its saved start baseline |
-| Input Mapping, Selector, Operator Call, Aggregation, Output Binding | no | Node-internal work is not a recovery boundary |
-| Node changes to `completed`, `failed`, `skipped`, or `cancelled` | yes | Node-level recovery boundary |
-| Edge evaluation | no | recovery may evaluate unresolved outgoing Edges again |
-| Wait is established | yes | preserves request, Wait id, Node input, and scope |
-| Resume response is accepted | no | the resumed Node terminal boundary records the result |
-| Cancel request is accepted | no | Node and Invocation terminal convergence records cancellation |
-| Invocation becomes `completed`, `failed`, or `cancelled` | yes | final Session and Invocation state |
-
-When one parallel Node reaches a terminal boundary while siblings are still
-running, the Checkpoint includes each unfinished Node's request and isolated
-start Context baseline. Recovery replays those unfinished Nodes from that
-baseline. It must not silently substitute Context committed later by a faster
-sibling.
-
-## Runtime Events
-
-Minimal mode emits no Runtime Events. Standard and Full modes use the same
-semantic Event boundaries. Standard omits Operations and heavy input/output.
-Full may include the ordered State Operations accumulated for that boundary and
-the phase input/output required for debugging. An Event is emitted even when
-its Operations are empty. Event sequence and Runtime `state_version` are
-independent.
-
-The Runtime Event vocabulary is intentionally small:
-
-- `invocation_state_changed`;
-- `node_state_changed`;
-- `edge_evaluated`;
-- `input_mapping_finished`;
-- `item_selection_finished` when a custom Selector ran;
-- `operator_call_finished` for every physical attempt, including Map,
-  Replication, Retry, Fallback, timeout, and cancellation;
-- `aggregation_finished` when an Aggregator ran;
-- `output_binding_finished` when Output Binding ran.
-
-There are no separate Context, Wait, Resume, Recovery, Retry, Fallback, or
-Cancel Runtime Event types. Wait and Resume are visible through Node state
-changes; cancellation through Node and Invocation state changes; recovery uses
-the same ordinary execution events. ContextPatch details are shown by the Full
-`output_binding_finished` Event. User Events remain an independent,
-user-defined channel at their fixed mapping points.
-
-Invocation and Node state Events record one occurrence timestamp in
-milliseconds. Edge and Node-phase Events capture start and completion wall-clock
-timestamps in milliseconds and a monotonic duration in nanoseconds. Their
-timing breakdown records the applicable components, including dispatch wait,
-executor-permit wait, thread-pool queue wait, handler time, stream production,
-and stream delivery. Wall-clock timestamps are display data; monotonic
-nanoseconds are used for durations.
-
-### Event boundary table
-
-| Execution point | Event | Status or important detail |
-| --- | --- | --- |
-| Invocation starts or terminates | `invocation_state_changed` | `running`, `completed`, `failed`, `cancelled`, or stable `waiting` |
-| Node starts, waits, resumes, or terminates | `node_state_changed` | Resume is another `running` state change, not a special Event |
-| Edge condition finishes | `edge_evaluated` | `selected`, `not_selected`, or `failed`; unconditional Edges are included |
-| custom Input Mapping finishes | `input_mapping_finished` | one success or failure Event |
-| custom Map Selector finishes | `item_selection_finished` | omitted when no custom Selector ran |
-| physical Operator attempt finishes | `operator_call_finished` | one per Retry, Fallback, Map unit, or Replica, including timeout/cancel |
-| custom Aggregator finishes | `aggregation_finished` | omitted when no custom Aggregator ran |
-| custom Output Binding finishes | `output_binding_finished` | Full payload contains ContextPatch; no separate Context Event |
-
-`output_binding_finished: completed` is emitted only after the coordinator has
-validated parallel write conflicts and atomically committed the ContextPatch.
-Its Full Operation batch owns the Context changes. A later
-`node_state_changed: completed` Event owns only the Node/output state changes.
-If commit validation fails, Output Binding is reported as failed and no partial
-Context change is visible.
-
-An Event boundary does not imply a Checkpoint, and a Checkpoint boundary does
-not invent an Event type. Runtime Event generation and serialization failures
-are logged and may create a sequence gap, but do not change Workflow business
-state. Checkpoint generation or Sink checkpoint-offer failures only degrade
-recoverability and do not detach Event delivery.
-
-### Event mode matrix
-
-| Mode | Runtime Events | Operations | phase input/output | Checkpoints | User Events |
-| --- | --- | --- | --- | --- | --- |
-| Minimal | none | none in Events | none | all required boundaries | unchanged |
-| Standard | all semantic boundaries | omitted | heavy values omitted; timing/error retained | all required boundaries | unchanged |
-| Full | all semantic boundaries | ordered batches | debugging values retained | all required boundaries | unchanged |
-
-## Timing capture points
-
-For a measured operation:
-
-1. capture `scheduled_at_ms` and a monotonic scheduled timestamp when the work
-   becomes eligible;
-2. capture executor-permit wait around semaphore admission;
-3. for synchronous callables, capture thread-pool queue wait from submission to
-   handler entry;
-4. capture handler start immediately before user code and handler end
-   immediately after it returns or raises;
-5. capture stream production and delivery independently;
-6. capture `completed_at_ms` and total monotonic duration at finalization.
-
-The sum of named timing components must not exceed total duration except for
-explicitly documented overlap. Timestamps and durations are captured around the
-actual operation, not around Event serialization or Sink backpressure.
-
-State-change Events use only `occurred_at_ms`. Measured Events use
-`started_at_ms`, `completed_at_ms`, and `duration_ns`. The standard timing keys
-are:
-
-- `executor_wait_ns`: waiting for the App-wide Hook/Operator permit;
-- `thread_pool_wait_ns`: synchronous callable submission until worker entry;
-- `handler_ns`: time in user code, including a returned Awaitable;
-- `stream_ns`: stream production and reduction excluding delivery;
-- `stream_delivery_ns`: time delivering emitted stream values;
-- `dispatch_wait_ns`: optional Scheduler-to-execution delay when that boundary
-  has an independently measurable dispatch timestamp.
-
-Absent components are zero or omitted. Sink acceptance time is deliberately
-not included in user-code duration.
-
-## Required behavioral tests
-
-The test suite must compare uninterrupted execution with encode, process-state
-discard, `app.recover(checkpoint)`, and continuation at every supported
-Checkpoint boundary. Coverage includes serial and parallel Nodes, conflicting
-and non-conflicting Context writes, fan-in, conditions, Loop and nested Loop,
-Map and Replication, Retry/Fallback/Backoff/timeout, Wait/Resume, cancellation,
-failure policies, multiple Sessions, deterministic ordering, JSON round-trip,
-State Operation atomicity and replay, ContextPatch conversion, and Event timing
-capture.
+Core 只维护进程内 State、pending buffer，并产生 Runtime Event/User Event。
+数据库、Event Store、Outbox、消息发送、Server、远程 Executor 和 UI 不属于 Core。
+外部持久化层必须在可靠接纳 Event 后才推进自己的导出游标；Snapshot 只能作为
+重放加速，不能成为第二份权威状态日志。

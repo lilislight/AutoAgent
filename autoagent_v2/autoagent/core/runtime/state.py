@@ -1,106 +1,644 @@
-"""Canonical per-Session Runtime State and its only mutation API."""
+"""Canonical immutable Runtime State for one Session."""
 
 from __future__ import annotations
 
-import copy
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Sequence
-from uuid import UUID
+from types import MappingProxyType
+from typing import Literal
 
-from .serialization import RuntimeValueCodec
-
-
-PathToken = str | int
-OperationKind = Literal["add", "replace", "remove"]
-RUNTIME_STATE_SCHEMA_VERSION = 1
-
-_ROOT_KEYS = {
-    "schema_version",
-    "session",
-    "invocation",
-    "scheduler",
-    "node_executions",
-    "waits",
-    "pending_advances",
-    "counters",
-}
-_SESSION_KEYS = {
-    "id",
-    "workflow_id",
-    "created_at_ms",
-    "updated_at_ms",
-    "context",
-    "context_path_revisions",
-}
-_INVOCATION_KEYS = {
-    "id",
-    "workflow_revision_id",
-    "event_mode",
-    "state",
-    "created_at_ms",
-    "updated_at_ms",
-    "input",
-    "context",
-    "context_path_revisions",
-    "output",
-    "error",
-    "runtime_event_sequence",
-    "user_event_sequence",
-    "recovery_mode",
-    "cancel_requested",
-    "deferred_error",
-}
-_SCHEDULER_KEYS = {
-    "ready",
-    "active_requests",
-    "resolutions",
-    "skipped",
-    "pending_boundaries",
-}
-_COUNTER_KEYS = {
-    "node_executions",
-    "operator_attempts",
-    "operator_runtime_ns",
-}
-_INVOCATION_STATES = {
-    "created",
-    "running",
-    "waiting",
-    "completed",
-    "failed",
-    "cancelled",
-}
-_EVENT_MODES = {"minimal", "standard", "full"}
-_NODE_EXECUTION_KEYS = {
-    "id",
-    "node_id",
-    "scope",
-    "state",
-    "input",
-    "output",
-    "error",
-    "logical_occurrence",
-    "idempotency_key",
-    "started_state_version",
-    "restart_session_context",
-    "restart_invocation_context",
-}
-_NODE_STATES = {
-    "pending",
-    "ready",
-    "running",
-    "waiting",
-    "completed",
-    "failed",
-    "skipped",
-    "cancelled",
-}
-_WAIT_KEYS = {"id", "node_execution_id", "request", "payload"}
+from .events import RuntimeErrorInfo
+from .scheduling import (
+    Activation,
+    EdgeResolution,
+    ExecutionScope,
+    LoopIteration,
+    LoopBoundaryResolution,
+)
+from .values import DurableValue, freeze, thaw
 
 
-def context_path_key(path: Sequence[str]) -> str:
-    """Encode one Context leaf path as a stable JSON Pointer key."""
+RUNTIME_STATE_SCHEMA_VERSION = 2
+InvocationStatus = Literal[
+    "created", "running", "waiting", "completed", "failed", "cancelled"
+]
+NodeOccurrenceStatus = Literal[
+    "ready", "running", "waiting", "completed", "failed", "skipped", "cancelled"
+]
+OperatorCallStatus = Literal["running", "completed", "failed", "lost", "cancelled"]
 
+
+@dataclass(frozen=True, slots=True)
+class WaitState:
+    id: str
+    occurrence_id: str
+    status: Literal["waiting", "resumed", "cancelled"]
+    request: DurableValue
+    response: DurableValue = None
+    created_at_ns: int = 0
+    resumed_at_ns: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorCallState:
+    id: str
+    occurrence_id: str
+    operator_id: str
+    unit_index: int
+    status: OperatorCallStatus
+    input: DurableValue
+    output: DurableValue = None
+    error: RuntimeErrorInfo | None = None
+    started_at_ns: int = 0
+    completed_at_ns: int | None = None
+    attempt: int = 1
+    reason: Literal["normal", "retry", "fallback"] = "normal"
+
+
+@dataclass(frozen=True, slots=True)
+class ChildInvocationState:
+    parent_occurrence_id: str
+    session_id: str
+    invocation_id: str
+    workflow_id: str
+    workflow_revision_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class NodeOccurrenceState:
+    id: str
+    node_id: str
+    scope: ExecutionScope
+    status: NodeOccurrenceStatus
+    output: DurableValue = None
+    error: RuntimeErrorInfo | None = None
+    started_at_ns: int | None = None
+    completed_at_ns: int | None = None
+    started_state_version: int | None = None
+    activations: tuple[Activation, ...] = ()
+    metrics: DurableValue = None
+    recovery_attempts: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerState:
+    initialized: bool = False
+    ready: tuple[str, ...] = ()
+    occurrences: Mapping[str, NodeOccurrenceState] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    resolutions: Mapping[str, EdgeResolution] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    boundary_resolutions: Mapping[str, LoopBoundaryResolution] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    operator_calls: Mapping[str, OperatorCallState] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    waits: Mapping[str, WaitState] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionState:
+    id: str
+    workflow_id: str
+    context: DurableValue
+    created_at_ns: int
+    updated_at_ns: int
+    latest_invocation_id: str | None = None
+    context_path_revisions: Mapping[tuple[str, ...], int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationState:
+    id: str
+    workflow_revision_id: str
+    entry_node_id: str
+    status: InvocationStatus
+    input: DurableValue
+    context: DurableValue
+    output: DurableValue = None
+    error: RuntimeErrorInfo | None = None
+    cancel_reason: str | None = None
+    created_at_ns: int = 0
+    started_at_ns: int | None = None
+    completed_at_ns: int | None = None
+    scheduler: SchedulerState = field(default_factory=SchedulerState)
+    children: Mapping[str, ChildInvocationState] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    context_path_revisions: Mapping[tuple[str, ...], int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+    @property
+    def terminal(self) -> bool:
+        return self.status in {"completed", "failed", "cancelled"}
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeState:
+    """The state reconstructed from one Session's Runtime Event prefix."""
+
+    session: SessionState | None = None
+    invocation: InvocationState | None = None
+    state_version: int = 0
+    sequence: int = 0
+    last_event_id: str | None = None
+    last_event_digest: str | None = None
+    last_event_semantic_digest: str | None = None
+    schema_version: int = RUNTIME_STATE_SCHEMA_VERSION
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "state_version": self.state_version,
+            "sequence": self.sequence,
+            "last_event_id": self.last_event_id,
+            "last_event_digest": self.last_event_digest,
+            "last_event_semantic_digest": self.last_event_semantic_digest,
+            "session": _session_record(self.session),
+            "invocation": _invocation_record(self.invocation),
+        }
+
+    @classmethod
+    def from_record(cls, record: dict[str, object]) -> "RuntimeState":
+        """Restore the typed immutable State from its canonical durable record."""
+
+        if not isinstance(record, dict):
+            raise TypeError("Runtime State record must be a mapping.")
+        schema_version = _integer(record, "schema_version")
+        if schema_version != RUNTIME_STATE_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported Runtime State schema {schema_version}.")
+        state = cls(
+            session=_session_from_record(record.get("session")),
+            invocation=_invocation_from_record(record.get("invocation")),
+            state_version=_integer(record, "state_version", default=0),
+            sequence=_integer(record, "sequence"),
+            last_event_id=_optional_string(record, "last_event_id"),
+            last_event_digest=_optional_string(record, "last_event_digest"),
+            last_event_semantic_digest=_optional_string(
+                record, "last_event_semantic_digest"
+            ),
+            schema_version=schema_version,
+        )
+        if state.to_record() != record:
+            raise TypeError(
+                "Runtime State record contains missing, unknown, or non-canonical fields."
+            )
+        return state
+
+
+def _session_record(value: SessionState | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value.context, Mapping):
+        raise TypeError("Session Context must be a mapping.")
+    return {
+        "id": value.id,
+        "workflow_id": value.workflow_id,
+        "context": thaw(value.context),
+        "created_at_ns": value.created_at_ns,
+        "updated_at_ns": value.updated_at_ns,
+        "latest_invocation_id": value.latest_invocation_id,
+        "context_path_revisions": {
+            _context_path_key(path): revision
+            for path, revision in value.context_path_revisions.items()
+        },
+    }
+
+
+def _invocation_record(value: InvocationState | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value.context, Mapping):
+        raise TypeError("Invocation Context must be a mapping.")
+    return {
+        "id": value.id,
+        "workflow_revision_id": value.workflow_revision_id,
+        "entry_node_id": value.entry_node_id,
+        "status": value.status,
+        "input": thaw(value.input),
+        "context": thaw(value.context),
+        "output": thaw(value.output),
+        "error": _error_record(value.error),
+        "cancel_reason": value.cancel_reason,
+        "created_at_ns": value.created_at_ns,
+        "started_at_ns": value.started_at_ns,
+        "completed_at_ns": value.completed_at_ns,
+        "context_path_revisions": {
+            _context_path_key(path): revision
+            for path, revision in value.context_path_revisions.items()
+        },
+        "children": {
+            key: {
+                "parent_occurrence_id": item.parent_occurrence_id,
+                "session_id": item.session_id,
+                "invocation_id": item.invocation_id,
+                "workflow_id": item.workflow_id,
+                "workflow_revision_id": item.workflow_revision_id,
+            }
+            for key, item in value.children.items()
+        },
+        "scheduler": {
+            "initialized": value.scheduler.initialized,
+            "ready": list(value.scheduler.ready),
+            "occurrences": {
+                key: _occurrence_record(item)
+                for key, item in value.scheduler.occurrences.items()
+            },
+            "resolutions": {
+                key: _resolution_record(item)
+                for key, item in value.scheduler.resolutions.items()
+            },
+            "boundary_resolutions": {
+                key: {
+                    "loop_region_id": item.loop_region_id,
+                    "loop_scope": [
+                        {
+                            "loop_region_id": frame.loop_region_id,
+                            "iteration": frame.iteration,
+                        }
+                        for frame in item.loop_scope
+                    ],
+                    "edge_id": item.edge_id,
+                    "source_scope": [
+                        {
+                            "loop_region_id": frame.loop_region_id,
+                            "iteration": frame.iteration,
+                        }
+                        for frame in item.source_scope
+                    ],
+                    "target_node_id": item.target_node_id,
+                    "selected": item.selected,
+                    "activation": (
+                        {
+                            "edge_id": item.activation.edge_id,
+                            "source_occurrence_id": item.activation.source_occurrence_id,
+                            "target_node_id": item.activation.target_node_id,
+                        }
+                        if item.activation is not None
+                        else None
+                    ),
+                }
+                for key, item in value.scheduler.boundary_resolutions.items()
+            },
+            "operator_calls": {
+                key: {
+                    "id": item.id,
+                    "occurrence_id": item.occurrence_id,
+                    "operator_id": item.operator_id,
+                    "unit_index": item.unit_index,
+                    "status": item.status,
+                    "input": thaw(item.input),
+                    "output": thaw(item.output),
+                    "error": _error_record(item.error),
+                    "started_at_ns": item.started_at_ns,
+                    "completed_at_ns": item.completed_at_ns,
+                    "attempt": item.attempt,
+                    "reason": item.reason,
+                }
+                for key, item in value.scheduler.operator_calls.items()
+            },
+            "waits": {
+                key: {
+                    "id": item.id,
+                    "occurrence_id": item.occurrence_id,
+                    "status": item.status,
+                    "request": thaw(item.request),
+                    "response": thaw(item.response),
+                    "created_at_ns": item.created_at_ns,
+                    "resumed_at_ns": item.resumed_at_ns,
+                }
+                for key, item in value.scheduler.waits.items()
+            },
+        },
+    }
+
+
+def _occurrence_record(value: NodeOccurrenceState) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "node_id": value.node_id,
+        "scope": [
+            {"loop_region_id": item.loop_region_id, "iteration": item.iteration}
+            for item in value.scope
+        ],
+        "status": value.status,
+        "output": thaw(value.output),
+        "error": _error_record(value.error),
+        "started_at_ns": value.started_at_ns,
+        "completed_at_ns": value.completed_at_ns,
+        "started_state_version": value.started_state_version,
+        "activations": [
+            {
+                "edge_id": item.edge_id,
+                "source_occurrence_id": item.source_occurrence_id,
+                "target_node_id": item.target_node_id,
+            }
+            for item in value.activations
+        ],
+        "metrics": thaw(value.metrics),
+        "recovery_attempts": value.recovery_attempts,
+    }
+
+
+def _error_record(value: RuntimeErrorInfo | None) -> dict[str, object] | None:
+    if value is None:
+        return None
+    return {
+        key: item
+        for key, item in {
+            "type": value.type,
+            "message": value.message,
+            "code": value.code,
+            "phase": value.phase,
+            "retryable": value.retryable,
+            "cause": value.cause,
+        }.items()
+        if item is not None
+    }
+
+
+def _resolution_record(value: EdgeResolution) -> dict[str, object]:
+    return {
+        "edge_id": value.edge_id,
+        "target_node_id": value.target_node_id,
+        "target_scope": [
+            {"loop_region_id": item.loop_region_id, "iteration": item.iteration}
+            for item in value.target_scope
+        ],
+        "selected": value.selected,
+        "activation": (
+            {
+                "edge_id": value.activation.edge_id,
+                "source_occurrence_id": value.activation.source_occurrence_id,
+                "target_node_id": value.activation.target_node_id,
+            }
+            if value.activation is not None
+            else None
+        ),
+    }
+
+
+def _session_from_record(value: object) -> SessionState | None:
+    if value is None:
+        return None
+    record = _mapping(value, "Session State")
+    context = record.get("context")
+    if not isinstance(context, dict):
+        raise TypeError("Session Context must be a mapping.")
+    return SessionState(
+        id=_string(record, "id"),
+        workflow_id=_string(record, "workflow_id"),
+        context=freeze(context),
+        created_at_ns=_integer(record, "created_at_ns"),
+        updated_at_ns=_integer(record, "updated_at_ns"),
+        latest_invocation_id=_optional_string(record, "latest_invocation_id"),
+        context_path_revisions=MappingProxyType(
+            _context_revisions(record.get("context_path_revisions"))
+        ),
+    )
+
+
+def _invocation_from_record(value: object) -> InvocationState | None:
+    if value is None:
+        return None
+    record = _mapping(value, "Invocation State")
+    context = record.get("context")
+    if not isinstance(context, dict):
+        raise TypeError("Invocation Context must be a mapping.")
+    children_record = _mapping(record.get("children"), "Child Invocations")
+    scheduler = _scheduler_from_record(record.get("scheduler"))
+    status = _string(record, "status")
+    if status not in {"created", "running", "waiting", "completed", "failed", "cancelled"}:
+        raise ValueError(f"Unsupported Invocation status {status!r}.")
+    return InvocationState(
+        id=_string(record, "id"),
+        workflow_revision_id=_string(record, "workflow_revision_id"),
+        entry_node_id=_string(record, "entry_node_id"),
+        status=status,  # type: ignore[arg-type]
+        input=freeze(record.get("input")),
+        context=freeze(context),
+        output=freeze(record.get("output")),
+        error=_error_from_record(record.get("error")),
+        cancel_reason=_optional_string(record, "cancel_reason"),
+        created_at_ns=_integer(record, "created_at_ns"),
+        started_at_ns=_optional_integer(record, "started_at_ns"),
+        completed_at_ns=_optional_integer(record, "completed_at_ns"),
+        scheduler=scheduler,
+        children=MappingProxyType(
+            {
+                key: _child_from_record(item)
+                for key, item in children_record.items()
+            }
+        ),
+        context_path_revisions=MappingProxyType(
+            _context_revisions(record.get("context_path_revisions"))
+        ),
+    )
+
+
+def _scheduler_from_record(value: object) -> SchedulerState:
+    record = _mapping(value, "Scheduler State")
+    occurrences = _mapping(record.get("occurrences"), "Node Occurrences")
+    resolutions = _mapping(record.get("resolutions"), "Edge Resolutions")
+    boundaries = _mapping(
+        record.get("boundary_resolutions"), "Loop Boundary Resolutions"
+    )
+    calls = _mapping(record.get("operator_calls"), "Operator Calls")
+    waits = _mapping(record.get("waits"), "Waits")
+    ready = record.get("ready")
+    if not isinstance(ready, list) or not all(isinstance(item, str) for item in ready):
+        raise TypeError("Scheduler ready must be a list of strings.")
+    initialized = record.get("initialized")
+    if type(initialized) is not bool:
+        raise TypeError("Scheduler initialized must be bool.")
+    return SchedulerState(
+        initialized=initialized,
+        ready=tuple(ready),
+        occurrences=MappingProxyType(
+            {key: _occurrence_from_record(item) for key, item in occurrences.items()}
+        ),
+        resolutions=MappingProxyType(
+            {key: _resolution_from_record(item) for key, item in resolutions.items()}
+        ),
+        boundary_resolutions=MappingProxyType(
+            {key: _boundary_from_record(item) for key, item in boundaries.items()}
+        ),
+        operator_calls=MappingProxyType(
+            {key: _call_from_record(item) for key, item in calls.items()}
+        ),
+        waits=MappingProxyType(
+            {key: _wait_from_record(item) for key, item in waits.items()}
+        ),
+    )
+
+
+def _occurrence_from_record(value: object) -> NodeOccurrenceState:
+    record = _mapping(value, "Node Occurrence")
+    status = _string(record, "status")
+    if status not in {"ready", "running", "waiting", "completed", "failed", "skipped", "cancelled"}:
+        raise ValueError(f"Unsupported Node Occurrence status {status!r}.")
+    activations = record.get("activations")
+    if not isinstance(activations, list):
+        raise TypeError("Node Occurrence activations must be a list.")
+    return NodeOccurrenceState(
+        id=_string(record, "id"),
+        node_id=_string(record, "node_id"),
+        scope=_scope_from_record(record.get("scope")),
+        status=status,  # type: ignore[arg-type]
+        output=freeze(record.get("output")),
+        error=_error_from_record(record.get("error")),
+        started_at_ns=_optional_integer(record, "started_at_ns"),
+        completed_at_ns=_optional_integer(record, "completed_at_ns"),
+        started_state_version=_optional_integer(record, "started_state_version"),
+        activations=tuple(_activation_from_record(item) for item in activations),
+        metrics=freeze(record.get("metrics")),
+        recovery_attempts=_integer(record, "recovery_attempts"),
+    )
+
+
+def _resolution_from_record(value: object) -> EdgeResolution:
+    record = _mapping(value, "Edge Resolution")
+    selected = _boolean(record, "selected")
+    return EdgeResolution(
+        edge_id=_string(record, "edge_id"),
+        target_node_id=_string(record, "target_node_id"),
+        target_scope=_scope_from_record(record.get("target_scope")),
+        selected=selected,
+        activation=(
+            _activation_from_record(record["activation"])
+            if record.get("activation") is not None
+            else None
+        ),
+    )
+
+
+def _boundary_from_record(value: object) -> LoopBoundaryResolution:
+    record = _mapping(value, "Loop Boundary Resolution")
+    return LoopBoundaryResolution(
+        loop_region_id=_string(record, "loop_region_id"),
+        loop_scope=_scope_from_record(record.get("loop_scope")),
+        edge_id=_string(record, "edge_id"),
+        source_scope=_scope_from_record(record.get("source_scope")),
+        target_node_id=_string(record, "target_node_id"),
+        selected=_boolean(record, "selected"),
+        activation=(
+            _activation_from_record(record["activation"])
+            if record.get("activation") is not None
+            else None
+        ),
+    )
+
+
+def _call_from_record(value: object) -> OperatorCallState:
+    record = _mapping(value, "Operator Call")
+    status = _string(record, "status")
+    if status not in {"running", "completed", "failed", "lost", "cancelled"}:
+        raise ValueError(f"Unsupported Operator Call status {status!r}.")
+    reason = _string(record, "reason")
+    if reason not in {"normal", "retry", "fallback"}:
+        raise ValueError(f"Unsupported Operator Call reason {reason!r}.")
+    return OperatorCallState(
+        id=_string(record, "id"),
+        occurrence_id=_string(record, "occurrence_id"),
+        operator_id=_string(record, "operator_id"),
+        unit_index=_integer(record, "unit_index"),
+        status=status,  # type: ignore[arg-type]
+        input=freeze(record.get("input")),
+        output=freeze(record.get("output")),
+        error=_error_from_record(record.get("error")),
+        started_at_ns=_integer(record, "started_at_ns"),
+        completed_at_ns=_optional_integer(record, "completed_at_ns"),
+        attempt=_integer(record, "attempt"),
+        reason=reason,  # type: ignore[arg-type]
+    )
+
+
+def _wait_from_record(value: object) -> WaitState:
+    record = _mapping(value, "Wait State")
+    status = _string(record, "status")
+    if status not in {"waiting", "resumed", "cancelled"}:
+        raise ValueError(f"Unsupported Wait status {status!r}.")
+    return WaitState(
+        id=_string(record, "id"),
+        occurrence_id=_string(record, "occurrence_id"),
+        status=status,  # type: ignore[arg-type]
+        request=freeze(record.get("request")),
+        response=freeze(record.get("response")),
+        created_at_ns=_integer(record, "created_at_ns"),
+        resumed_at_ns=_optional_integer(record, "resumed_at_ns"),
+    )
+
+
+def _child_from_record(value: object) -> ChildInvocationState:
+    record = _mapping(value, "Child Invocation")
+    return ChildInvocationState(
+        parent_occurrence_id=_string(record, "parent_occurrence_id"),
+        session_id=_string(record, "session_id"),
+        invocation_id=_string(record, "invocation_id"),
+        workflow_id=_string(record, "workflow_id"),
+        workflow_revision_id=_string(record, "workflow_revision_id"),
+    )
+
+
+def _scope_from_record(value: object) -> ExecutionScope:
+    if not isinstance(value, list):
+        raise TypeError("Execution Scope must be a list.")
+    return tuple(
+        LoopIteration(
+            _string(_mapping(item, "Loop Iteration"), "loop_region_id"),
+            _integer(_mapping(item, "Loop Iteration"), "iteration"),
+        )
+        for item in value
+    )
+
+
+def _activation_from_record(value: object) -> Activation:
+    record = _mapping(value, "Activation")
+    return Activation(
+        edge_id=_string(record, "edge_id"),
+        source_occurrence_id=_string(record, "source_occurrence_id"),
+        target_node_id=_string(record, "target_node_id"),
+    )
+
+
+def _error_from_record(value: object) -> RuntimeErrorInfo | None:
+    if value is None:
+        return None
+    record = _mapping(value, "Runtime Error")
+    retryable = record.get("retryable")
+    if retryable is not None and type(retryable) is not bool:
+        raise TypeError("Runtime Error retryable must be bool or None.")
+    return RuntimeErrorInfo(
+        type=_string(record, "type"),
+        message=_string(record, "message"),
+        code=_optional_string(record, "code"),
+        phase=_optional_string(record, "phase"),
+        retryable=retryable,
+        cause=_optional_string(record, "cause"),
+    )
+
+
+def _context_revisions(value: object) -> dict[tuple[str, ...], int]:
+    record = _mapping(value, "Context path revisions")
+    result: dict[tuple[str, ...], int] = {}
+    for key, revision in record.items():
+        if not isinstance(key, str) or not key:
+            raise TypeError("Context revision key must be a non-empty string.")
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            raise TypeError("Context revision value must be an integer.")
+        result[_context_path_from_key(key)] = revision
+    return result
+
+
+def _context_path_key(path: tuple[str, ...]) -> str:
     if not path:
         raise ValueError("Context revision path cannot be empty.")
     return "/" + "/".join(
@@ -108,8 +646,8 @@ def context_path_key(path: Sequence[str]) -> str:
     )
 
 
-def context_path_from_key(value: str) -> tuple[str, ...]:
-    if not isinstance(value, str) or not value.startswith("/") or value == "/":
+def _context_path_from_key(value: str) -> tuple[str, ...]:
+    if not value.startswith("/") or value == "/":
         raise ValueError("Context revision key must be a non-root JSON Pointer.")
     return tuple(
         token.replace("~1", "/").replace("~0", "~")
@@ -117,519 +655,48 @@ def context_path_from_key(value: str) -> tuple[str, ...]:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class StateOperation:
-    """One ordered JSON-Patch-compatible Runtime State change."""
-
-    op: OperationKind
-    path: tuple[PathToken, ...]
-    value: Any = None
-    _persistent_value: Any = field(default=None, repr=False, compare=False)
-    _captured: bool = field(default=False, repr=False, compare=False)
-
-    @classmethod
-    def capture(cls, operation: "StateOperation") -> "StateOperation":
-        if operation._captured:
-            return operation
-        if operation.op == "remove":
-            return cls("remove", operation.path, _captured=True)
-        captured = RuntimeValueCodec.capture(operation.value)
-        return cls(
-            operation.op,
-            operation.path,
-            captured.transfer_to_runtime(),
-            captured.persistent_value(),
-            True,
-        )
-
-    def to_record(self) -> dict[str, Any]:
-        value = self._persistent_value
-        if self.op != "remove" and not self._captured:
-            value = RuntimeValueCodec.encode(self.value)
-        return {
-            "op": self.op,
-            "path": list(self.path),
-            **({"value": value} if self.op != "remove" else {}),
-        }
-
-    @classmethod
-    def from_record(cls, value: dict[str, Any]) -> "StateOperation":
-        operation = str(value["op"])
-        if operation not in {"add", "replace", "remove"}:
-            raise ValueError(f"Unsupported StateOperation {operation!r}.")
-        return cls(
-            op=operation,  # type: ignore[arg-type]
-            path=tuple(value["path"]),
-            value=(
-                RuntimeValueCodec.decode(value.get("value"))
-                if operation != "remove"
-                else None
-            ),
-            _persistent_value=value.get("value") if operation != "remove" else None,
-            _captured=True,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class StateOperationBatch:
-    """One atomically-applied, ordered group of State Operations."""
-
-    state_version: int
-    operations: tuple[StateOperation, ...]
-
-    def to_record(self) -> dict[str, Any]:
-        return {
-            "state_version": self.state_version,
-            "operations": [operation.to_record() for operation in self.operations],
-        }
-
-    @classmethod
-    def from_record(cls, value: dict[str, Any]) -> "StateOperationBatch":
-        return cls(
-            state_version=int(value["state_version"]),
-            operations=tuple(
-                StateOperation.from_record(operation)
-                for operation in value.get("operations", [])
-            ),
-        )
-
-
-class RuntimeState:
-    """The authoritative mutable state for exactly one Session.
-
-    The canonical tree uses mappings and lists so the exact same paths can be
-    applied to its persistent JSON tree. Values at leaves may retain supported
-    Python runtime types; ``_persistent`` contains their encoded representation.
-    """
-
-    def __init__(
-        self,
-        value: dict[str, Any],
-        *,
-        state_version: int = 0,
-        persistent_value: dict[str, Any] | None = None,
-    ) -> None:
-        captured = RuntimeValueCodec.capture(value) if persistent_value is None else None
-        self._value = (
-            captured.transfer_to_runtime() if captured is not None else copy.deepcopy(value)
-        )
-        self._persistent = (
-            captured.persistent_value()
-            if captured is not None
-            else copy.deepcopy(persistent_value)
-        )
-        if not isinstance(self._value, dict) or not isinstance(self._persistent, dict):
-            raise TypeError("RuntimeState root must be a mapping.")
-        _validate_runtime_tree(self._value)
-        self._state_version = state_version
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        workflow_id: str,
-        workflow_revision_id: str,
-        session_id: str,
-        invocation_id: UUID | str,
-        event_mode: str,
-        invocation_input: Any,
-        session_context: dict[str, Any] | None = None,
-        session_created_at_ms: int,
-        invocation_created_at_ms: int,
-    ) -> "RuntimeState":
-        """Create the one canonical Runtime tree for a Session Invocation."""
-
-        if not isinstance(event_mode, str):
-            raise TypeError("Runtime State event_mode must be str.")
-        normalized_mode = event_mode.strip().lower()
-        timestamp = invocation_created_at_ms
-        return cls(
-            {
-                "schema_version": RUNTIME_STATE_SCHEMA_VERSION,
-                "session": {
-                    "id": session_id,
-                    "workflow_id": workflow_id,
-                    "created_at_ms": session_created_at_ms,
-                    "updated_at_ms": timestamp,
-                    "context": session_context or {},
-                    "context_path_revisions": {},
-                },
-                "invocation": {
-                    "id": str(invocation_id),
-                    "workflow_revision_id": workflow_revision_id,
-                    "event_mode": normalized_mode,
-                    "state": "created",
-                    "created_at_ms": invocation_created_at_ms,
-                    "updated_at_ms": timestamp,
-                    "input": invocation_input,
-                    "context": {},
-                    "context_path_revisions": {},
-                    "output": None,
-                    "error": None,
-                    "runtime_event_sequence": 0,
-                    "user_event_sequence": 0,
-                    "recovery_mode": False,
-                    "cancel_requested": False,
-                    "deferred_error": None,
-                },
-                "scheduler": {
-                    "ready": [],
-                    "active_requests": {},
-                    "resolutions": {},
-                    "skipped": {},
-                    "pending_boundaries": {},
-                },
-                "node_executions": {},
-                "waits": {},
-                "pending_advances": {},
-                "counters": {
-                    "node_executions": {},
-                    "operator_attempts": {},
-                    "operator_runtime_ns": {},
-                },
-            }
-        )
-
-    @property
-    def state_version(self) -> int:
-        return self._state_version
-
-    def restore_state_version(self, state_version: int) -> None:
-        """Set the durable version while adapting the legacy Checkpoint model.
-
-        This is intentionally not a normal mutation API. It is removed when
-        Recovery consumes the canonical Runtime State record directly.
-        """
-
-        if not isinstance(state_version, int) or isinstance(state_version, bool):
-            raise TypeError("Runtime State version must be int.")
-        if state_version < 0:
-            raise ValueError("Runtime State version cannot be negative.")
-        self._state_version = state_version
-
-    def read(self, *path: PathToken) -> Any:
-        """Read a detached value so callers cannot bypass State Operations."""
-
-        return copy.deepcopy(_read_path(self._value, path))
-
-    def isolate(self, *path: PathToken) -> Any:
-        return self.read(*path)
-
-    def apply(
-        self, operations: Sequence[StateOperation]
-    ) -> StateOperationBatch:
-        """Capture and atomically apply one ordered Operation batch.
-
-        Both candidate trees are copy-on-write. A bad later Operation therefore
-        cannot leave either the Python Runtime or persistent JSON state partially
-        modified.
-        """
-
-        if not operations:
-            raise ValueError("A State Operation batch cannot be empty.")
-        captured = tuple(StateOperation.capture(operation) for operation in operations)
-        candidate = _apply_copy_on_write(self._value, captured, persistent=False)
-        persistent = _apply_copy_on_write(self._persistent, captured, persistent=True)
-        _validate_runtime_tree(candidate)
-        next_version = self._state_version + 1
-        self._value = candidate
-        self._persistent = persistent
-        self._state_version = next_version
-        return StateOperationBatch(next_version, captured)
-
-    def checkpoint_record(self) -> dict[str, Any]:
-        return {
-            "state_version": self._state_version,
-            "state": copy.deepcopy(self._persistent),
-        }
-
-    @classmethod
-    def from_checkpoint_record(cls, record: dict[str, Any]) -> "RuntimeState":
-        persistent = copy.deepcopy(record["state"])
-        value = RuntimeValueCodec.decode(persistent)
-        if not isinstance(value, dict):
-            raise TypeError("Checkpoint Runtime State must decode to a mapping.")
-        return cls(
-            value,
-            state_version=int(record["state_version"]),
-            persistent_value=persistent,
-        )
-
-
-def _validate_runtime_tree(value: dict[str, Any]) -> None:
-    _require_exact_keys("Runtime State", value, _ROOT_KEYS)
-    if value["schema_version"] != RUNTIME_STATE_SCHEMA_VERSION:
-        raise ValueError("Unsupported Runtime State schema version.")
-
-    session = _require_mapping("session", value["session"])
-    _require_exact_keys("session", session, _SESSION_KEYS)
-    _require_nonempty_string("session.id", session["id"])
-    _require_nonempty_string("session.workflow_id", session["workflow_id"])
-    _require_timestamp("session.created_at_ms", session["created_at_ms"])
-    _require_timestamp("session.updated_at_ms", session["updated_at_ms"])
-    _require_mapping("session.context", session["context"])
-    _require_revision_map(
-        "session.context_path_revisions", session["context_path_revisions"]
-    )
-
-    invocation = _require_mapping("invocation", value["invocation"])
-    _require_exact_keys("invocation", invocation, _INVOCATION_KEYS)
-    _require_uuid_string("invocation.id", invocation["id"])
-    _require_nonempty_string(
-        "invocation.workflow_revision_id", invocation["workflow_revision_id"]
-    )
-    if invocation["event_mode"] not in _EVENT_MODES:
-        raise ValueError("Runtime State invocation.event_mode is invalid.")
-    if invocation["state"] not in _INVOCATION_STATES:
-        raise ValueError("Runtime State invocation.state is invalid.")
-    _require_timestamp("invocation.created_at_ms", invocation["created_at_ms"])
-    _require_timestamp("invocation.updated_at_ms", invocation["updated_at_ms"])
-    _require_mapping("invocation.context", invocation["context"])
-    _require_revision_map(
-        "invocation.context_path_revisions",
-        invocation["context_path_revisions"],
-    )
-    for name in ("runtime_event_sequence", "user_event_sequence"):
-        count = invocation[name]
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            raise TypeError(f"Runtime State invocation.{name} must be non-negative int.")
-    if not isinstance(invocation["recovery_mode"], bool):
-        raise TypeError("Runtime State invocation.recovery_mode must be bool.")
-    if not isinstance(invocation["cancel_requested"], bool):
-        raise TypeError("Runtime State invocation.cancel_requested must be bool.")
-    _require_optional_error("invocation.error", invocation["error"])
-    _require_optional_error("invocation.deferred_error", invocation["deferred_error"])
-
-    scheduler = _require_mapping("scheduler", value["scheduler"])
-    _require_exact_keys("scheduler", scheduler, _SCHEDULER_KEYS)
-    if not isinstance(scheduler["ready"], list) or not all(
-        isinstance(item, str) and item for item in scheduler["ready"]
-    ):
-        raise TypeError("Runtime State scheduler.ready must be list[str].")
-    for name in ("active_requests", "resolutions", "skipped", "pending_boundaries"):
-        _require_string_key_mapping(f"scheduler.{name}", scheduler[name])
-
-    node_executions = _require_string_key_mapping(
-        "node_executions", value["node_executions"]
-    )
-    for execution_id, item in node_executions.items():
-        node = _require_mapping(f"node_executions.{execution_id}", item)
-        _require_exact_keys(
-            f"node_executions.{execution_id}", node, _NODE_EXECUTION_KEYS
-        )
-        _require_uuid_string(f"node_executions.{execution_id}.id", node["id"])
-        if node["id"] != execution_id:
-            raise ValueError("Runtime State Node Execution key must equal its id.")
-        _require_nonempty_string(
-            f"node_executions.{execution_id}.node_id", node["node_id"]
-        )
-        if node["state"] not in _NODE_STATES:
-            raise ValueError("Runtime State Node Execution state is invalid.")
-        if not isinstance(node["scope"], list):
-            raise TypeError("Runtime State Node Execution scope must be a list.")
-        for frame in node["scope"]:
-            if (
-                not isinstance(frame, dict)
-                or set(frame) != {"loop_region_id", "iteration"}
-                or not isinstance(frame["loop_region_id"], str)
-                or not isinstance(frame["iteration"], int)
-                or isinstance(frame["iteration"], bool)
-                or frame["iteration"] < 0
-            ):
-                raise TypeError("Runtime State Node Execution scope is invalid.")
-        for name in ("logical_occurrence", "started_state_version"):
-            count = node[name]
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                raise TypeError(
-                    f"Runtime State node_executions.{execution_id}.{name} "
-                    "must be non-negative int."
-                )
-
-    waits = _require_string_key_mapping("waits", value["waits"])
-    for wait_id, item in waits.items():
-        wait = _require_mapping(f"waits.{wait_id}", item)
-        _require_exact_keys(f"waits.{wait_id}", wait, _WAIT_KEYS)
-        _require_uuid_string(f"waits.{wait_id}.id", wait["id"])
-        _require_uuid_string(
-            f"waits.{wait_id}.node_execution_id", wait["node_execution_id"]
-        )
-        if wait["id"] != wait_id:
-            raise ValueError("Runtime State Wait key must equal its id.")
-        _require_mapping(f"waits.{wait_id}.request", wait["request"])
-
-    _require_string_key_mapping("pending_advances", value["pending_advances"])
-
-    counters = _require_mapping("counters", value["counters"])
-    _require_exact_keys("counters", counters, _COUNTER_KEYS)
-    for name in _COUNTER_KEYS:
-        mapping = _require_string_key_mapping(f"counters.{name}", counters[name])
-        if not all(
-            isinstance(item, int) and not isinstance(item, bool) and item >= 0
-            for item in mapping.values()
-        ):
-            raise TypeError(f"Runtime State counters.{name} values must be non-negative int.")
-
-
-def _require_mapping(name: str, value: Any) -> dict[str, Any]:
+def _mapping(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise TypeError(f"Runtime State {name} must be a mapping.")
+        raise TypeError(f"{label} must be a mapping.")
+    if not all(isinstance(key, str) for key in value):
+        raise TypeError(f"{label} keys must be strings.")
     return value
 
 
-def _require_string_key_mapping(name: str, value: Any) -> dict[str, Any]:
-    mapping = _require_mapping(name, value)
-    if not all(isinstance(key, str) and key for key in mapping):
-        raise TypeError(f"Runtime State {name} keys must be non-empty str.")
-    return mapping
-
-
-def _require_exact_keys(name: str, value: dict[str, Any], expected: set[str]) -> None:
-    actual = set(value)
-    if actual != expected:
-        missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
-        raise ValueError(
-            f"Runtime State {name} keys do not match schema; "
-            f"missing={missing}, extra={extra}."
-        )
-
-
-def _require_nonempty_string(name: str, value: Any) -> None:
+def _string(record: dict[str, object], key: str) -> str:
+    value = record.get(key)
     if not isinstance(value, str) or not value:
-        raise TypeError(f"Runtime State {name} must be non-empty str.")
+        raise TypeError(f"{key} must be a non-empty string.")
+    return value
 
 
-def _require_uuid_string(name: str, value: Any) -> None:
-    _require_nonempty_string(name, value)
-    try:
-        UUID(value)
-    except ValueError as error:
-        raise ValueError(f"Runtime State {name} must be a UUID string.") from error
+def _optional_string(record: dict[str, object], key: str) -> str | None:
+    value = record.get(key)
+    if value is not None and (not isinstance(value, str) or not value):
+        raise TypeError(f"{key} must be a non-empty string or None.")
+    return value
 
 
-def _require_timestamp(name: str, value: Any) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise TypeError(f"Runtime State {name} must be non-negative int.")
+def _integer(
+    record: dict[str, object], key: str, *, default: int | None = None
+) -> int:
+    value = record.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{key} must be an integer.")
+    return value
 
 
-def _require_revision_map(name: str, value: Any) -> None:
-    mapping = _require_string_key_mapping(name, value)
-    if not all(
-        isinstance(item, int) and not isinstance(item, bool) and item >= 0
-        for item in mapping.values()
+def _optional_integer(record: dict[str, object], key: str) -> int | None:
+    value = record.get(key)
+    if value is not None and (
+        not isinstance(value, int) or isinstance(value, bool)
     ):
-        raise TypeError(f"Runtime State {name} values must be non-negative int.")
+        raise TypeError(f"{key} must be an integer or None.")
+    return value
 
 
-def _require_optional_error(name: str, value: Any) -> None:
-    if value is None:
-        return
-    mapping = _require_mapping(name, value)
-    if set(mapping) != {"type", "message"} or not all(
-        isinstance(mapping[key], str) for key in ("type", "message")
-    ):
-        raise TypeError(
-            f"Runtime State {name} must be None or {{'type': str, 'message': str}}."
-        )
-
-
-def _apply_copy_on_write(
-    root: dict[str, Any],
-    operations: tuple[StateOperation, ...],
-    *,
-    persistent: bool,
-) -> dict[str, Any]:
-    candidate = root.copy()
-    cloned: set[int] = {id(candidate)}
-    for operation in operations:
-        if not operation.path:
-            raise ValueError("StateOperation path cannot be empty.")
-        parent, token = _copy_parent(candidate, operation.path, cloned)
-        value = operation._persistent_value if persistent else operation.value
-        if operation.op == "add":
-            _add(parent, token, copy.deepcopy(value) if persistent else value)
-        elif operation.op == "replace":
-            _replace(parent, token, copy.deepcopy(value) if persistent else value)
-        else:
-            _remove(parent, token)
-    return candidate
-
-
-def _copy_parent(
-    root: dict[str, Any], path: tuple[PathToken, ...], cloned: set[int]
-) -> tuple[dict[str, Any] | list[Any], PathToken]:
-    current: dict[str, Any] | list[Any] = root
-    for token in path[:-1]:
-        child = _child(current, token)
-        if not isinstance(child, (dict, list)):
-            raise TypeError(f"StateOperation traverses non-container at {token!r}.")
-        if id(child) not in cloned:
-            child_copy = child.copy()
-            _assign_existing(current, token, child_copy)
-            cloned.add(id(child_copy))
-            child = child_copy
-        current = child
-    return current, path[-1]
-
-
-def _child(parent: dict[str, Any] | list[Any], token: PathToken) -> Any:
-    if isinstance(parent, dict):
-        if not isinstance(token, str) or token not in parent:
-            raise KeyError(token)
-        return parent[token]
-    index = _list_index(token, len(parent), allow_end=False)
-    return parent[index]
-
-
-def _assign_existing(
-    parent: dict[str, Any] | list[Any], token: PathToken, value: Any
-) -> None:
-    if isinstance(parent, dict):
-        if not isinstance(token, str) or token not in parent:
-            raise KeyError(token)
-        parent[token] = value
-        return
-    parent[_list_index(token, len(parent), allow_end=False)] = value
-
-
-def _add(parent: dict[str, Any] | list[Any], token: PathToken, value: Any) -> None:
-    if isinstance(parent, dict):
-        if not isinstance(token, str):
-            raise TypeError("Mapping StateOperation token must be str.")
-        if token in parent:
-            raise KeyError(f"StateOperation add target already exists: {token!r}.")
-        parent[token] = value
-        return
-    if token == "-":
-        parent.append(value)
-        return
-    parent.insert(_list_index(token, len(parent), allow_end=True), value)
-
-
-def _replace(parent: dict[str, Any] | list[Any], token: PathToken, value: Any) -> None:
-    _assign_existing(parent, token, value)
-
-
-def _remove(parent: dict[str, Any] | list[Any], token: PathToken) -> None:
-    if isinstance(parent, dict):
-        if not isinstance(token, str) or token not in parent:
-            raise KeyError(token)
-        del parent[token]
-        return
-    del parent[_list_index(token, len(parent), allow_end=False)]
-
-
-def _list_index(token: PathToken, size: int, *, allow_end: bool) -> int:
-    if not isinstance(token, int):
-        raise TypeError("List StateOperation token must be int or '-' for add.")
-    upper = size if allow_end else size - 1
-    if token < 0 or token > upper:
-        raise IndexError(token)
-    return token
-
-
-def _read_path(root: Any, path: Sequence[PathToken]) -> Any:
-    current = root
-    for token in path:
-        current = _child(current, token)
-    return current
+def _boolean(record: dict[str, object], key: str) -> bool:
+    value = record.get(key)
+    if type(value) is not bool:
+        raise TypeError(f"{key} must be bool.")
+    return value

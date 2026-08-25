@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-import math
 from types import MappingProxyType
 from typing import Literal, TypeAlias, Union
 from typing_extensions import TypedDict
@@ -103,60 +102,6 @@ class Map:
 
 
 @dataclass(frozen=True, slots=True)
-class Backoff:
-    mode: Literal["fixed", "linear", "exponential"] = "exponential"
-    initial_delay_ms: int = 100
-    max_delay_ms: int | None = None
-    multiplier: float = 2.0
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.mode, str) or self.mode not in {
-            "fixed",
-            "linear",
-            "exponential",
-        }:
-            raise ValueError("Backoff mode is invalid.")
-        if not _non_negative_int(self.initial_delay_ms):
-            raise ValueError("Backoff initial_delay_ms cannot be negative.")
-        if self.max_delay_ms is not None and not _non_negative_int(
-            self.max_delay_ms
-        ):
-            raise ValueError("Backoff max_delay_ms cannot be negative.")
-        if (
-            not isinstance(self.multiplier, (int, float))
-            or isinstance(self.multiplier, bool)
-            or not math.isfinite(self.multiplier)
-            or self.multiplier < 0
-        ):
-            raise ValueError("Backoff multiplier cannot be negative.")
-
-    def delay_seconds(self, retry_index: int) -> float:
-        if not _non_negative_int(retry_index):
-            raise ValueError("retry_index cannot be negative.")
-        if self.mode == "fixed":
-            delay = float(self.initial_delay_ms)
-        elif self.mode == "linear":
-            delay = self.initial_delay_ms * (1 + self.multiplier * retry_index)
-        else:
-            delay = self.initial_delay_ms * (self.multiplier ** retry_index)
-        if self.max_delay_ms is not None:
-            delay = min(delay, self.max_delay_ms)
-        return delay / 1000
-
-
-@dataclass(frozen=True, slots=True)
-class Retry:
-    max_attempts: int = 1
-    backoff: Backoff | None = None
-
-    def __post_init__(self) -> None:
-        if not _positive_int(self.max_attempts):
-            raise ValueError("Retry max_attempts must be positive.")
-        if self.backoff is not None and not isinstance(self.backoff, Backoff):
-            raise TypeError("Retry backoff must be Backoff or None.")
-
-
-@dataclass(frozen=True, slots=True)
 class Recovery:
     """Crash recovery rule for one logical Node occurrence."""
 
@@ -171,45 +116,6 @@ class Recovery:
             raise ValueError("Recovery mode is invalid.")
         if not _positive_int(self.max_attempts):
             raise ValueError("Recovery max_attempts must be positive.")
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorPolicy:
-    retry: Retry = field(default_factory=Retry)
-    timeout_ms: int | None = None
-    fallback: tuple[Callable[..., object] | Operator, ...] = field(
-        default=(), compare=False
-    )
-    max_concurrency: int | None = None
-    max_operator_calls_per_invocation: int | None = None
-    max_runtime_ms_per_invocation: int | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.retry, Retry):
-            raise TypeError("OperatorPolicy retry must be Retry.")
-        if not isinstance(self.fallback, tuple):
-            raise TypeError("OperatorPolicy fallback must be a tuple.")
-        for name, value in (
-            ("timeout_ms", self.timeout_ms),
-            ("max_concurrency", self.max_concurrency),
-            (
-                "max_operator_calls_per_invocation",
-                self.max_operator_calls_per_invocation,
-            ),
-            ("max_runtime_ms_per_invocation", self.max_runtime_ms_per_invocation),
-        ):
-            if value is not None and not _positive_int(value):
-                raise ValueError(f"OperatorPolicy {name} must be positive.")
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorPolicyIR:
-    retry: Retry
-    timeout_ms: int | None
-    fallback: tuple[Operator, ...] = field(default=(), compare=False)
-    max_concurrency: int | None = None
-    max_operator_calls_per_invocation: int | None = None
-    max_runtime_ms_per_invocation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,9 +145,7 @@ class Node:
     map: Map | None = None
     stream: Stream | None = None
     user_events: tuple[UserEventMapping, ...] = ()
-    operator_policy: OperatorPolicy | None = None
     recovery_mode: Recovery = field(default_factory=Recovery)
-    max_occurrences_per_invocation: int | None = None
 
 
 @dataclass(slots=True)
@@ -291,9 +195,7 @@ class NodeIR:
     user_events: tuple[UserEventMappingIR, ...] = field(
         default=(), compare=False
     )
-    operator_policy: OperatorPolicyIR | None = field(default=None, compare=False)
     recovery_mode: Recovery = field(default_factory=Recovery)
-    max_occurrences_per_invocation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,7 +288,3 @@ class WorkflowIR:
 
 def _positive_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
-
-
-def _non_negative_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0

@@ -44,9 +44,14 @@ class Harness:
         self.workflow = WorkflowCompiler().compile_or_raise(workflow)
         self.scheduler = Scheduler()
         self.journal = InMemoryEventJournal()
-        self.emit(SessionOpened(self.workflow.workflow_id, {}), invocation_id=None)
+        self.emit(SessionOpened({}), invocation_id=None)
         self.emit(
-            InvocationOpened(self.workflow.workflow_revision_id, entry, {"value": 1})
+            InvocationOpened(
+                self.workflow.workflow_id,
+                self.workflow.workflow_revision_id,
+                entry,
+                {"value": 1},
+            )
         )
         self.emit(InvocationStarted())
         self.emit(self.scheduler.initialize(self.workflow, self.state))

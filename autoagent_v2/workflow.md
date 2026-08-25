@@ -1,6 +1,7 @@
 # Workflow 静态模型
 
-V2 Workflow 是静态有向图。Runtime 只执行编译后的 `WorkflowIR`，不读取可变的 Authoring 对象。
+V2 Workflow 是静态有向图。Runtime 只执行 Compiler 生成的不可变 `WorkflowIR`，不读取
+可变 Authoring 对象。
 
 ```python
 Workflow(
@@ -15,65 +16,114 @@ Workflow(
 Node(
     id: str,
     executable: callable | Operator | Capability | Wait | Workflow,
-    input_mapping: InputMapping | None,
-    output_binding: OutputBinding | None,
-    execution_mode: "await" | "spawn" = "await",  # 仅 Workflow 生效
-    map: Map | None,
-    stream: Stream | None,
-    user_events: tuple[UserEventMapping, ...],
-    operator_policy: OperatorPolicy | None,
-    recovery_mode: Recovery = Recovery(mode="never"),
-    max_occurrences_per_invocation: int | None,
+    input_mapping: InputMapping | None = None,
+    output_binding: OutputBinding | None = None,
+    execution_mode: "await" | "spawn" = "await",  # 仅 Child Workflow 生效
+    map: Map | None = None,
+    stream: Stream | None = None,
+    user_events: tuple[UserEventMapping, ...] = (),
+    recovery_mode: Recovery = Recovery(mode="never", max_attempts=1),
 )
 
 Edge(
-    source: str,
-    target: str,
-    condition: Condition | None,
+    source: str,             # Source Node id
+    target: str,             # Target Node id
+    condition: Condition | None = None,
     on: "complete" | "error" = "complete",
+    id: str | None = None,
+)
+
+Map(
+    aggregate: Aggregation | None = None,
+    max_parallelism: int | None = None,
 )
 ```
 
-## 数据契约
+## 契约与 Hook
 
-Operator 只接受零个或一个业务输入。输入、输出、Wait 请求/响应只允许模块级 `TypedDict`、受限 Pydantic Model 或 `None`。契约采用名义匹配，并在进入 Runtime Event 前转换成可持久化记录。
+Operator 只接受零个或一个业务输入。Operator 输入/输出、Wait 请求/响应和需要业务值
+契约的 Hook 输出只接受模块级 `TypedDict`、受限 Pydantic Model 或 `None`；契约采用
+名义匹配，不按字段结构猜测兼容。Condition 必须返回 `bool`，Output Binding 必须返回
+`ContextPatch | None`，其他 Hook 也由 Compiler 检查精确签名。
 
-Node 默认接收唯一选中 Activation 的输出。多入边必须提供 `InputMapping`；`incoming` 以 Edge id 为键，只包含实际选中的 Activation。`OutputBinding` 只能返回 `ContextPatch`，不能直接修改权威 Context。
+用户调用 Operator/Resume 时传入严格的 Python domain value。值进入 RuntimeState 前只在
+一个边界序列化成 canonical JSON record，例如 Enum 变为其值、tuple 变为 list；隐式
+Edge、Wait 继续执行和 Child 边界会按契约恢复 domain value 后再调用 executable。这样
+运行状态可持久化，同时不会用宽松类型强转掩盖用户输入错误。
 
-## Map 与 Stream
+所有 Hook 可同步或异步，并接收只读 Context：
 
-Map 是一次 NodeOccurrence。`InputMapping` 返回 `list[ExecutableInput]`，Runtime 有界并行执行物理 OperatorCall 或 Child Invocation，结果保持输入顺序；Operator Map 使用固定数量 Worker 按索引领取 item，不为每个 item 预建 Task。可选 Aggregation 生成一个 Node Output。`Map.max_parallelism` 是局部上限，不能突破 App 的 `max_operator_concurrency`。Child Workflow 支持 `map + await` 和 `map + spawn`：前者聚合有序 Child Output，后者为全部输入建立有序 ChildInvocationHandle，但只允许受限数量 Child 实际执行；空 Map 不创建 Child。
+- `InputMappingContext`：durable Invocation 输入、按 Edge id 索引的已选中 incoming、两层 Context；
+- `OutputBindingContext`：只读 durable Node Output 和两层 Context；
+- `ConditionContext`：Source Node、只读 durable Output/Error 和两层 Context；
+- `AggregationContext`：有序 Map inputs/outputs 和两层 Context；
+- `StreamContext`：当前 Node input 和两层 Context。
 
-Stream Operator 返回同步或异步迭代器。StreamReducer 将 Chunk 归约成一个 Node Output；每个 Chunk 同时产生独立 UserEvent，不进入 RuntimeState。
+`OutputBinding` 只能返回 `ContextPatch | None`，不能直接修改 Runtime Context。多入边、
+Error Edge 的目标以及类型无法直连的节点必须提供 Input Mapping。`incoming` 只包含实际
+选中的 Activation；未选中边由 Scheduler 决议，不伪造业务值。
 
-## Operator 执行边界
+## Edge、分支与 Join
 
-`OperatorPolicy` 只作用于实际 Operator Call，包含 Retry、Backoff、Timeout、Fallback、最大并发、Invocation 内最大 Call 数和累计运行时间。Node 的 `max_occurrences_per_invocation` 独立限制 Loop 中的逻辑发生次数。Map 的每个单元及每次 Retry/Fallback 都是独立物理 Call；一个单元失败时，其余 Map Task 必须取消并收敛后，NodeOccurrence 才能进入终态。
+- 同一 Source/Target 之间最多一条 Edge；Complete 与 Error 路由不能重复指向同一 Target。
+- Source 终态后，状态匹配且 Condition 为真的出边全部选中，即 all-match。
+- Target 等待当前 ExecutionScope 内全部预期入边决议；至少一条选中才执行，全部未选中
+  则跳过并继续传播不可达状态。
+- 多入口/多出口保留在 IR；调用多入口 Workflow 时必须提供 `entry_node_id`。
 
-Capability 的静态定义只给出能力 id 和名义契约，不保存实现。Operator Registry 是实现的唯一来源，可以注册、禁用实现并设置默认实现或优先级，但所有实现必须保持相同名义契约；Registry 变化不修改 Workflow Revision。选择顺序为显式 default、唯一候选、唯一最高优先级；仍有歧义时必须提供 CapabilityResolver。
+## Map
 
-## 分支、Join 与 Loop
+Map 始终是一次 NodeOccurrence：
 
-- 出边采用 all-match：状态匹配且 Condition 为真的 Edge 全部选中。
-- Node 等待同一 ExecutionScope 的全部预期入边决议；至少一条选中则执行，全部未选中则跳过。
-- 自然 Loop 在编译期形成 `LoopRegionIR`。每轮使用独立 `ExecutionScope` 和 NodeOccurrence。
-- Back/Exit 决议先进入 Loop 边界状态；当本轮所有并行工作终态后再原子提交。
-- 同一轮不能同时选择 Continue 与 Exit。支持 Self Loop、嵌套 Loop、同 Header 嵌套和互斥 sibling Loop。
+1. Input Mapping 返回 `list[ExecutableInput]`；
+2. Runtime 有界并行执行每个 item；
+3. 结果按输入索引稳定排序；
+4. 没有 Aggregation 时 Node Output 是结果列表，有 Aggregation 时为其返回值；
+5. 任一单元失败时，先取消并收敛同一 Map 已开始的工作，再结束 NodeOccurrence。
 
-## 子 Workflow
+`Map.max_parallelism` 是局部上限，不能超过 App 的 `max_operator_concurrency`。Map item
+不会沿普通 Edge 独立扩散，因此连续 Map 不引入通用 Node 多发生。
 
-- `SubWorkflow` 只做编译时结构展开，共享父 Invocation 和 Context。
-- Node 的 executable 为 Workflow 时创建独立子 Invocation。
-- `await` 等待子 Invocation 终态并返回结果。
-- `spawn` 立即返回可持久化 ChildInvocationHandle，Handle 包含 child session、Invocation 和精确 Workflow Revision。
-- App 已提供 Child status、await 和 cancel；父子消息、远程执行仍属于后续 Task Runtime。
+## Stream
 
-## Revision 与可移植定义快照
+设置 `Stream(reducer=...)` 后，Operator 必须返回同步或异步迭代器。每个 Chunk 产生
+非 canonical 的 `UserEvent(kind="stream.chunk")`；StreamReducer 将全部 Chunk 归约成
+一个 Node Output，Node 仍只完成一次。当前没有 Stream Edge，Chunk 不激活下游 Node，
+也不是 Checkpoint 边界。
 
-用户自定义方法通过方法名、声明的参数/返回 contract 和可选的 `@workflow_hook(version="...")` 参与 Workflow Revision；Python module、文件路径和 import 位置不参与。方法实现发生语义变化时必须提升 hook version。Operator 的部署版本不产生新的 Workflow Revision。
+## Loop
 
-编译成功同时生成 `WorkflowDefinitionSnapshot`。它是纯 JSON 兼容的静态图和执行语义记录，不包含可执行 callable；可用于历史图展示、Revision 兼容检查和后续恢复装配，但执行仍要求应用注册匹配代码。App 可按 Workflow id 或精确 Revision id 读取已注册快照。
+Compiler 从自然 Loop 生成 `LoopRegionIR`，每轮使用独立 `ExecutionScope` 和
+NodeOccurrence。Back/Exit 决议会等待当轮活动分支收敛；同一轮不能同时 Continue 与
+Exit。当前支持 Self Loop、嵌套 Loop、共享 Header 的合法结构，并拒绝不可归约图、
+多 Back Edge 和无出口 Loop。
+
+## SubWorkflow 与 Child Workflow
+
+- `SubWorkflow` 只做编译期带命名空间展开，共享父 Invocation 与 Context。
+- Node 的 executable 为 Workflow 时，创建独立 Child Session/Invocation。
+- `execution_mode="await"` 等待 Child 终态并返回 Child Output。
+- `execution_mode="spawn"` 在 Child 被可靠接纳后返回可持久化
+  `ChildInvocationHandle`。
+- Child Workflow 可与 Map 组合，输出为有序 Child Output 或 Handle 列表，也可再聚合。
+
+当前 Child Workflow 要求边界无歧义；父子 Context 不共享。App 可查询、等待或取消
+Handle，父子消息和远程 Child 不在当前静态模型。
+
+## Capability 与 Revision
+
+Capability 只声明 id 和名义 contract。实现来自 App 的 Operator Registry；选择顺序为
+显式 default、唯一候选、唯一最高优先级，仍有歧义时交给 CapabilityResolver。Resolver
+不能返回 Registry 之外的 Operator，动态实现也必须保持 Capability 的名义 contract。
+
+Revision 不记录 Python module、文件路径或 import 位置。用户方法的短名称、声明
+contract 和 `@workflow_hook(version="...")` 参与 Revision；语义变化时由用户提升 Hook
+version。Compiler 同时生成 JSON 兼容且不含 callable 的
+`WorkflowDefinitionSnapshot`。
 
 ## Crash Recovery
 
-Recovery 与活进程内的 Retry 不同，它会重放整个 NodeOccurrence。Node 默认 `Recovery(mode="never")`，避免带副作用的 Operator 被隐式重复调用；只有显式标记 `replay_safe` 且未超过 `max_attempts` 的运行中 occurrence 才能在进程恢复后重新 Ready。
+`Recovery` 只控制进程崩溃后是否允许重放整个运行中 NodeOccurrence，与当前不存在的
+调用级重试无关。默认 `never`；只有显式 `replay_safe` 且恢复次数不超过
+`max_attempts` 才重新进入 ready。整次重放包含 Input Mapping、Operator、Output Binding
+和 Condition；正常 live 执行不会因并行 Context 提交而隐式重试 Binding 或 Condition。

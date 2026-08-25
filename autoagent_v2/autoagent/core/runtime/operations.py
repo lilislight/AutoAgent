@@ -132,9 +132,15 @@ def diff_runtime_states(before: object, after: object) -> tuple[StateOperation, 
 def apply_operation_batch(
     record: Mapping[str, object], batch: StateOperationBatch
 ) -> dict[str, object]:
-    """Apply a batch copy-on-write and reject partial or invalid changes."""
+    """Apply a batch with path copy-on-write.
 
-    candidate: object = thaw(freeze(record))
+    The input record is treated as an immutable snapshot.  Every operation
+    clones only the containers on its path, while operation values are thawed
+    into newly owned containers.  This keeps a failed batch atomic without the
+    previous full-tree ``freeze``/``thaw`` clone.
+    """
+
+    candidate: object = record if isinstance(record, dict) else dict(record)
     for operation in batch.operations:
         candidate = _apply_operation(candidate, operation)
     if not isinstance(candidate, dict):
@@ -150,7 +156,12 @@ def _diff_runtime_value(
     before: object,
     after: object,
 ) -> None:
-    if before is after or before == after:
+    if before is after:
+        return
+    if (
+        before is None
+        or isinstance(before, (bool, int, float, str))
+    ) and before == after:
         return
     if type(before) is type(after) and is_dataclass(before):
         # Optional RuntimeErrorInfo fields are omitted from its canonical
@@ -195,7 +206,59 @@ def _diff_runtime_value(
                 after_items[key],
             )
         return
+    if isinstance(before, (tuple, list)) and isinstance(after, (tuple, list)):
+        _diff_runtime_sequence(operations, path, before, after)
+        return
+    if before == after:
+        return
     operations.append(StateOperation("replace", path, _encode_runtime(after)))
+
+
+def _diff_runtime_sequence(
+    operations: list[StateOperation],
+    path: tuple[PathToken, ...],
+    before: Sequence[object],
+    after: Sequence[object],
+) -> None:
+    """Describe tuple/list edits without replacing unchanged large collections."""
+
+    prefix = 0
+    limit = min(len(before), len(after))
+    while prefix < limit and (
+        before[prefix] is after[prefix] or before[prefix] == after[prefix]
+    ):
+        prefix += 1
+
+    suffix = 0
+    while (
+        suffix < len(before) - prefix
+        and suffix < len(after) - prefix
+        and (
+            before[len(before) - 1 - suffix]
+            is after[len(after) - 1 - suffix]
+            or before[len(before) - 1 - suffix]
+            == after[len(after) - 1 - suffix]
+        )
+    ):
+        suffix += 1
+
+    before_end = len(before) - suffix
+    after_end = len(after) - suffix
+    shared = min(before_end - prefix, after_end - prefix)
+    for offset in range(shared):
+        index = prefix + offset
+        _diff_runtime_value(
+            operations,
+            (*path, index),
+            before[index],
+            after[index],
+        )
+    for index in range(before_end - 1, prefix + shared - 1, -1):
+        operations.append(StateOperation("remove", (*path, index)))
+    for index in range(prefix + shared, after_end):
+        operations.append(
+            StateOperation("add", (*path, index), _encode_runtime(after[index]))
+        )
 
 
 def _runtime_mapping(value: Mapping[object, object]) -> dict[str, object]:

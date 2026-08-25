@@ -33,18 +33,29 @@ class OperatorRegistry:
         self._lock = RLock()
 
     def bind_capability(self, capability) -> None:
-        contract = capability.contract
+        self.bind_capabilities((capability,))
+
+    def bind_capabilities(self, capabilities) -> None:
+        """Validate and bind one Workflow closure without partial mutation."""
+
         with self._lock:
-            previous = self._contracts.get(capability.id)
-            if previous is not None and not _same_contract(previous, contract):
-                raise ValueError(
-                    f"Capability {capability.id!r} was rebound with another contract."
-                )
-            self._contracts[capability.id] = contract
-            for registration in self.for_capability(
-                capability.id, include_disabled=True
-            ):
-                _require_contract(capability.id, contract, registration.operator.contract)
+            pending = dict(self._contracts)
+            for capability in capabilities:
+                contract = capability.contract
+                previous = pending.get(capability.id)
+                if previous is not None and not _same_contract(previous, contract):
+                    raise ValueError(
+                        f"Capability {capability.id!r} was rebound with another contract."
+                    )
+                for operator_id in self._by_capability.get(capability.id, ()):
+                    registration = self._items[operator_id]
+                    _require_contract(
+                        capability.id,
+                        contract,
+                        registration.operator.contract,
+                    )
+                pending[capability.id] = contract
+            self._contracts = pending
 
     def register(
         self,

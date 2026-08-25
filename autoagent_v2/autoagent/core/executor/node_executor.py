@@ -45,6 +45,10 @@ CallEventHandler = Callable[[CallEvent], Awaitable[None]]
 StreamChunkHandler = Callable[[object], Awaitable[None]]
 
 
+class UserCallableCancelledError(RuntimeError):
+    """A user callable raised CancelledError without Task cancellation."""
+
+
 async def _ignore_event(_event: CallEvent) -> None:
     return None
 
@@ -66,6 +70,7 @@ class NodeExecutor:
         self._max_operator_concurrency = max_operator_concurrency
         self._operator_capacity = asyncio.Semaphore(max_operator_concurrency)
         self._pool = _BurstThreadPool(max_operator_concurrency)
+        self._settlement_tasks: set[asyncio.Task[None]] = set()
         self._closed = False
 
     def close(self) -> None:
@@ -115,7 +120,11 @@ class NodeExecutor:
                 ),
             )
         if node.map is None and node.input_contract is not None:
-            value = node.input_contract.validate(value)
+            value = (
+                node.input_contract.restore(value)
+                if node.input_mapping is None
+                else node.input_contract.validate(value)
+            )
         return value
 
     async def bind_output(
@@ -185,7 +194,6 @@ class NodeExecutor:
         session_context: object = None,
         on_call_event: CallEventHandler = _ignore_event,
         on_stream_chunk: StreamChunkHandler = _ignore_chunk,
-        max_calls: int | None = None,
     ) -> NodeExecutionResult:
         if self._closed:
             raise RuntimeError("NodeExecutor is closed.")
@@ -200,19 +208,6 @@ class NodeExecutor:
         peak = 0
         active = 0
         lock = asyncio.Lock()
-        budget_lock = asyncio.Lock()
-        remaining_calls = max_calls
-
-        async def consume_call() -> bool:
-            nonlocal remaining_calls
-            if remaining_calls is None:
-                return True
-            async with budget_lock:
-                if remaining_calls < 1:
-                    return False
-                remaining_calls -= 1
-                return True
-
         async def run_unit(index: int, item: object) -> tuple[object, int]:
             nonlocal active, peak
             async with lock:
@@ -228,7 +223,6 @@ class NodeExecutor:
                     session_context,
                     on_call_event,
                     on_stream_chunk,
-                    consume_call,
                 )
             finally:
                 async with lock:
@@ -287,8 +281,6 @@ class NodeExecutor:
                 outputs=tuple(outputs),
             )
             output = await _invoke(self._pool, node.map.aggregate, context)
-        if node.output_contract is not None:
-            output = node.output_contract.to_record(output)
         return NodeExecutionResult(
             output,
             ExecutionMetrics(
@@ -308,53 +300,21 @@ class NodeExecutor:
         session_context: object,
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
-        consume_call: Callable[[], Awaitable[bool]],
     ) -> tuple[object, int]:
-        primary = node.executable
-        assert isinstance(primary, Operator)
-        policy = node.operator_policy
-        retry = policy.retry if policy is not None else None
-        max_attempts = retry.max_attempts if retry is not None else 1
-        operators = (primary, *(policy.fallback if policy is not None else ()))
-        calls = 0
-        last_error: BaseException | None = None
-        for operator_index, operator in enumerate(operators):
-            for attempt in range(1, max_attempts + 1):
-                if not await consume_call():
-                    raise RuntimeError("Operator Call limit exceeded for this Invocation.")
-                calls += 1
-                reason = (
-                    "fallback"
-                    if operator_index > 0
-                    else "retry"
-                    if attempt > 1
-                    else "normal"
-                )
-                try:
-                    output = await self._call_once(
-                        node,
-                        operator,
-                        occurrence_id,
-                        unit_index,
-                        value,
-                        attempt,
-                        reason,
-                        invocation_context,
-                        session_context,
-                        on_call_event,
-                        on_stream_chunk,
-                    )
-                    return output, calls
-                except asyncio.CancelledError:
-                    raise
-                except BaseException as error:
-                    last_error = error
-                    if attempt < max_attempts and retry is not None and retry.backoff is not None:
-                        delay = retry.backoff.delay_seconds(attempt - 1)
-                        if delay:
-                            await asyncio.sleep(delay)
-        assert last_error is not None
-        raise last_error
+        operator = node.executable
+        assert isinstance(operator, Operator)
+        output = await self._call_once(
+            node,
+            operator,
+            occurrence_id,
+            unit_index,
+            value,
+            invocation_context,
+            session_context,
+            on_call_event,
+            on_stream_chunk,
+        )
+        return output, 1
 
     async def _call_once(
         self,
@@ -363,22 +323,17 @@ class NodeExecutor:
         occurrence_id: str,
         unit_index: int,
         value: object,
-        attempt: int,
-        reason: str,
         invocation_context: object,
         session_context: object,
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
     ) -> object:
         await self._operator_capacity.acquire()
-        release_deferred = False
-
-        def defer_release(future: Future[object]) -> None:
-            nonlocal release_deferred
-            release_deferred = True
-            asyncio.create_task(
-                _release_capacity_after_future(future, self._operator_capacity)
-            )
+        lease = _OperatorCapacityLease(
+            self._pool,
+            self._operator_capacity,
+            self._settlement_tasks,
+        )
 
         try:
             return await self._call_once_admitted(
@@ -387,17 +342,14 @@ class NodeExecutor:
                 occurrence_id,
                 unit_index,
                 value,
-                attempt,
-                reason,
                 invocation_context,
                 session_context,
                 on_call_event,
                 on_stream_chunk,
-                defer_release,
+                lease,
             )
         finally:
-            if not release_deferred:
-                self._operator_capacity.release()
+            lease.close()
 
     async def _call_once_admitted(
         self,
@@ -406,17 +358,15 @@ class NodeExecutor:
         occurrence_id: str,
         unit_index: int,
         value: object,
-        attempt: int,
-        reason: str,
         invocation_context: object,
         session_context: object,
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
-        defer_release: Callable[[Future[object]], None],
+        lease: "_OperatorCapacityLease",
     ) -> object:
         validated = (
             operator.contract.input.validate(value)
-            if operator.contract.input is not None
+            if operator.contract.accepts_input
             else None
         )
         call_id = str(uuid4())
@@ -428,16 +378,15 @@ class NodeExecutor:
                 unit_index,
                 (
                     operator.contract.input.to_record(validated)
-                    if operator.contract.input is not None
+                    if operator.contract.accepts_input
                     else None
                 ),
-                attempt,
-                reason,  # type: ignore[arg-type]
             )
         )
+
         async def invoke_and_validate() -> tuple[object, ValueContract]:
             returned = await _invoke_handler(
-                self._pool, operator, validated, defer_release
+                self._pool, operator, validated, lease.defer
             )
             if node.stream is not None:
                 returned = await self._reduce_stream(
@@ -448,6 +397,7 @@ class NodeExecutor:
                     invocation_context,
                     session_context,
                     on_stream_chunk,
+                    lease,
                 )
             elif is_stream_value(returned):
                 raise TypeError("Streaming Operator requires Node.stream.")
@@ -461,20 +411,25 @@ class NodeExecutor:
             return contract.validate(returned), contract
 
         try:
-            timeout_ms = (
-                node.operator_policy.timeout_ms
-                if node.operator_policy is not None
-                else None
+            output, contract = await invoke_and_validate()
+        except _RuntimeEmitFailure as failure:
+            raise failure.error from failure
+        except UserCallableCancelledError:
+            error = RuntimeErrorInfo(
+                "CancelledError", "User callable raised asyncio.CancelledError."
             )
-            output, contract = (
-                await asyncio.wait_for(invoke_and_validate(), timeout_ms / 1000)
-                if timeout_ms is not None
-                else await invoke_and_validate()
-            )
-        except asyncio.CancelledError:
-            error = RuntimeErrorInfo("CancelledError", "Operator Call was cancelled.")
-            await asyncio.shield(on_call_event(OperatorCallFailed(call_id, error)))
+            await on_call_event(OperatorCallFailed(call_id, error))
             raise
+        except asyncio.CancelledError as cancelled:
+            error = RuntimeErrorInfo("CancelledError", "Operator Call was cancelled.")
+            if _task_is_cancelling():
+                await asyncio.shield(on_call_event(OperatorCallFailed(call_id, error)))
+                raise
+            user_error = UserCallableCancelledError(
+                "User callable raised asyncio.CancelledError."
+            )
+            await on_call_event(OperatorCallFailed(call_id, error))
+            raise user_error from cancelled
         except BaseException as exc:
             error = RuntimeErrorInfo(type(exc).__name__, str(exc) or type(exc).__name__)
             await on_call_event(OperatorCallFailed(call_id, error))
@@ -491,6 +446,7 @@ class NodeExecutor:
         invocation_context: object,
         session_context: object,
         on_stream_chunk: StreamChunkHandler,
+        lease: "_OperatorCapacityLease",
     ) -> object:
         if not is_stream_value(returned):
             raise TypeError("Stream Node Operator must return Iterator or AsyncIterator.")
@@ -501,9 +457,15 @@ class NodeExecutor:
             input=value,
         )
         reducer = node.stream.reducer
-        state = await _invoke(self._pool, reducer.initial, context)
+        state: object | None = None
         stream_error: BaseException | None = None
         try:
+            state = await _invoke(
+                self._pool,
+                reducer.initial,
+                context,
+                defer_release=lease.defer,
+            )
             if hasattr(returned, "__anext__"):
                 async for chunk in returned:  # type: ignore[union-attr]
                     if operator.contract.stream_chunk is not None:
@@ -515,12 +477,24 @@ class NodeExecutor:
                         )
                     else:
                         emitted_chunk = chunk
-                    await on_stream_chunk(emitted_chunk)
-                    state = await _invoke(self._pool, reducer.add, context, state, chunk)
+                    await _emit_stream_chunk(on_stream_chunk, emitted_chunk)
+                    state = await _invoke(
+                        self._pool,
+                        reducer.add,
+                        context,
+                        state,
+                        chunk,
+                        defer_release=lease.defer,
+                    )
             else:
                 iterator = iter(returned)  # type: ignore[arg-type]
                 while True:
-                    present, chunk = await _run_sync(self._pool, _next_item, iterator)
+                    present, chunk = await _run_sync(
+                        self._pool,
+                        _next_item,
+                        iterator,
+                        defer_release=lease.defer,
+                    )
                     if not present:
                         break
                     if operator.contract.stream_chunk is not None:
@@ -532,18 +506,38 @@ class NodeExecutor:
                         )
                     else:
                         emitted_chunk = chunk
-                    await on_stream_chunk(emitted_chunk)
-                    state = await _invoke(self._pool, reducer.add, context, state, chunk)
+                    await _emit_stream_chunk(on_stream_chunk, emitted_chunk)
+                    state = await _invoke(
+                        self._pool,
+                        reducer.add,
+                        context,
+                        state,
+                        chunk,
+                        defer_release=lease.defer,
+                    )
         except BaseException as error:
             stream_error = error
             raise
         finally:
-            try:
-                await _close_stream_source(self._pool, returned)
-            except BaseException:
-                if stream_error is None:
-                    raise
-        return await _invoke(self._pool, reducer.finish, context, state)
+            if lease.has_deferred_work:
+                lease.close_stream_later(returned)
+            else:
+                try:
+                    await _close_stream_source(
+                        self._pool,
+                        returned,
+                        defer_release=lease.defer,
+                    )
+                except BaseException:
+                    if stream_error is None:
+                        raise
+        return await _invoke(
+            self._pool,
+            reducer.finish,
+            context,
+            state,
+            defer_release=lease.defer,
+        )
 
 
 async def _invoke_handler(
@@ -552,29 +546,60 @@ async def _invoke_handler(
     value: object,
     defer_release: Callable[[Future[object]], None],
 ) -> object:
-    handler = operator.handler
-    if inspect.iscoroutinefunction(handler) or inspect.isasyncgenfunction(handler):
-        returned = handler() if operator.contract.input is None else handler(value)
-    else:
-        returned = await _run_sync(
-            pool,
-            handler if operator.contract.input is None else lambda: handler(value),
-            defer_release=defer_release,
-        )
-    if inspect.isawaitable(returned):
-        return await returned
-    return returned
+    try:
+        handler = operator.handler
+        if inspect.iscoroutinefunction(handler) or inspect.isasyncgenfunction(handler):
+            returned = (
+                handler()
+                if not operator.contract.accepts_input
+                else handler(value)
+            )
+        else:
+            returned = await _run_sync(
+                pool,
+                handler if not operator.contract.accepts_input else lambda: handler(value),
+                defer_release=defer_release,
+            )
+        if inspect.isawaitable(returned):
+            return await returned
+        return returned
+    except asyncio.CancelledError as cancelled:
+        if _task_is_cancelling():
+            raise
+        raise UserCallableCancelledError(
+            "User callable raised asyncio.CancelledError."
+        ) from cancelled
 
 
 async def _invoke(
-    pool: Executor, handler: Callable[..., object], *args: object
+    pool: Executor,
+    handler: Callable[..., object],
+    *args: object,
+    defer_release: Callable[[Future[object]], None] | None = None,
 ) -> object:
-    if inspect.iscoroutinefunction(handler):
-        return await handler(*args)  # type: ignore[misc]
-    returned = await _run_sync(pool, handler, *args)
-    if inspect.isawaitable(returned):
-        return await returned
-    return returned
+    try:
+        if inspect.iscoroutinefunction(handler):
+            return await handler(*args)  # type: ignore[misc]
+        returned = await _run_sync(
+            pool,
+            handler,
+            *args,
+            defer_release=defer_release,
+        )
+        if inspect.isawaitable(returned):
+            return await returned
+        return returned
+    except asyncio.CancelledError as cancelled:
+        if _task_is_cancelling():
+            raise
+        raise UserCallableCancelledError(
+            "User callable raised asyncio.CancelledError."
+        ) from cancelled
+
+
+def _task_is_cancelling() -> bool:
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
 
 
 async def _run_sync(
@@ -594,23 +619,98 @@ async def _run_sync(
         raise
 
 
-async def _release_capacity_after_future(
-    future: Future[object], capacity: asyncio.Semaphore
+class _RuntimeEmitFailure(Exception):
+    """A Runtime callback failed outside physical Operator execution."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+async def _emit_stream_chunk(
+    handler: StreamChunkHandler,
+    chunk: object,
 ) -> None:
     try:
-        await await_concurrent_future(future)
-    except BaseException:
-        pass
-    finally:
-        capacity.release()
+        await handler(chunk)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        raise _RuntimeEmitFailure(error) from error
 
 
-async def _close_stream_source(pool: Executor, source: object) -> None:
+class _OperatorCapacityLease:
+    """Hold one Operator permit until all escaped sync work has settled."""
+
+    def __init__(
+        self,
+        pool: Executor,
+        capacity: asyncio.Semaphore,
+        settlement_tasks: set[asyncio.Task[None]],
+    ) -> None:
+        self._pool = pool
+        self._capacity = capacity
+        self._settlement_tasks = settlement_tasks
+        self._futures: list[Future[object]] = []
+        self._stream_sources: list[object] = []
+        self._closed = False
+
+    @property
+    def has_deferred_work(self) -> bool:
+        return bool(self._futures)
+
+    def defer(self, future: Future[object]) -> None:
+        if future not in self._futures:
+            self._futures.append(future)
+
+    def close_stream_later(self, source: object) -> None:
+        if all(existing is not source for existing in self._stream_sources):
+            self._stream_sources.append(source)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if not self._futures and not self._stream_sources:
+            self._capacity.release()
+            return
+        task = asyncio.create_task(self._settle())
+        self._settlement_tasks.add(task)
+        task.add_done_callback(self._settlement_tasks.discard)
+        task.add_done_callback(_consume_background_exception)
+
+    async def _settle(self) -> None:
+        try:
+            for future in self._futures:
+                try:
+                    await await_concurrent_future(future)
+                except BaseException:
+                    pass
+            for source in self._stream_sources:
+                try:
+                    await _close_stream_source(self._pool, source)
+                except BaseException:
+                    pass
+        finally:
+            self._capacity.release()
+
+
+def _consume_background_exception(task: asyncio.Task[object]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _close_stream_source(
+    pool: Executor,
+    source: object,
+    *,
+    defer_release: Callable[[Future[object]], None] | None = None,
+) -> None:
     close = getattr(source, "aclose", None)
     if not callable(close):
         close = getattr(source, "close", None)
     if callable(close):
-        await _invoke(pool, close)
+        await _invoke(pool, close, defer_release=defer_release)
 
 
 class _BurstThreadPool(Executor):

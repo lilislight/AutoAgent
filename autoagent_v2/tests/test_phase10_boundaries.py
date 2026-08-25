@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import threading
 import time
 import unittest
 from concurrent.futures import CancelledError, Future
 from unittest.mock import patch
+
+import autoagent as sdk_api
+import autoagent.core as core_api
 from typing_extensions import TypedDict
 
 from autoagent import (
     AutoAgentApp,
-    Backoff,
     Capability,
     ContextOperation,
     ContextPatch,
@@ -20,11 +21,8 @@ from autoagent import (
     Map,
     Node,
     Operator,
-    OperatorPolicy,
     Recovery,
-    Retry,
     RuntimeErrorInfo,
-    RuntimeEvent,
     UserEvent,
     UserEventMapping,
     Wait,
@@ -34,6 +32,7 @@ from autoagent import (
 from autoagent.core import (
     NodeExecutor,
     OperatorRegistry,
+    RuntimeEvent,
     SessionOpened,
     TaskRuntime,
 )
@@ -41,6 +40,7 @@ from autoagent.core.app.runtime_loop import RuntimeLoop
 from autoagent.core.context import apply_context_operation
 from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core.executor.future import await_concurrent_future
+from autoagent.core.hosting import RuntimeEventSink
 from autoagent.core.runtime.values import freeze, thaw
 from autoagent.core.workflow import SubWorkflow
 
@@ -70,6 +70,44 @@ def map_user_event(context) -> Value:
 
 
 class DefinitionBoundaryTests(unittest.TestCase):
+    def test_public_exports_preserve_sdk_core_and_host_boundaries(self) -> None:
+        """Verify public exports do not leak canonical State or legacy Server APIs."""
+        for module in (sdk_api, core_api):
+            with self.subTest(module=module.__name__):
+                self.assertEqual(len(module.__all__), len(set(module.__all__)))
+                self.assertFalse(
+                    [name for name in module.__all__ if not hasattr(module, name)]
+                )
+
+        self.assertTrue(
+            {"AutoAgentApp", "Workflow", "RuntimeCheckpointBundle", "TraceEvent"}
+            <= set(sdk_api.__all__)
+        )
+        self.assertFalse(
+            {
+                "RuntimeEvent",
+                "RuntimeState",
+                "StateOperation",
+                "StateReducer",
+                "InMemoryEventJournal",
+                "RuntimeEventSink",
+                "AutoAgentServer",
+                "RuntimeStore",
+                "AutoAgentSettings",
+                "Backoff",
+                "Retry",
+                "OperatorPolicy",
+            }
+            & set(sdk_api.__all__)
+        )
+        self.assertTrue(
+            {"RuntimeEvent", "RuntimeState", "StateOperation", "StateReducer"}
+            <= set(core_api.__all__)
+        )
+        self.assertEqual(
+            RuntimeEventSink.__module__, "autoagent.core.hosting.runtime_events"
+        )
+
     def test_malformed_definition_members_produce_stable_diagnostics(self) -> None:
         """Verify malformed authoring objects fail through Compiler diagnostics."""
         compiler = WorkflowCompiler()
@@ -119,20 +157,11 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 self.assertIn(code, {item.code for item in result.diagnostics})
 
-    def test_numeric_policies_reject_bool_and_non_finite_values(self) -> None:
-        """Verify numeric policy fields accept real bounded numbers, not bool aliases."""
+    def test_numeric_runtime_limits_reject_bool_values(self) -> None:
+        """Verify confirmed numeric limits reject bool aliases."""
         factories = (
             lambda: Map(max_parallelism=True),
-            lambda: Retry(max_attempts=True),
             lambda: Recovery(max_attempts=True),
-            lambda: Backoff(initial_delay_ms=True),
-            lambda: Backoff(max_delay_ms=True),
-            lambda: Backoff(multiplier=math.nan),
-            lambda: Retry(backoff="invalid"),
-            lambda: OperatorPolicy(retry="invalid"),
-            lambda: OperatorPolicy(fallback=[]),
-            lambda: OperatorPolicy(timeout_ms=True),
-            lambda: OperatorPolicy(max_concurrency=0),
             lambda: NodeExecutor(max_operator_concurrency=True),
             lambda: AutoAgentApp(max_operator_concurrency=True),
             lambda: AutoAgentApp(max_node_executions_per_invocation=True),
@@ -192,6 +221,27 @@ class DefinitionBoundaryTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             registry.set_enabled("missing", False)
 
+    def test_capability_closure_binding_is_atomic(self) -> None:
+        """Verify a later contract conflict cannot retain earlier bindings."""
+
+        registry = OperatorRegistry()
+        registry.register(
+            Operator(other, id="wrong-second"),
+            capability_id="second",
+        )
+        first = Capability("first", Operator(identity, id="first-base").contract)
+        second = Capability("second", Operator(identity, id="second-base").contract)
+        with self.assertRaisesRegex(ValueError, "does not match Capability"):
+            registry.bind_capabilities((first, second))
+
+        # A mismatched implementation remains legal for the first id only if
+        # the rejected multi-bind left no partial nominal contract behind.
+        registered = registry.register(
+            Operator(other, id="other-first"),
+            capability_id="first",
+        )
+        self.assertEqual(registered.id, "other-first")
+
     def test_context_operations_validate_and_apply_path_copy(self) -> None:
         """Verify Context operations are strict and copy only the modified path."""
         original = freeze({"left": {"value": 1}, "right": {"value": 2}})
@@ -224,13 +274,13 @@ class DefinitionBoundaryTests(unittest.TestCase):
             RuntimeEvent(
                 session_id=1,  # type: ignore[arg-type]
                 sequence=1,
-                payload=SessionOpened("workflow", {}),
+                payload=SessionOpened({}),
             )
         with self.assertRaises(ValueError):
             RuntimeEvent(
                 session_id="session",
                 sequence=True,
-                payload=SessionOpened("workflow", {}),
+                payload=SessionOpened({}),
             )
         for values in (
             {"session_id": "", "invocation_id": "inv", "sequence": 1},
@@ -256,7 +306,15 @@ class DefinitionBoundaryTests(unittest.TestCase):
 
     def test_emitted_runtime_event_variants_round_trip_through_json(self) -> None:
         """Verify persisted Wait, failure, and Child Event payloads decode losslessly."""
-        app = AutoAgentApp()
+        class Collector:
+            def __init__(self) -> None:
+                self.events: list[RuntimeEvent] = []
+
+            async def append(self, event: RuntimeEvent) -> None:
+                self.events.append(event)
+
+        collector = Collector()
+        app = AutoAgentApp(runtime_event_sink=collector)
         try:
             failed = app.invoke(
                 Workflow("codec-failure", nodes=[Node("fail", fail)]),
@@ -268,9 +326,9 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 ),
                 {"value": 2},
             )
-            waiting = app.wait(waiting.session_id, timeout=1)
+            waiting = app.wait(waiting.ref, timeout=1)
             resumed = app.resume(
-                waiting.session_id, waiting.waits[0].id, {"value": 3}
+                waiting.ref, waiting.waits[0].id, {"value": 3}
             )
             spawned = app.invoke(
                 Workflow(
@@ -288,16 +346,10 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 ),
                 {"value": 4},
             )
-            handle = app.child_handles(spawned.invocation_id)[0]
-            child_result = app.wait_child(handle, timeout=1)
+            handle = app.child_handles(spawned.ref)[0]
+            app.wait_child(handle, timeout=1)
 
-            events = (
-                *failed.events,
-                *waiting.events,
-                *resumed.events,
-                *spawned.events,
-                *child_result.events,
-            )
+            events = tuple(collector.events)
             names = {event.event_name for event in events}
             self.assertTrue(
                 {
@@ -305,7 +357,8 @@ class DefinitionBoundaryTests(unittest.TestCase):
                     "invocation.failed",
                     "node_occurrence.waiting",
                     "wait.resumed",
-                    "child_invocation.linked",
+                    "child_invocation.planned",
+                    "child_invocation.phase_changed",
                 }.issubset(names)
             )
             for event in events:
@@ -348,18 +401,12 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
 
         task = asyncio.create_task(work())
-        runtime.track("session", "invocation", task)
+        runtime.track("session", task)
         duplicate = asyncio.create_task(work())
         with self.assertRaisesRegex(RuntimeError, "already has a live task"):
-            runtime.track("session", "other", duplicate)
+            runtime.track("session", duplicate)
         duplicate.cancel()
         await asyncio.gather(duplicate, return_exceptions=True)
-
-        waiter = asyncio.create_task(runtime.wait_update("invocation"))
-        await asyncio.sleep(0)
-        runtime.signal_update("invocation")
-        await waiter
-        runtime.release_update_event("invocation")
 
         release.set()
         await task
@@ -368,7 +415,7 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.active_sessions(), ())
 
         blocked = asyncio.create_task(asyncio.Event().wait())
-        runtime.track("blocked", "blocked-invocation", blocked)
+        runtime.track("blocked", blocked)
         await runtime.cancel_all()
         self.assertTrue(blocked.cancelled())
 
@@ -378,17 +425,12 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         try:
             waiting = Workflow("async-wait", nodes=[Node("wait", Wait(Value, Value))])
             submitted = await app.asubmit_invoke(waiting, {"value": 1})
-            boundary = await app.await_result(submitted.session_id, timeout=1)
+            boundary = await app.await_result(submitted.ref, timeout=1)
             self.assertEqual(boundary.status, "waiting")
             resumed = await app.asubmit_resume(
-                submitted.session_id, boundary.waits[0].id, {"value": 2}
+                submitted.ref, boundary.waits[0].id, {"value": 2}
             )
-            completed = await app.await_result(
-                submitted.session_id,
-                timeout=1,
-                event_cursor=resumed.next_event_cursor,
-                user_event_cursor=resumed.next_user_event_cursor,
-            )
+            completed = await app.await_result(resumed.ref, timeout=1)
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.output, {"value": 2})
 
@@ -402,14 +444,14 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 nodes=[Node("spawn", child_workflow, execution_mode="spawn")],
             )
             parent_result = await app.ainvoke(parent, {"value": 3})
-            handles = await app.achild_handles(parent_result.invocation_id)
+            handles = await app.achild_handles(parent_result.ref)
             self.assertEqual(len(handles), 1)
             status = await app.achild_status(handles[0])
             self.assertIn(status.status, {"running", "completed"})
             child_result = await app.await_child(handles[0], timeout=1)
             self.assertEqual(child_result.output, {"value": 3})
             self.assertTrue(
-                json.dumps([event.to_record() for event in parent_result.events])
+                json.dumps([event.to_record() for event in parent_result.trace_events])
             )
 
             async def blocked_child(value: Value) -> Value:
@@ -431,7 +473,7 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
             )
             blocked_result = await app.ainvoke(blocked_parent, {"value": 4})
             blocked_handle = (
-                await app.achild_handles(blocked_result.invocation_id)
+                await app.achild_handles(blocked_result.ref)
             )[0]
             cancelled = await app.acancel_child(blocked_handle, "test cancel")
             self.assertEqual(cancelled.status, "cancelled")

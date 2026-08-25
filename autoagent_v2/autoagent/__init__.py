@@ -1,6 +1,18 @@
 """Stable authoring and invocation API for AutoAgent V2."""
 
-from .core.app import AutoAgentApp, InvocationResult, InvocationStream, StreamItem
+from .core.app import (
+    AppCheckpoint,
+    AutoAgentApp,
+    CheckpointLoadResult,
+    InvocationRef,
+    InvocationResult,
+    InvocationStatus,
+    InvocationStream,
+    InvocationSubmission,
+    InvocationUpdate,
+    InvocationWait,
+    StreamItem,
+)
 from .core.compiler import (
     CompileResult,
     Diagnostic,
@@ -8,12 +20,16 @@ from .core.compiler import (
     WorkflowDefinitionSnapshot,
 )
 from .core.context import ContextOperation, ContextPatch
-from .core.errors import AutoAgentError, RuntimeTransitionError, WorkflowCompileError
+from .core.errors import (
+    AutoAgentError,
+    RuntimeInfrastructureError,
+    RuntimeTransitionError,
+    WorkflowCompileError,
+)
 from .core.operators import Operator, StreamReducer, ValueContract, Wait
-from .core.runtime import RuntimeErrorInfo, RuntimeEvent, UserEvent
+from .core.runtime import RuntimeCheckpointBundle, RuntimeErrorInfo, TraceEvent, UserEvent
 from .core.workflow import (
     AggregationContext,
-    Backoff,
     Capability,
     ChildInvocationHandle,
     ConditionContext,
@@ -23,10 +39,8 @@ from .core.workflow import (
     InputMappingContext,
     Map,
     Node,
-    OperatorPolicy,
     OutputBindingContext,
     Recovery,
-    Retry,
     Stream,
     StreamContext,
     SubWorkflow,
@@ -37,11 +51,12 @@ from .core.workflow import (
 
 __all__ = [
     "AggregationContext",
+    "AppCheckpoint",
     "AutoAgentApp",
     "AutoAgentError",
-    "Backoff",
     "Capability",
     "ChildInvocationHandle",
+    "CheckpointLoadResult",
     "CompileResult",
     "ConditionContext",
     "Context",
@@ -51,23 +66,28 @@ __all__ = [
     "Edge",
     "ErrorInfo",
     "InputMappingContext",
+    "InvocationRef",
     "InvocationResult",
+    "InvocationStatus",
     "InvocationStream",
+    "InvocationSubmission",
+    "InvocationUpdate",
+    "InvocationWait",
     "StreamItem",
     "Map",
     "Node",
     "Operator",
-    "OperatorPolicy",
     "OutputBindingContext",
     "Recovery",
-    "Retry",
+    "RuntimeCheckpointBundle",
     "RuntimeErrorInfo",
-    "RuntimeEvent",
+    "RuntimeInfrastructureError",
     "RuntimeTransitionError",
     "Stream",
     "StreamContext",
     "StreamReducer",
     "SubWorkflow",
+    "TraceEvent",
     "UserEvent",
     "UserEventMapping",
     "ValueContract",

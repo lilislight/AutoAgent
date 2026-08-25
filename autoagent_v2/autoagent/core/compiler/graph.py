@@ -127,11 +127,9 @@ def analyze_loops(
 
     predecessors: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
     outgoing_nodes: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
-    outgoing_edges: dict[str, list[EdgeIR]] = defaultdict(list)
     for edge in edges:
         predecessors[edge.target].add(edge.source)
         outgoing_nodes[edge.source].append(edge.target)
-        outgoing_edges[edge.source].append(edge)
     dominators = _dominators(node_ids, predecessors, entries)
 
     raw: list[LoopRegionIR] = []
@@ -352,12 +350,12 @@ def _validate_cyclic_components(
 def _validate_static_control(
     edges: tuple[EdgeIR, ...], regions: tuple[LoopRegionIR, ...]
 ) -> None:
-    by_source: dict[str, list[EdgeIR]] = defaultdict(list)
+    by_source_status: dict[tuple[str, str], list[EdgeIR]] = defaultdict(list)
     for edge in edges:
         if edge.condition is None:
-            by_source[edge.source].append(edge)
+            by_source_status[(edge.source, edge.on)].append(edge)
 
-    for source, unconditional in by_source.items():
+    for (source, _source_status), unconditional in by_source_status.items():
         containing = [region for region in regions if source in region.node_ids]
         for region in containing:
             members = set(region.node_ids)

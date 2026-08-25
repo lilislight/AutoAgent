@@ -85,6 +85,12 @@ class Reducer:
         return {"value": sum(state["values"])}
 
 
+class CallableMapping:
+    @workflow_hook(version="callable-1")
+    def __call__(self, context: InputMappingContext) -> Value:
+        return next(iter(context.incoming.values()))  # type: ignore[return-value]
+
+
 class CompilerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.compiler = WorkflowCompiler()
@@ -102,6 +108,10 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(first.entry_node_ids, ("a",))
         self.assertEqual(first.exit_node_ids, ("b",))
         self.assertEqual(first.workflow_revision_id, second.workflow_revision_id)
+        self.assertEqual(
+            first.workflow_revision_id,
+            f"{first.workflow_id}:{first.definition_hash}",
+        )
 
         @workflow_hook(version="2")
         def changed_identity(value: Value) -> Value:
@@ -220,6 +230,35 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(condition_record["version"], "2")
         self.assertIn("contract", condition_record)
 
+        decoded = WorkflowDefinitionSnapshot.from_record(
+            json.loads(json.dumps(record))
+        )
+        self.assertEqual(decoded, snapshot)
+
+    def test_workflow_snapshot_rejects_tampering_and_external_mutation(self) -> None:
+        """Verify portable Snapshot identity is detached and content-addressed."""
+
+        result = self.compiler.compile_or_raise(
+            Workflow("snapshot-integrity", nodes=[Node("node", identity)])
+        )
+        snapshot = WorkflowDefinitionSnapshot.from_workflow_ir(result)
+        source_definition = snapshot.to_record()["definition"]
+        rebuilt = WorkflowDefinitionSnapshot(
+            schema_version=snapshot.schema_version,
+            workflow_id=snapshot.workflow_id,
+            workflow_version=snapshot.workflow_version,
+            workflow_revision_id=snapshot.workflow_revision_id,
+            definition_hash=snapshot.definition_hash,
+            definition=source_definition,
+        )
+        source_definition["workflow_id"] = "changed"
+        self.assertEqual(rebuilt.workflow_id, rebuilt.definition["workflow_id"])
+
+        corrupted = snapshot.to_record()
+        corrupted["definition"]["workflow_id"] = "changed"
+        with self.assertRaises(ValueError):
+            WorkflowDefinitionSnapshot.from_record(corrupted)
+
     def test_workflow_hook_rejects_invalid_versions(self) -> None:
         """Verify hook versions are explicit non-empty strings or integers."""
 
@@ -227,6 +266,31 @@ class CompilerTests(unittest.TestCase):
             workflow_hook(version=" ")
         with self.assertRaisesRegex(TypeError, "string or integer"):
             workflow_hook(version=True)
+
+    def test_workflow_version_requires_non_empty_string_or_integer(self) -> None:
+        """Verify Workflow versions cannot be coerced from invalid values."""
+
+        for version in (True, None, 1.5, "", " "):
+            with self.subTest(version=version):
+                result = self.compiler.compile(
+                    Workflow(
+                        "version",
+                        nodes=[Node("node", identity)],
+                        version=version,  # type: ignore[arg-type]
+                    )
+                )
+                self.assertFalse(result.ok)
+                self.assertEqual(
+                    [item.code for item in result.diagnostics],
+                    ["WORKFLOW_VERSION_INVALID"],
+                )
+
+        for version, expected in ((2, "2"), ("release-2", "release-2")):
+            with self.subTest(version=version):
+                ir = self.compiler.compile_or_raise(
+                    Workflow("version", nodes=[Node("node", identity)], version=version)
+                )
+                self.assertEqual(ir.workflow_version, expected)
 
     def test_compile_collects_independent_definition_errors(self) -> None:
         """Verify compile collects independent definition errors."""
@@ -370,6 +434,24 @@ class CompilerTests(unittest.TestCase):
         )
         self.assertIs(aggregated.node("map").output_contract.annotation, Value)
 
+    def test_map_wait_combination_is_rejected(self) -> None:
+        """Verify one Wait occurrence cannot suspend multiple mapped items."""
+
+        with self.assertRaisesRegex(WorkflowCompileError, "MAP_WAIT_UNSUPPORTED"):
+            self.compiler.compile_or_raise(
+                Workflow(
+                    "map-wait",
+                    nodes=[
+                        Node(
+                            "approval",
+                            Wait(Value, OtherValue),
+                            input_mapping=map_inputs,
+                            map=Map(max_parallelism=2),
+                        )
+                    ],
+                )
+            )
+
     def test_hook_contracts_are_checked(self) -> None:
         """Verify hook contracts are checked."""
         def bad_mapping(context: ConditionContext) -> Value:
@@ -385,6 +467,85 @@ class CompilerTests(unittest.TestCase):
             with self.subTest(code=code):
                 with self.assertRaisesRegex(WorkflowCompileError, code):
                     self.compiler.compile_or_raise(Workflow(code, nodes=[node]))
+
+    def test_callable_object_hook_uses_bound_signature_everywhere(self) -> None:
+        """Verify callable-object hook validation and snapshot contracts agree."""
+
+        result = self.compiler.compile(
+            Workflow(
+                "callable-hook",
+                nodes=[Node("node", identity, input_mapping=CallableMapping())],
+            )
+        )
+        self.assertTrue(result.ok)
+        assert result.workflow_definition_snapshot is not None
+        mapping_record = result.workflow_definition_snapshot.definition["nodes"][0][
+            "input_mapping"
+        ]
+        self.assertEqual(mapping_record["name"], "CallableMapping")
+        self.assertEqual(len(mapping_record["contract"]["parameters"]), 1)
+        self.assertEqual(mapping_record["version"], "callable-1")
+
+    def test_reserved_runtime_id_delimiters_are_rejected(self) -> None:
+        """Verify author ids cannot collide with composite Runtime identities."""
+
+        invalid_definitions = (
+            (
+                Workflow("bad:workflow", nodes=[Node("node", identity)]),
+                "WORKFLOW_ID_RESERVED",
+            ),
+            (
+                Workflow("node-id", nodes=[Node("bad@node", identity)]),
+                "NODE_ID_RESERVED",
+            ),
+            (
+                Workflow(
+                    "edge-id",
+                    nodes=[Node("a", identity), Node("b", identity)],
+                    edges=[Edge("a", "b", id="bad/edge")],
+                ),
+                "EDGE_ID_RESERVED",
+            ),
+            (
+                Workflow(
+                    "namespace-id",
+                    sub_workflows=[
+                        SubWorkflow(
+                            "bad:part",
+                            Workflow("child", nodes=[Node("node", identity)]),
+                        )
+                    ],
+                ),
+                "SUBWORKFLOW_ID_RESERVED",
+            ),
+            (
+                Workflow(
+                    "default-edge",
+                    nodes=[
+                        Node("a", identity),
+                        Node("b->c", identity),
+                        Node("a->b", identity),
+                        Node("c", identity),
+                    ],
+                    edges=[Edge("a", "b->c"), Edge("a->b", "c")],
+                ),
+                "NODE_ID_RESERVED",
+            ),
+        )
+        for workflow, code in invalid_definitions:
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(WorkflowCompileError, code):
+                    self.compiler.compile_or_raise(workflow)
+
+    def test_node_occurrence_limit_is_not_an_authoring_field(self) -> None:
+        """Verify Loop safety is not encoded as a per-Node authoring limit."""
+
+        with self.assertRaises(TypeError):
+            Node(  # type: ignore[call-arg]
+                "node",
+                identity,
+                max_occurrences_per_invocation=2,
+            )
 
     def test_compile_result_has_stable_agent_facing_diagnostic(self) -> None:
         """Verify compile result has stable agent facing diagnostic."""

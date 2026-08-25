@@ -1,8 +1,14 @@
-from .app import (
-    AutoAgentApp,
-    CapabilityResolver,
+from ..executor import CapabilityResolver
+from .app import AutoAgentApp
+from .models import (
+    AppCheckpoint,
+    CheckpointLoadResult,
+    InvocationRef,
     InvocationResult,
-    InvocationStream,
+    InvocationStatus,
+    InvocationSubmission,
+    InvocationUpdate,
+    InvocationWait,
     StreamItem,
 )
 from .ports import (
@@ -13,13 +19,21 @@ from .ports import (
     SchedulerPort,
     UserEventJournalPort,
 )
+from .stream import InvocationStream
 
 __all__ = [
+    "AppCheckpoint",
     "AutoAgentApp",
     "CapabilityResolver",
+    "CheckpointLoadResult",
     "Clock",
+    "InvocationRef",
     "InvocationResult",
+    "InvocationStatus",
     "InvocationStream",
+    "InvocationSubmission",
+    "InvocationUpdate",
+    "InvocationWait",
     "NodeExecutorPort",
     "OperatorRegistryPort",
     "RuntimeJournalPort",

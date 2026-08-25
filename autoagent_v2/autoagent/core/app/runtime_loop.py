@@ -1,4 +1,4 @@
-"""Owned asyncio loop with an explicit cross-thread submission channel."""
+"""Lazy owned asyncio loop with a notification-driven submission channel."""
 
 from __future__ import annotations
 
@@ -16,28 +16,106 @@ from ..executor.future import await_concurrent_future
 T = TypeVar("T")
 
 
+class _RuntimeFuture(Future[T]):
+    """Bridge result plus the later physical Task-settled boundary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.settled: Future[None] = Future()
+
+
 @dataclass(slots=True)
 class _Submission(Generic[T]):
     coroutine: Coroutine[object, object, T]
-    future: Future[T]
+    future: _RuntimeFuture[T]
     task: asyncio.Task[T] | None = None
 
 
 class RuntimeLoop:
-    """Run all live Runtime objects on one stable event-loop thread.
-
-    The explicit pipe channel avoids reliance on call_soon_threadsafe wakeups
-    in embedded hosts where the loop's internal self-pipe is unreliable.
-    """
+    """Own one event-loop thread without polling or eager thread creation."""
 
     def __init__(self) -> None:
-        self._reader, self._writer = os.pipe()
-        os.set_blocking(self._reader, False)
-        os.set_blocking(self._writer, False)
+        # One lock linearizes the complete submit/close lifecycle.  In
+        # particular, a submission is placed on the notification queue before
+        # close is allowed to enqueue the terminal stop action.
+        self._lifecycle_lock = threading.Lock()
         self._actions: deque[tuple[str, object | None]] = deque()
         self._actions_lock = threading.Lock()
         self._ready = threading.Event()
+        self._reader: int | None = None
+        self._writer: int | None = None
+        self._thread: threading.Thread | None = None
         self._closed = False
+
+    @property
+    def started(self) -> bool:
+        with self._lifecycle_lock:
+            return self._thread is not None
+
+    def submit(self, coroutine: Coroutine[object, object, T]) -> Future[T]:
+        submission = _Submission(coroutine, _RuntimeFuture())
+
+        def cancelled(future: Future[T]) -> None:
+            if future.cancelled():
+                self._enqueue("cancel", submission)
+
+        submission.future.add_done_callback(cancelled)
+        try:
+            with self._lifecycle_lock:
+                if self._closed:
+                    raise RuntimeError("RuntimeLoop is closed.")
+                self._ensure_started_locked()
+                self._enqueue_action("submit", submission)
+        except BaseException:
+            coroutine.close()
+            raise
+        return submission.future
+
+    def run(self, coroutine: Coroutine[object, object, T]) -> T:
+        if self._thread is threading.current_thread():
+            coroutine.close()
+            raise RuntimeError("RuntimeLoop.run cannot block its own loop thread.")
+        return self.submit(coroutine).result()
+
+    async def wait(self, future: Future[T]) -> T:
+        try:
+            return await await_concurrent_future(future)
+        except asyncio.CancelledError:
+            # ``Future.cancel()`` completes the cross-thread bridge before the
+            # RuntimeLoop Task has handled cancellation.  Join that physical
+            # cleanup so an async facade cannot return while Runtime State is
+            # still running but its owned Task is already disappearing.
+            if isinstance(future, _RuntimeFuture):
+                await asyncio.shield(await_concurrent_future(future.settled))
+            raise
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            thread = self._thread
+            if thread is threading.current_thread():
+                raise RuntimeError("RuntimeLoop cannot join its own thread.")
+            self._closed = True
+            if thread is None:
+                return
+            self._enqueue_action("stop", None)
+        thread.join()
+        with self._lifecycle_lock:
+            assert self._reader is not None and self._writer is not None
+            os.close(self._reader)
+            os.close(self._writer)
+            self._reader = None
+            self._writer = None
+            self._thread = None
+
+    def _ensure_started_locked(self) -> None:
+        if self._thread is not None:
+            return
+        self._reader, self._writer = os.pipe()
+        os.set_blocking(self._reader, False)
+        os.set_blocking(self._writer, False)
+        self._ready.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
             name="autoagent-runtime",
@@ -46,50 +124,32 @@ class RuntimeLoop:
         self._thread.start()
         self._ready.wait()
 
-    def submit(self, coroutine: Coroutine[object, object, T]) -> Future[T]:
-        if self._closed:
-            coroutine.close()
-            raise RuntimeError("RuntimeLoop is closed.")
-        submission = _Submission(coroutine, Future())
-
-        def cancelled(future: Future[T]) -> None:
-            if future.cancelled():
-                self._enqueue("cancel", submission)
-
-        submission.future.add_done_callback(cancelled)
-        self._enqueue("submit", submission)
-        return submission.future
-
-    def run(self, coroutine: Coroutine[object, object, T]) -> T:
-        return self.submit(coroutine).result()
-
-    async def wait(self, future: Future[T]) -> T:
-        return await await_concurrent_future(future)
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._enqueue("stop", None)
-        self._thread.join()
-        os.close(self._reader)
-        os.close(self._writer)
-
     def _enqueue(self, kind: str, value: object | None) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._enqueue_action(kind, value)
+
+    def _enqueue_action(self, kind: str, value: object | None) -> None:
+        """Queue one action while the caller owns ``_lifecycle_lock``."""
+
         with self._actions_lock:
             self._actions.append((kind, value))
+        writer = self._writer
+        if writer is None:
+            return
         try:
-            os.write(self._writer, b"\0")
+            os.write(writer, b"\0")
         except (BlockingIOError, OSError):
-            # An unread byte already guarantees that the loop will drain every
-            # queued action.
             pass
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        assert self._reader is not None
 
         def drain() -> None:
+            assert self._reader is not None
             try:
                 while os.read(self._reader, 4096):
                     pass
@@ -110,6 +170,8 @@ class RuntimeLoop:
                     continue
                 if submission.future.cancelled():
                     submission.coroutine.close()
+                    if not submission.future.settled.done():
+                        submission.future.settled.set_result(None)
                     continue
                 task = loop.create_task(submission.coroutine)
                 submission.task = task
@@ -118,21 +180,28 @@ class RuntimeLoop:
                     done: asyncio.Task[object],
                     target: _Submission[object] = submission,
                 ) -> None:
-                    if target.future.done():
-                        return
-                    if done.cancelled():
-                        target.future.cancel()
-                        return
-                    error = done.exception()
-                    if error is not None:
-                        target.future.set_exception(error)
-                    else:
-                        target.future.set_result(done.result())
+                    try:
+                        if target.future.done():
+                            # A cancelled bridge Future no longer accepts the Task
+                            # result, but the Task exception must still be observed.
+                            if not done.cancelled():
+                                done.exception()
+                            return
+                        if done.cancelled():
+                            target.future.cancel()
+                            return
+                        error = done.exception()
+                        if error is not None:
+                            target.future.set_exception(error)
+                        else:
+                            target.future.set_result(done.result())
+                    finally:
+                        if not target.future.settled.done():
+                            target.future.settled.set_result(None)
 
                 task.add_done_callback(finished)
 
         loop.add_reader(self._reader, drain)
-
         self._ready.set()
         loop.run_forever()
         loop.remove_reader(self._reader)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from ..errors import RuntimeTransitionError
@@ -18,7 +18,10 @@ from .events import (
     InvocationStarted,
     InvocationWaiting,
     InvocationRecoveryRequested,
-    ChildInvocationLinked,
+    ChildInvocationPhaseChanged,
+    ChildInvocationPlanned,
+    ChildAwaitReady,
+    ChildAwaitSuspended,
     NodeOccurrenceCompleted,
     NodeOccurrenceFailed,
     NodeOccurrenceStarted,
@@ -30,6 +33,7 @@ from .events import (
     RuntimeEvent,
     SchedulerInitialized,
     SessionOpened,
+    StateTransition,
 )
 from .scheduling import SchedulerDelta, boundary_key, occurrence_key
 from .operations import (
@@ -39,16 +43,26 @@ from .operations import (
 )
 from .state import (
     InvocationState,
-    ChildInvocationState,
+    ChildInvocationPlan,
+    ChildUnitState,
     NodeOccurrenceState,
     OperatorCallState,
     RuntimeState,
     SchedulerState,
     SessionState,
     WaitState,
+    validate_runtime_state,
 )
 from .values import freeze
 from ..context import ContextOperation, apply_context_operation
+
+
+@dataclass(frozen=True, slots=True)
+class TransitionCommit:
+    """Validated compatibility Event and immutable State for one Transition."""
+
+    event: RuntimeEvent
+    state: RuntimeState
 
 
 class StateReducer:
@@ -64,6 +78,18 @@ class StateReducer:
 
         return self.plan(state, event)[0]
 
+    def transition(
+        self, state: RuntimeState, transition: StateTransition
+    ) -> TransitionCommit:
+        """Plan one internal semantic Transition without exposing Event drafts."""
+
+        if not isinstance(transition, StateTransition):
+            raise TypeError("transition must be StateTransition.")
+        event, candidate = self.plan(
+            state, transition.to_runtime_event(state.sequence + 1)
+        )
+        return TransitionCommit(event, candidate)
+
     def plan(
         self, state: RuntimeState, event: RuntimeEvent
     ) -> tuple[RuntimeEvent, RuntimeState]:
@@ -71,8 +97,10 @@ class StateReducer:
 
         if event.from_state_version is not None:
             raise ValueError("A persisted Runtime Event cannot be planned again.")
+        event = self._attach_previous_event(state, event)
         self._validate_event_header(state, event)
         session, invocation = self._transition(state, event)
+        session = replace(session, updated_at_ns=event.occurred_at_ns)
         candidate = RuntimeState(
             session=session,
             invocation=invocation,
@@ -83,6 +111,11 @@ class StateReducer:
             last_event_semantic_digest=state.last_event_semantic_digest,
         )
         operations = diff_runtime_states(state, candidate)
+        if operations:
+            candidate = replace(
+                candidate, state_version=state.state_version + 1
+            )
+        validate_runtime_state(candidate)
         if not operations:
             return (
                 replace(
@@ -114,7 +147,7 @@ class StateReducer:
                     for log in event.logs
                 ),
             ),
-            replace(candidate, state_version=batch.to_state_version),
+            candidate,
         )
 
     def apply(self, state: RuntimeState, event: RuntimeEvent) -> RuntimeState:
@@ -144,6 +177,14 @@ class StateReducer:
         current = state
         for batch in event.operation_batches:
             current = self.apply_batch(current, batch)
+        if (
+            current.session is not None
+            and current.session.updated_at_ns != event.occurred_at_ns
+        ):
+            raise RuntimeTransitionError(
+                "EVENT_TIME_BOUNDARY_MISMATCH",
+                "Runtime Event time must equal its final Session time boundary.",
+            )
         return replace(
             current,
             sequence=event.sequence,
@@ -165,11 +206,20 @@ class StateReducer:
                 "EVENT_STATE_VERSION_GAP",
                 "Flushed Runtime Event does not end at the live State version.",
             )
+        self._validate_previous_event(state, event)
         expected = state.sequence + 1
         if event.sequence != expected:
             raise RuntimeTransitionError(
                 "EVENT_SEQUENCE_GAP",
                 f"Expected Event sequence {expected}, got {event.sequence}.",
+            )
+        if (
+            state.session is not None
+            and state.session.updated_at_ns != event.occurred_at_ns
+        ):
+            raise RuntimeTransitionError(
+                "EVENT_TIME_BOUNDARY_MISMATCH",
+                "Runtime Event time must equal its live Session time boundary.",
             )
         return replace(
             state,
@@ -190,6 +240,14 @@ class StateReducer:
                 f"Expected State version {state.state_version}, got "
                 f"{batch.from_state_version}.",
             )
+        if (
+            state.session is not None
+            and batch.occurred_at_ns < state.session.updated_at_ns
+        ):
+            raise RuntimeTransitionError(
+                "EVENT_TIME_REGRESSION",
+                "State Operation Batch time cannot move backwards within a Session.",
+            )
         record = apply_operation_batch(state.to_record(), batch)
         record["state_version"] = batch.to_state_version
         candidate = RuntimeState.from_record(record)
@@ -197,6 +255,14 @@ class StateReducer:
             raise RuntimeTransitionError(
                 "STATE_EVENT_METADATA_MUTATION",
                 "State Operations cannot mutate Runtime Event sequence metadata.",
+            )
+        if (
+            candidate.session is None
+            or candidate.session.updated_at_ns != batch.occurred_at_ns
+        ):
+            raise RuntimeTransitionError(
+                "STATE_TIME_BOUNDARY_MISMATCH",
+                "State Operation Batch must advance the Session time boundary.",
             )
         return candidate
 
@@ -230,12 +296,190 @@ class StateReducer:
                     f"Expected Event from_state_version {state.state_version}, got "
                     f"{event.from_state_version}.",
                 )
+        self._validate_previous_event(state, event)
+
+    @staticmethod
+    def _attach_previous_event(
+        state: RuntimeState, event: RuntimeEvent
+    ) -> RuntimeEvent:
+        if event.previous_event_id is None and event.previous_event_digest is None:
+            return replace(
+                event,
+                previous_event_id=state.last_event_id,
+                previous_event_digest=state.last_event_digest,
+            )
+        return event
+
+    @staticmethod
+    def _validate_previous_event(state: RuntimeState, event: RuntimeEvent) -> None:
+        if (
+            event.previous_event_id != state.last_event_id
+            or event.previous_event_digest != state.last_event_digest
+        ):
+            raise RuntimeTransitionError(
+                "EVENT_CHAIN_MISMATCH",
+                "Runtime Event previous identity or digest does not match the current State.",
+            )
 
     def reduce(self, events: tuple[RuntimeEvent, ...]) -> RuntimeState:
-        state = RuntimeState()
+        """Reconstruct one complete Event prefix.
+
+        This fast path is for sealed Event prefixes already produced by Core
+        and accepted by the Host. It keeps one canonical record, applies every
+        batch with path copy-on-write, and decodes through the authoritative
+        ``RuntimeState`` codec once at the returned prefix boundary. Callers
+        validating an untrusted stream incrementally must use ``apply`` (or
+        ``apply_batch``) at each acceptance boundary. Unsealed compatibility
+        Events still use normal semantic planning.
+        """
+
+        if not events:
+            return RuntimeState()
+        if any(event.from_state_version is None for event in events):
+            state = RuntimeState()
+            for event in events:
+                state = self.apply(state, event)
+            return state
+
+        record = RuntimeState().to_record()
         for event in events:
-            state = self.apply(state, event)
-        return state
+            record = self._apply_persisted_event_record(record, event)
+        return _decode_runtime_state(record)
+
+    def _apply_persisted_event_record(
+        self,
+        record: dict[str, object],
+        event: RuntimeEvent,
+    ) -> dict[str, object]:
+        """Apply one sealed Event to a private canonical replay record."""
+
+        sequence = _record_integer(record, "sequence")
+        if event.sequence == sequence:
+            if event.id != _record_optional_string(record, "last_event_id"):
+                raise RuntimeTransitionError(
+                    "EVENT_SEQUENCE_CONFLICT",
+                    f"Sequence {event.sequence} already contains another Event.",
+                )
+            if (
+                event.operation_batches
+                and _event_digest(event)
+                == _record_optional_string(record, "last_event_digest")
+            ) or (
+                not event.operation_batches
+                and _semantic_event_digest(event)
+                == _record_optional_string(
+                    record, "last_event_semantic_digest"
+                )
+            ):
+                return record
+            raise RuntimeTransitionError(
+                "EVENT_SEQUENCE_CONFLICT",
+                f"Sequence {event.sequence} already contains another Event.",
+            )
+
+        self._validate_persisted_event_record_header(record, event)
+        candidate: dict[str, object] = record
+        state_version = _record_integer(record, "state_version")
+        session_record = record.get("session")
+        updated_at_ns = (
+            _record_integer(session_record, "updated_at_ns")
+            if isinstance(session_record, dict)
+            else None
+        )
+        for batch in event.operation_batches:
+            if batch.from_state_version != state_version:
+                raise RuntimeTransitionError(
+                    "STATE_VERSION_GAP",
+                    f"Expected State version {state_version}, got "
+                    f"{batch.from_state_version}.",
+                )
+            if updated_at_ns is not None and batch.occurred_at_ns < updated_at_ns:
+                raise RuntimeTransitionError(
+                    "EVENT_TIME_REGRESSION",
+                    "State Operation Batch time cannot move backwards within a Session.",
+                )
+            candidate = apply_operation_batch(candidate, batch)
+            candidate["state_version"] = batch.to_state_version
+            state_version = batch.to_state_version
+            if _record_integer(candidate, "sequence") != sequence:
+                raise RuntimeTransitionError(
+                    "STATE_EVENT_METADATA_MUTATION",
+                    "State Operations cannot mutate Runtime Event sequence metadata.",
+                )
+            session_record = candidate.get("session")
+            if not isinstance(session_record, dict):
+                raise RuntimeTransitionError(
+                    "STATE_TIME_BOUNDARY_MISMATCH",
+                    "State Operation Batch must retain a Session time boundary.",
+                )
+            updated_at_ns = _record_integer(session_record, "updated_at_ns")
+            if updated_at_ns != batch.occurred_at_ns:
+                raise RuntimeTransitionError(
+                    "STATE_TIME_BOUNDARY_MISMATCH",
+                    "State Operation Batch must advance the Session time boundary.",
+                )
+        if updated_at_ns != event.occurred_at_ns:
+            raise RuntimeTransitionError(
+                "EVENT_TIME_BOUNDARY_MISMATCH",
+                "Runtime Event time must equal its final Session time boundary.",
+            )
+        candidate = dict(candidate)
+        digest = _event_digest(event)
+        semantic_digest = _semantic_event_digest(event)
+        candidate["sequence"] = event.sequence
+        candidate["last_event_id"] = event.id
+        candidate["last_event_digest"] = digest
+        candidate["last_event_semantic_digest"] = semantic_digest
+        return candidate
+
+    @staticmethod
+    def _validate_persisted_event_record_header(
+        record: dict[str, object], event: RuntimeEvent
+    ) -> None:
+        sequence = _record_integer(record, "sequence")
+        expected = sequence + 1
+        if event.sequence != expected:
+            raise RuntimeTransitionError(
+                "EVENT_SEQUENCE_GAP",
+                f"Expected Event sequence {expected}, got {event.sequence}.",
+            )
+        if event.schema_version != RUNTIME_EVENT_SCHEMA_VERSION:
+            raise RuntimeTransitionError(
+                "EVENT_SCHEMA_UNSUPPORTED",
+                f"Unsupported Runtime Event schema {event.schema_version}.",
+            )
+        session = record.get("session")
+        if session is not None:
+            if not isinstance(session, dict):
+                raise TypeError("Runtime State session must be a mapping or None.")
+            if event.session_id != _record_string(session, "id"):
+                raise RuntimeTransitionError(
+                    "EVENT_SESSION_MISMATCH",
+                    "Runtime Event belongs to another Session.",
+                )
+            updated_at_ns = _record_integer(session, "updated_at_ns")
+            if event.occurred_at_ns < updated_at_ns:
+                raise RuntimeTransitionError(
+                    "EVENT_TIME_REGRESSION",
+                    "Runtime Event time cannot move backwards within a Session.",
+                )
+        state_version = _record_integer(record, "state_version")
+        if event.from_state_version != state_version:
+            raise RuntimeTransitionError(
+                "EVENT_STATE_VERSION_GAP",
+                f"Expected Event from_state_version {state_version}, got "
+                f"{event.from_state_version}.",
+            )
+        if (
+            event.previous_event_id
+            != _record_optional_string(record, "last_event_id")
+            or event.previous_event_digest
+            != _record_optional_string(record, "last_event_digest")
+        ):
+            raise RuntimeTransitionError(
+                "EVENT_CHAIN_MISMATCH",
+                "Runtime Event previous identity or digest does not match the current State.",
+            )
 
     def preview_context_patch(
         self,
@@ -278,10 +522,6 @@ class StateReducer:
                     "SESSION_ALREADY_OPEN",
                     f"Session {event.session_id!r} already exists.",
                 )
-            if not payload.workflow_id:
-                raise RuntimeTransitionError(
-                    "SESSION_WORKFLOW_REQUIRED", "Session workflow_id cannot be empty."
-                )
             context = payload.context
             if not isinstance(context, Mapping):
                 raise RuntimeTransitionError(
@@ -290,7 +530,6 @@ class StateReducer:
             return (
                 SessionState(
                     id=event.session_id,
-                    workflow_id=payload.workflow_id,
                     context=context,
                     created_at_ns=event.occurred_at_ns,
                     updated_at_ns=event.occurred_at_ns,
@@ -314,13 +553,18 @@ class StateReducer:
                     "INVOCATION_ALREADY_ACTIVE",
                     f"Session {session.id!r} already has an active Invocation.",
                 )
-            if not payload.workflow_revision_id or not payload.entry_node_id:
+            if (
+                not payload.workflow_id
+                or not payload.workflow_revision_id
+                or not payload.entry_node_id
+            ):
                 raise RuntimeTransitionError(
                     "INVOCATION_DEFINITION_REQUIRED",
-                    "Invocation revision and Entry Node cannot be empty.",
+                    "Invocation Workflow, revision and Entry Node cannot be empty.",
                 )
             invocation = InvocationState(
                 id=event.invocation_id,
+                workflow_id=payload.workflow_id,
                 workflow_revision_id=payload.workflow_revision_id,
                 entry_node_id=payload.entry_node_id,
                 status="created",
@@ -354,13 +598,25 @@ class StateReducer:
 
         if isinstance(payload, InvocationWaiting):
             _require_status(invocation, {"running"}, payload.kind)
-            if not any(
+            has_operator_wait = any(
                 item.status == "waiting"
                 for item in invocation.scheduler.waits.values()
-            ):
+            )
+            waiting_occurrence_ids = {
+                item.id
+                for item in invocation.scheduler.occurrences.values()
+                if item.status == "waiting"
+            }
+            has_child_wait = any(
+                plan.mode == "await"
+                and plan.parent_occurrence_id in waiting_occurrence_ids
+                and any(unit.phase != "terminal" for unit in plan.units)
+                for plan in invocation.child_plans.values()
+            )
+            if not (has_operator_wait or has_child_wait):
                 raise RuntimeTransitionError(
                     "INVOCATION_WAIT_MISSING",
-                    "Invocation cannot wait without an active Wait.",
+                    "Invocation cannot wait without an active Wait or Child Await.",
                 )
             if any(
                 item.status in {"ready", "running"}
@@ -440,18 +696,29 @@ class StateReducer:
                     else occurrence.metrics
                 ),
             )
-            if any(
-                resolution.activation is not None
-                and resolution.activation.source_occurrence_id
-                != payload.occurrence_id
-                for resolution in (
-                    *payload.delta.resolutions,
-                    *payload.delta.boundary_resolutions,
-                )
-            ):
+            invalid_activation = next(
+                (
+                    resolution.activation
+                    for resolution in (
+                        *payload.delta.resolutions,
+                        *payload.delta.boundary_resolutions,
+                    )
+                    if resolution.activation is not None
+                    and (
+                        resolution.activation.source_occurrence_id
+                        not in occurrences
+                        or occurrences[
+                            resolution.activation.source_occurrence_id
+                        ].status
+                        not in {"completed", "failed"}
+                    )
+                ),
+                None,
+            )
+            if invalid_activation is not None:
                 raise RuntimeTransitionError(
                     "ACTIVATION_SOURCE_MISMATCH",
-                    "Outgoing Activation must reference the completing Node Occurrence.",
+                    "Activation must reference a terminal Node Occurrence.",
                 )
             scheduler = replace(
                 scheduler, occurrences=MappingProxyType(occurrences)
@@ -492,8 +759,6 @@ class StateReducer:
                 status="running",
                 input=payload.input,
                 started_at_ns=event.occurred_at_ns,
-                attempt=payload.attempt,
-                reason=payload.reason,
             )
             return session, replace(
                 invocation,
@@ -627,12 +892,12 @@ class StateReducer:
                 ),
             )
 
-        if isinstance(payload, ChildInvocationLinked):
+        if isinstance(payload, ChildInvocationPlanned):
             _require_status(invocation, {"running"}, payload.kind)
-            if payload.child_invocation_id in invocation.children:
+            if payload.creation_id in invocation.child_plans:
                 raise RuntimeTransitionError(
-                    "CHILD_INVOCATION_DUPLICATE",
-                    f"Child Invocation {payload.child_invocation_id!r} is already linked.",
+                    "CHILD_PLAN_DUPLICATE",
+                    f"Child Invocation plan {payload.creation_id!r} already exists.",
                 )
             occurrence = invocation.scheduler.occurrences.get(
                 payload.parent_occurrence_id
@@ -642,16 +907,171 @@ class StateReducer:
                     "CHILD_PARENT_OCCURRENCE_NOT_RUNNING",
                     "Child Invocation requires a running parent Node Occurrence.",
                 )
-            children = dict(invocation.children)
-            children[payload.child_invocation_id] = ChildInvocationState(
-                payload.parent_occurrence_id,
-                payload.child_session_id,
-                payload.child_invocation_id,
-                payload.workflow_id,
-                payload.workflow_revision_id,
+            existing_session_ids = {
+                unit.session_id
+                for plan in invocation.child_plans.values()
+                for unit in plan.units
+            }
+            existing_invocation_ids = {
+                unit.invocation_id
+                for plan in invocation.child_plans.values()
+                for unit in plan.units
+            }
+            if any(
+                unit.child_session_id in existing_session_ids
+                or unit.child_invocation_id in existing_invocation_ids
+                for unit in payload.units
+            ):
+                raise RuntimeTransitionError(
+                    "CHILD_IDENTITY_DUPLICATE",
+                    "Child Session and Invocation identities cannot be reused.",
+                )
+            units = tuple(
+                    ChildUnitState(
+                        unit_index=unit.unit_index,
+                        session_id=unit.child_session_id,
+                        invocation_id=unit.child_invocation_id,
+                        input=unit.input,
+                    )
+                    for unit in payload.units
+            )
+            plans = dict(invocation.child_plans)
+            plans[payload.creation_id] = ChildInvocationPlan(
+                creation_id=payload.creation_id,
+                parent_occurrence_id=payload.parent_occurrence_id,
+                mode=payload.mode,
+                workflow_id=payload.workflow_id,
+                workflow_revision_id=payload.workflow_revision_id,
+                units=units,
             )
             return session, replace(
-                invocation, children=MappingProxyType(children)
+                invocation, child_plans=MappingProxyType(plans)
+            )
+
+        if isinstance(payload, ChildInvocationPhaseChanged):
+            _require_status(
+                invocation,
+                {"running", "waiting", "completed", "failed", "cancelled"},
+                payload.kind,
+            )
+            plan = invocation.child_plans.get(payload.creation_id)
+            if plan is None:
+                raise RuntimeTransitionError(
+                    "CHILD_PLAN_MISSING",
+                    f"Child Invocation plan {payload.creation_id!r} does not exist.",
+                )
+            if payload.unit_index >= len(plan.units):
+                raise RuntimeTransitionError(
+                    "CHILD_UNIT_MISSING",
+                    f"Child unit {payload.unit_index!r} does not exist.",
+                )
+            unit = plan.units[payload.unit_index]
+            expected = {
+                "planned": "opened",
+                "opened": "accepted",
+                "accepted": "terminal",
+            }.get(unit.phase)
+            if payload.phase != expected:
+                raise RuntimeTransitionError(
+                    "CHILD_PHASE_INVALID",
+                    f"Child unit phase {unit.phase!r} cannot become {payload.phase!r}.",
+                )
+            units = list(plan.units)
+            units[payload.unit_index] = replace(unit, phase=payload.phase)
+            plans = dict(invocation.child_plans)
+            plans[payload.creation_id] = replace(
+                plan, units=tuple(units)
+            )
+            return session, replace(
+                invocation, child_plans=MappingProxyType(plans)
+            )
+
+        if isinstance(payload, ChildAwaitSuspended):
+            _require_status(invocation, {"running"}, payload.kind)
+            plan = invocation.child_plans.get(payload.creation_id)
+            if (
+                plan is None
+                or plan.mode != "await"
+                or plan.parent_occurrence_id != payload.parent_occurrence_id
+            ):
+                raise RuntimeTransitionError(
+                    "CHILD_AWAIT_PLAN_MISMATCH",
+                    "Child Await suspension does not match an await plan.",
+                )
+            if any(
+                unit.phase not in {"accepted", "terminal"}
+                for unit in plan.units
+            ):
+                raise RuntimeTransitionError(
+                    "CHILD_AWAIT_NOT_ACCEPTED",
+                    "Child Await cannot suspend before all units are accepted.",
+                )
+            scheduler = invocation.scheduler
+            occurrence = scheduler.occurrences.get(payload.parent_occurrence_id)
+            if occurrence is None or occurrence.status != "running":
+                raise RuntimeTransitionError(
+                    "CHILD_PARENT_OCCURRENCE_NOT_RUNNING",
+                    "Child Await suspension requires a running parent occurrence.",
+                )
+            occurrences = dict(scheduler.occurrences)
+            occurrences[occurrence.id] = replace(occurrence, status="waiting")
+            still_runnable = any(
+                item.id != occurrence.id and item.status in {"ready", "running"}
+                for item in scheduler.occurrences.values()
+            )
+            return session, replace(
+                invocation,
+                status="running" if still_runnable else "waiting",
+                scheduler=replace(
+                    scheduler,
+                    occurrences=MappingProxyType(occurrences),
+                ),
+            )
+
+        if isinstance(payload, ChildAwaitReady):
+            _require_status(invocation, {"running", "waiting"}, payload.kind)
+            plan = invocation.child_plans.get(payload.creation_id)
+            if (
+                plan is None
+                or plan.mode != "await"
+                or plan.parent_occurrence_id != payload.parent_occurrence_id
+            ):
+                raise RuntimeTransitionError(
+                    "CHILD_AWAIT_PLAN_MISMATCH",
+                    "Child Await readiness does not match an await plan.",
+                )
+            if any(unit.phase != "terminal" for unit in plan.units):
+                raise RuntimeTransitionError(
+                    "CHILD_AWAIT_NOT_TERMINAL",
+                    "Child Await cannot become ready before every unit is terminal.",
+                )
+            scheduler = invocation.scheduler
+            occurrence = scheduler.occurrences.get(payload.parent_occurrence_id)
+            if occurrence is None or occurrence.status != "waiting":
+                raise RuntimeTransitionError(
+                    "CHILD_PARENT_OCCURRENCE_NOT_WAITING",
+                    "Child Await readiness requires a waiting parent occurrence.",
+                )
+            occurrences = dict(scheduler.occurrences)
+            occurrences[occurrence.id] = replace(
+                occurrence,
+                status="ready",
+                started_at_ns=None,
+                started_state_version=None,
+            )
+            ready = (
+                scheduler.ready
+                if occurrence.id in scheduler.ready
+                else (*scheduler.ready, occurrence.id)
+            )
+            return session, replace(
+                invocation,
+                status="running",
+                scheduler=replace(
+                    scheduler,
+                    ready=ready,
+                    occurrences=MappingProxyType(occurrences),
+                ),
             )
 
         if isinstance(payload, InvocationCompleted):
@@ -961,6 +1381,35 @@ def _semantic_event_digest(event: RuntimeEvent) -> str:
         logs=tuple(replace(log, state_version=None) for log in event.logs),
     )
     return _event_digest(draft)
+
+
+def _decode_runtime_state(record: dict[str, object]) -> RuntimeState:
+    """Single authoritative codec/validation boundary for optimized replay."""
+
+    return RuntimeState.from_record(record)
+
+
+def _record_integer(record: Mapping[str, object], key: str) -> int:
+    value = record.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"Runtime State {key} must be an integer.")
+    return value
+
+
+def _record_string(record: Mapping[str, object], key: str) -> str:
+    value = record.get(key)
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"Runtime State {key} must be a non-empty string.")
+    return value
+
+
+def _record_optional_string(
+    record: Mapping[str, object], key: str
+) -> str | None:
+    value = record.get(key)
+    if value is not None and (not isinstance(value, str) or not value):
+        raise TypeError(f"Runtime State {key} must be a non-empty string or None.")
+    return value
 
 
 def _apply_context_operations(

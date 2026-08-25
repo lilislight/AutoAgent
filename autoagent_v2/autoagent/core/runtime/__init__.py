@@ -7,7 +7,11 @@ from .events import (
     InvocationStarted,
     InvocationWaiting,
     InvocationRecoveryRequested,
-    ChildInvocationLinked,
+    ChildInvocationPhaseChanged,
+    ChildInvocationPlanned,
+    ChildUnitSpec,
+    ChildAwaitReady,
+    ChildAwaitSuspended,
     NodeOccurrenceCompleted,
     NodeOccurrenceFailed,
     NodeOccurrenceStarted,
@@ -21,11 +25,21 @@ from .events import (
     RuntimeEventPayload,
     SessionOpened,
     SchedulerInitialized,
+    StateTransition,
     WaitResumed,
 )
 from .journal import InMemoryEventJournal
+from .checkpoint import RUNTIME_CHECKPOINT_SCHEMA_VERSION, RuntimeCheckpointBundle
+from .trace import (
+    TRACE_EVENT_SCHEMA_VERSION,
+    TraceEvent,
+    project_trace_event,
+    project_trace_events,
+)
+from .capture import RuntimeEventCapture
+from .store import RuntimeStateStore
 from .operations import StateOperation, StateOperationBatch
-from .reducer import StateReducer
+from .reducer import StateReducer, TransitionCommit
 from .scheduling import (
     Activation,
     EdgeResolution,
@@ -40,7 +54,8 @@ from .scheduling import (
 from .state import (
     RUNTIME_STATE_SCHEMA_VERSION,
     InvocationState,
-    ChildInvocationState,
+    ChildInvocationPlan,
+    ChildUnitState,
     InvocationStatus,
     NodeOccurrenceState,
     NodeOccurrenceStatus,
@@ -61,6 +76,14 @@ __all__ = [
     "EdgeResolution",
     "ExecutionScope",
     "InMemoryEventJournal",
+    "RuntimeCheckpointBundle",
+    "RUNTIME_CHECKPOINT_SCHEMA_VERSION",
+    "TraceEvent",
+    "TRACE_EVENT_SCHEMA_VERSION",
+    "project_trace_events",
+    "project_trace_event",
+    "RuntimeEventCapture",
+    "RuntimeStateStore",
     "InMemoryUserEventJournal",
     "InvocationCancelled",
     "InvocationCompleted",
@@ -69,9 +92,14 @@ __all__ = [
     "InvocationStarted",
     "InvocationWaiting",
     "InvocationRecoveryRequested",
-    "ChildInvocationLinked",
+    "ChildInvocationPhaseChanged",
+    "ChildInvocationPlanned",
+    "ChildUnitSpec",
+    "ChildAwaitReady",
+    "ChildAwaitSuspended",
     "InvocationState",
-    "ChildInvocationState",
+    "ChildInvocationPlan",
+    "ChildUnitState",
     "InvocationStatus",
     "LoopIteration",
     "NodeOccurrenceCompleted",
@@ -99,6 +127,8 @@ __all__ = [
     "SessionOpened",
     "SessionState",
     "StateReducer",
+    "StateTransition",
+    "TransitionCommit",
     "StateOperation",
     "StateOperationBatch",
     "WaitResumed",

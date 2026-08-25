@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from ..executor import (
@@ -15,10 +15,12 @@ from ..runtime import (
     NodeOccurrenceCompleted,
     NodeOccurrenceFailed,
     NodeOccurrenceStarted,
+    RuntimeCheckpointBundle,
     RuntimeEvent,
     RuntimeState,
-    ChildInvocationState,
     SchedulerInitialized,
+    StateOperationBatch,
+    StateTransition,
     UserEvent,
 )
 from ..workflow import Capability, EdgeIR, ErrorInfo, NodeIR, WorkflowIR
@@ -32,6 +34,8 @@ class RuntimeJournalPort(Protocol):
     the hosting layer.
     """
 
+    def apply_transition(self, transition: StateTransition) -> RuntimeState: ...
+
     def append(self, event: RuntimeEvent) -> RuntimeState: ...
 
     def append_many(self, events: tuple[RuntimeEvent, ...]) -> RuntimeState: ...
@@ -40,15 +44,47 @@ class RuntimeJournalPort(Protocol):
 
     def flush(self, session_id: str) -> RuntimeEvent | None: ...
 
-    def pending_batches(self, session_id: str): ...
+    def begin_event_group(self, session_id: str) -> None:
+        """Start one exclusive group whose staged prefix must remain invisible.
+
+        While active, ``append`` may update live State, but ordinary ``flush``
+        must reject the Session and checkpoint capture must omit the group.
+        """
+        ...
+
+    def commit_event_group(self, session_id: str) -> RuntimeEvent | None:
+        """Seal every grouped transition as one Runtime Event, or return None."""
+        ...
+
+    def abort_event_group(self, session_id: str) -> bool:
+        """Restore pre-group State, pending batches and Event-id ownership."""
+        ...
+
+    def event_group_active(self, session_id: str) -> bool:
+        """Return whether the Session currently owns an uncommitted group."""
+        ...
+
+    def pending_batches(self, session_id: str) -> tuple[StateOperationBatch, ...]: ...
 
     def state(self, session_id: str) -> RuntimeState: ...
 
     def events(self, session_id: str) -> tuple[RuntimeEvent, ...]: ...
 
-    def child_link(self, child_invocation_id: str) -> ChildInvocationState | None: ...
+    def drain_events(self, session_id: str) -> tuple[RuntimeEvent, ...]: ...
 
-    def child_links(self, parent_invocation_id: str) -> tuple[ChildInvocationState, ...]: ...
+    def session_ids(self) -> tuple[str, ...]: ...
+
+    def discard_states(self, session_ids: tuple[str, ...]) -> None:
+        """Discard only States with no active group, pending, or unacknowledged Event."""
+        ...
+
+    def install_states(self, states: Mapping[str, RuntimeState]) -> None: ...
+
+    def capture_checkpoint(
+        self, root_session_id: str, *, captured_at_ns: int | None = None
+    ) -> RuntimeCheckpointBundle:
+        """Capture the recoverable graph, omitting active groups in Child-first order."""
+        ...
 
 
 class UserEventJournalPort(Protocol):
@@ -66,6 +102,10 @@ class UserEventJournalPort(Protocol):
     ) -> UserEvent: ...
 
     def events(self, invocation_id: str) -> tuple[UserEvent, ...]: ...
+
+    def drain(self, invocation_id: str) -> tuple[UserEvent, ...]: ...
+
+    def discard(self, invocation_id: str) -> None: ...
 
 
 class SchedulerPort(Protocol):
@@ -151,7 +191,6 @@ class NodeExecutorPort(Protocol):
         session_context: object = None,
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
-        max_calls: int | None = None,
     ) -> NodeExecutionResult: ...
 
 
@@ -159,6 +198,8 @@ class OperatorRegistryPort(Protocol):
     """Runtime-selectable implementations of compiled Capability contracts."""
 
     def bind_capability(self, capability: Capability) -> None: ...
+
+    def bind_capabilities(self, capabilities: tuple[Capability, ...]) -> None: ...
 
     def register(
         self,

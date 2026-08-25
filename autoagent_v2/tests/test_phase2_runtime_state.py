@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import FrozenInstanceError, replace
+from unittest.mock import patch
 
 from autoagent.core import (
     InMemoryEventJournal,
@@ -20,6 +21,7 @@ from autoagent.core import (
     StateOperationBatch,
     StateReducer,
 )
+from autoagent.core.runtime.operations import apply_operation_batch
 
 
 def event(
@@ -44,8 +46,8 @@ def event(
 
 def successful_events() -> tuple[RuntimeEvent, ...]:
     return (
-        event(1, SessionOpened("workflow", {"history": []})),
-        event(2, InvocationOpened("revision", "entry", {"value": 1})),
+        event(1, SessionOpened({"history": []})),
+        event(2, InvocationOpened("workflow", "revision", "entry", {"value": 1})),
         event(3, InvocationStarted()),
         event(4, InvocationCompleted({"value": 2})),
     )
@@ -100,26 +102,41 @@ class RuntimeReducerTests(unittest.TestCase):
         self.assertEqual(cancelled.invocation.cancel_reason, "user request")
         self.assertIsNone(cancelled.invocation.output)
 
+    def test_created_invocation_can_fail_or_cancel_without_starting(self) -> None:
+        """Verify setup failure and early cancellation do not require started_at_ns."""
+
+        opened = self.reducer.reduce(successful_events()[:2])
+        payloads = (
+            InvocationFailed(RuntimeErrorInfo("SetupError", "cannot start")),
+            InvocationCancelled("cancel before start"),
+        )
+        for payload in payloads:
+            with self.subTest(payload=type(payload).__name__):
+                terminal = self.reducer.apply(opened, event(3, payload))
+                self.assertIsNone(terminal.invocation.started_at_ns)
+                self.assertIsNotNone(terminal.invocation.completed_at_ns)
+
     def test_sequence_gap_conflict_schema_and_session_are_rejected(self) -> None:
         """Verify sequence gap conflict schema and session are rejected."""
         state = self.reducer.apply(RuntimeState(), successful_events()[0])
         cases = (
-            (event(3, InvocationOpened("revision", "entry", {})), "EVENT_SEQUENCE_GAP"),
+            (event(3, InvocationOpened("workflow", "revision", "entry", {})), "EVENT_SEQUENCE_GAP"),
             (replace(successful_events()[0], id="different"), "EVENT_SEQUENCE_CONFLICT"),
-            (replace(event(2, InvocationOpened("revision", "entry", {})), schema_version=99), "EVENT_SCHEMA_UNSUPPORTED"),
-            (event(2, InvocationOpened("revision", "entry", {}), session_id="other"), "EVENT_SESSION_MISMATCH"),
+            (event(2, InvocationOpened("workflow", "revision", "entry", {}), session_id="other"), "EVENT_SESSION_MISMATCH"),
         )
         for invalid, code in cases:
             with self.subTest(code=code):
                 with self.assertRaisesRegex(RuntimeTransitionError, code):
                     self.reducer.apply(state, invalid)
+        with self.assertRaisesRegex(ValueError, "Unsupported Runtime Event schema"):
+            replace(successful_events()[1], schema_version=99)
 
     def test_latest_event_is_idempotent_but_changed_payload_is_not(self) -> None:
         """Verify latest event is idempotent but changed payload is not."""
         first = successful_events()[0]
         state = self.reducer.apply(RuntimeState(), first)
         self.assertIs(self.reducer.apply(state, first), state)
-        changed_payload = SessionOpened("other", {})
+        changed_payload = SessionOpened({"other": True})
         changed = replace(
             first,
             payload=changed_payload,
@@ -133,11 +150,12 @@ class RuntimeReducerTests(unittest.TestCase):
         state = self.reducer.reduce(successful_events())
         next_open = event(
             5,
-            InvocationOpened("revision", "entry", {"value": 3}),
+            InvocationOpened("workflow-2", "revision", "entry", {"value": 3}),
             invocation_id="invocation-2",
         )
         state = self.reducer.apply(state, next_open)
         self.assertEqual(state.invocation.id, "invocation-2")
+        self.assertEqual(state.invocation.workflow_id, "workflow-2")
         self.assertEqual(state.invocation.status, "created")
 
         with self.assertRaisesRegex(RuntimeTransitionError, "INVOCATION_ALREADY_ACTIVE"):
@@ -145,7 +163,7 @@ class RuntimeReducerTests(unittest.TestCase):
                 state,
                 event(
                     6,
-                    InvocationOpened("revision", "entry", {}),
+                    InvocationOpened("workflow", "revision", "entry", {}),
                     invocation_id="invocation-3",
                 ),
             )
@@ -153,7 +171,7 @@ class RuntimeReducerTests(unittest.TestCase):
     def test_state_and_nested_values_cannot_be_modified_outside_reducer(self) -> None:
         """Verify state and nested values cannot be modified outside reducer."""
         source = {"nested": {"items": [1]}}
-        opened = event(1, SessionOpened("workflow", source))
+        opened = event(1, SessionOpened(source))
         source["nested"]["items"].append(2)
         state = self.reducer.apply(RuntimeState(), opened)
         self.assertEqual(state.to_record()["session"]["context"], {"nested": {"items": [1]}})
@@ -191,9 +209,11 @@ class RuntimeReducerTests(unittest.TestCase):
     def test_time_regression_and_non_durable_values_are_rejected(self) -> None:
         """Verify time regression and non durable values are rejected."""
         state = self.reducer.apply(RuntimeState(), successful_events()[0])
+        forward = event(2, InvocationOpened("workflow", "revision", "entry", {}))
         backwards = replace(
-            event(2, InvocationOpened("revision", "entry", {})),
+            forward,
             occurred_at_ns=5,
+            logs=(replace(forward.logs[0], occurred_at_ns=5),),
         )
         with self.assertRaisesRegex(RuntimeTransitionError, "EVENT_TIME_REGRESSION"):
             self.reducer.apply(state, backwards)
@@ -203,7 +223,7 @@ class RuntimeReducerTests(unittest.TestCase):
         for value in ({1: "bad"}, {"bad": float("nan")}, {"bad": cyclic}):
             with self.subTest(value=value):
                 with self.assertRaises(TypeError):
-                    SessionOpened("workflow", value)  # type: ignore[arg-type]
+                    SessionOpened(value)  # type: ignore[arg-type]
 
 
 class EventJournalTests(unittest.TestCase):
@@ -276,6 +296,45 @@ class EventJournalTests(unittest.TestCase):
         self.assertEqual(replayed.invocation.status, "completed")
         self.assertEqual(replayed.invocation.output, final.payload.output)
 
+    def test_persisted_batches_preserve_global_time_boundaries(self) -> None:
+        """Verify batched replay rejects regressing time and stale Session clocks."""
+
+        journal = InMemoryEventJournal(max_batches_per_event=100)
+        for index, item in enumerate(successful_events(), start=1):
+            journal.append(
+                replace(item, sequence=1, id=f"time-{index}", logs=())
+            )
+        persisted = journal.events("session-1")
+        self.assertEqual(len(persisted), 1)
+        runtime_event = persisted[0]
+
+        regressing_batches = list(runtime_event.operation_batches)
+        regressing_batches[1] = replace(
+            regressing_batches[1], occurred_at_ns=5
+        )
+        with self.assertRaisesRegex(RuntimeTransitionError, "EVENT_TIME_REGRESSION"):
+            StateReducer().reduce(
+                (replace(runtime_event, operation_batches=tuple(regressing_batches)),)
+            )
+
+        stale_batches = list(runtime_event.operation_batches)
+        stale = stale_batches[2]
+        stale_batches[2] = replace(
+            stale,
+            operations=tuple(
+                replace(operation, value=29)
+                if operation.path == ("session", "updated_at_ns")
+                else operation
+                for operation in stale.operations
+            ),
+        )
+        with self.assertRaisesRegex(
+            RuntimeTransitionError, "STATE_TIME_BOUNDARY_MISMATCH"
+        ):
+            StateReducer().reduce(
+                (replace(runtime_event, operation_batches=tuple(stale_batches)),)
+            )
+
     def test_invalid_operation_batch_is_atomic(self) -> None:
         """Verify a bad later operation leaves the original typed State untouched."""
         state = StateReducer().apply(RuntimeState(), successful_events()[0])
@@ -285,7 +344,7 @@ class EventJournalTests(unittest.TestCase):
             to_state_version=state.state_version + 1,
             occurred_at_ns=20,
             operations=(
-                StateOperation("replace", ("session", "workflow_id"), "changed"),
+                StateOperation("replace", ("session", "updated_at_ns"), 20),
                 StateOperation("replace", ("session", "missing"), "bad"),
             ),
         )
@@ -314,7 +373,7 @@ class EventJournalTests(unittest.TestCase):
         target.append(
             event(
                 1,
-                SessionOpened("other-workflow", {}),
+                SessionOpened({}),
                 session_id="other-session",
                 event_id=prefix[-1].id,
             )
@@ -329,8 +388,8 @@ class EventJournalTests(unittest.TestCase):
     def test_sessions_have_independent_contiguous_event_streams(self) -> None:
         """Verify sessions have independent contiguous event streams."""
         journal = InMemoryEventJournal()
-        first = event(1, SessionOpened("workflow", {}), session_id="one")
-        second = event(1, SessionOpened("workflow", {}), session_id="two")
+        first = event(1, SessionOpened({}), session_id="one")
+        second = event(1, SessionOpened({}), session_id="two")
         journal.append(first)
         journal.append(second)
         self.assertEqual(journal.state("one").sequence, 1)
@@ -364,10 +423,54 @@ class EventJournalTests(unittest.TestCase):
         for item in successful_events():
             journal.append(item)
         events = journal.events("session-1")
+        strict = RuntimeState()
         for sequence in range(len(events) + 1):
             state = StateReducer().reduce(events[:sequence])
             self.assertEqual(state.sequence, sequence)
+            if sequence:
+                strict = StateReducer().apply(strict, events[sequence - 1])
+            self.assertEqual(state, strict)
         self.assertEqual(StateReducer().reduce(events), journal.state("session-1"))
+
+    def test_persisted_prefix_replay_uses_one_authoritative_decode(self) -> None:
+        """Verify replay reuses one record and decodes once at the prefix boundary."""
+        journal = InMemoryEventJournal()
+        for item in successful_events():
+            journal.append(item)
+        events = journal.events("session-1")
+
+        with patch.object(
+            RuntimeState,
+            "from_record",
+            wraps=RuntimeState.from_record,
+        ) as decode:
+            replayed = StateReducer().reduce(events)
+
+        self.assertEqual(replayed, journal.state("session-1"))
+        self.assertEqual(decode.call_count, 1)
+
+    def test_operation_batch_clones_only_the_modified_record_path(self) -> None:
+        """Verify batch application preserves untouched branches and source data."""
+        state = StateReducer().reduce(successful_events()[:3])
+        record = state.to_record()
+        session = record["session"]
+        invocation = record["invocation"]
+        assert isinstance(session, dict)
+        batch = StateOperationBatch(
+            from_state_version=state.state_version,
+            to_state_version=state.state_version + 1,
+            occurred_at_ns=40,
+            operations=(
+                StateOperation("replace", ("session", "updated_at_ns"), 40),
+            ),
+        )
+
+        candidate = apply_operation_batch(record, batch)
+
+        self.assertIs(candidate["invocation"], invocation)
+        self.assertIsNot(candidate["session"], session)
+        self.assertEqual(session["updated_at_ns"], 30)
+        self.assertEqual(candidate["session"]["updated_at_ns"], 40)
 
 
 if __name__ == "__main__":

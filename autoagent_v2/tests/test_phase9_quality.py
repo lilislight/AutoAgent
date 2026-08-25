@@ -21,10 +21,9 @@ from autoagent import (
     Map,
     Node,
     Operator,
-    OperatorPolicy,
     OutputBindingContext,
+    RuntimeCheckpointBundle,
     RuntimeTransitionError,
-    Retry,
     Stream,
     StreamContext,
     UserEvent,
@@ -37,7 +36,6 @@ from autoagent.core import (
     InMemoryUserEventJournal,
     NodeExecutor,
     Scheduler,
-    StateReducer,
 )
 from autoagent.core.context import apply_context_operation
 from autoagent.core.runtime.values import freeze
@@ -190,7 +188,7 @@ class QualityTests(unittest.TestCase):
             time.sleep(0.03)
             self.assertEqual(peak, 2)
             release.set()
-            results = [app.wait(item.session_id, 2) for item in submitted]
+            results = [app.wait(item.ref, 2) for item in submitted]
             self.assertTrue(all(item.status == "completed" for item in results))
             self.assertEqual(peak, 2)
         finally:
@@ -265,7 +263,7 @@ class QualityTests(unittest.TestCase):
                 {"value": 1},
             )
             self.assertTrue(sync_started.wait(1))
-            self.assertEqual(app.cancel(first.session_id).status, "cancelled")
+            self.assertEqual(app.cancel(first.ref).status, "cancelled")
             second = app.submit_invoke(
                 Workflow("following-capacity", nodes=[Node("node", following)]),
                 {"value": 2},
@@ -273,7 +271,7 @@ class QualityTests(unittest.TestCase):
             time.sleep(0.03)
             self.assertFalse(async_started.is_set())
             release_sync.set()
-            self.assertEqual(app.wait(second.session_id, 2).status, "completed")
+            self.assertEqual(app.wait(second.ref, 2).status, "completed")
             self.assertTrue(async_started.is_set())
         finally:
             release_sync.set()
@@ -400,7 +398,9 @@ class QualityTests(unittest.TestCase):
                 [{"value": 0}, {"value": 1}, {"value": 2}],
             )
             self.assertEqual([event.sequence for event in result.user_events], [1, 2, 3])
-            self.assertFalse(any(event.event_name == "stream.chunk" for event in result.events))
+            self.assertFalse(
+                any(event.kind == "stream.chunk" for event in result.trace_events)
+            )
             for event in result.user_events:
                 self.assertEqual(UserEvent.from_record(event.to_record()), event)
         finally:
@@ -415,7 +415,7 @@ class QualityTests(unittest.TestCase):
                 {"value": 1},
             )
             self.assertEqual(result.output, {"value": 2})
-            json.dumps([event.to_record() for event in result.events])
+            json.dumps([event.to_record() for event in result.trace_events])
         finally:
             app.close()
 
@@ -456,17 +456,13 @@ class QualityTests(unittest.TestCase):
         finally:
             no_route.close()
 
-        limited = AutoAgentApp()
+        limited = AutoAgentApp(max_node_executions_per_invocation=3)
         try:
             workflow = Workflow(
                 "limited",
                 nodes=[
                     Node("start", identity),
-                    Node(
-                        "header",
-                        identity,
-                        max_occurrences_per_invocation=2,
-                    ),
+                    Node("header", identity),
                     Node("finish", identity),
                 ],
                 edges=[
@@ -477,7 +473,7 @@ class QualityTests(unittest.TestCase):
             )
             result = limited.invoke(workflow, {"value": 1})
             self.assertEqual(result.status, "failed")
-            self.assertEqual(result.error.type, "NodeExecutionLimitExceeded")
+            self.assertEqual(result.error.type, "InvocationExecutionLimitExceeded")
         finally:
             limited.close()
 
@@ -544,21 +540,39 @@ class QualityTests(unittest.TestCase):
 
         app = AutoAgentApp()
         try:
-            app.register_operator(wrong, capability_id="choice", operator_id="wrong")
-            with self.assertRaisesRegex(ValueError, "does not match Capability"):
-                app.register_workflow(
-                    Workflow(
-                        "bad-dynamic-capability",
-                        nodes=[
-                            Node(
-                                "node",
-                                Capability(
-                                    "choice", Operator(identity, id="base").contract
-                                ),
-                            )
-                        ],
-                    )
+            previous = app.register_workflow(
+                Workflow(
+                    "bad-dynamic-capability",
+                    nodes=[Node("previous", identity)],
                 )
+            )
+            app.register_operator(wrong, capability_id="choice", operator_id="wrong")
+            rejected = Workflow(
+                "bad-dynamic-capability",
+                nodes=[
+                    Node(
+                        "node",
+                        Capability(
+                            "choice", Operator(identity, id="base").contract
+                        ),
+                    )
+                ],
+            )
+            rejected_ir = app._compiler.compile(rejected).require_workflow_ir()
+            with self.assertRaisesRegex(ValueError, "does not match Capability"):
+                app.register_workflow(rejected)
+            snapshot = app.workflow_definition_snapshot("bad-dynamic-capability")
+            self.assertEqual(snapshot.workflow_revision_id, previous.workflow_revision_id)
+            with self.assertRaisesRegex(
+                RuntimeTransitionError, "WORKFLOW_NOT_REGISTERED"
+            ):
+                app.workflow_definition_snapshot(
+                    rejected_ir.workflow_revision_id
+                )
+            self.assertEqual(
+                app.invoke("bad-dynamic-capability", {"value": 3}).output,
+                {"value": 3},
+            )
         finally:
             app.close()
 
@@ -614,7 +628,9 @@ class QualityTests(unittest.TestCase):
                 session_context={"large": "x" * 100_000},
             )
             completed = next(
-                event for event in result.events if event.event_name == "node_occurrence.completed"
+                event
+                for event in result.trace_events
+                if event.kind == "node_occurrence.completed"
             )
             encoded = json.dumps(completed.to_record())
             self.assertLess(len(encoded), 5_000)
@@ -622,101 +638,8 @@ class QualityTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_operator_call_and_runtime_budgets_fail_deterministically(self) -> None:
-        """Verify operator call and runtime budgets fail deterministically."""
-        attempts = 0
-
-        def always_fails(value: Value) -> Value:
-            nonlocal attempts
-            attempts += 1
-            raise RuntimeError("no")
-
-        journal = InMemoryEventJournal()
-        app = AutoAgentApp(runtime_journal=journal)
-        try:
-            call_limited = Workflow(
-                "call-budget",
-                nodes=[
-                    Node(
-                        "node",
-                        always_fails,
-                        operator_policy=OperatorPolicy(
-                            retry=Retry(max_attempts=5),
-                            max_operator_calls_per_invocation=2,
-                        ),
-                    )
-                ],
-            )
-            result = app.invoke(call_limited, {"value": 1})
-            self.assertEqual(result.status, "failed")
-            self.assertEqual(attempts, 2)
-            state = journal.state(result.session_id)
-            self.assertEqual(len(state.invocation.scheduler.operator_calls), 2)
-
-            async def slow(value: Value) -> Value:
-                await asyncio.sleep(0.01)
-                return value
-
-            runtime_limited = Workflow(
-                "runtime-budget",
-                nodes=[
-                    Node(
-                        "node",
-                        slow,
-                        operator_policy=OperatorPolicy(
-                            max_runtime_ms_per_invocation=1
-                        ),
-                    )
-                ],
-            )
-            result = app.invoke(runtime_limited, {"value": 1})
-            self.assertEqual(result.status, "failed")
-            self.assertIn("runtime limit", result.error.message)
-        finally:
-            app.close()
-
-    def test_node_concurrency_limit_applies_across_invocations(self) -> None:
-        """Verify node concurrency limit applies across invocations."""
-        async def run() -> None:
-            active = 0
-            peak = 0
-
-            async def observed(value: Value) -> Value:
-                nonlocal active, peak
-                active += 1
-                peak = max(peak, active)
-                await asyncio.sleep(0.02)
-                active -= 1
-                return value
-
-            journal = InMemoryEventJournal()
-            app = AutoAgentApp(runtime_journal=journal)
-            try:
-                workflow = Workflow(
-                    "node-concurrency",
-                    nodes=[
-                        Node(
-                            "node",
-                            observed,
-                            operator_policy=OperatorPolicy(max_concurrency=1),
-                        )
-                    ],
-                )
-                first = await app.asubmit_invoke(workflow, {"value": 1})
-                second = await app.asubmit_invoke(workflow, {"value": 2})
-                results = await asyncio.gather(
-                    app.await_result(first.session_id, 1),
-                    app.await_result(second.session_id, 1),
-                )
-                self.assertTrue(all(result.status == "completed" for result in results))
-                self.assertEqual(peak, 1)
-            finally:
-                await app.aclose()
-
-        asyncio.run(run())
-
-    def test_app_close_converges_active_runtime_state_before_tasks_stop(self) -> None:
-        """Verify app close converges active runtime state before tasks stop."""
+    def test_app_close_returns_recoverable_state_without_business_cancel(self) -> None:
+        """Verify clean close quiesces tasks and returns current checkpoint state."""
         started = threading.Event()
 
         async def blocking(value: Value) -> Value:
@@ -731,9 +654,9 @@ class QualityTests(unittest.TestCase):
             {"value": 1},
         )
         self.assertTrue(started.wait(1))
-        app.close()
-        state = journal.state(submitted.session_id)
-        self.assertEqual(state.invocation.status, "cancelled")
+        checkpoint = app.close()
+        state = checkpoint.roots[0].state(submitted.session_id)
+        self.assertEqual(state.invocation.status, "running")
         self.assertFalse(
             any(
                 call.status == "running"
@@ -814,26 +737,28 @@ class QualityTests(unittest.TestCase):
         )
         self.assertIs(updated["large"], large)  # type: ignore[index]
 
-    def test_child_handle_is_valid_with_a_new_app_using_same_journal(self) -> None:
-        """Verify child handle is valid with a new app using same journal."""
-        journal = InMemoryEventJournal()
+    def test_child_handle_is_valid_after_checkpoint_load_in_new_app(self) -> None:
+        """Verify a Child handle is rebuilt from a loaded Runtime graph."""
         child = Workflow("durable-child", nodes=[Node("node", identity)])
         parent = Workflow(
             "durable-parent",
             nodes=[Node("child", child, execution_mode="spawn")],
         )
-        first_app = AutoAgentApp(runtime_journal=journal)
+        first_app = AutoAgentApp()
         result = first_app.invoke(parent, {"value": 1})
         handle = result.output
-        first_app.wait_child(handle)
+        child_result = first_app.wait_child(handle)
+        checkpoint = child_result.checkpoint
         first_app.close()
 
-        second_app = AutoAgentApp(runtime_journal=journal)
+        second_app = AutoAgentApp()
         try:
+            second_app.register_workflow(parent)
+            second_app.load_checkpoint(checkpoint)
             status = second_app.child_status(handle)
             self.assertEqual(status.status, "completed")
             self.assertEqual(
-                second_app.child_handles(result.invocation_id),
+                second_app.child_handles(result.ref),
                 (handle,),
             )
         finally:
@@ -914,8 +839,8 @@ class QualityTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(compiler.count, 1)
 
-    def test_existing_session_rejects_session_context_and_result_cursors(self) -> None:
-        """Verify existing session rejects session context and result cursors."""
+    def test_existing_session_rejects_new_session_context(self) -> None:
+        """Verify Session Context can only be supplied when opening the Session."""
         app = AutoAgentApp()
         try:
             workflow = Workflow("cursor", nodes=[Node("node", identity)])
@@ -934,31 +859,34 @@ class QualityTests(unittest.TestCase):
                     session_id="cursor-session",
                     session_context={"version": 2},
                 )
-            incremental = app.wait(
-                first.session_id,
-                event_cursor=first.next_event_cursor,
-                user_event_cursor=first.next_user_event_cursor,
-            )
-            self.assertEqual(incremental.events, ())
+            incremental = app.wait(first.ref)
+            self.assertEqual(incremental.trace_events, ())
             self.assertEqual(incremental.user_events, ())
         finally:
             app.close()
 
-    def test_result_events_are_a_complete_incremental_session_log(self) -> None:
-        """Verify returned Event batches can rebuild the Session without hidden Events."""
+    def test_result_exposes_trace_and_checkpoint_not_state_operations(self) -> None:
+        """Verify SDK results separate safe Trace from recoverable Checkpoint State."""
         app = AutoAgentApp()
         try:
             workflow = Workflow("event-batch", nodes=[Node("node", identity)])
             first = app.invoke(
                 workflow, {"value": 1}, session_id="event-batch-session"
             )
-            self.assertEqual(first.events[0].event_name, "session.opened")
-            rebuilt = StateReducer().reduce(first.events)
-            self.assertEqual(rebuilt.invocation.output, {"value": 1})
+            self.assertEqual(first.trace_events[0].kind, "session.opened")
+            self.assertFalse(hasattr(first, "events"))
+            rebuilt = RuntimeCheckpointBundle.from_record(
+                first.checkpoint.to_record()
+            )
+            self.assertEqual(
+                rebuilt.state(first.session_id).invocation.output,
+                {"value": 1},
+            )
             recovered_app = AutoAgentApp()
             try:
-                recovered = recovered_app.recover_events(workflow, first.events)
-                self.assertEqual(recovered.status, "completed")
+                recovered_app.register_workflow(workflow)
+                loaded = recovered_app.load_checkpoint(first.checkpoint)
+                recovered = recovered_app.wait(loaded.roots[0])
                 self.assertEqual(recovered.output, {"value": 1})
             finally:
                 recovered_app.close()
@@ -966,42 +894,29 @@ class QualityTests(unittest.TestCase):
             second = app.invoke(
                 workflow, {"value": 2}, session_id=first.session_id
             )
-            self.assertTrue(second.events)
-            self.assertEqual(second.events[0].event_name, "invocation.opened")
-            self.assertTrue(
-                all(
-                    event.sequence > first.next_event_cursor
-                    for event in second.events
-                )
+            self.assertTrue(second.trace_events)
+            self.assertEqual(second.trace_events[0].kind, "invocation.opened")
+            self.assertNotIn(
+                "session.opened", {event.kind for event in second.trace_events}
             )
         finally:
             app.close()
 
-    def test_result_cursors_reject_invalid_or_future_positions(self) -> None:
-        """Verify Event cursors are non-negative integers within their streams."""
+    def test_stale_invocation_ref_cannot_control_replaced_invocation(self) -> None:
+        """Verify control methods cannot silently target a newer Invocation."""
         app = AutoAgentApp()
         try:
-            result = app.invoke(
-                Workflow("cursor-validation", nodes=[Node("node", identity)]),
+            workflow = Workflow("ref-validation", nodes=[Node("node", identity)])
+            first = app.invoke(
+                workflow,
                 {"value": 1},
+                session_id="ref-session",
             )
-            for event_cursor, user_cursor in (
-                (-1, 0),
-                (True, 0),
-                (result.next_event_cursor + 1, 0),
-                (result.next_event_cursor, -1),
-                (result.next_event_cursor, True),
-                (result.next_event_cursor, 1),
+            app.invoke(workflow, {"value": 2}, session_id="ref-session")
+            with self.assertRaisesRegex(
+                RuntimeTransitionError, "INVOCATION_REF_STALE"
             ):
-                with self.subTest(
-                    event_cursor=event_cursor, user_cursor=user_cursor
-                ):
-                    with self.assertRaises(ValueError):
-                        app.wait(
-                            result.session_id,
-                            event_cursor=event_cursor,
-                            user_event_cursor=user_cursor,
-                        )
+                app.wait(first.ref)
         finally:
             app.close()
 

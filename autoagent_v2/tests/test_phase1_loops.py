@@ -244,6 +244,29 @@ class LoopCompilerTests(unittest.TestCase):
                 )
             )
 
+    def test_complete_continue_and_error_exit_are_status_exclusive(self) -> None:
+        """Verify complete and error routes do not statically conflict in a Loop."""
+
+        ir = self.compiler.compile_or_raise(
+            Workflow(
+                "status-exclusive-loop",
+                nodes=[
+                    Node("start", identity),
+                    Node("header", identity),
+                    Node("body", identity),
+                    Node("handled", identity, input_mapping=merge),
+                ],
+                edges=[
+                    Edge("start", "header"),
+                    Edge("header", "body"),
+                    Edge("body", "header", id="back"),
+                    Edge("body", "handled", on="error", id="error-exit"),
+                ],
+            )
+        )
+        self.assertEqual(ir.loop_regions[0].back_edge_id, "back")
+        self.assertEqual(ir.loop_regions[0].exit_edge_ids, ("error-exit",))
+
     def test_long_acyclic_graph_does_not_use_recursive_dfs(self) -> None:
         """Verify long acyclic graph does not use recursive dfs."""
         size = 1500

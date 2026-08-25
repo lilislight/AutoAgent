@@ -7,18 +7,14 @@ from typing_extensions import TypedDict
 
 from autoagent.core import (
     AggregationContext,
-    Backoff,
     InputMappingContext,
     Map,
     Node,
     NodeExecutor,
-    Operator,
-    OperatorPolicy,
     OperatorCallCompleted,
     OperatorCallFailed,
     OperatorCallStarted,
     RuntimeEvent,
-    Retry,
     Stream,
     StreamContext,
     Workflow,
@@ -81,119 +77,6 @@ class SumReducer:
 
 
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_retry_backoff_fallback_and_timeout_are_call_scoped(self) -> None:
-        """Verify retry backoff fallback and timeout are call scoped."""
-        attempts = 0
-
-        async def flaky(value: Value) -> Value:
-            nonlocal attempts
-            attempts += 1
-            if attempts < 3:
-                raise RuntimeError("retry")
-            return value
-
-        events: list[object] = []
-
-        async def record(payload: object) -> None:
-            events.append(payload)
-
-        retry_node = WorkflowCompiler().compile_or_raise(
-            Workflow(
-                "retry",
-                nodes=[
-                    Node(
-                        "node",
-                        flaky,
-                        operator_policy=OperatorPolicy(
-                            retry=Retry(3, Backoff("fixed", 0))
-                        ),
-                    )
-                ],
-            )
-        ).node("node")
-        retried = await self.executor.execute(
-            retry_node,
-            "node@root",
-            {"value": 1},
-            on_call_event=record,  # type: ignore[arg-type]
-        )
-        self.assertEqual(retried.metrics.call_count, 3)
-        starts = [item for item in events if isinstance(item, OperatorCallStarted)]
-        self.assertEqual([item.reason for item in starts], ["normal", "retry", "retry"])
-
-        def primary(_value: Value) -> Value:
-            raise RuntimeError("primary")
-
-        def fallback(value: Value) -> Value:
-            return value
-
-        fallback_events: list[object] = []
-
-        async def record_fallback(payload: object) -> None:
-            fallback_events.append(payload)
-
-        fallback_node = WorkflowCompiler().compile_or_raise(
-            Workflow(
-                "fallback",
-                nodes=[
-                    Node(
-                        "node",
-                        primary,
-                        operator_policy=OperatorPolicy(
-                            fallback=(Operator(fallback, id="fallback"),)
-                        ),
-                    )
-                ],
-            )
-        ).node("node")
-        recovered = await self.executor.execute(
-            fallback_node,
-            "node@root",
-            {"value": 2},
-            on_call_event=record_fallback,  # type: ignore[arg-type]
-        )
-        self.assertEqual(recovered.output, {"value": 2})
-        fallback_starts = [
-            item for item in fallback_events if isinstance(item, OperatorCallStarted)
-        ]
-        self.assertEqual([item.reason for item in fallback_starts], ["normal", "fallback"])
-
-        async def slow(value: Value) -> Value:
-            await asyncio.sleep(1)
-            return value
-
-        timeout_node = WorkflowCompiler().compile_or_raise(
-            Workflow(
-                "timeout",
-                nodes=[
-                    Node(
-                        "node",
-                        slow,
-                        operator_policy=OperatorPolicy(
-                            timeout_ms=5,
-                            retry=Retry(2),
-                        ),
-                    )
-                ],
-            )
-        ).node("node")
-        timeout_events: list[object] = []
-
-        async def record_timeout(payload: object) -> None:
-            timeout_events.append(payload)
-
-        with self.assertRaises(TimeoutError):
-            await self.executor.execute(
-                timeout_node,
-                "node@root",
-                {"value": 1},
-                on_call_event=record_timeout,  # type: ignore[arg-type]
-            )
-        self.assertEqual(
-            len([item for item in timeout_events if isinstance(item, OperatorCallFailed)]),
-            2,
-        )
-
     async def asyncSetUp(self) -> None:
         self.executor = NodeExecutor(max_operator_concurrency=8)
 

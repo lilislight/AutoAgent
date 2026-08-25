@@ -6,7 +6,7 @@ import inspect
 import json
 from collections.abc import Callable
 from dataclasses import replace
-from typing import get_args, get_origin, get_type_hints
+from typing import get_args, get_origin
 
 from ..errors import WorkflowCompileError
 from ..operators import Operator, ValueContract, Wait
@@ -22,9 +22,7 @@ from ..workflow import (
     Map,
     Node,
     NodeIR,
-    OperatorPolicy,
     OutputBindingContext,
-    OperatorPolicyIR,
     Recovery,
     Stream,
     StreamContext,
@@ -34,6 +32,7 @@ from ..workflow import (
     WorkflowIR,
     UserEventMappingIR,
 )
+from ._hooks import resolve_hook_contract
 from .diagnostic import CompileResult, Diagnostic
 from .graph import analyze_loops
 from .snapshot import (
@@ -62,12 +61,54 @@ def _error(
     )
 
 
-def _optional_contract_same(
-    left: ValueContract | None, right: ValueContract | None
-) -> bool:
-    if left is None or right is None:
-        return left is right
-    return left.same_as(right)
+# Runtime scheduling keys compose author ids with these delimiters. Keeping
+# them out of author-owned segments makes that string encoding injective.
+_RUNTIME_ID_DELIMITERS = ("@", "/", ":")
+
+
+def _validate_workflow_version(version: object) -> str:
+    if isinstance(version, bool) or not isinstance(version, (str, int)):
+        raise _error(
+            "WORKFLOW_VERSION_INVALID",
+            "Workflow version must be a non-empty string or integer.",
+            object_type="workflow",
+            field="version",
+        )
+    if isinstance(version, str) and not version.strip():
+        raise _error(
+            "WORKFLOW_VERSION_INVALID",
+            "Workflow version must be a non-empty string or integer.",
+            object_type="workflow",
+            field="version",
+        )
+    return str(version)
+
+
+def _validate_runtime_identifier(
+    value: str,
+    *,
+    code: str,
+    label: str,
+    object_type: str,
+    reserved_tokens: tuple[str, ...] = _RUNTIME_ID_DELIMITERS,
+    forbid_default_edge_separator: bool = False,
+) -> None:
+    tokens = (
+        (*reserved_tokens, "->")
+        if forbid_default_edge_separator
+        else reserved_tokens
+    )
+    reserved = next((token for token in tokens if token in value), None)
+    if reserved is None:
+        return
+    raise _error(
+        code,
+        f"{label} cannot contain reserved token {reserved!r}.",
+        object_type=object_type,
+        object_id=value,
+        field="id",
+        hint="Choose an id without Runtime identity delimiters.",
+    )
 
 
 class WorkflowCompiler:
@@ -162,8 +203,23 @@ class WorkflowCompiler:
 
         if not isinstance(workflow.id, str) or not workflow.id.strip():
             add(_error("WORKFLOW_ID_EMPTY", "Workflow id cannot be empty."))
+        else:
+            try:
+                _validate_runtime_identifier(
+                    workflow.id,
+                    code="WORKFLOW_ID_RESERVED",
+                    label="Workflow id",
+                    object_type="workflow",
+                    reserved_tokens=(":",),
+                )
+            except WorkflowCompileError as error:
+                add(error)
         try:
-            nodes, edges = self._flatten(workflow)
+            _validate_workflow_version(workflow.version)
+        except WorkflowCompileError as error:
+            add(error)
+        try:
+            nodes, edges = self._flatten(workflow, validate_workflow=False)
         except (WorkflowCompileError, TypeError, ValueError) as error:
             add(error)
             return tuple(collected)
@@ -254,6 +310,14 @@ class WorkflowCompiler:
         workflow_stack = (*parent_workflows, id(workflow))
         if not isinstance(workflow.id, str) or not workflow.id.strip():
             raise _error("WORKFLOW_ID_EMPTY", "Workflow id cannot be empty.")
+        _validate_runtime_identifier(
+            workflow.id,
+            code="WORKFLOW_ID_RESERVED",
+            label="Workflow id",
+            object_type="workflow",
+            reserved_tokens=(":",),
+        )
+        workflow_version = _validate_workflow_version(workflow.version)
         if not isinstance(workflow.failure_mode, str) or workflow.failure_mode not in {
             "fail_fast",
             "continue_active_branches",
@@ -263,7 +327,7 @@ class WorkflowCompiler:
                 "Workflow failure_mode must be 'fail_fast' or "
                 "'continue_active_branches'.",
             )
-        nodes, edges = self._flatten(workflow)
+        nodes, edges = self._flatten(workflow, validate_workflow=False)
         if not nodes:
             raise _error("WORKFLOW_EMPTY", "Workflow must contain at least one Node.")
         node_ids = tuple(node.id for node in nodes)
@@ -324,16 +388,6 @@ class WorkflowCompiler:
         for edge in edge_ir:
             incoming[edge.target].append(edge)
             outgoing[edge.source].append(edge)
-        for source, values in outgoing.items():
-            complete_targets = {edge.target for edge in values if edge.on == "complete"}
-            error_targets = {edge.target for edge in values if edge.on == "error"}
-            overlap = complete_targets & error_targets
-            if overlap:
-                raise _error(
-                    "EDGE_STATUS_TARGET_CONFLICT",
-                    f"Node {source!r} routes complete and error to the same Target.",
-                )
-
         entries = tuple(node_id for node_id in node_ids if not incoming[node_id])
         exits = tuple(node_id for node_id in node_ids if not outgoing[node_id])
         if not entries:
@@ -404,7 +458,7 @@ class WorkflowCompiler:
 
         definition = workflow_semantic_definition(
             workflow_id=workflow.id,
-            workflow_version=str(workflow.version),
+            workflow_version=workflow_version,
             failure_mode=workflow.failure_mode,
             nodes=node_ir,
             edges=tuple(edge_ir),
@@ -415,9 +469,9 @@ class WorkflowCompiler:
         digest = definition_digest(definition)
         return WorkflowIR(
             workflow_id=workflow.id,
-            workflow_revision_id=f"{workflow.id}:{digest[:16]}",
+            workflow_revision_id=f"{workflow.id}:{digest}",
             definition_hash=digest,
-            workflow_version=str(workflow.version),
+            workflow_version=workflow_version,
             nodes=node_ir,
             edges=tuple(edge_ir),
             entry_node_ids=entries,
@@ -431,9 +485,20 @@ class WorkflowCompiler:
         workflow: Workflow,
         prefix: str = "",
         parent_workflows: tuple[int, ...] = (),
+        *,
+        validate_workflow: bool = True,
     ) -> tuple[list[Node], list[Edge]]:
-        if not isinstance(workflow.id, str) or not workflow.id.strip():
-            raise _error("WORKFLOW_ID_EMPTY", "Workflow id cannot be empty.")
+        if validate_workflow:
+            if not isinstance(workflow.id, str) or not workflow.id.strip():
+                raise _error("WORKFLOW_ID_EMPTY", "Workflow id cannot be empty.")
+            _validate_runtime_identifier(
+                workflow.id,
+                code="WORKFLOW_ID_RESERVED",
+                label="Workflow id",
+                object_type="workflow",
+                reserved_tokens=(":",),
+            )
+            _validate_workflow_version(workflow.version)
         if id(workflow) in parent_workflows:
             raise _error(
                 "SUBWORKFLOW_RECURSION",
@@ -447,6 +512,13 @@ class WorkflowCompiler:
                 raise _error("NODE_ID_INVALID", "Node id must be a string.")
             if not node.id.strip():
                 raise _error("NODE_ID_EMPTY", "Node id cannot be empty.")
+            _validate_runtime_identifier(
+                node.id,
+                code="NODE_ID_RESERVED",
+                label="Node id",
+                object_type="node",
+                forbid_default_edge_separator=True,
+            )
         for edge in workflow.edges:
             if not isinstance(edge, Edge):
                 raise _error("EDGE_DEFINITION_INVALID", "Workflow edges must be Edge objects.")
@@ -456,6 +528,13 @@ class WorkflowCompiler:
                 raise _error("EDGE_ID_INVALID", "Edge id must be a string or None.")
             if edge.id is not None and not edge.id.strip():
                 raise _error("EDGE_ID_EMPTY", "Edge id cannot be empty.")
+            if edge.id is not None:
+                _validate_runtime_identifier(
+                    edge.id,
+                    code="EDGE_ID_RESERVED",
+                    label="Edge id",
+                    object_type="edge",
+                )
             if not isinstance(edge.on, str) or edge.on not in {"complete", "error"}:
                 raise _error("EDGE_ON_INVALID", "Edge on must be 'complete' or 'error'.")
         for child in workflow.sub_workflows:
@@ -481,6 +560,13 @@ class WorkflowCompiler:
         for child in workflow.sub_workflows:
             if not isinstance(child.id, str) or not child.id.strip():
                 raise _error("SUBWORKFLOW_ID_EMPTY", "SubWorkflow id cannot be empty.")
+            _validate_runtime_identifier(
+                child.id,
+                code="SUBWORKFLOW_ID_RESERVED",
+                label="SubWorkflow id",
+                object_type="sub_workflow",
+                forbid_default_edge_separator=True,
+            )
             child_prefix = f"{prefix}{child.id}."
             child_nodes, child_edges = self._flatten(
                 child.workflow,
@@ -498,22 +584,9 @@ class WorkflowCompiler:
     ) -> NodeIR:
         if not isinstance(node.id, str) or not node.id.strip():
             raise _error("NODE_ID_EMPTY", "Node id cannot be empty.")
-        if (
-            node.max_occurrences_per_invocation is not None
-            and (
-                not isinstance(node.max_occurrences_per_invocation, int)
-                or isinstance(node.max_occurrences_per_invocation, bool)
-                or node.max_occurrences_per_invocation < 1
-            )
-        ):
-            raise _error(
-                "NODE_OCCURRENCE_LIMIT_INVALID",
-                f"Node {node.id!r} occurrence limit must be positive.",
-            )
         for name, value, expected in (
             ("map", node.map, Map),
             ("stream", node.stream, Stream),
-            ("operator_policy", node.operator_policy, OperatorPolicy),
         ):
             if value is not None and not isinstance(value, expected):
                 raise _error(
@@ -560,6 +633,15 @@ class WorkflowCompiler:
                 raise _error(
                     "STREAM_OPERATOR_REQUIRED",
                     f"Wait Node {node.id!r} cannot define Stream.",
+                )
+            if node.map is not None:
+                raise _error(
+                    "MAP_WAIT_UNSUPPORTED",
+                    f"Wait Node {node.id!r} cannot define Map.",
+                    object_type="node",
+                    object_id=node.id,
+                    field="map",
+                    hint="Model independent approvals as separate Wait Nodes.",
                 )
             input_contract = executable.input_contract
             output_contract = executable.output_contract
@@ -637,50 +719,6 @@ class WorkflowCompiler:
                     ),
                 )
             )
-        operator_policy = None
-        if node.operator_policy is not None:
-            if not isinstance(compiled_executable, (Operator, Capability)):
-                raise _error(
-                    "OPERATOR_POLICY_EXECUTABLE_INVALID",
-                    f"Node {node.id!r} OperatorPolicy requires Operator or Capability.",
-                )
-            fallback = tuple(
-                value if isinstance(value, Operator) else Operator(value)
-                for value in node.operator_policy.fallback
-            )
-            primary_contract = (
-                compiled_executable.contract
-                if isinstance(compiled_executable, Operator)
-                else compiled_executable.contract
-            )
-            for operator in fallback:
-                if (
-                    not operator.contract.input.same_as(primary_contract.input)
-                    or not _optional_contract_same(
-                        operator.contract.output,
-                        primary_contract.output,
-                    )
-                    or not _optional_contract_same(
-                        operator.contract.stream_chunk,
-                        primary_contract.stream_chunk,
-                    )
-                ):
-                    raise _error(
-                        "FALLBACK_CONTRACT_MISMATCH",
-                        f"Node {node.id!r} fallback Operator {operator.id!r} has another contract.",
-                    )
-            operator_policy = OperatorPolicyIR(
-                retry=node.operator_policy.retry,
-                timeout_ms=node.operator_policy.timeout_ms,
-                fallback=fallback,
-                max_concurrency=node.operator_policy.max_concurrency,
-                max_operator_calls_per_invocation=(
-                    node.operator_policy.max_operator_calls_per_invocation
-                ),
-                max_runtime_ms_per_invocation=(
-                    node.operator_policy.max_runtime_ms_per_invocation
-                ),
-            )
         return NodeIR(
             id=node.id,
             executable=compiled_executable,  # type: ignore[arg-type]
@@ -692,9 +730,7 @@ class WorkflowCompiler:
             map=node.map,
             stream=node.stream,
             user_events=tuple(user_events),
-            operator_policy=operator_policy,
             recovery_mode=node.recovery_mode,
-            max_occurrences_per_invocation=node.max_occurrences_per_invocation,
         )
 
     def _validate_input_mapping(self, node: Node, target: ValueContract | None) -> None:
@@ -820,7 +856,11 @@ class WorkflowCompiler:
     ) -> object:
         if not callable(hook):
             raise _error(code, f"{label} must be callable.")
-        signature = inspect.signature(hook)
+        try:
+            contract = resolve_hook_contract(hook)
+        except Exception as error:
+            raise _error(code, f"{label} annotations cannot be resolved: {error}") from error
+        signature = contract.signature
         parameters = tuple(signature.parameters.values())
         if len(parameters) != len(expected) or any(
             item.kind
@@ -828,10 +868,7 @@ class WorkflowCompiler:
             for item in parameters
         ):
             raise _error(code, f"{label} has an invalid parameter list.")
-        try:
-            hints = get_type_hints(hook, include_extras=True)
-        except Exception as error:
-            raise _error(code, f"{label} annotations cannot be resolved: {error}") from error
+        hints = contract.hints
         for parameter, expected_type in zip(parameters, expected, strict=True):
             actual = hints.get(parameter.name, parameter.annotation)
             if actual is not expected_type:

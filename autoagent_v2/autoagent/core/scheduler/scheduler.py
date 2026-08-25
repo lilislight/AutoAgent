@@ -22,6 +22,7 @@ from ..runtime.scheduling import (
 )
 from ..runtime.state import RuntimeState
 from ..workflow import EdgeIR, WorkflowIR
+from ._routing import validate_edge_selection
 
 
 class DAGScheduler:
@@ -124,33 +125,7 @@ class DAGScheduler:
         selected_edge_ids: set[str] | frozenset[str],
     ) -> tuple[EdgeResolution, ...]:
         outgoing = workflow.outgoing(source_node_id)
-        known = {edge.id for edge in outgoing}
-        matching = {edge.id for edge in outgoing if edge.on == source_status}
-        unknown = selected_edge_ids - known
-        if unknown:
-            raise RuntimeTransitionError(
-                "EDGE_SELECTION_UNKNOWN",
-                "Selected Edge is not outgoing from the Node: "
-                + ", ".join(sorted(unknown)),
-            )
-        if not selected_edge_ids <= matching:
-            invalid = sorted(selected_edge_ids - matching)
-            raise RuntimeTransitionError(
-                "EDGE_SELECTION_INVALID",
-                "Selected Edges do not match the source terminal state: "
-                + ", ".join(invalid),
-            )
-        required = {
-            edge.id
-            for edge in outgoing
-            if edge.on == source_status and edge.condition is None
-        }
-        if not required <= selected_edge_ids:
-            raise RuntimeTransitionError(
-                "EDGE_UNCONDITIONAL_NOT_SELECTED",
-                "Unconditional matching Edges must be selected: "
-                + ", ".join(sorted(required - selected_edge_ids)),
-            )
+        validate_edge_selection(outgoing, source_status, selected_edge_ids)
         return tuple(
             self._resolution(edge, source_occurrence_id, edge.id in selected_edge_ids)
             for edge in outgoing

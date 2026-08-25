@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import UnionType
 from typing import (
@@ -45,10 +46,6 @@ def _validate_annotation(annotation: object, location: str) -> object | None:
         )
     if "<locals>" in annotation.__qualname__:  # type: ignore[attr-defined]
         raise TypeError(f"{location} must be declared at module scope.")
-    if _is_model_type(annotation):
-        config = annotation.model_config  # type: ignore[union-attr]
-        if bool(config.get("arbitrary_types_allowed", False)):
-            raise TypeError(f"{location} cannot enable arbitrary_types_allowed.")
     _validate_fields(annotation, location, set())
     try:
         json.dumps(TypeAdapter(annotation).json_schema(), sort_keys=True)
@@ -70,6 +67,11 @@ def _validate_fields(annotation: object, location: str, seen: set[object]) -> No
             _validate_fields(field_type, f"{location}.{name}", seen)
         return
     if _is_model_type(annotation):
+        config = annotation.model_config  # type: ignore[union-attr]
+        if bool(config.get("arbitrary_types_allowed", False)):
+            raise TypeError(f"{location} cannot enable arbitrary_types_allowed.")
+        if config.get("extra") != "forbid":
+            raise TypeError(f"{location} must configure extra='forbid'.")
         for name, field_info in annotation.model_fields.items():  # type: ignore[union-attr]
             _validate_fields(field_info.annotation, f"{location}.{name}", seen)
         return
@@ -119,6 +121,18 @@ class ValueContract:
     annotation: object | None
     name: str
     schema: str
+    _adapter: TypeAdapter[object] | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_adapter",
+            None if self.annotation is None else TypeAdapter(self.annotation),
+        )
 
     @classmethod
     def create(cls, annotation: object, *, location: str) -> "ValueContract":
@@ -140,8 +154,9 @@ class ValueContract:
             if value is not None:
                 raise TypeError("Value must be None.")
             return None
+        assert self._adapter is not None
         try:
-            validated = TypeAdapter(self.annotation).validate_python(value, strict=True)
+            validated = self._adapter.validate_python(value, strict=True)
         except ValidationError as error:
             raise TypeError(str(error)) from error
         if is_typeddict(self.annotation):
@@ -152,12 +167,64 @@ class ValueContract:
         validated = self.validate(value)
         if validated is None:
             return None
-        if isinstance(validated, BaseModel):
-            return validated.model_dump(mode="json", round_trip=True)
-        return TypeAdapter(self.annotation).dump_python(validated, mode="json")
+        assert self._adapter is not None
+        return self._adapter.dump_python(
+            validated,
+            mode="json",
+            round_trip=True,
+            by_alias=True,
+        )
 
     def restore(self, value: object) -> object:
-        return self.validate(value)
+        if self.annotation is None:
+            if value is not None:
+                raise TypeError("Value record must be None.")
+            return None
+        assert self._adapter is not None
+        _validate_json_record(value)
+        try:
+            encoded = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            validated = self._adapter.validate_json(encoded, strict=True)
+        except (TypeError, ValueError, ValidationError) as error:
+            raise TypeError(str(error)) from error
+        canonical = self._adapter.dump_python(
+            validated,
+            mode="json",
+            round_trip=True,
+            by_alias=True,
+        )
+        if canonical != value:
+            raise TypeError("Value record is not in canonical contract form.")
+        if is_typeddict(self.annotation):
+            return dict(validated)
+        return validated
+
+
+def _validate_json_record(value: object) -> None:
+    """Reject Python-domain values that are not canonical JSON records."""
+
+    if value is None or type(value) in {str, bool, int}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise TypeError("Value record floats must be finite.")
+        return
+    if type(value) is list:
+        for item in value:
+            _validate_json_record(item)
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("Value record mappings require string keys.")
+            _validate_json_record(item)
+        return
+    raise TypeError("Value record must contain only canonical JSON values.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +232,12 @@ class OperatorContract:
     input: ValueContract
     output: ValueContract | None
     stream_chunk: ValueContract | None = None
+
+    @property
+    def accepts_input(self) -> bool:
+        """Whether the handler declares one business input argument."""
+
+        return self.input.annotation is not None
 
     @classmethod
     def from_callable(cls, handler: object) -> "OperatorContract":

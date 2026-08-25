@@ -26,6 +26,7 @@ from ..runtime.scheduling import (
 )
 from ..runtime.state import RuntimeState
 from ..workflow import EdgeIR, LoopRegionIR, WorkflowIR
+from ._routing import validate_edge_selection
 from .scheduler import DAGScheduler, _running_invocation, _running_occurrence
 
 
@@ -114,77 +115,6 @@ class Scheduler(DAGScheduler):
         planner.propagate()
         return NodeOccurrenceFailed(occurrence_id, error, planner.delta())
 
-    @staticmethod
-    def _scope_index(scope: ExecutionScope, region_id: str) -> int | None:
-        return next(
-            (
-                index
-                for index, frame in enumerate(scope)
-                if frame.loop_region_id == region_id
-            ),
-            None,
-        )
-
-    def _target_scope(
-        self, workflow: WorkflowIR, edge: EdgeIR, source_scope: ExecutionScope
-    ) -> ExecutionScope:
-        back = workflow.back_loop(edge.id)
-        if back is not None:
-            index = self._scope_index(source_scope, back.id)
-            if index is None:
-                raise LoopControlError(
-                    "LOOP_CONTROL_CONFLICT",
-                    f"Back Edge {edge.id!r} has no active Loop scope.",
-                )
-            frame = source_scope[index]
-            return (
-                *source_scope[:index],
-                LoopIteration(back.id, frame.iteration + 1),
-            )
-
-        target_regions = workflow.containing_loops(edge.target)
-        target_ids = {region.id for region in target_regions}
-        retained = tuple(
-            frame for frame in source_scope if frame.loop_region_id in target_ids
-        )
-        active = {frame.loop_region_id for frame in retained}
-        candidates = tuple(
-            region
-            for region in target_regions
-            if region.id not in active
-            and (
-                edge.id in region.entry_edge_ids
-                or (
-                    edge.source == region.header_node_id
-                    and edge.target != region.header_node_id
-                )
-            )
-        )
-        entered = self._entry_chain(candidates)
-        return (*retained, *(LoopIteration(region.id, 1) for region in entered))
-
-    @staticmethod
-    def _entry_chain(
-        regions: tuple[LoopRegionIR, ...],
-    ) -> tuple[LoopRegionIR, ...]:
-        by_parent: dict[str | None, list[LoopRegionIR]] = {}
-        ids = {region.id for region in regions}
-        for region in regions:
-            parent = (
-                region.parent_loop_region_id
-                if region.parent_loop_region_id in ids
-                else None
-            )
-            by_parent.setdefault(parent, []).append(region)
-        result: list[LoopRegionIR] = []
-        parent: str | None = None
-        while len(by_parent.get(parent, ())) == 1:
-            current = by_parent[parent][0]
-            result.append(current)
-            parent = current.id
-        return tuple(result)
-
-
 class _LoopPlanner:
     """Mutable transition-local projection; only its immutable delta is emitted."""
 
@@ -198,6 +128,7 @@ class _LoopPlanner:
         self.workflow = workflow
         self.scheduler = _running_invocation(state).scheduler
         self.terminal_occurrence_id = terminal_occurrence_id
+        self.terminal_failed = False
         self.resolutions = dict(self.scheduler.resolutions)
         self.boundaries = dict(self.scheduler.boundary_resolutions)
         self.known_occurrences = set(self.scheduler.occurrences)
@@ -251,43 +182,17 @@ class _LoopPlanner:
         source_status: str,
         selected_edge_ids: set[str] | frozenset[str],
     ) -> None:
+        if source_status == "error":
+            self.terminal_failed = True
         outgoing = self.workflow.outgoing(source_node_id)
-        known = {edge.id for edge in outgoing}
-        matching = {edge.id for edge in outgoing if edge.on == source_status}
-        unknown = selected_edge_ids - known
-        if unknown:
-            raise RuntimeTransitionError(
-                "EDGE_SELECTION_UNKNOWN",
-                "Selected Edge is not outgoing from the Node: "
-                + ", ".join(sorted(unknown)),
-            )
-        invalid = selected_edge_ids - matching
-        if invalid:
-            raise RuntimeTransitionError(
-                "EDGE_SELECTION_INVALID",
-                "Selected Edges do not match the source terminal state: "
-                + ", ".join(sorted(invalid)),
-            )
-        required = {
-            edge.id
-            for edge in outgoing
-            if edge.on == source_status and edge.condition is None
-        }
-        if not required <= selected_edge_ids:
-            raise RuntimeTransitionError(
-                "EDGE_UNCONDITIONAL_NOT_SELECTED",
-                "Unconditional matching Edges must be selected: "
-                + ", ".join(sorted(required - selected_edge_ids)),
-            )
+        validate_edge_selection(outgoing, source_status, selected_edge_ids)
         self._validate_control(source_node_id, source_scope, selected_edge_ids)
         active_ids = {frame.loop_region_id for frame in source_scope}
         entered: dict[str, ExecutionScope] = {}
         for edge in outgoing:
             if edge.id not in selected_edge_ids:
                 continue
-            target_scope = Scheduler()._target_scope(
-                self.workflow, edge, source_scope
-            )
+            target_scope = _target_scope(self.workflow, edge, source_scope)
             for frame in target_scope:
                 if frame.loop_region_id in active_ids:
                     continue
@@ -315,9 +220,7 @@ class _LoopPlanner:
 
         for edge in outgoing:
             if edge.id in seeded and edge.id not in selected_edge_ids:
-                target_scope = Scheduler()._target_scope(
-                    self.workflow, edge, source_scope
-                )
+                target_scope = _target_scope(self.workflow, edge, source_scope)
                 if not (
                     {frame.loop_region_id for frame in target_scope} & active_ids
                 ) and not self._active_boundary_regions(edge, source_scope):
@@ -344,7 +247,7 @@ class _LoopPlanner:
         containing = tuple(
             region
             for region in self.workflow.containing_loops(source_node_id)
-            if region.id in active_ids
+            if region.id in active_ids or region.header_node_id == source_node_id
         )
         for region in containing:
             inside = [edge.id for edge in selected if edge.target in region.node_ids]
@@ -391,7 +294,7 @@ class _LoopPlanner:
             )
         if boundaries:
             return
-        target_scope = Scheduler()._target_scope(self.workflow, edge, source_scope)
+        target_scope = _target_scope(self.workflow, edge, source_scope)
         self._add_resolution(edge, target_scope, selected, activation)
 
     def _add_boundary(
@@ -543,9 +446,7 @@ class _LoopPlanner:
         if selected_back:
             value = values[0]
             edge = self.workflow.edge(value.edge_id)
-            target_scope = Scheduler()._target_scope(
-                self.workflow, edge, value.source_scope
-            )
+            target_scope = _target_scope(self.workflow, edge, value.source_scope)
             self._add_resolution(edge, target_scope, True, value.activation)
             return
 
@@ -571,12 +472,23 @@ class _LoopPlanner:
                 )
                 if has_active_ancestor:
                     continue
-                target_scope = Scheduler()._target_scope(
-                    self.workflow, edge, item.source_scope
-                )
+                target_scope = _target_scope(self.workflow, edge, item.source_scope)
                 self._add_resolution(
                     edge, target_scope, item.selected, item.activation
                 )
+            return
+
+        if self.terminal_failed or self._scope_has_recorded_failure(
+            region, loop_scope
+        ) or not self._scope_was_activated(region, loop_scope):
+            # An unreachable Loop, or one interrupted by an unhandled Node
+            # failure, resolves its Exit boundaries as unselected.  LOOP_NO_ROUTE
+            # is reserved for a successfully executed iteration whose control
+            # logic selected neither Back nor Exit.
+            for item in values[1:]:
+                edge = self.workflow.edge(item.edge_id)
+                target_scope = _target_scope(self.workflow, edge, item.source_scope)
+                self._add_resolution(edge, target_scope, False, None)
             return
 
         raise LoopControlError(
@@ -584,10 +496,37 @@ class _LoopPlanner:
             f"Loop {region.id!r} stabilized without Back or Exit.",
         )
 
+    def _scope_has_recorded_failure(
+        self, region: LoopRegionIR, loop_scope: ExecutionScope
+    ) -> bool:
+        return any(
+            occurrence.status == "failed"
+            and occurrence.node_id in region.node_ids
+            and self._region_scope(occurrence.scope, region.id) == loop_scope
+            for occurrence in self.scheduler.occurrences.values()
+        )
+
+    def _scope_was_activated(
+        self, region: LoopRegionIR, loop_scope: ExecutionScope
+    ) -> bool:
+        for occurrence_id, occurrence in self.scheduler.occurrences.items():
+            if occurrence.node_id not in region.node_ids:
+                continue
+            if self._region_scope(occurrence.scope, region.id) != loop_scope:
+                continue
+            if occurrence.status != "skipped":
+                return True
+            if occurrence_id == self.terminal_occurrence_id:
+                return True
+        return any(
+            plan.node_id in region.node_ids
+            and self._region_scope(plan.scope, region.id) == loop_scope
+            for plan in self.ready
+        )
+
     def _scope_has_active_work(
         self, region: LoopRegionIR, loop_scope: ExecutionScope
     ) -> bool:
-        ready_ids = {item.id for item in self.ready}
         for occurrence_id, occurrence in self.scheduler.occurrences.items():
             if occurrence_id == self.terminal_occurrence_id:
                 continue
@@ -598,7 +537,7 @@ class _LoopPlanner:
             if self._region_scope(occurrence.scope, region.id) == loop_scope:
                 return True
         for plan in self.ready:
-            if plan.id not in ready_ids or plan.node_id not in region.node_ids:
+            if plan.node_id not in region.node_ids:
                 continue
             if self._region_scope(plan.scope, region.id) == loop_scope:
                 return True
@@ -657,5 +596,76 @@ class _LoopPlanner:
     def _region_scope(
         scope: ExecutionScope, region_id: str
     ) -> ExecutionScope | None:
-        index = Scheduler._scope_index(scope, region_id)
+        index = _scope_index(scope, region_id)
         return scope[: index + 1] if index is not None else None
+
+
+def _scope_index(scope: ExecutionScope, region_id: str) -> int | None:
+    return next(
+        (
+            index
+            for index, frame in enumerate(scope)
+            if frame.loop_region_id == region_id
+        ),
+        None,
+    )
+
+
+def _target_scope(
+    workflow: WorkflowIR, edge: EdgeIR, source_scope: ExecutionScope
+) -> ExecutionScope:
+    back = workflow.back_loop(edge.id)
+    if back is not None:
+        index = _scope_index(source_scope, back.id)
+        if index is None:
+            raise LoopControlError(
+                "LOOP_CONTROL_CONFLICT",
+                f"Back Edge {edge.id!r} has no active Loop scope.",
+            )
+        frame = source_scope[index]
+        return (
+            *source_scope[:index],
+            LoopIteration(back.id, frame.iteration + 1),
+        )
+
+    target_regions = workflow.containing_loops(edge.target)
+    target_ids = {region.id for region in target_regions}
+    retained = tuple(
+        frame for frame in source_scope if frame.loop_region_id in target_ids
+    )
+    active = {frame.loop_region_id for frame in retained}
+    candidates = tuple(
+        region
+        for region in target_regions
+        if region.id not in active
+        and (
+            edge.id in region.entry_edge_ids
+            or (
+                edge.source == region.header_node_id
+                and edge.target != region.header_node_id
+            )
+        )
+    )
+    entered = _entry_chain(candidates)
+    return (*retained, *(LoopIteration(region.id, 1) for region in entered))
+
+
+def _entry_chain(
+    regions: tuple[LoopRegionIR, ...],
+) -> tuple[LoopRegionIR, ...]:
+    by_parent: dict[str | None, list[LoopRegionIR]] = {}
+    ids = {region.id for region in regions}
+    for region in regions:
+        parent = (
+            region.parent_loop_region_id
+            if region.parent_loop_region_id in ids
+            else None
+        )
+        by_parent.setdefault(parent, []).append(region)
+    result: list[LoopRegionIR] = []
+    parent: str | None = None
+    while len(by_parent.get(parent, ())) == 1:
+        current = by_parent[parent][0]
+        result.append(current)
+        parent = current.id
+    return tuple(result)

@@ -133,3 +133,12 @@ class InMemoryUserEventJournal:
 
     def events(self, invocation_id: str) -> tuple[UserEvent, ...]:
         return tuple(self._events.get(invocation_id, ()))
+
+    def drain(self, invocation_id: str) -> tuple[UserEvent, ...]:
+        """Return and release observations already handed to an SDK caller."""
+
+        return tuple(self._events.pop(invocation_id, ()))
+
+    def discard(self, invocation_id: str) -> None:
+        self._events.pop(invocation_id, None)
+        self._sequences.pop(invocation_id, None)

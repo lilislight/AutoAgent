@@ -3,9 +3,10 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 from typing import Any, Iterator
+from unittest.mock import patch
 from typing_extensions import TypedDict
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.core import Operator, ValueContract, Wait
 
@@ -21,6 +22,11 @@ class SameShape(TypedDict):
 class ModelValue(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: int
+
+
+class AliasedModelValue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: int = Field(alias="v")
 
 
 class UnsafeAny(TypedDict):
@@ -61,6 +67,26 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(model.validate({"value": 2}), ModelValue(value=2))
         with self.assertRaises(TypeError):
             typed.validate({"value": "1"})
+
+    def test_pydantic_alias_uses_one_reversible_durable_record(self) -> None:
+        """Verify model aliases serialize and restore with the same canonical key."""
+
+        contract = ValueContract.create(AliasedModelValue, location="alias")
+        record = contract.to_record(AliasedModelValue(v=2))
+        self.assertEqual(record, {"v": 2})
+        self.assertEqual(contract.restore(record), AliasedModelValue(v=2))
+
+    def test_contract_reuses_its_compiled_type_adapter(self) -> None:
+        """Verify hot contract boundaries do not rebuild Pydantic adapters."""
+
+        contract = ValueContract.create(Value, location="cached")
+        with patch(
+            "autoagent.core.operators.contract.TypeAdapter",
+            side_effect=AssertionError("TypeAdapter rebuilt"),
+        ):
+            self.assertEqual(contract.validate({"value": 1}), {"value": 1})
+            self.assertEqual(contract.to_record({"value": 2}), {"value": 2})
+            self.assertEqual(contract.restore({"value": 3}), {"value": 3})
 
     def test_contracts_are_nominal(self) -> None:
         """Verify contracts are nominal."""

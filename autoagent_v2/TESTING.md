@@ -8,15 +8,22 @@
 | `test_phase1_contracts.py` | TypedDict/Pydantic 契约、Operator、Wait |
 | `test_phase1_compiler.py` | Workflow 编译、诊断、稳定 Revision、Portable Snapshot、SubWorkflow、Map、Stream、Child Workflow |
 | `test_phase1_loops.py` | 自然 Loop 的编译、嵌套和非法图结构 |
-| `test_phase2_runtime_state.py` | Runtime Event、Reducer、Journal、任意前缀重放 |
+| `test_phase2_runtime_state.py` | StateOperation、Reducer、RuntimeEvent 捕获、前缀重建 |
 | `test_phase3_scheduler.py` | DAG、分支、Fan-out、完整 Fan-in、不可达传播 |
 | `test_phase4_loop_scheduler.py` | scoped NodeOccurrence、Loop 边界和序列化重放 |
-| `test_phase5_executor.py` | NodeExecutor、Map、Retry、Fallback、Timeout、Stream |
+| `test_phase5_executor.py` | NodeExecutor、Map、有序聚合、OperatorCall、StreamReducer |
 | `test_phase6_context.py` | Mapping、Binding、Condition、Context 原子提交和冲突 |
 | `test_phase7_wait_recovery.py` | Wait、Resume、Cancel 和进程恢复状态转换 |
-| `test_phase8_app.py` | 端到端 DAG/Loop、Child Map 四种组合、Recovery 与同步异步入口 |
-| `test_phase9_quality.py` | Port、Capability、失败策略、预算、取消、增量 Event |
-| `test_phase10_boundaries.py` | 严格配置边界、TaskRuntime、RuntimeLoop 和持久化往返 |
+| `test_phase8_app.py` | 同步/异步 App、严格流背压、Loop、Child 四组合、Checkpoint Recovery |
+| `test_phase9_quality.py` | 全局并发、Port、Capability、UserEvent、关闭、失败模式与公开边界 |
+| `test_phase10_boundaries.py` | 严格定义、codec、TaskRuntime、RuntimeLoop、Host RuntimeEvent sink |
+| `test_phase11_app_correctness.py` | 流式安全 Checkpoint、sink 顺序、Child Root 与 Session 互斥回归 |
+| `test_phase12_runtime_boundaries.py` | 并行/Loop/Child 竞态、失败收敛和 Pydantic durable 边界 |
+| `test_phase13_lifecycle_recovery.py` | Stream/close 生命周期、RuntimeLoop 线性化、sink 失败和图恢复 |
+| `test_phase14_contract_roundtrip.py` | Enum/tuple 契约在 Edge、Wait、Child 与 Checkpoint 间往返 |
+| `test_phase14_runtime_state_validation.py` | RuntimeState 数值、身份、状态和引用不变量 |
+| `test_runtime_checkpoint_trace.py` | RuntimeEvent 链、Trace 投影、Checkpoint 图校验与原子加载 |
+| `test_executor_hardening.py` | Pydantic 边界、回调失败、同步 Stream 取消与并发名额收敛 |
 
 ## 测试说明规则
 
@@ -32,7 +39,8 @@
 git diff --check
 ```
 
-Full 模式性能基准单独运行：
+性能基准单独运行。它通过 Host sink 统计 canonical RuntimeEvent，并分别统计 Trace、
+Checkpoint 大小，不依赖公开结果中的内部状态日志：
 
 ```bash
 ../.venv/bin/python -m tests.benchmarks.benchmark_full_core

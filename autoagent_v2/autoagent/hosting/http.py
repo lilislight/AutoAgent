@@ -88,11 +88,7 @@ class HttpRuntimeEventSink:
         with self._lock:
             self._ensure_open_locked()
             completion = self._worker.call_async(self._append, event)
-        try:
-            await completion
-        except RuntimeError:
-            self._ensure_open()
-            raise
+        await completion
 
     def save_workflow(self, snapshot: WorkflowDefinitionSnapshot) -> None:
         """Send one portable Workflow definition before its Runtime Events."""
@@ -102,11 +98,7 @@ class HttpRuntimeEventSink:
         with self._lock:
             self._ensure_open_locked()
             completion = self._worker.submit(self._save_workflow, snapshot)
-        try:
-            completion.result()
-        except RuntimeError:
-            self._ensure_open()
-            raise
+        completion.result()
 
     async def asave_workflow(self, snapshot: WorkflowDefinitionSnapshot) -> None:
         """Asynchronously send one portable Workflow definition."""
@@ -116,11 +108,7 @@ class HttpRuntimeEventSink:
         with self._lock:
             self._ensure_open_locked()
             completion = self._worker.call_async(self._save_workflow, snapshot)
-        try:
-            await completion
-        except RuntimeError:
-            self._ensure_open()
-            raise
+        await completion
 
     def close(self) -> None:
         """Drain submitted requests and close the connection pool."""
@@ -183,7 +171,20 @@ class HttpRuntimeEventSink:
                 headers=headers,
             )
             status_code = response.status_code
-            detail = response.text.strip()[:500]
+            if (
+                not isinstance(status_code, int)
+                or isinstance(status_code, bool)
+                or not 100 <= status_code <= 599
+            ):
+                raise RuntimeEventStoreError(
+                    "Remote Runtime Event sink returned an invalid HTTP status."
+                )
+            response_text = response.text
+            if not isinstance(response_text, str):
+                raise RuntimeEventStoreError(
+                    "Remote Runtime Event sink returned an invalid HTTP response body."
+                )
+            detail = response_text.strip()[:500]
         except RuntimeEventStoreError:
             raise
         except Exception as error:
@@ -216,10 +217,6 @@ class HttpRuntimeEventSink:
         self._client = None
         if client is not None and self._owns_client:
             client.close()
-
-    def _ensure_open(self) -> None:
-        with self._lock:
-            self._ensure_open_locked()
 
     def _ensure_open_locked(self) -> None:
         if self._closed:

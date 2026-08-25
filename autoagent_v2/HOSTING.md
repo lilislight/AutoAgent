@@ -84,6 +84,10 @@ result = host.invoke("research", {"topic": "agents"})
 loaded = host.restore_session(result.session_id)
 
 host.close()
+
+# 异步装配和关闭都不会阻塞调用方 Event Loop。
+async with await AutoAgentHost.afrom_project("./autoagent.toml") as host:
+    result = await host.ainvoke("research", {"topic": "agents"})
 ```
 
 `AutoAgentHost`：
@@ -92,8 +96,18 @@ host.close()
 2. 创建并启动 Sink；
 3. 按环境创建一个 `AutoAgentApp`；
 4. 原子注册全部 Workflow，并把 portable `WorkflowDefinitionSnapshot` 写入可查询 Store；
-5. 代理 invoke/submit/stream、wait/resume/cancel、Checkpoint 加载、Child 控制和 recover；
+5. 代理 Workflow Snapshot、Capability Operator 注册，以及 invoke/submit/stream、
+   wait/resume/cancel、Checkpoint 加载、Child 控制和 recover；
 6. 关闭时先让 App 收敛并导出 Event，再关闭 Sink。
+
+同步和异步 context manager 都会关闭完整 Host。若业务代码与关闭同时失败，业务异常保持为
+主异常，关闭失败附加到异常 note；若业务代码没有失败，关闭失败正常向调用方抛出。App
+已关闭但 Sink 清理失败时 Host 保持终态，当前及后续所有 close/aclose 调用都观察同一个失败。
+同步 `from_project()` 会导入用户模块、初始化本地 Store，并可能发布远程 Workflow definition，
+因此不能在运行中的 Event Loop 内调用；异步代码必须使用 `afrom_project()`。若异步启动被取消，
+后台装配完成后会重试关闭其 App 与 Sink；持续清理失败会发出 RuntimeWarning，而不是静默
+留下无人持有的 Host。`afrom_project()` 会复制调用方 `ContextVar`，但用户模块会在专用线程
+导入，因此模块级启动代码必须支持非主线程执行。
 
 `restore_session()` 只从可查询 Store 重建该 Root Session 当前的父子 Runtime 图，调用
 Core `load_checkpoint()`；调用方再按状态选择 `recover()` 或 `resume()`。Host 不保存第二份
@@ -129,6 +143,12 @@ invocations           # 查询索引
 session_ownership     # Root/Child 关系索引
 ```
 
+首次创建 Store 时，SQLite Store 以原子排他创建方式预建数据库文件。在 POSIX 系统上，
+新建的父目录默认使用 `0700`，数据库以及 SQLite 派生的 WAL/SHM 文件默认使用 `0600`。
+这个安全默认只适用于本次真正新建的资源；打开已经存在的目录或用户指定数据库时不会隐式
+`chmod`。初始化在建库后失败会保留这个私有空文件，后续启动可安全重试；不能在失败路径
+删除它，因为另一个进程可能已经观察到该文件并开始初始化。
+
 Store 只接受当前精确 schema version，不在本模块隐式迁移旧数据库。`sessions`、
 `invocations`、`trace_events` 和 `session_ownership` 都只是查询投影：读取、继续追加和恢复时
 会把投影的 identity、head、count、SQL envelope 与 canonical Event 重新绑定；已有 canonical
@@ -145,7 +165,9 @@ StateOperation 校验；需要 Runtime State 的 `state`、rebuild、Checkpoint 
 Reducer，不使用轻量摘要结果替代恢复状态。
 
 Checkpoint 由 `runtime_events` 重建：每个 Session 按 sequence 经同一个 `StateReducer`
-归约，再在同一个 SQLite 读快照中从 Root 当前 `child_plans` 递归收集 Child State。历史 Trace
+归约；已接纳的 sealed Event 前缀复用单份 canonical record，只在返回边界解码一次 typed
+`RuntimeState`。父侧 Child plan/phase 也在同一个 SQLite 读快照中扫描一次并供兄弟 Child
+复用，再从 Root 当前 `child_plans` 递归收集 Child State。历史 Trace
 可按 Invocation 查询；某个 Session Event 边界的状态可按 `through_sequence` 重建。历史
 Invocation 只重放它自己的 canonical Event 前缀，不要求之后的 Invocation 仍然完好；当前
 Checkpoint 则要求整个可达父子图及其投影一致。
@@ -155,7 +177,9 @@ Checkpoint 则要求整个可达父子图及其投影一致。
 HTTP Sink 向配置地址发送 `RuntimeEvent` 与 `WorkflowDefinitionSnapshot` JSON，分别使用
 Event id 与 Workflow revision id 作为 `Idempotency-Key`。任意非 2xx、超时、初始化或协议
 错误都会失败。阻塞 HTTP 请求由有界 worker pool 执行，不占用 RuntimeLoop；调用方注入的
-自定义 client 必须支持并发 `post`。
+自定义 client 必须支持并发 `post`。Core 在同一个 Session 内逐 Event 等待 `append()`，
+因此远端顺序来自 Core 的 Session 串行边界；不同 Session 可以占用不同 worker 并发发送。
+`close/aclose` 会排空已经接纳的请求，并让所有并发关闭者观察同一个完成或失败结果。
 
 ## 五、Tracing Server
 
@@ -179,8 +203,10 @@ Host 与 Server 分进程时，仅在存在订阅者时以可配置间隔检查 
 轮询。进程内唤醒在 POSIX 使用 pipe，在 Windows 使用 event-loop thread-safe callback，
 不要求 Selector-only API。Trace 支持 `tail_limit`，返回最新有界窗口、`resume_cursor` 和 `has_earlier`；UI 可以
 立即从该快照进入 live，不必先重放全部历史。SSE 支持 query cursor 与 `Last-Event-ID`，
-终态追平后发送 `stream_end`。Server 不返回 RuntimeEvent 内部的 StateOperation，普通
-Trace API 只返回 `TraceEvent`；`state` 返回 reducer 生成的只读状态记录。
+终态追平后发送 `stream_end`。如果响应已经建立后 Store 读取失败，Server 会发送不含底层
+异常详情的 `stream_error(code=store_unavailable)` 并结束流；UI 随即关闭 EventSource、停止
+live 刷新并显示错误，不会由 EventSource 自动无限重连。Server 不返回 RuntimeEvent 内部的
+StateOperation，普通 Trace API 只返回 `TraceEvent`；`state` 返回 reducer 生成的只读状态记录。
 
 身份放在 query 中，因此包含 `/` 或 Unicode 的 id 不改变路由语义。所有纳秒时间在 HTTP
 DTO 中使用十进制字符串；State 和 Trace 的任意深层 JSON 值若超出 JavaScript safe integer
@@ -189,11 +215,18 @@ DTO，不改变 SQLite 中的 canonical RuntimeEvent 或恢复数据。Server �
 WAL reader 可能由 SQLite 创建 `-wal`/`-shm` sidecar，因此数据库目录仍需可写。它不提供
 认证，CLI 默认只允许 loopback；绑定远端地址必须显式传
 `--allow-remote-without-auth`。
+CLI 的 loopback 模式同时校验 HTTP `Host`，避免浏览器经 DNS rebinding 读取本机 Trace；
+显式远端暴露时由部署者负责认证、TLS 和允许的 Host。Server 关闭公开 OpenAPI 与交互式文档路由，
+所有响应附带 `nosniff`、禁止嵌入和同源 CSP。API 默认 `no-store`，SSE 使用
+`no-cache, no-transform`；带内容哈希的 UI asset 使用 immutable cache，入口 HTML 与自定义
+无哈希 asset 每次重新校验。
 
 Spawn 父 Invocation 进入终态后，SSE 会继续等待其直接 Child 全部进入 terminal 并交付最后
 的 Child trace，随后才发送 `stream_end`；缺失或不连续的 Trace 投影会返回 Store 错误，
 不会提前伪造终态。UI 在启动 live 前先建立可恢复 tail cursor，支持
 向前分页加载完整历史，并对 Child burst 合并 projection 刷新。
+Child 刷新会越过已经加载的完整分页前缀再探测一页，从而不会在恰好 100 个 Child 时漏掉
+第 101 个；重复 cursor 会终止并显示错误，不会形成请求循环。
 
 ## 六、Tracing UI
 
@@ -209,7 +242,11 @@ Spawn 父 Invocation 进入终态后，SSE 会继续等待其直接 Child 全部
 UI 不提供执行、Resume、Cancel、Replay、Fork、Eval 或用户管理。它只消费上面的只读
 API，因而以后可以无状态地连接本地 Store 或中心化平台。Invocation 首屏先加载可恢复
 Trace tail、摘要和 Child 列表并启动 SSE；完整 Runtime State 由独立后台请求补入，不阻塞
-图、时间线和实时事件展示。
+图、时间线和实时事件展示。live 期间每条语义 Trace 都会请求更新 Latest Runtime State，
+但 State 重建严格单飞并以 250ms 最小间隔合并 burst；`stream_end` 前会 flush 最后一轮读取。
+Workflow、Session 和 Invocation 导航是分页快照，新运行通过顶部 Refresh 显式发现；选中
+Invocation 后的 Trace、State 与 Child 变化才进入实时 SSE 路径，避免后台反复重建所有历史
+Session 摘要。
 
 ## 七、CLI
 
@@ -217,11 +254,13 @@ Trace tail、摘要和 Child 列表并启动 SSE；完整 Runtime State 由独�
 autoagent compile [--project PATH]
 autoagent invoke WORKFLOW_ID --input JSON [--session-id ID] [--entry NODE]
 autoagent trace [--database PATH] [--host HOST] [--port PORT]
+                [--allow-remote-without-auth]
 ```
 
 - `compile`：加载全部 Workflow，执行 Compiler 检查并打印 revision；不创建数据库。
 - `invoke`：创建 Host，执行到 completed/failed/cancelled/waiting 边界并输出 JSON。
-- `trace`：启动只读本地 Tracing Server 和 UI；非 loopback 必须显式确认无认证暴露。
+- `trace`：启动只读本地 Tracing Server 和 UI；非 loopback 必须显式确认无认证暴露；
+  uvicorn 启动失败返回结构化 `TRACING_SERVER_FAILED` 且始终关闭只读 Store。
 
 所有用户 Python、原生 fd 和子进程输出都与 stdout 机器通道隔离；诊断写 stderr，机器结果
 只写一条 JSON 到 stdout。成功退出码为 0，项目/编译/执行错误为 1，

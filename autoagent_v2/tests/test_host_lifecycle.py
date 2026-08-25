@@ -7,6 +7,7 @@ import textwrap
 import threading
 import unittest
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
@@ -212,6 +213,244 @@ class HostLifecycleTests(unittest.TestCase):
                 self.assertEqual(streamed[-1].output, {"value": 6})
             finally:
                 host.close()
+        sys.modules.pop(module, None)
+
+    def test_async_context_manager_closes_the_complete_host(self) -> None:
+        """Build and close a complete Host without blocking the caller loop."""
+
+        module = "host_lifecycle_async_context"
+        with self.project(
+            module,
+            """
+            from typing_extensions import TypedDict
+            from autoagent import Node, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            async def identity(value: Value) -> Value:
+                return value
+
+            workflow = Workflow("async-context", nodes=[Node("work", identity)])
+            """,
+        ) as root:
+            async def run() -> tuple[InvocationResult, AutoAgentHost]:
+                host = await AutoAgentHost.afrom_project(
+                    root,
+                    environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+                )
+                async with host as entered:
+                    self.assertIs(entered, host)
+                    result = await entered.ainvoke(
+                        "async-context",
+                        {"value": 9},
+                    )
+                return result, host
+
+            result, host = asyncio.run(run())
+            self.assertEqual(result.output, {"value": 9})
+            with self.assertRaises(HostOperationError) as captured:
+                host.invoke("async-context", {"value": 10})
+            self.assertEqual(captured.exception.code, "HOST_CLOSED")
+        sys.modules.pop(module, None)
+
+    def test_sync_factory_rejects_an_async_context(self) -> None:
+        """Direct async callers to afrom_project before doing blocking work."""
+
+        async def run() -> str:
+            with self.assertRaises(HostOperationError) as captured:
+                AutoAgentHost.from_project("/path/is/not/inspected")
+            return captured.exception.code
+
+        self.assertEqual(
+            asyncio.run(run()),
+            "HOST_SYNC_API_IN_ASYNC_CONTEXT",
+        )
+
+    def test_cancelled_async_factory_closes_an_eventual_host(self) -> None:
+        """Close a Host that finishes construction after its caller is cancelled."""
+
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        class ConstructedHost:
+            close_calls = 0
+
+            def close(self, timeout=None):
+                self.close_calls += 1
+                self.timeout = timeout
+                if self.close_calls == 1:
+                    raise RuntimeError("transient close failure")
+                closed.set()
+
+        constructed = ConstructedHost()
+
+        def construct(*_args, **_kwargs):
+            started.set()
+            if not release.wait(2):
+                raise RuntimeError("test construction was not released")
+            return constructed
+
+        async def run() -> None:
+            task = asyncio.create_task(AutoAgentHost.afrom_project("ignored"))
+            for _ in range(1_000):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            self.assertTrue(started.is_set())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            release.set()
+            for _ in range(1_000):
+                if closed.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            self.assertTrue(closed.is_set())
+
+        with patch.object(AutoAgentHost, "from_project", side_effect=construct):
+            asyncio.run(run())
+        self.assertIsNone(constructed.timeout)
+        self.assertEqual(constructed.close_calls, 2)
+
+    def test_async_factory_propagates_the_calling_context(self) -> None:
+        """Preserve ContextVar values while project code runs off-loop."""
+
+        request_context: ContextVar[str] = ContextVar(
+            "host_test_request_context",
+            default="missing",
+        )
+        observed: list[str] = []
+
+        class ContextLoader(ProjectLoader):
+            def load(self, path=None):
+                observed.append(request_context.get())
+                return super().load(path)
+
+        module = "host_lifecycle_async_contextvars"
+        with self.project(
+            module,
+            """
+            from typing_extensions import TypedDict
+            from autoagent import Node, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            def identity(value: Value) -> Value:
+                return value
+
+            workflow = Workflow(
+                "async-contextvars",
+                nodes=[Node("work", identity)],
+            )
+            """,
+        ) as root:
+            async def run() -> None:
+                token = request_context.set("request-42")
+                try:
+                    host = await AutoAgentHost.afrom_project(
+                        root,
+                        environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+                        loader=ContextLoader(),
+                    )
+                finally:
+                    request_context.reset(token)
+                await host.aclose()
+
+            asyncio.run(run())
+        self.assertEqual(observed, ["request-42"])
+        sys.modules.pop(module, None)
+
+    def test_context_managers_preserve_body_error_when_close_also_fails(self) -> None:
+        """Keep the body failure primary and attach sync/async close diagnostics."""
+
+        class FailingCloseApp:
+            def close(self, timeout=30.0):
+                raise RuntimeError("close failed")
+
+        def host() -> AutoAgentHost:
+            return AutoAgentHost(
+                project=object(),  # type: ignore[arg-type]
+                settings=HostSettings(runtime_event_sink="none"),
+                app=FailingCloseApp(),  # type: ignore[arg-type]
+                event_sink=None,
+            )
+
+        sync_error = ValueError("sync body failed")
+        with self.assertRaises(ValueError) as captured:
+            with host():
+                raise sync_error
+        self.assertIs(captured.exception, sync_error)
+        self.assertIn("close failed", "\n".join(sync_error.__notes__))
+
+        async_error = ValueError("async body failed")
+
+        async def run() -> None:
+            async with host():
+                raise async_error
+
+        with self.assertRaises(ValueError) as captured:
+            asyncio.run(run())
+        self.assertIs(captured.exception, async_error)
+        self.assertIn("close failed", "\n".join(async_error.__notes__))
+
+    def test_definition_and_capability_facades_preserve_host_lifecycle(self) -> None:
+        """Expose project definitions and dynamic implementations without raw App use."""
+
+        module = "host_lifecycle_capability_facade"
+        with self.project(
+            module,
+            """
+            from typing_extensions import TypedDict
+            from autoagent import Capability, Node, Operator, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            def identity(value: Value) -> Value:
+                return value
+
+            def preferred(value: Value) -> Value:
+                return {"value": value["value"] + 10}
+
+            base = Operator(identity, id="base")
+            choice = Capability("choice", base.contract)
+            workflow = Workflow("capability-host", nodes=[Node("work", choice)])
+            """,
+        ) as root:
+            host = AutoAgentHost.from_project(
+                root,
+                environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            )
+            try:
+                loaded = sys.modules[module]
+                self.assertEqual(
+                    host.workflow_definition_snapshot("capability-host").workflow_id,
+                    "capability-host",
+                )
+                self.assertIs(host.register_capability(loaded.choice), loaded.choice)
+                host.register_operator(loaded.base, capability_id="choice")
+                host.register_operator(
+                    loaded.preferred,
+                    operator_id="preferred",
+                    capability_id="choice",
+                    default=True,
+                )
+                self.assertEqual(
+                    host.invoke("capability-host", {"value": 1}).output,
+                    {"value": 11},
+                )
+                host.set_operator_enabled("preferred", False)
+                self.assertEqual(
+                    host.invoke("capability-host", {"value": 2}).output,
+                    {"value": 2},
+                )
+            finally:
+                host.close()
+            with self.assertRaises(HostOperationError):
+                host.workflow_definition_snapshot("capability-host")
         sys.modules.pop(module, None)
 
     def test_sqlite_restore_loads_then_recovers_a_completed_session(self) -> None:
@@ -496,8 +735,17 @@ class HostLifecycleTests(unittest.TestCase):
             app=FakeApp(),  # type: ignore[arg-type]
             event_sink=FakeSink(),  # type: ignore[arg-type]
         )
-        with self.assertRaises(ValueError):
-            host.close(timeout=10**1000)
+        for timeout in (
+            -1,
+            float("nan"),
+            float("inf"),
+            True,
+            "1",
+            10**1000,
+            threading.TIMEOUT_MAX * 2.0,
+        ):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                host.close(timeout=timeout)
         first = host.close()
         second = host.close()
         self.assertIs(first, second)
@@ -686,7 +934,16 @@ class HostLifecycleTests(unittest.TestCase):
         with self.assertRaises(HostOperationError) as captured:
             host.invoke("workflow", None)
         self.assertEqual(captured.exception.code, "HOST_CLOSED")
-        self.assertIsInstance(host.close(), AppCheckpoint)
+        with self.assertRaises(HostOperationError) as repeated:
+            host.close()
+        self.assertIs(repeated.exception, close_error.exception)
+
+        async def close_again() -> None:
+            await host.aclose()
+
+        with self.assertRaises(HostOperationError) as async_repeated:
+            asyncio.run(close_again())
+        self.assertIs(async_repeated.exception, close_error.exception)
 
     def test_failed_registration_closes_app_before_sink(self) -> None:
         """Verify startup failure cannot leak a live App or persistence worker."""

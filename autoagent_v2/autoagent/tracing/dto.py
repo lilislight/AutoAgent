@@ -272,6 +272,16 @@ class StreamEndResponse(_ResponseModel):
     resume_cursor: str | None
     resume_sequence: int
 
+
+class StreamErrorResponse(_ResponseModel):
+    """Safe terminal SSE marker when the Store fails after streaming starts."""
+
+    invocation_id: str
+    code: Literal["store_unavailable"] = "store_unavailable"
+    message: Literal["Tracing data is unavailable or corrupt."] = (
+        "Tracing data is unavailable or corrupt."
+    )
+
 __all__ = [
     "ChildSessionPageResponse",
     "HealthResponse",
@@ -280,6 +290,7 @@ __all__ = [
     "InvocationSummaryResponse",
     "SessionPageResponse",
     "StreamEndResponse",
+    "StreamErrorResponse",
     "TRACING_API_VERSION",
     "TracePageResponse",
     "WorkflowDefinitionResponse",

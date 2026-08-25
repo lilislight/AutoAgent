@@ -48,6 +48,10 @@ from autoagent.host import AutoAgentHost
 
 with AutoAgentHost.from_project(".") as host:
     result = host.invoke("research", {"topic": "agents"})
+
+# 异步代码使用非阻塞工厂。
+async with await AutoAgentHost.afrom_project(".") as host:
+    result = await host.ainvoke("research", {"topic": "agents"})
 ```
 
 默认 RuntimeEvent Store 为 `.autoagent/runtime.db`，Tracing Server 只监听

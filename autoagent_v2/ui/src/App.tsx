@@ -17,6 +17,7 @@ import { TraceTimeline } from "./components/TraceTimeline";
 import { WorkflowGraph } from "./components/WorkflowGraph";
 import { switchInvocation, switchSession, switchWorkflow } from "./navigation";
 import { RequestGate } from "./requestGate";
+import { handleTraceStreamError } from "./traceStream";
 import type {
   ChildSessionSummary,
   InvocationSummary,
@@ -38,6 +39,7 @@ const CHILD_BOUNDARY_KINDS = new Set([
   "child_invocation.planned",
   "child_invocation.phase_changed",
 ]);
+const LIVE_STATE_REFRESH_DELAY_MS = 250;
 
 export default function App() {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -311,14 +313,22 @@ export default function App() {
     const current = () =>
       requests.isCurrent(token) &&
       selectionRef.current.invocation === invocationId;
+    const stateRefresh = createCoalescedRefresh(async () => {
+      if (!current()) return;
+      const stateToken = requests.start("boundary-state");
+      const response = await api.state(invocationId);
+      if (
+        current() &&
+        requests.isCurrent(stateToken) &&
+        selectionRef.current.invocation === invocationId
+      ) setState(response.state);
+    }, report, LIVE_STATE_REFRESH_DELAY_MS);
     const childRefresh = createCoalescedRefresh(async () => {
       if (!current()) return;
       const summaryToken = requests.start("boundary-summary");
-      const stateToken = requests.start("boundary-state");
       const childToken = requests.start("boundary-children");
-      const [summaryResult, stateResult, childResult] = await Promise.allSettled([
+      const [summaryResult, childResult] = await Promise.allSettled([
         api.invocation(invocationId),
-        api.state(invocationId),
         api.childrenThroughKnown(
           invocationId,
           childrenRef.current.map((child) => child.session_id),
@@ -328,9 +338,6 @@ export default function App() {
       if (summaryResult.status === "fulfilled") {
         if (requests.isCurrent(summaryToken)) setInvocation(summaryResult.value);
       } else if (requests.isCurrent(summaryToken)) report(summaryResult.reason);
-      if (stateResult.status === "fulfilled") {
-        if (requests.isCurrent(stateToken)) setState(stateResult.value.state);
-      } else if (requests.isCurrent(stateToken)) report(stateResult.reason);
       if (childResult.status === "fulfilled") {
         if (requests.isCurrent(childToken)) {
           setChildCursor(childResult.value.next_cursor);
@@ -366,19 +373,9 @@ export default function App() {
           return merged;
         });
         setLive(true);
-        const refreshRuntimeState = () => {
-          const stateToken = requests.start("boundary-state");
-          api.state(invocationId)
-            .then((response) => {
-              if (
-                requests.isCurrent(stateToken) &&
-                selectionRef.current.invocation === invocationId
-              ) setState(response.state);
-            })
-            .catch((reason) => {
-              if (requests.isCurrent(stateToken)) report(reason);
-            });
-        };
+        // State reconstruction is more expensive than Trace delivery. Keep it
+        // live for every semantic event, but serialize and coalesce bursts.
+        stateRefresh.request();
         if (INVOCATION_BOUNDARY_KINDS.has(event.kind)) {
           const summaryToken = requests.start("boundary-summary");
           api.invocation(invocationId)
@@ -391,7 +388,6 @@ export default function App() {
             .catch((reason) => {
               if (requests.isCurrent(summaryToken)) report(reason);
             });
-          refreshRuntimeState();
         }
         if (CHILD_BOUNDARY_KINDS.has(event.kind)) {
           setChildren((current) => {
@@ -409,9 +405,25 @@ export default function App() {
       if (!current()) return;
       setLive(false);
       source.close();
-      void childRefresh.flush().finally(() => {
-        childRefresh.dispose();
-        if (requests.isCurrent(token)) requests.invalidate(token.scope);
+      void Promise.all([childRefresh.flush(), stateRefresh.flush()]).finally(
+        () => {
+          childRefresh.dispose();
+          stateRefresh.dispose();
+          if (requests.isCurrent(token)) requests.invalidate(token.scope);
+        },
+      );
+    };
+    const fail = (message: MessageEvent<string>) => {
+      if (!current()) return;
+      handleTraceStreamError(message.data, invocationId, {
+        closeSource: () => source.close(),
+        stopRefresh: () => {
+          setLive(false);
+          childRefresh.dispose();
+          stateRefresh.dispose();
+          if (requests.isCurrent(token)) requests.invalidate(token.scope);
+        },
+        showError: (text) => report(new Error(text)),
       });
     };
     source.onopen = () => {
@@ -419,12 +431,14 @@ export default function App() {
     };
     source.addEventListener("trace", receive as EventListener);
     source.addEventListener("stream_end", finish);
+    source.addEventListener("stream_error", fail as EventListener);
     source.onerror = () => {
       if (current()) setLive(false);
     };
     return () => {
       source.close();
       childRefresh.dispose();
+      stateRefresh.dispose();
       if (requests.isCurrent(token)) requests.invalidate(token.scope);
     };
     // Reconnect only when selection/history bootstrap changes. New events are

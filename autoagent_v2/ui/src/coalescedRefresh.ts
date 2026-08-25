@@ -14,21 +14,30 @@ export function createCoalescedRefresh(
   let disposed = false;
   let active: Promise<void> | null = null;
 
+  const schedule = () => {
+    if (disposed || !dirty || timer !== null || active !== null) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void execute();
+    }, delayMs);
+  };
+
   const execute = (): Promise<void> => {
     if (disposed) return Promise.resolve();
     if (active !== null) return active;
     const operation = (async () => {
+      dirty = false;
       try {
-        do {
-          dirty = false;
-          await run();
-        } while (dirty && !disposed);
+        await run();
       } catch (reason) {
-        onError(reason);
+        if (!disposed) onError(reason);
       }
     })();
     const completion = operation.finally(() => {
-      if (active === completion) active = null;
+      if (active === completion) {
+        active = null;
+        schedule();
+      }
     });
     active = completion;
     return completion;
@@ -38,17 +47,20 @@ export function createCoalescedRefresh(
     request() {
       if (disposed) return;
       dirty = true;
-      if (timer !== null || active !== null) return;
-      timer = setTimeout(() => {
-        timer = null;
-        void execute();
-      }, delayMs);
+      schedule();
     },
-    flush() {
+    async flush() {
       if (disposed) return Promise.resolve();
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
-      return dirty || active !== null ? execute() : Promise.resolve();
+      while (!disposed) {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+        if (active !== null) {
+          await active;
+          continue;
+        }
+        if (!dirty) return;
+        await execute();
+      }
     },
     dispose() {
       disposed = true;

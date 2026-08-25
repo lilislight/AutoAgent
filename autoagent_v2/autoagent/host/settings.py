@@ -41,9 +41,14 @@ _HTTP_URL = TypeAdapter(AnyHttpUrl)
 
 
 class HostSettings(BaseModel):
-    """Validated deployment values used when a future Host assembles Core."""
+    """Validated deployment values used by Host to assemble Core."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        hide_input_in_errors=True,
+    )
 
     max_operator_concurrency: int = 32
     max_node_executions_per_invocation: int = 1_000
@@ -66,7 +71,10 @@ class HostSettings(BaseModel):
         if not resolved:
             return None
         if not _valid_http_url(resolved):
-            raise ValueError("http_sink_url must be an absolute HTTP(S) URL")
+            raise ValueError(
+                "http_sink_url must be an absolute HTTP(S) URL without "
+                "embedded credentials"
+            )
         return resolved
 
     @field_validator("http_sink_token")
@@ -208,7 +216,8 @@ def load_host_settings(
     if url is not None and not _valid_http_url(url):
         diagnostics.append(
             _invalid_environment(
-                "AUTOAGENT_HTTP_SINK_URL", "must be an absolute HTTP(S) URL"
+                "AUTOAGENT_HTTP_SINK_URL",
+                "must be an absolute HTTP(S) URL without embedded credentials",
             )
         )
         url = None
@@ -282,10 +291,13 @@ def _optional(raw: str | None) -> str | None:
 
 def _valid_http_url(value: str) -> bool:
     try:
-        _HTTP_URL.validate_python(value, strict=True)
+        parsed = _HTTP_URL.validate_python(value, strict=True)
     except ValidationError:
         return False
-    return True
+    # URL userinfo is routinely copied into logs, exception messages and
+    # tracing configuration.  Authentication has a separate redacted Bearer
+    # token field, so embedding credentials here is never necessary.
+    return parsed.username is None and parsed.password is None
 
 
 def _positive_finite(value: object) -> bool:

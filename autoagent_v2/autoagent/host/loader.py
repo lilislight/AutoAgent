@@ -150,6 +150,21 @@ def _load_workflow(locator: WorkflowLocator) -> Workflow:
                 )
             ]
         ) from error
+    except (Exception, SystemExit) as error:
+        raise ProjectLoadError(
+            [
+                HostDiagnostic(
+                    code="WORKFLOW_OBJECT_RESOLUTION_FAILED",
+                    message=(
+                        f"Cannot resolve Workflow object {locator.object_path!r} "
+                        f"from module {locator.module_name!r}: {error}"
+                    ),
+                    field="workflows.entrypoint",
+                    entrypoint=locator.entrypoint,
+                    metadata={"exception_type": type(error).__name__},
+                )
+            ]
+        ) from error
 
     if not isinstance(value, Workflow):
         raise ProjectLoadError(
@@ -217,6 +232,9 @@ def _guard_project_module_namespaces(
                 candidates = tuple(str(item) for item in paths)
             else:
                 candidates = (str(source),)
+            if not candidates:
+                origins.append(f"<unknown origin: {name}>")
+                continue
             for candidate in candidates:
                 try:
                     belongs = Path(candidate).expanduser().resolve().is_relative_to(root)

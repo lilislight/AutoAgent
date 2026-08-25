@@ -210,10 +210,24 @@ def _trace(arguments: argparse.Namespace) -> int:
     try:
         store.start()
         try:
-            application = create_tracing_app(store, ui_directory=ui_directory)
+            application = create_tracing_app(
+                store,
+                ui_directory=ui_directory,
+                allowed_hosts=(
+                    _local_tracing_hosts(host)
+                    if _is_loopback_host(host)
+                    else None
+                ),
+            )
         except TracingDependencyError as error:
             raise _CliError("CLI_DEPENDENCY_MISSING", str(error)) from error
-        uvicorn.run(application, host=host, port=port)
+        try:
+            uvicorn.run(application, host=host, port=port)
+        except SystemExit as error:
+            raise _CliError(
+                "TRACING_SERVER_FAILED",
+                f"Tracing server exited with status {error.code!r}.",
+            ) from error
     except BaseException as error:
         _close_after_failure(store, error)
         raise
@@ -303,6 +317,19 @@ def _is_loopback_host(value: str) -> bool:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
         return False
+
+
+def _local_tracing_hosts(value: str) -> tuple[str, ...]:
+    normalized = value.strip().lower()
+    if normalized == "localhost":
+        return ("localhost", "127.0.0.1", "::1")
+    address = ipaddress.ip_address(normalized)
+    if address in {
+        ipaddress.ip_address("127.0.0.1"),
+        ipaddress.ip_address("::1"),
+    }:
+        return ("localhost", "127.0.0.1", "::1")
+    return (address.compressed,)
 
 
 def _read_json_argument(source: str) -> object:

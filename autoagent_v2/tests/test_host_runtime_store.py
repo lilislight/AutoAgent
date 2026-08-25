@@ -5,9 +5,11 @@ import base64
 from dataclasses import replace
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import sqlite3
+import stat
 from tempfile import TemporaryDirectory
 import threading
 import time
@@ -15,6 +17,7 @@ import unittest
 from unittest.mock import patch
 from typing_extensions import TypedDict
 
+import autoagent.hosting.sqlite as sqlite_hosting
 from autoagent import AutoAgentApp, Edge, InputMappingContext, Map, Node, Wait, Workflow
 from autoagent.core.runtime import (
     ChildInvocationPhaseChanged,
@@ -22,6 +25,8 @@ from autoagent.core.runtime import (
     InMemoryEventJournal,
     InvocationOpened,
     RuntimeEvent,
+    RuntimeState,
+    StateReducer,
 )
 from autoagent.hosting import (
     HttpRuntimeEventSink,
@@ -31,7 +36,7 @@ from autoagent.hosting import (
     SQLITE_STORE_SCHEMA_VERSION,
     SQLiteRuntimeStore,
 )
-from autoagent.hosting._worker import ConcurrentWorker
+from autoagent.hosting._worker import ConcurrentWorker, SerialWorker
 
 
 class Value(TypedDict):
@@ -99,7 +104,69 @@ def _persist_events(path: Path, events: tuple[RuntimeEvent, ...]) -> None:
         store.close()
 
 
+def _start_store_in_process(path: str, ready, release, result) -> None:
+    """Start one Store after every test process reaches the same barrier."""
+
+    store: SQLiteRuntimeStore | None = None
+    error: BaseException | None = None
+    try:
+        ready.put(None)
+        if not release.wait(10):
+            raise TimeoutError("SQLite initialization barrier timed out.")
+        store = SQLiteRuntimeStore(path)
+        store.start()
+    except BaseException as caught:
+        error = caught
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except BaseException as cleanup_error:
+                if error is None:
+                    error = cleanup_error
+                else:
+                    error.add_note(f"Store cleanup failed: {cleanup_error}")
+        result.put(None if error is None else repr(error))
+
+
 class WorkerBridgeTests(unittest.TestCase):
+    def test_cancelled_serial_work_is_not_executed_after_leaving_the_queue(
+        self,
+    ) -> None:
+        """Skip a queued SQLite-style operation whose Future was cancelled."""
+
+        worker = SerialWorker("cancelled-serial-work")
+        started = threading.Event()
+        release = threading.Event()
+        executed = False
+
+        def block() -> None:
+            started.set()
+            release.wait(1)
+
+        def mark() -> None:
+            nonlocal executed
+            executed = True
+
+        async def run() -> None:
+            first = asyncio.create_task(worker.call_async(block))
+            while not started.is_set():
+                await asyncio.sleep(0)
+            cancelled = asyncio.create_task(worker.call_async(mark))
+            await asyncio.sleep(0)
+            cancelled.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await cancelled
+            release.set()
+            await first
+
+        try:
+            asyncio.run(run())
+            self.assertFalse(executed)
+        finally:
+            release.set()
+            worker.close()
+
     def test_cancelled_waiter_cannot_notify_a_reused_file_descriptor(self) -> None:
         """Unregister a thread completion notifier before closing its pipe."""
 
@@ -140,6 +207,114 @@ class WorkerBridgeTests(unittest.TestCase):
 
 
 class SQLiteRuntimeStoreTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX permissions only")
+    def test_new_store_resources_use_private_permissions(self) -> None:
+        """Protect a newly created Store directory, database, WAL, and SHM."""
+
+        with TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir(mode=0o755)
+            os.chmod(project, 0o755)
+            path = project / ".autoagent" / "runtime.db"
+            previous_umask = os.umask(0o002)
+            store = SQLiteRuntimeStore(path)
+            try:
+                store.start()
+            finally:
+                os.umask(previous_umask)
+            try:
+                self.assertEqual(stat.S_IMODE(project.stat().st_mode), 0o755)
+                self.assertEqual(
+                    stat.S_IMODE(path.parent.stat().st_mode),
+                    0o700,
+                )
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                for suffix in ("-wal", "-shm"):
+                    sidecar = path.with_name(path.name + suffix)
+                    self.assertTrue(sidecar.is_file())
+                    self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o600)
+            finally:
+                store.close()
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions only")
+    def test_existing_store_permissions_are_not_changed(self) -> None:
+        """Leave user-selected modes unchanged when opening existing resources."""
+
+        with TemporaryDirectory() as directory:
+            parent = Path(directory) / "custom"
+            parent.mkdir(mode=0o775)
+            os.chmod(parent, 0o775)
+            path = parent / "runtime.db"
+            path.touch(mode=0o644)
+            os.chmod(path, 0o644)
+            store = SQLiteRuntimeStore(path)
+            try:
+                store.start()
+                self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o775)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+            finally:
+                store.close()
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions only")
+    def test_failed_first_initialization_leaves_private_retryable_file(self) -> None:
+        """Close the creation descriptor and safely retry a failed first open."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "runtime.db"
+            failed = SQLiteRuntimeStore(path)
+            try:
+                with patch.object(
+                    sqlite_hosting.sqlite3,
+                    "connect",
+                    side_effect=sqlite3.OperationalError("injected open failure"),
+                ):
+                    with self.assertRaises(RuntimeEventStoreError):
+                        failed.start()
+            finally:
+                failed.close()
+            self.assertTrue(path.is_file())
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+            retried = SQLiteRuntimeStore(path)
+            try:
+                retried.start()
+                self.assertEqual(asyncio.run(retried.list_workflows()).items, ())
+            finally:
+                retried.close()
+
+    def test_failed_schema_transaction_leaves_no_partial_tables(self) -> None:
+        """Roll back every DDL statement when first-time schema creation fails."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.db"
+            failed = SQLiteRuntimeStore(path)
+            try:
+                with patch.object(
+                    sqlite_hosting,
+                    "_schema_statements",
+                    return_value=(
+                        "CREATE TABLE partial_runtime_state(value TEXT);",
+                        "THIS IS NOT VALID SQL;",
+                    ),
+                ):
+                    with self.assertRaises(RuntimeEventStoreError):
+                        failed.start()
+            finally:
+                failed.close()
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(sqlite_hosting._sqlite_tables(connection), set())
+            finally:
+                connection.close()
+
+            retried = SQLiteRuntimeStore(path)
+            try:
+                retried.start()
+                self.assertEqual(asyncio.run(retried.list_workflows()).items, ())
+            finally:
+                retried.close()
+
     def test_numeric_query_boundaries_reject_nonfinite_and_oversized_values(
         self,
     ) -> None:
@@ -208,6 +383,63 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
             for store in stores:
                 store.close()
             self.assertEqual(errors, [])
+
+    def test_concurrent_processes_initialize_one_schema(self) -> None:
+        """Recheck schema emptiness under SQLite's cross-process write lock."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "runtime.db"
+            context = multiprocessing.get_context("spawn")
+            ready = context.Queue()
+            release = context.Event()
+            result = context.Queue()
+            processes = [
+                context.Process(
+                    target=_start_store_in_process,
+                    args=(str(path), ready, release, result),
+                )
+                for _ in range(4)
+            ]
+            try:
+                for process in processes:
+                    process.start()
+                for _ in processes:
+                    ready.get(timeout=10)
+                release.set()
+                for process in processes:
+                    process.join(10)
+                self.assertTrue(
+                    all(not process.is_alive() for process in processes),
+                    "SQLite initializer process did not terminate.",
+                )
+                self.assertEqual(
+                    [result.get(timeout=2) for _ in processes],
+                    [None] * len(processes),
+                )
+                self.assertTrue(all(process.exitcode == 0 for process in processes))
+                connection = sqlite3.connect(path)
+                try:
+                    self.assertEqual(
+                        connection.execute("PRAGMA integrity_check").fetchone()[0],
+                        "ok",
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT value FROM schema_metadata WHERE key = ?",
+                            ("schema_version",),
+                        ).fetchone()[0],
+                        str(SQLITE_STORE_SCHEMA_VERSION),
+                    )
+                finally:
+                    connection.close()
+            finally:
+                release.set()
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(2)
+                ready.close()
+                result.close()
 
     def test_read_only_store_handles_uri_characters_without_wrong_files(self) -> None:
         """Percent-encode SQLite file URIs while retaining live read access."""
@@ -443,6 +675,45 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
 
             self.assertTrue(asyncio.run(run()))
 
+    def test_cancelled_async_close_preserves_the_shared_failure(self) -> None:
+        """Let a later closer observe cleanup failure after waiter cancellation."""
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteRuntimeStore(Path(directory) / "runtime.db")
+            store.start()
+            original = store._close_connection
+            entered = threading.Event()
+            release = threading.Event()
+            failure = RuntimeError("sqlite close failed")
+
+            def fail_close() -> None:
+                entered.set()
+                release.wait(1)
+                original()
+                raise failure
+
+            store._close_connection = fail_close  # type: ignore[method-assign]
+
+            async def run() -> None:
+                closing = asyncio.create_task(store.aclose())
+                while not entered.is_set():
+                    await asyncio.sleep(0)
+                closing.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await closing
+                release.set()
+                with self.assertRaises(RuntimeError) as raised:
+                    await store.aclose()
+                self.assertIs(raised.exception, failure)
+
+            try:
+                asyncio.run(run())
+                with self.assertRaises(RuntimeError) as raised:
+                    store.close()
+                self.assertIs(raised.exception, failure)
+            finally:
+                release.set()
+
     def test_store_indexes_trace_and_rebuilds_state(self) -> None:
         """Persist one Invocation and rebuild its exact current State."""
 
@@ -480,6 +751,32 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
             finally:
                 app.close()
                 store.close()
+
+    def test_rebuild_uses_one_typed_state_decode_for_a_sealed_prefix(self) -> None:
+        """Replay accepted Event operations once without decoding every prefix."""
+
+        events = _capture_events()
+        strict = RuntimeState()
+        for event in events:
+            strict = StateReducer().apply(strict, event)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.db"
+            _persist_events(path, events)
+            reader = SQLiteRuntimeStore.open_read_only(path)
+            try:
+                with patch.object(
+                    RuntimeState,
+                    "from_record",
+                    wraps=RuntimeState.from_record,
+                ) as decode:
+                    rebuilt = asyncio.run(
+                        reader.rebuild_state("captured-session")
+                    )
+                self.assertEqual(rebuilt, strict)
+                self.assertEqual(decode.call_count, 1)
+            finally:
+                reader.close()
 
     def test_revision_filtered_sessions_use_that_revision_latest_invocation(
         self,
@@ -710,7 +1007,10 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
 
             restarted = SQLiteRuntimeStore(path)
             try:
-                with self.assertRaisesRegex(RuntimeEventStoreError, "Trace count"):
+                with self.assertRaisesRegex(
+                    RuntimeEventStoreError,
+                    "Trace count",
+                ):
                     asyncio.run(restarted.append(events[1]))
             finally:
                 restarted.close()
@@ -1121,6 +1421,47 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
             finally:
                 reader.close()
 
+    def test_trace_page_decodes_each_batched_source_event_once(self) -> None:
+        """Avoid per-Trace source decoding when one Event carries many Logs."""
+
+        events = _capture_events()
+        first = events[0]
+        last = events[-1]
+        batched = replace(
+            last,
+            id="batched-runtime-event",
+            sequence=1,
+            previous_event_id=None,
+            previous_event_digest=None,
+            from_state_version=first.from_state_version,
+            operation_batches=tuple(
+                batch for event in events for batch in event.operation_batches
+            ),
+            logs=tuple(log for event in events for log in event.logs),
+        )
+        assert last.invocation_id is not None
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteRuntimeStore(Path(directory) / "runtime.db")
+            try:
+                asyncio.run(store.append(batched))
+                with patch.object(
+                    sqlite_hosting,
+                    "_decode_verified_runtime_event",
+                    wraps=sqlite_hosting._decode_verified_runtime_event,
+                ) as source_decode:
+                    traces = asyncio.run(
+                        store.list_trace_events(last.invocation_id, limit=100)
+                    )
+                expected = sum(
+                    log.invocation_id == last.invocation_id
+                    for log in batched.logs
+                )
+                self.assertEqual(len(traces), expected)
+                self.assertLess(source_decode.call_count, len(traces))
+            finally:
+                store.close()
+
     def test_forward_trace_list_rejects_a_deleted_middle_row(self) -> None:
         """Reject a forward Trace page that would silently skip a missing row."""
 
@@ -1152,7 +1493,22 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 connection.close()
             reader = SQLiteRuntimeStore.open_read_only(path)
             try:
-                with self.assertRaisesRegex(RuntimeEventStoreError, "Trace count"):
+                missing = sequences[len(sequences) // 2]
+                with self.assertRaisesRegex(
+                    RuntimeEventStoreError,
+                    "Trace sequence is incomplete",
+                ):
+                    asyncio.run(
+                        reader.list_trace_events(
+                            invocation_id,
+                            after_sequence=missing - 1,
+                            limit=1,
+                        )
+                    )
+                with self.assertRaisesRegex(
+                    RuntimeEventStoreError,
+                    "Trace sequence is incomplete",
+                ):
                     asyncio.run(
                         reader.list_trace_events(invocation_id, limit=1_000)
                     )
@@ -1763,6 +2119,10 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                     asyncio.run(store.append(event))
                 self.assertEqual(rebuilds, 0)
                 self.assertNotIn("cache-parent-session", store._validated_states)
+                self.assertNotIn(
+                    "cache-parent-session",
+                    store._canonical_ownership,
+                )
             finally:
                 store.close()
 
@@ -2321,9 +2681,15 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 for handle in (*first_handles, *second_handles):
                     app.wait_child(handle, timeout=1)
 
-                page_one = asyncio.run(
-                    store.list_child_sessions(first.invocation_id, limit=2)
-                )
+                with patch.object(
+                    store,
+                    "_read_parent_child_ownership",
+                    wraps=store._read_parent_child_ownership,
+                ) as ownership_scan:
+                    page_one = asyncio.run(
+                        store.list_child_sessions(first.invocation_id, limit=2)
+                    )
+                self.assertEqual(ownership_scan.call_count, 1)
                 self.assertEqual(
                     [item["unit_index"] for item in page_one.items],
                     [0, 1],
@@ -2352,6 +2718,17 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 )
                 self.assertTrue(first_child["parent_occurrence_id"])
                 self.assertGreater(first_child["planned_event_sequence"], 0)
+
+                with patch.object(
+                    store,
+                    "_read_parent_child_ownership",
+                    wraps=store._read_parent_child_ownership,
+                ) as checkpoint_scan:
+                    rebuilt = asyncio.run(
+                        store.rebuild_checkpoint(first.session_id)
+                    )
+                self.assertEqual(len(rebuilt.states), 4)
+                self.assertEqual(checkpoint_scan.call_count, 1)
 
                 with self.assertRaises(ValueError):
                     asyncio.run(
@@ -2610,6 +2987,54 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
             all(not thread.is_alive() for thread in sink._worker._executor._threads)
         )
 
+    def test_concurrent_close_does_not_mask_an_admitted_request_failure(self) -> None:
+        """Keep the remote response error after close starts draining the pool."""
+
+        entered = threading.Event()
+        release = threading.Event()
+        client = _Client()
+
+        def rejected_post(
+            url: str,
+            *,
+            json: object,
+            headers: dict[str, str],
+        ) -> _Response:
+            entered.set()
+            release.wait(1)
+            return _Response(503, "unavailable")
+
+        client.post = rejected_post  # type: ignore[method-assign]
+        sink = HttpRuntimeEventSink(
+            "https://events.example.test/v1/runtime-events",
+            client=client,
+        )
+        closer: threading.Thread | None = None
+
+        async def run() -> None:
+            nonlocal closer
+            sending = asyncio.create_task(sink.append(_capture_events()[0]))
+            while not entered.is_set():
+                await asyncio.sleep(0)
+            closer = threading.Thread(target=sink.close)
+            closer.start()
+            while not sink._closed:
+                await asyncio.sleep(0)
+            release.set()
+            with self.assertRaisesRegex(
+                RuntimeEventStoreError,
+                "returned 503: unavailable",
+            ):
+                await sending
+
+        try:
+            asyncio.run(run())
+        finally:
+            release.set()
+            if closer is not None:
+                closer.join(1)
+            sink.close()
+
     def test_async_close_keeps_the_caller_event_loop_responsive(self) -> None:
         """Close a blocked HTTP pool without blocking unrelated async work."""
 
@@ -2854,6 +3279,24 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
                 asyncio.run(sink.append(event))
         finally:
             sink.close()
+
+    def test_http_sink_rejects_malformed_response_status(self) -> None:
+        """Wrap a custom client's non-integer or invalid HTTP status."""
+
+        event = _capture_events()[0]
+        for status_code in ("202", 202.0, True, 99, 600):
+            with self.subTest(status_code=status_code):
+                client = _Client()
+                client.status_code = status_code  # type: ignore[assignment]
+                sink = HttpRuntimeEventSink(
+                    "https://events.example.test/v1/runtime-events",
+                    client=client,
+                )
+                try:
+                    with self.assertRaises(RuntimeEventStoreError):
+                        asyncio.run(sink.append(event))
+                finally:
+                    sink.close()
 
     def test_http_sink_wraps_transport_failure(self) -> None:
         """Expose a stable Store error when the remote transport times out."""

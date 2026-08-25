@@ -64,23 +64,84 @@ test("refreshes every loaded child page instead of only the first hundred", asyn
     const url = String(input);
     requested.push(url);
     const cursor = new URL(`http://local${url}`).searchParams.get("cursor");
-    const offset = cursor === null ? 0 : 100;
+    const offset = cursor === null ? 0 : cursor === "second-page" ? 100 : 200;
     return {
       ok: true,
       json: async () => ({
         items: Array.from({ length: 100 }, (_, index) => ({
           session_id: `child-${offset + index}`,
         })),
-        next_cursor: cursor === null ? "second-page" : "third-page",
+        next_cursor:
+          cursor === null
+            ? "second-page"
+            : cursor === "second-page"
+              ? "third-page"
+              : "fourth-page",
       }),
     } as Response;
   }) as typeof fetch;
   try {
     const page = await api.childrenThroughKnown("parent", ["child-149"]);
-    assert.equal(requested.length, 2);
+    assert.equal(requested.length, 3);
     assert.match(requested[1], /cursor=second-page/);
-    assert.equal(page.items.length, 200);
-    assert.equal(page.next_cursor, "third-page");
+    assert.match(requested[2], /cursor=third-page/);
+    assert.equal(page.items.length, 300);
+    assert.equal(page.next_cursor, "fourth-page");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("discovers a child appended beyond an exact loaded page boundary", async () => {
+  const original = globalThis.fetch;
+  const requested: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    requested.push(url);
+    const cursor = new URL(`http://local${url}`).searchParams.get("cursor");
+    return {
+      ok: true,
+      json: async () =>
+        cursor === null
+          ? {
+              items: Array.from({ length: 100 }, (_, index) => ({
+                session_id: `child-${index}`,
+              })),
+              next_cursor: "page-2",
+            }
+          : {
+              items: [{ session_id: "child-100" }],
+              next_cursor: null,
+            },
+    } as Response;
+  }) as typeof fetch;
+  try {
+    const known = Array.from({ length: 100 }, (_, index) => `child-${index}`);
+    const page = await api.childrenThroughKnown("parent", known);
+    assert.equal(requested.length, 2);
+    assert.equal(page.items.at(-1)?.session_id, "child-100");
+    assert.equal(page.next_cursor, null);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("rejects a repeated child cursor instead of requesting forever", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return {
+      ok: true,
+      json: async () => ({ items: [], next_cursor: "cycle" }),
+    } as Response;
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      api.childrenThroughKnown("parent", ["missing"]),
+      /repeated cursor/,
+    );
+    assert.equal(calls, 2);
   } finally {
     globalThis.fetch = original;
   }

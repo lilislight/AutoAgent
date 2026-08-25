@@ -56,9 +56,12 @@ async function childrenThroughKnown(
   signal?: AbortSignal,
 ): Promise<Page<ChildSessionSummary>> {
   const remaining = new Set(knownSessionIds);
+  const seenCursors = new Set<string>();
   const items: ChildSessionSummary[] = [];
   let cursor: string | null = null;
+  let pagesAfterKnown = 0;
   do {
+    const knownCompleteBeforePage = remaining.size === 0;
     const page: Page<ChildSessionSummary> = await get<Page<ChildSessionSummary>>(
       `/invocations/children${query({
         invocation_id: invocationId,
@@ -70,7 +73,20 @@ async function childrenThroughKnown(
     items.push(...page.items);
     for (const item of page.items) remaining.delete(item.session_id);
     cursor = page.next_cursor;
-  } while (cursor !== null && remaining.size > 0);
+    if (knownCompleteBeforePage) pagesAfterKnown += 1;
+    if (cursor !== null) {
+      if (seenCursors.has(cursor)) {
+        throw new Error("Child pagination returned a repeated cursor.");
+      }
+      seenCursors.add(cursor);
+    }
+    // Once the complete loaded prefix has been refreshed, read one more page.
+    // That page discovers children appended just beyond an exact page boundary
+    // even when their planned Trace was missed during an SSE reconnect.
+  } while (
+    cursor !== null &&
+    (remaining.size > 0 || pagesAfterKnown === 0)
+  );
   return { items, next_cursor: cursor, has_more: cursor !== null };
 }
 

@@ -77,6 +77,8 @@ class SerialWorker:
             work = self._queue.get()
             if work is None:
                 return
+            if not work.future.set_running_or_notify_cancel():
+                continue
             try:
                 result = work.function(*work.arguments)
             except BaseException as error:

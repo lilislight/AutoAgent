@@ -6,6 +6,7 @@ import textwrap
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 from typing import Iterator
 
 from pydantic import ValidationError
@@ -190,6 +191,7 @@ class HostProjectTests(unittest.TestCase):
                 "relative/path",
                 "ftp://example.test/events",
                 "http://example.test:99999/events",
+                "https://user:password@example.test/events",
             ):
                 environment = {"AUTOAGENT_RUNTIME_EVENT_SINK": "http"}
                 if url is not None:
@@ -211,6 +213,13 @@ class HostProjectTests(unittest.TestCase):
         self.assertEqual(settings.http_sink_token, "token")
         self.assertNotIn("token", repr(settings))
         self.assertNotIn("token", str(settings))
+
+        with self.assertRaises(ValidationError) as captured:
+            HostSettings(
+                runtime_event_sink="http",
+                http_sink_url="https://user:password@example.test/events",
+            )
+        self.assertNotIn("password", str(captured.exception))
 
     def test_environment_reports_missing_or_malformed_explicit_files(self) -> None:
         """Verify explicit .env failures are diagnosed instead of silently ignored."""
@@ -292,6 +301,34 @@ class HostProjectTests(unittest.TestCase):
         finally:
             sys.modules.pop("workflow", None)
 
+    def test_loader_rejects_a_preloaded_module_without_a_file_origin(self) -> None:
+        """Never resolve a project entrypoint from an unverifiable module alias."""
+
+        module_name = "host_project_originless_alias"
+        alias = ModuleType(module_name)
+        alias.workflow = object()
+        sys.modules[module_name] = alias
+        try:
+            with self.project(
+                self.manifest(f"{module_name}:workflow"),
+                modules={
+                    f"{module_name}.py": (
+                        "from autoagent import Workflow\n"
+                        "workflow = Workflow('from-project')\n"
+                    )
+                },
+            ) as root:
+                with self.assertRaises(ProjectLoadError) as captured:
+                    ProjectLoader().load(root)
+            diagnostic = captured.exception.diagnostics[0]
+            self.assertEqual(diagnostic.code, "WORKFLOW_MODULE_CONFLICT")
+            self.assertIn(
+                f"<unknown origin: {module_name}>",
+                diagnostic.metadata["namespaces"][module_name],
+            )
+        finally:
+            sys.modules.pop(module_name, None)
+
     def test_loader_restores_sys_path_and_reports_entrypoint_failures(self) -> None:
         """Verify import, attribute, and type failures are aggregated safely."""
 
@@ -332,6 +369,28 @@ class HostProjectTests(unittest.TestCase):
         diagnostic = captured.exception.diagnostics[0]
         self.assertEqual(diagnostic.code, "WORKFLOW_MODULE_IMPORT_FAILED")
         self.assertEqual(diagnostic.metadata["exception_type"], "SystemExit")
+        sys.modules.pop(module_name, None)
+
+    def test_loader_structures_user_failure_while_resolving_an_object(self) -> None:
+        """Keep dynamic object lookup failures inside stable Host diagnostics."""
+
+        module_name = "host_project_object_resolution_failure"
+        with self.project(
+            self.manifest(f"{module_name}:workflow"),
+            modules={
+                f"{module_name}.py": """
+                    def __getattr__(name):
+                        raise RuntimeError(f"cannot resolve {name}")
+                """,
+            },
+        ) as root:
+            with self.assertRaises(ProjectLoadError) as captured:
+                ProjectLoader().load(root)
+
+        diagnostic = captured.exception.diagnostics[0]
+        self.assertEqual(diagnostic.code, "WORKFLOW_OBJECT_RESOLUTION_FAILED")
+        self.assertEqual(diagnostic.metadata["exception_type"], "RuntimeError")
+        self.assertEqual(diagnostic.entrypoint, f"{module_name}:workflow")
         sys.modules.pop(module_name, None)
 
     def test_loader_rejects_duplicate_workflow_ids(self) -> None:

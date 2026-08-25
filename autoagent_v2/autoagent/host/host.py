@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import math
 import threading
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from concurrent.futures import Future as ThreadFuture
 from contextlib import contextmanager
@@ -21,8 +23,10 @@ from autoagent.core.app import (
     InvocationSubmission,
     StreamItem,
 )
+from autoagent.core.compiler import WorkflowDefinitionSnapshot
+from autoagent.core.operators import Operator
 from autoagent.core.runtime import RuntimeCheckpointBundle
-from autoagent.core.workflow import ChildInvocationHandle, WorkflowIR
+from autoagent.core.workflow import Capability, ChildInvocationHandle, WorkflowIR
 from autoagent.hosting import RuntimeSessionNotRootError, SQLiteRuntimeStore
 from autoagent.hosting._worker import await_thread_future
 
@@ -61,14 +65,13 @@ class AutoAgentHost:
         self.settings = settings
         self.app = app
         self.event_sink = event_sink
-        self._lifecycle = threading.Condition()
+        self._lifecycle = threading.Lock()
         self._closing = False
         self._closed = False
         self._active_restores = 0
         self._closed_checkpoint: AppCheckpoint | None = None
         self._close_future: ThreadFuture[AppCheckpoint] | None = None
         self._restore_drain_future: ThreadFuture[None] | None = None
-        self._close_thread: threading.Thread | None = None
 
     @classmethod
     def from_project(
@@ -80,6 +83,13 @@ class AutoAgentHost:
         loader: ProjectLoader | None = None,
     ) -> AutoAgentHost:
         """Load, configure, and register every Workflow as one Host unit."""
+
+        if _in_async_context():
+            raise HostOperationError(
+                "HOST_SYNC_API_IN_ASYNC_CONTEXT",
+                "Use await AutoAgentHost.afrom_project(...) from an "
+                "asynchronous context.",
+            )
 
         manifest_path = resolve_manifest_path(path)
         settings = load_host_settings(
@@ -114,6 +124,53 @@ class AutoAgentHost:
             event_sink=sink,
         )
 
+    @classmethod
+    async def afrom_project(
+        cls,
+        path: str | Path | None = None,
+        *,
+        env_file: str | Path | None = None,
+        environ: Mapping[str, str] | None = None,
+        loader: ProjectLoader | None = None,
+    ) -> AutoAgentHost:
+        """Assemble one Host without blocking the caller's event loop.
+
+        Project imports, SQLite initialization, and remote Workflow definition
+        publication all run on a dedicated daemon thread.  If the caller is
+        cancelled during startup, a successfully constructed Host is closed on
+        another daemon thread as soon as construction finishes.
+        """
+
+        future: ThreadFuture[AutoAgentHost] = ThreadFuture()
+        context = contextvars.copy_context()
+
+        def construct() -> None:
+            try:
+                host = cls.from_project(
+                    path,
+                    env_file=env_file,
+                    environ=environ,
+                    loader=loader,
+                )
+            except BaseException as error:
+                if not future.done():
+                    future.set_exception(error)
+            else:
+                if not future.done():
+                    future.set_result(host)
+
+        thread = threading.Thread(
+            target=lambda: context.run(construct),
+            name="autoagent-host-start",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            return await await_thread_future(future, cancel_future=False)
+        except asyncio.CancelledError:
+            future.add_done_callback(_close_cancelled_host_start)
+            raise
+
     @property
     def runtime_store(self) -> SQLiteRuntimeStore | None:
         """Return the query/recovery Store when SQLite mode is configured."""
@@ -130,6 +187,49 @@ class AutoAgentHost:
 
         sink = self.event_sink
         return sink if isinstance(sink, RecoverySource) else None
+
+    def workflow_definition_snapshot(
+        self,
+        workflow_id_or_revision_id: str,
+    ) -> WorkflowDefinitionSnapshot:
+        """Return a registered portable Workflow definition."""
+
+        self._ensure_open()
+        return self.app.workflow_definition_snapshot(workflow_id_or_revision_id)
+
+    def register_capability(self, capability: Capability) -> Capability:
+        """Bind one additional Capability contract to the Host App."""
+
+        self._ensure_open()
+        return self.app.register_capability(capability)
+
+    def register_operator(
+        self,
+        operator: Operator | Callable[..., object],
+        *,
+        capability_id: str,
+        operator_id: str | None = None,
+        priority: int = 0,
+        enabled: bool = True,
+        default: bool = False,
+    ) -> Operator:
+        """Register one runtime implementation for a project Capability."""
+
+        self._ensure_open()
+        return self.app.register_operator(
+            operator,
+            capability_id=capability_id,
+            operator_id=operator_id,
+            priority=priority,
+            enabled=enabled,
+            default=default,
+        )
+
+    def set_operator_enabled(self, operator_id: str, enabled: bool) -> None:
+        """Enable or disable one registered Capability implementation."""
+
+        self._ensure_open()
+        self.app.set_operator_enabled(operator_id, enabled)
 
     def invoke(
         self,
@@ -488,8 +588,34 @@ class AutoAgentHost:
     def __enter__(self) -> AutoAgentHost:
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        _error_type: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException as close_error:
+            if error is None:
+                raise
+            error.add_note(f"AutoAgentHost close failed: {close_error}")
+
+    async def __aenter__(self) -> AutoAgentHost:
+        return self
+
+    async def __aexit__(
+        self,
+        _error_type: type[BaseException] | None,
+        error: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            await self.aclose()
+        except BaseException as close_error:
+            if error is None:
+                raise
+            error.add_note(f"AutoAgentHost close failed: {close_error}")
 
     def _prepare_workflow_call(self, workflow_id: str) -> None:
         self._ensure_open()
@@ -510,9 +636,8 @@ class AutoAgentHost:
         with self._lifecycle:
             if self._closed:
                 assert self._closed_checkpoint is not None
-                completed: ThreadFuture[AppCheckpoint] = ThreadFuture()
-                completed.set_result(self._closed_checkpoint)
-                return completed
+                assert self._close_future is not None
+                return self._close_future
             if self._close_future is not None:
                 return self._close_future
             future: ThreadFuture[AppCheckpoint] = ThreadFuture()
@@ -528,13 +653,11 @@ class AutoAgentHost:
                 name="autoagent-host-close",
                 daemon=True,
             )
-            self._close_thread = thread
             try:
                 thread.start()
             except BaseException as error:
                 self._close_future = None
                 self._restore_drain_future = None
-                self._close_thread = None
                 self._closing = False
                 future.set_exception(error)
                 raise
@@ -575,8 +698,6 @@ class AutoAgentHost:
             self._closed = True
             self._closing = False
             self._restore_drain_future = None
-            self._close_thread = None
-            self._lifecycle.notify_all()
         if not future.done():
             future.set_result(checkpoint)
 
@@ -590,8 +711,6 @@ class AutoAgentHost:
                 self._close_future = None
             self._closing = False
             self._restore_drain_future = None
-            self._close_thread = None
-            self._lifecycle.notify_all()
         if not future.done():
             future.set_exception(error)
 
@@ -608,8 +727,6 @@ class AutoAgentHost:
             self._closed = True
             self._closing = False
             self._restore_drain_future = None
-            self._close_thread = None
-            self._lifecycle.notify_all()
         error.add_note("AutoAgentApp closed successfully; the Host is terminal.")
         if not future.done():
             future.set_exception(error)
@@ -635,7 +752,6 @@ class AutoAgentHost:
                     and not self._restore_drain_future.done()
                 ):
                     self._restore_drain_future.set_result(None)
-                self._lifecycle.notify_all()
 
     def _restore_store(self) -> RecoverySource:
         store = self.recovery_source
@@ -645,6 +761,40 @@ class AutoAgentHost:
                 "Session restore requires AUTOAGENT_RUNTIME_EVENT_SINK=sqlite.",
             )
         return store
+
+
+def _close_cancelled_host_start(
+    future: ThreadFuture[AutoAgentHost],
+) -> None:
+    """Close a Host whose asynchronous construction outlived its caller."""
+
+    try:
+        host = future.result()
+    except BaseException:
+        return
+
+    def close() -> None:
+        for _attempt in range(3):
+            try:
+                host.close(timeout=None)
+            except BaseException:
+                # App-close failures leave Host retryable.  Startup has not
+                # exposed the App, so a short bounded retry is safe and avoids
+                # leaking a Host on a transient lifecycle failure.
+                continue
+            return
+        warnings.warn(
+            "A Host abandoned by cancelled asynchronous startup could not be "
+            "closed after three attempts; owned resources may remain active.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    threading.Thread(
+        target=close,
+        name="autoagent-host-cancelled-start-close",
+        daemon=True,
+    ).start()
 
 
 def _register_project_workflows(
@@ -746,8 +896,12 @@ def _close_timeout(value: float | None) -> None:
         or isinstance(value, bool)
         or not finite
         or value < 0
+        or value > threading.TIMEOUT_MAX
     ):
-        raise ValueError("timeout must be a non-negative finite number or None.")
+        raise ValueError(
+            "timeout must be a non-negative finite number no greater than "
+            "the platform timeout limit, or None."
+        )
 
 
 __all__ = ["AutoAgentHost"]

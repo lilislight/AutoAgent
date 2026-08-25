@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import math
 import mimetypes
 from pathlib import Path
-from typing import Protocol, TypeVar
+import re
+from typing import Any, Protocol, TypeVar
 
 from autoagent.core.runtime import RuntimeState, TraceEvent
 from autoagent.hosting import Page, RuntimeEventStoreError
@@ -23,6 +25,7 @@ from .dto import (
     InvocationSummaryResponse,
     SessionPageResponse,
     StreamEndResponse,
+    StreamErrorResponse,
     TRACING_API_VERSION,
     TraceEventResponse,
     TracePageResponse,
@@ -65,6 +68,73 @@ _STREAM_BATCH_SIZE = 200
 _TRACE_CURSOR_VERSION = 2
 _T = TypeVar("_T")
 _DisconnectProbe = Callable[[], Awaitable[bool]]
+_HASHED_ASSET = re.compile(r".+-[A-Za-z0-9_-]{8,}\.[^.]+$")
+_SECURITY_HEADERS = (
+    (
+        b"content-security-policy",
+        b"default-src 'self'; script-src 'self'; style-src 'self'; "
+        b"img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        b"base-uri 'none'; frame-ancestors 'none'",
+    ),
+    (b"referrer-policy", b"no-referrer"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+)
+
+
+class _TracingBoundaryMiddleware:
+    """Enforce the local Host boundary and non-buffering response headers."""
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        allowed_hosts: tuple[str, ...] | None,
+    ) -> None:
+        self._app = app
+        self._allowed_hosts = allowed_hosts
+
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def secured_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", ()))
+                existing = {name.lower() for name, _value in headers}
+                for name, value in _SECURITY_HEADERS:
+                    if name not in existing:
+                        headers.append((name, value))
+                path = str(scope.get("path", ""))
+                if path.startswith("/api/") and b"cache-control" not in existing:
+                    headers.append((b"cache-control", b"no-store"))
+                message["headers"] = headers
+            await send(message)
+
+        if self._allowed_hosts is not None and not _scope_host_allowed(
+            scope, self._allowed_hosts
+        ):
+            assert _JSONResponse is not None
+            response = _JSONResponse(
+                {
+                    "detail": {
+                        "code": "invalid_host",
+                        "message": (
+                            "Request Host is not allowed by this Tracing Server."
+                        ),
+                    }
+                },
+                status_code=400,
+            )
+            await response(scope, receive, secured_send)
+            return
+        await self._app(scope, receive, secured_send)
 
 
 class TracingStore(Protocol):
@@ -155,6 +225,7 @@ def create_tracing_app(
     *,
     ui_directory: str | Path | None = None,
     heartbeat_seconds: float = 15.0,
+    allowed_hosts: Sequence[str] | None = None,
 ) -> object:
     """Create a read-only Tracing ASGI app over an existing Store."""
 
@@ -162,6 +233,7 @@ def create_tracing_app(
     heartbeat_seconds = _positive_seconds(
         heartbeat_seconds, "heartbeat_seconds"
     )
+    normalized_hosts = _normalize_allowed_hosts(allowed_hosts)
     static_directory = _resolve_ui_directory(ui_directory)
     static_assets = _load_ui_assets(static_directory)
     assert _FastAPI is not None
@@ -173,6 +245,13 @@ def create_tracing_app(
     app = _FastAPI(
         title="AutoAgent Tracing API",
         version=str(TRACING_API_VERSION),
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.add_middleware(
+        _TracingBoundaryMiddleware,
+        allowed_hosts=normalized_hosts,
     )
     app.state.tracing_store = store
 
@@ -421,7 +500,10 @@ def create_tracing_app(
         response_model=None,
         responses={
             200: {
-                "description": "TraceEvent frames followed by stream_end at terminal.",
+                "description": (
+                    "TraceEvent frames followed by stream_end at terminal, or "
+                    "stream_error when the Store fails after the response starts."
+                ),
                 "content": {
                     "text/event-stream": {"schema": {"type": "string"}}
                 },
@@ -457,7 +539,7 @@ def create_tracing_app(
             stream,
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-transform",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
@@ -480,7 +562,11 @@ def create_tracing_app(
             if asset is None:
                 raise _not_found("Tracing UI asset was not found.")
             content, media_type = asset
-            return _Response(content=content, media_type=media_type)
+            return _Response(
+                content=content,
+                media_type=media_type,
+                headers={"Cache-Control": _static_cache_control(requested)},
+            )
     return app
 
 
@@ -531,42 +617,46 @@ async def _iter_trace_stream(
 ) -> AsyncIterator[bytes]:
     """Yield incremental Trace Events and heartbeat comments."""
 
-    while True:
-        if disconnected is not None and await disconnected():
-            return
-        traces = await store.list_trace_events(
-            invocation_id,
-            after_sequence=after_sequence,
-            limit=_STREAM_BATCH_SIZE,
-        )
-        if traces:
-            for trace in traces:
-                after_sequence = trace.trace_sequence
-                yield _trace_sse_frame(trace)
-            if len(traces) == _STREAM_BATCH_SIZE:
-                continue
-
-        terminal = await store.terminal_trace_status(
-            invocation_id,
-            through_sequence=after_sequence,
-        )
-        if terminal is not None:
-            status, latest_sequence = terminal
-            yield _stream_end_sse_frame(
-                invocation_id,
-                status,
-                latest_sequence,
-            )
-            return
-        changed = await store.wait_for_trace(
-            invocation_id,
-            after_sequence=after_sequence,
-            timeout=heartbeat_seconds,
-        )
-        if not changed:
+    try:
+        while True:
             if disconnected is not None and await disconnected():
                 return
-            yield b": heartbeat\n\n"
+            traces = await store.list_trace_events(
+                invocation_id,
+                after_sequence=after_sequence,
+                limit=_STREAM_BATCH_SIZE,
+            )
+            if traces:
+                for trace in traces:
+                    after_sequence = trace.trace_sequence
+                    yield _trace_sse_frame(trace)
+                if len(traces) == _STREAM_BATCH_SIZE:
+                    continue
+
+            terminal = await store.terminal_trace_status(
+                invocation_id,
+                through_sequence=after_sequence,
+            )
+            if terminal is not None:
+                status, latest_sequence = terminal
+                yield _stream_end_sse_frame(
+                    invocation_id,
+                    status,
+                    latest_sequence,
+                )
+                return
+            changed = await store.wait_for_trace(
+                invocation_id,
+                after_sequence=after_sequence,
+                timeout=heartbeat_seconds,
+            )
+            if not changed:
+                if disconnected is not None and await disconnected():
+                    return
+                yield b": heartbeat\n\n"
+    except RuntimeEventStoreError:
+        yield _stream_error_sse_frame(invocation_id)
+        return
 
 
 def _trace_sse_frame(trace: TraceEvent) -> bytes:
@@ -605,6 +695,16 @@ def _stream_end_sse_frame(
     )
     identifier = f"id: {resume_cursor}\n" if resume_cursor is not None else ""
     return f"{identifier}event: stream_end\ndata: {data}\n\n".encode("utf-8")
+
+
+def _stream_error_sse_frame(invocation_id: str) -> bytes:
+    data = json.dumps(
+        StreamErrorResponse(invocation_id=invocation_id).to_record(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return f"event: stream_error\ndata: {data}\n\n".encode("utf-8")
 
 
 def _encode_trace_cursor(invocation_id: str, sequence: int) -> str:
@@ -748,6 +848,89 @@ def _load_ui_assets(
 
 def _private_asset_path(value: str) -> bool:
     return any(part.startswith(".") for part in Path(value).parts)
+
+
+def _static_cache_control(requested: str) -> str:
+    if requested.startswith("assets/") and _HASHED_ASSET.fullmatch(
+        Path(requested).name
+    ):
+        return "public, max-age=31536000, immutable"
+    return "no-cache"
+
+
+def _normalize_allowed_hosts(
+    values: Sequence[str] | None,
+) -> tuple[str, ...] | None:
+    if values is None:
+        return None
+    if isinstance(values, (str, bytes)):
+        raise TypeError("allowed_hosts must be a sequence of Host names or None.")
+    hosts = tuple(_normalize_host_name(value) for value in values)
+    if not hosts:
+        raise ValueError("allowed_hosts cannot be empty.")
+    return tuple(dict.fromkeys(hosts))
+
+
+def _normalize_host_name(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("allowed_hosts entries must be strings.")
+    host = value.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    host = host.rstrip(".")
+    if not host:
+        raise ValueError("allowed_hosts entries cannot be empty.")
+    try:
+        return ipaddress.ip_address(host).compressed
+    except ValueError:
+        if len(host) > 253 or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(
+                character.isascii()
+                and (character.isalnum() or character == "-")
+                for character in label
+            )
+            for label in host.split(".")
+        ):
+            raise ValueError(f"Invalid allowed Host name: {value!r}") from None
+        return host
+
+
+def _scope_host_allowed(
+    scope: dict[str, Any], allowed_hosts: tuple[str, ...]
+) -> bool:
+    raw_hosts = [
+        value
+        for name, value in scope.get("headers", ())
+        if bytes(name).lower() == b"host"
+    ]
+    if len(raw_hosts) != 1:
+        return False
+    try:
+        authority = bytes(raw_hosts[0]).decode("ascii").strip()
+    except UnicodeError:
+        return False
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing < 0:
+            return False
+        host = authority[1:closing]
+        suffix = authority[closing + 1 :]
+        if suffix and (not suffix.startswith(":") or not suffix[1:].isdigit()):
+            return False
+    else:
+        if authority.count(":") > 1:
+            return False
+        host, separator, port = authority.partition(":")
+        if separator and not port.isdigit():
+            return False
+    try:
+        return _normalize_host_name(host) in allowed_hosts
+    except (TypeError, ValueError):
+        return False
 
 
 def _require_server_dependencies() -> None:

@@ -14,7 +14,7 @@ from typing_extensions import TypedDict
 
 from autoagent import AutoAgentApp, Node, Workflow
 from autoagent.core.runtime import RuntimeEvent
-from autoagent.hosting import SQLiteRuntimeStore
+from autoagent.hosting import RuntimeEventStoreError, SQLiteRuntimeStore
 from autoagent.tracing import (
     create_tracing_app,
     tracing_record,
@@ -280,7 +280,15 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                     "console.log('public')",
                     encoding="utf-8",
                 )
-                app = create_tracing_app(store, ui_directory=ui)
+                (ui / "assets" / "app-deadbeef.js").write_text(
+                    "console.log('hashed')",
+                    encoding="utf-8",
+                )
+                app = create_tracing_app(
+                    store,
+                    ui_directory=ui,
+                    allowed_hosts=("tracing.test",),
+                )
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(
                     transport=transport,
@@ -290,6 +298,14 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         health.json(),
                         {"status": "ok", "api_version": 1},
+                    )
+                    self.assertEqual(health.headers["cache-control"], "no-store")
+                    self.assertEqual(
+                        health.headers["x-content-type-options"], "nosniff"
+                    )
+                    self.assertIn(
+                        "frame-ancestors 'none'",
+                        health.headers["content-security-policy"],
                     )
 
                     first = await client.get("/api/v1/workflows?limit=2")
@@ -349,8 +365,17 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(non_object_cursor.status_code, 400)
                     root = await client.get("/")
                     self.assertEqual(root.text, "tracing ui")
+                    self.assertEqual(root.headers["cache-control"], "no-cache")
                     asset = await client.get("/assets/app.js")
                     self.assertEqual(asset.status_code, 200)
+                    self.assertEqual(asset.headers["cache-control"], "no-cache")
+                    hashed_asset = await client.get(
+                        "/assets/app-deadbeef.js"
+                    )
+                    self.assertEqual(
+                        hashed_asset.headers["cache-control"],
+                        "public, max-age=31536000, immutable",
+                    )
                     secret = await client.get("/.env")
                     self.assertEqual(secret.status_code, 404)
                     self.assertNotIn("SECRET=exposed", secret.text)
@@ -358,6 +383,18 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(source.status_code, 404)
                     client_route = await client.get("/workflows/example")
                     self.assertEqual(client_route.text, "tracing ui")
+                    openapi_route = await client.get("/openapi.json")
+                    self.assertEqual(openapi_route.status_code, 404)
+
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://attacker.test",
+                ) as untrusted_client:
+                    rejected = await untrusted_client.get("/api/v1/health")
+                self.assertEqual(rejected.status_code, 400)
+                self.assertEqual(
+                    rejected.json()["detail"]["code"], "invalid_host"
+                )
 
                 api_routes = [
                     route
@@ -834,6 +871,10 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                         replay.headers["content-type"],
                         "text/event-stream; charset=utf-8",
                     )
+                    self.assertEqual(
+                        replay.headers["cache-control"],
+                        "no-cache, no-transform",
+                    )
                     resumed = await client.get(
                         path,
                         params=identity_params,
@@ -880,6 +921,63 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 core.close()
                 store.close()
+
+    async def test_sse_emits_safe_error_when_store_fails_after_start(self) -> None:
+        """End an established stream with a safe Store failure frame."""
+
+        assert httpx is not None
+
+        class _FailingLiveStore:
+            async def get_invocation(
+                self, invocation_id: str
+            ) -> dict[str, object]:
+                return {"invocation_id": invocation_id}
+
+            async def latest_trace_sequence(self, invocation_id: str) -> int:
+                del invocation_id
+                return 0
+
+            async def list_trace_events(
+                self,
+                invocation_id: str,
+                *,
+                after_sequence: int = 0,
+                limit: int = 200,
+            ) -> tuple[object, ...]:
+                del invocation_id, after_sequence, limit
+                raise RuntimeEventStoreError("secret SQLite failure")
+
+        invocation_id = "sse-store-failure-invocation"
+        app = create_tracing_app(
+            _FailingLiveStore(),  # type: ignore[arg-type]
+            heartbeat_seconds=0.1,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://tracing.test",
+        ) as client:
+            response = await client.get(
+                "/api/v1/invocations/stream",
+                params={"invocation_id": invocation_id},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            _sse_events(response.text),
+            [
+                {
+                    "id": None,
+                    "event": "stream_error",
+                    "data": {
+                        "invocation_id": invocation_id,
+                        "code": "store_unavailable",
+                        "message": "Tracing data is unavailable or corrupt.",
+                    },
+                }
+            ],
+        )
+        self.assertNotIn("secret SQLite failure", response.text)
 
     async def test_sse_wakes_live_and_emits_configured_heartbeat(self) -> None:
         """Wake live subscribers without a short polling loop."""

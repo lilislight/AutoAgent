@@ -14,6 +14,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
+from concurrent.futures import Future as ThreadFuture
 from contextlib import closing
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -81,6 +82,11 @@ SELECT row_id, revision_id, workflow_id, workflow_version, definition_hash,
 FROM workflow_definitions
 """
 _T = TypeVar("_T")
+_OwnershipKey = tuple[str, str, int]
+_ReadOwnershipCache = dict[
+    str,
+    dict[_OwnershipKey, "_CanonicalChildOwnership"],
+]
 _SCHEMA_INITIALIZATION_LOCK = threading.Lock()
 _REQUIRED_TABLES = frozenset(
     {
@@ -380,6 +386,7 @@ class SQLiteRuntimeStore:
         self._write_data_version: int | None = None
         self._started = False
         self._closed = False
+        self._close_future: ThreadFuture[None] | None = None
 
     @classmethod
     def open_read_only(
@@ -411,12 +418,11 @@ class SQLiteRuntimeStore:
                 if self.read_only:
                     self._reader_worker.call(self._validate_read_only)
                 else:
-                    self.path.parent.mkdir(parents=True, exist_ok=True)
                     assert self._writer is not None
                     self._writer.call(self._initialize)
             except RuntimeEventStoreError:
                 raise
-            except sqlite3.Error as error:
+            except (OSError, sqlite3.Error) as error:
                 raise RuntimeEventStoreError(
                     f"Cannot initialize SQLite Runtime Store {self.path}."
                 ) from error
@@ -469,25 +475,48 @@ class SQLiteRuntimeStore:
     def close(self) -> None:
         """Close the writer after all already-submitted operations finish."""
 
+        started = False
         with self._lifecycle_lock:
-            if self._closed:
-                return
-            self._closed = True
-            error: BaseException | None = None
+            future = self._close_future
+            owner = future is None
+            if owner:
+                future = ThreadFuture()
+                self._close_future = future
+                self._closed = True
+                started = self._started
+        assert future is not None
+        if not owner:
+            future.result()
+            return
+
+        error: BaseException | None = None
+        try:
+            if started and self._writer is not None:
+                self._writer.call(self._close_connection)
+        except BaseException as caught:
+            error = caught
+        close_resources = [self._reader_worker.close]
+        if self._writer is not None:
+            close_resources.insert(0, self._writer.close)
+        for close_resource in close_resources:
             try:
-                if self._started and self._writer is not None:
-                    self._writer.call(self._close_connection)
+                close_resource()
             except BaseException as caught:
-                error = caught
-            finally:
-                if self._writer is not None:
-                    self._writer.close()
-                self._reader_worker.close()
+                if error is None:
+                    error = caught
+                else:
+                    error.add_note(f"Additional close failure: {caught}")
         try:
             self._announce_change()
-        finally:
-            if error is not None:
-                raise error
+        except BaseException as caught:
+            if error is None:
+                error = caught
+            else:
+                error.add_note(f"Additional close failure: {caught}")
+        if error is not None:
+            future.set_exception(error)
+            raise error
+        future.set_result(None)
 
     async def aclose(self) -> None:
         """Close without blocking the caller's event loop."""
@@ -781,6 +810,7 @@ class SQLiteRuntimeStore:
     # Writer implementation
 
     def _initialize(self) -> None:
+        _prepare_private_database_path(self.path)
         connection = sqlite3.connect(
             self.path,
             timeout=30,
@@ -792,34 +822,36 @@ class SQLiteRuntimeStore:
             connection.execute("PRAGMA busy_timeout = 30000")
             connection.execute("PRAGMA foreign_keys = ON")
             with _SCHEMA_INITIALIZATION_LOCK:
-                tables = _sqlite_tables(connection)
-                if tables:
-                    _validate_existing_schema(connection, tables)
+                _with_busy_retry(
+                    lambda: connection.execute("BEGIN IMMEDIATE")
+                )
+                try:
+                    # Re-read after acquiring SQLite's cross-process write
+                    # lock. Another initializer may have populated the file
+                    # after this process atomically pre-created it.
+                    tables = _sqlite_tables(connection)
+                    if tables:
+                        _validate_existing_schema(connection, tables)
+                    else:
+                        for statement in _schema_statements():
+                            connection.execute(statement)
+                        connection.execute(
+                            "INSERT INTO schema_metadata(key, value) VALUES (?, ?)",
+                            ("schema_version", str(SQLITE_STORE_SCHEMA_VERSION)),
+                        )
+                        _validate_existing_schema(
+                            connection,
+                            _sqlite_tables(connection),
+                        )
+                    connection.commit()
+                except BaseException:
+                    if connection.in_transaction:
+                        connection.rollback()
+                    raise
                 _with_busy_retry(
                     lambda: connection.execute("PRAGMA journal_mode = WAL").fetchone()
                 )
                 connection.execute("PRAGMA synchronous = FULL")
-                if not tables:
-                    initialization = (
-                        "BEGIN IMMEDIATE;\n"
-                        + _SCHEMA
-                        + "\nINSERT OR IGNORE INTO schema_metadata(key, value) "
-                        + "VALUES ('schema_version', '"
-                        + str(SQLITE_STORE_SCHEMA_VERSION)
-                        + "');\nCOMMIT;"
-                    )
-                    try:
-                        _with_busy_retry(
-                            lambda: connection.executescript(initialization)
-                        )
-                    except BaseException:
-                        if connection.in_transaction:
-                            connection.rollback()
-                        raise
-                    _validate_existing_schema(
-                        connection,
-                        _sqlite_tables(connection),
-                    )
             self._write_data_version = _sqlite_data_version(connection)
         except BaseException:
             connection.close()
@@ -1229,7 +1261,11 @@ class SQLiteRuntimeStore:
     def _validated_invocation_trace_projection(
         connection: sqlite3.Connection,
         invocation_id: str,
-    ) -> tuple[sqlite3.Row, int]:
+    ) -> tuple[
+        sqlite3.Row,
+        int,
+        _CanonicalInvocationProjection,
+    ]:
         """Validate one Invocation's Trace subset against its canonical prefix."""
 
         invocation, _ = SQLiteRuntimeStore._invocation_trace_head(
@@ -1265,8 +1301,8 @@ class SQLiteRuntimeStore:
                 raise RuntimeEventStoreError(
                     "Empty Invocation Trace projection has a non-empty head."
                 )
-            return invocation, 0
-        return invocation, canonical.last_trace_sequence
+            return invocation, 0, canonical
+        return invocation, canonical.last_trace_sequence, canonical
 
     @staticmethod
     def _canonical_invocation_projection(
@@ -1627,6 +1663,8 @@ class SQLiteRuntimeStore:
         self,
         connection: sqlite3.Connection,
         state: RuntimeState,
+        *,
+        ownership_cache: _ReadOwnershipCache | None = None,
     ) -> None:
         """Validate canonical current State against required query projections."""
 
@@ -1662,6 +1700,7 @@ class SQLiteRuntimeStore:
         expected_root = self._validated_ownership_root(
             connection,
             session.id,
+            ownership_cache=ownership_cache,
         )
         if _stored_string(session_row, "root_session_id") != expected_root:
             raise RuntimeEventStoreError(
@@ -1765,9 +1804,13 @@ class SQLiteRuntimeStore:
         self,
         connection: sqlite3.Connection,
         session_id: str,
+        *,
+        ownership_cache: _ReadOwnershipCache | None = None,
     ) -> str:
         """Bind one ownership chain to canonical parent plans and return its Root."""
 
+        if ownership_cache is None:
+            ownership_cache = {}
         current = session_id
         visited: set[str] = set()
         chain: list[sqlite3.Row] = []
@@ -1869,6 +1912,7 @@ class SQLiteRuntimeStore:
                 unit_index=unit_index,
                 planned_event_sequence=planned_event_sequence,
                 planned_log_id=planned_log_id,
+                ownership_cache=ownership_cache,
             )
             actual_descriptor = (
                 creation_id,
@@ -1920,6 +1964,7 @@ class SQLiteRuntimeStore:
         unit_index: int,
         planned_event_sequence: int,
         planned_log_id: str,
+        ownership_cache: _ReadOwnershipCache,
     ) -> _CanonicalChildOwnership:
         """Resolve one projected Child against canonical parent Events."""
 
@@ -1937,63 +1982,165 @@ class SQLiteRuntimeStore:
                 )
             return canonical
 
-        planned_row = connection.execute(
-            _RUNTIME_EVENT_SELECT
-            + " WHERE session_id = ? AND sequence = ?",
-            (parent_session_id, planned_event_sequence),
-        ).fetchone()
-        if planned_row is None:
-            raise RuntimeEventStoreError(
-                "Stored Child owner refers to a missing parent plan Event."
+        children = ownership_cache.get(parent_session_id)
+        if children is None:
+            children = self._read_parent_child_ownership(
+                connection,
+                parent_session_id,
             )
-        planned_event = _decode_verified_runtime_event(planned_row)
-        matching_logs = tuple(
-            log for log in planned_event.logs if log.id == planned_log_id
+            ownership_cache[parent_session_id] = children
+        canonical = children.get(
+            (parent_invocation_id, creation_id, unit_index)
         )
-        if len(matching_logs) != 1:
-            raise RuntimeEventStoreError(
-                "Stored Child owner refers to a missing parent plan Log."
-            )
-        planned_log = matching_logs[0]
-        payload = planned_log.payload
-        if (
-            planned_log.invocation_id != parent_invocation_id
-            or not isinstance(payload, ChildInvocationPlanned)
-            or payload.creation_id != creation_id
-            or unit_index >= len(payload.units)
-        ):
+        if canonical is None:
             raise RuntimeEventStoreError(
                 "Stored Child owner has no canonical parent plan."
             )
-        unit = payload.units[unit_index]
-        phase = SQLiteRuntimeStore._canonical_child_phase(
+        if (
+            canonical.planned_event_sequence != planned_event_sequence
+            or canonical.planned_log_id != planned_log_id
+        ):
+            raise RuntimeEventStoreError(
+                "Stored Child owner refers to another canonical plan source."
+            )
+        return canonical
+
+    def _read_parent_child_ownership(
+        self,
+        connection: sqlite3.Connection,
+        parent_session_id: str,
+    ) -> dict[_OwnershipKey, _CanonicalChildOwnership]:
+        """Derive all Child facts once for one read-transaction snapshot."""
+
+        tail = self._validated_session_tail(connection, parent_session_id)
+        if tail is None:
+            raise RuntimeEventStoreError(
+                "Stored Child owner has no canonical parent Session."
+            )
+        tail_event = _decode_verified_runtime_event(tail)
+        tail_digest = _verify_runtime_event_digest(tail)
+        children, last_row = self._scan_parent_child_ownership(
             connection,
-            parent_session_id=parent_session_id,
-            parent_invocation_id=parent_invocation_id,
-            creation_id=creation_id,
-            unit_index=unit_index,
-            planned_event_sequence=planned_event_sequence,
-            planned_log_id=planned_log_id,
+            parent_session_id,
+            start_sequence=1,
+            previous=None,
+            children={},
         )
-        return _CanonicalChildOwnership(
-            creation_id=payload.creation_id,
-            unit_index=unit.unit_index,
-            parent_occurrence_id=payload.parent_occurrence_id,
-            mode=payload.mode,
-            workflow_id=payload.workflow_id,
-            workflow_revision_id=payload.workflow_revision_id,
-            planned_invocation_id=unit.child_invocation_id,
-            child_session_id=unit.child_session_id,
-            planned_event_sequence=planned_event_sequence,
-            planned_log_id=planned_log_id,
-            phase=phase,
-        )
+        if last_row is None:
+            raise RuntimeEventStoreError(
+                "Stored Child owner has no canonical parent Event chain."
+            )
+        last_event = _decode_verified_runtime_event(last_row)
+        if (
+            last_event.sequence != tail_event.sequence
+            or last_event.id != tail_event.id
+            or _verify_runtime_event_digest(last_row) != tail_digest
+        ):
+            raise RuntimeEventStoreError(
+                "Canonical parent Event chain does not reach its durable head."
+            )
+        return children
+
+    @staticmethod
+    def _scan_parent_child_ownership(
+        connection: sqlite3.Connection,
+        parent_session_id: str,
+        *,
+        start_sequence: int,
+        previous: sqlite3.Row | None,
+        children: dict[_OwnershipKey, _CanonicalChildOwnership],
+    ) -> tuple[
+        dict[_OwnershipKey, _CanonicalChildOwnership],
+        sqlite3.Row | None,
+    ]:
+        """Validate one parent Event suffix and update its Child facts."""
+
+        rows = connection.execute(
+            _RUNTIME_EVENT_SELECT
+            + " WHERE session_id = ? AND sequence >= ? ORDER BY sequence",
+            (parent_session_id, start_sequence),
+        ).fetchall()
+        last_row = previous
+        for event_row in rows:
+            event = _decode_verified_runtime_event(event_row)
+            SQLiteRuntimeStore._validate_chain(event, last_row)
+            last_row = event_row
+            for log in event.logs:
+                payload = log.payload
+                if isinstance(payload, ChildInvocationPlanned):
+                    if log.invocation_id is None:
+                        raise RuntimeEventStoreError(
+                            "Canonical Child plan has no parent Invocation."
+                        )
+                    for unit in payload.units:
+                        key = (
+                            log.invocation_id,
+                            payload.creation_id,
+                            unit.unit_index,
+                        )
+                        canonical = _CanonicalChildOwnership(
+                            creation_id=payload.creation_id,
+                            unit_index=unit.unit_index,
+                            parent_occurrence_id=payload.parent_occurrence_id,
+                            mode=payload.mode,
+                            workflow_id=payload.workflow_id,
+                            workflow_revision_id=payload.workflow_revision_id,
+                            planned_invocation_id=unit.child_invocation_id,
+                            child_session_id=unit.child_session_id,
+                            planned_event_sequence=event.sequence,
+                            planned_log_id=log.id,
+                            phase="planned",
+                        )
+                        existing = children.get(key)
+                        if existing is not None:
+                            raise RuntimeEventStoreError(
+                                "Canonical parent Events contain conflicting Child plans."
+                            )
+                        children[key] = canonical
+                elif isinstance(payload, ChildInvocationPhaseChanged):
+                    if log.invocation_id is None:
+                        raise RuntimeEventStoreError(
+                            "Canonical Child phase has no parent Invocation."
+                        )
+                    key = (
+                        log.invocation_id,
+                        payload.creation_id,
+                        payload.unit_index,
+                    )
+                    canonical = children.get(key)
+                    if canonical is None:
+                        raise RuntimeEventStoreError(
+                            "Canonical Child phase has no preceding plan."
+                        )
+                    expected_phase = {
+                        "planned": "opened",
+                        "opened": "accepted",
+                        "accepted": "terminal",
+                    }.get(canonical.phase)
+                    if payload.phase != expected_phase:
+                        raise RuntimeEventStoreError(
+                            "Canonical Child phase transition is invalid."
+                        )
+                    children[key] = _CanonicalChildOwnership(
+                        creation_id=canonical.creation_id,
+                        unit_index=canonical.unit_index,
+                        parent_occurrence_id=canonical.parent_occurrence_id,
+                        mode=canonical.mode,
+                        workflow_id=canonical.workflow_id,
+                        workflow_revision_id=canonical.workflow_revision_id,
+                        planned_invocation_id=canonical.planned_invocation_id,
+                        child_session_id=canonical.child_session_id,
+                        planned_event_sequence=canonical.planned_event_sequence,
+                        planned_log_id=canonical.planned_log_id,
+                        phase=payload.phase,
+                    )
+        return children, last_row
 
     def _cached_parent_child_ownership(
         self,
         connection: sqlite3.Connection,
         parent_session_id: str,
-    ) -> dict[tuple[str, str, int], _CanonicalChildOwnership]:
+    ) -> dict[_OwnershipKey, _CanonicalChildOwnership]:
         """Incrementally validate and cache one writer-owned parent Event chain."""
 
         tail = self._validated_session_tail(connection, parent_session_id)
@@ -2039,76 +2186,13 @@ class SQLiteRuntimeStore:
             previous = None
             children = {}
 
-        rows = connection.execute(
-            _RUNTIME_EVENT_SELECT
-            + " WHERE session_id = ? AND sequence >= ? ORDER BY sequence",
-            (parent_session_id, start_sequence),
-        ).fetchall()
-        last_row = previous
-        for event_row in rows:
-            event = _decode_verified_runtime_event(event_row)
-            self._validate_chain(event, last_row)
-            last_row = event_row
-            for log in event.logs:
-                payload = log.payload
-                if isinstance(payload, ChildInvocationPlanned):
-                    if log.invocation_id is None:
-                        raise RuntimeEventStoreError(
-                            "Canonical Child plan has no parent Invocation."
-                        )
-                    for unit in payload.units:
-                        key = (
-                            log.invocation_id,
-                            payload.creation_id,
-                            unit.unit_index,
-                        )
-                        canonical = _CanonicalChildOwnership(
-                            creation_id=payload.creation_id,
-                            unit_index=unit.unit_index,
-                            parent_occurrence_id=payload.parent_occurrence_id,
-                            mode=payload.mode,
-                            workflow_id=payload.workflow_id,
-                            workflow_revision_id=payload.workflow_revision_id,
-                            planned_invocation_id=unit.child_invocation_id,
-                            child_session_id=unit.child_session_id,
-                            planned_event_sequence=event.sequence,
-                            planned_log_id=log.id,
-                            phase="planned",
-                        )
-                        existing = children.get(key)
-                        if existing is not None and existing != canonical:
-                            raise RuntimeEventStoreError(
-                                "Canonical parent Events contain conflicting Child plans."
-                            )
-                        children[key] = canonical
-                elif isinstance(payload, ChildInvocationPhaseChanged):
-                    if log.invocation_id is None:
-                        raise RuntimeEventStoreError(
-                            "Canonical Child phase has no parent Invocation."
-                        )
-                    key = (
-                        log.invocation_id,
-                        payload.creation_id,
-                        payload.unit_index,
-                    )
-                    canonical = children.get(key)
-                    if canonical is None:
-                        raise RuntimeEventStoreError(
-                            "Canonical Child phase has no preceding plan."
-                        )
-                    children[key] = _CanonicalChildOwnership(
-                        creation_id=canonical.creation_id,
-                        unit_index=canonical.unit_index,
-                        parent_occurrence_id=canonical.parent_occurrence_id,
-                        mode=canonical.mode,
-                        workflow_id=canonical.workflow_id,
-                        workflow_revision_id=canonical.workflow_revision_id,
-                        planned_invocation_id=canonical.planned_invocation_id,
-                        child_session_id=canonical.child_session_id,
-                        planned_event_sequence=canonical.planned_event_sequence,
-                        planned_log_id=canonical.planned_log_id,
-                        phase=payload.phase,
-                    )
+        children, last_row = self._scan_parent_child_ownership(
+            connection,
+            parent_session_id,
+            start_sequence=start_sequence,
+            previous=previous,
+            children=children,
+        )
         if last_row is None:
             raise RuntimeEventStoreError(
                 "Stored Child owner has no canonical parent Event chain."
@@ -2134,69 +2218,6 @@ class SQLiteRuntimeStore:
         while len(self._canonical_ownership) > _VALIDATED_OWNERSHIP_CACHE_SIZE:
             self._canonical_ownership.popitem(last=False)
         return entry.children
-
-    @staticmethod
-    def _canonical_child_phase(
-        connection: sqlite3.Connection,
-        *,
-        parent_session_id: str,
-        parent_invocation_id: str,
-        creation_id: str,
-        unit_index: int,
-        planned_event_sequence: int,
-        planned_log_id: str,
-    ) -> str:
-        """Derive one Child phase from its canonical parent Event suffix."""
-
-        tail = SQLiteRuntimeStore._validated_session_tail(
-            connection,
-            parent_session_id,
-        )
-        if tail is None:
-            raise RuntimeEventStoreError(
-                "Stored Child owner has no canonical parent Session."
-            )
-        rows = connection.execute(
-            _RUNTIME_EVENT_SELECT
-            + " WHERE session_id = ? ORDER BY sequence",
-            (parent_session_id,),
-        ).fetchall()
-        source_seen = False
-        phase: str | None = None
-        previous: sqlite3.Row | None = None
-        last_sequence: int | None = None
-        for event_row in rows:
-            event = _decode_verified_runtime_event(event_row)
-            SQLiteRuntimeStore._validate_chain(event, previous)
-            previous = event_row
-            last_sequence = event.sequence
-            for log in event.logs:
-                if not source_seen:
-                    if event.sequence == planned_event_sequence and log.id == planned_log_id:
-                        source_seen = True
-                        phase = "planned"
-                    continue
-                payload = log.payload
-                if (
-                    log.invocation_id == parent_invocation_id
-                    and isinstance(payload, ChildInvocationPhaseChanged)
-                    and payload.creation_id == creation_id
-                    and payload.unit_index == unit_index
-                ):
-                    phase = payload.phase
-            if phase == "terminal":
-                break
-        if not source_seen or phase is None:
-            raise RuntimeEventStoreError(
-                "Stored Child owner has no canonical parent plan Log."
-            )
-        if phase != "terminal":
-            tail_event = _decode_verified_runtime_event(tail)
-            if last_sequence != tail_event.sequence:
-                raise RuntimeEventStoreError(
-                    "Canonical parent Event suffix is incomplete."
-                )
-        return phase
 
     @staticmethod
     def _validate_child_units_projection(
@@ -2697,6 +2718,7 @@ class SQLiteRuntimeStore:
             and not has_unsettled_children
         ):
             self._validated_states.pop(session_id, None)
+            self._canonical_ownership.pop(session_id, None)
             return
         self._validated_states[session_id] = state
         self._validated_states.move_to_end(session_id)
@@ -3456,11 +3478,13 @@ class SQLiteRuntimeStore:
             connection.execute("BEGIN")
             try:
                 rows = connection.execute(query, parameters).fetchall()
+                ownership_cache: _ReadOwnershipCache = {}
                 for row in rows[:limit]:
                     child_session_id = _stored_string(row, "session_id")
                     self._validated_ownership_root(
                         connection,
                         child_session_id,
+                        ownership_cache=ownership_cache,
                     )
                     if (
                         _stored_string(row, "parent_invocation_id")
@@ -3592,7 +3616,7 @@ class SQLiteRuntimeStore:
         with closing(self._reader()) as connection:
             connection.execute("BEGIN")
             try:
-                _, latest = self._invocation_trace_head(
+                invocation, latest = self._invocation_trace_head(
                     connection,
                     invocation_id,
                     allow_absent=True,
@@ -3606,9 +3630,30 @@ class SQLiteRuntimeStore:
                     (invocation_id, after_sequence, limit),
                 ).fetchall()
                 traces = tuple(
-                    _decode_anchored_trace_event(connection, row)
-                    for row in rows
+                    trace
+                    for trace, _payload in _decode_anchored_traces(
+                        connection,
+                        rows,
+                    )
                 )
+                if invocation is not None and latest > 0:
+                    trace_count = _stored_integer(
+                        invocation,
+                        "trace_count",
+                        minimum=1,
+                    )
+                    first = latest - trace_count + 1
+                    expected = max(after_sequence + 1, first)
+                    for trace in traces:
+                        if trace.trace_sequence != expected:
+                            raise RuntimeEventStoreError(
+                                "Stored Invocation Trace sequence is incomplete."
+                            )
+                        expected += 1
+                    if not traces and after_sequence < latest:
+                        raise RuntimeEventStoreError(
+                            "Stored Invocation Trace sequence is incomplete."
+                        )
                 reached_tail = (
                     bool(traces) and traces[-1].trace_sequence == latest
                 ) or (not traces and after_sequence >= latest)
@@ -3643,8 +3688,11 @@ class SQLiteRuntimeStore:
                 )
                 rows = connection.execute(query, parameters).fetchall()
                 return tuple(
-                    _decode_anchored_trace_event(connection, row)
-                    for row in reversed(rows)
+                    trace
+                    for trace, _payload in _decode_anchored_traces(
+                        connection,
+                        tuple(reversed(rows)),
+                    )
                 )
             finally:
                 connection.rollback()
@@ -3653,7 +3701,7 @@ class SQLiteRuntimeStore:
         with closing(self._reader()) as connection:
             connection.execute("BEGIN")
             try:
-                _, latest = self._validated_invocation_trace_projection(
+                _, latest, _ = self._validated_invocation_trace_projection(
                     connection,
                     invocation_id,
                 )
@@ -3684,14 +3732,25 @@ class SQLiteRuntimeStore:
         with closing(self._reader()) as connection:
             connection.execute("BEGIN")
             try:
-                invocation, latest = self._validated_invocation_trace_projection(
-                    connection,
-                    invocation_id,
+                invocation, latest, canonical = (
+                    self._validated_invocation_trace_projection(
+                        connection,
+                        invocation_id,
+                    )
                 )
                 projected_status = _stored_enum(
                     invocation,
                     "status",
                     _INVOCATION_STATUSES,
+                )
+                if projected_status != canonical.status:
+                    raise RuntimeEventStoreError(
+                        "Stored Invocation status does not match canonical Runtime logs."
+                    )
+                terminal_status = (
+                    projected_status
+                    if projected_status in {"completed", "failed", "cancelled"}
+                    else None
                 )
                 terminal_rows = connection.execute(
                     _TRACE_EVENT_SELECT
@@ -3709,12 +3768,16 @@ class SQLiteRuntimeStore:
                     raise RuntimeEventStoreError(
                         "Canonical Invocation contains multiple terminal Trace Events."
                     )
-                if not terminal_rows:
-                    if projected_status in {"completed", "failed", "cancelled"}:
+                if terminal_status is None:
+                    if terminal_rows:
                         raise RuntimeEventStoreError(
-                            "Stored Invocation terminal status has no canonical Trace Event."
+                            "Running Invocation has a terminal Trace Event."
                         )
                     return None
+                if not terminal_rows:
+                    raise RuntimeEventStoreError(
+                        "Stored Invocation terminal status has no canonical Trace Event."
+                    )
                 terminal_trace, terminal_payload = _decode_anchored_trace(
                     connection,
                     terminal_rows[0],
@@ -3731,99 +3794,25 @@ class SQLiteRuntimeStore:
                 if (
                     expected_terminal is None
                     or terminal_trace.status != expected_terminal
-                    or projected_status != expected_terminal
+                    or terminal_status != expected_terminal
                 ):
                     raise RuntimeEventStoreError(
                         "Stored Invocation status does not match its terminal Trace Event."
                     )
-                rows = connection.execute(
-                    _TRACE_EVENT_SELECT
-                    + " WHERE invocation_id = ? ORDER BY trace_sequence ASC",
-                    (invocation_id,),
-                ).fetchall()
-                terminal_status: str | None = None
-                expected_children: dict[str, dict[str, object]] = {}
-                for row in rows:
-                    trace, payload = _decode_anchored_trace(connection, row)
-                    if isinstance(payload, InvocationCompleted):
-                        terminal_status = "completed"
-                    elif isinstance(payload, InvocationFailed):
-                        terminal_status = "failed"
-                    elif isinstance(payload, InvocationCancelled):
-                        terminal_status = "cancelled"
-                    elif isinstance(payload, ChildInvocationPlanned):
-                        if payload.creation_id in {
-                            child["creation_id"] for child in expected_children.values()
-                        }:
-                            raise RuntimeEventStoreError(
-                                "Canonical Child plan identity is duplicated."
-                            )
-                        planned_sequence = trace.attributes.get(
-                            "planned_event_sequence"
-                        )
-                        if (
-                            not isinstance(planned_sequence, int)
-                            or isinstance(planned_sequence, bool)
-                            or planned_sequence < 1
-                        ):
-                            raise RuntimeEventStoreError(
-                                "Canonical Child plan has no Event sequence."
-                            )
-                        for unit in payload.units:
-                            if unit.child_session_id in expected_children:
-                                raise RuntimeEventStoreError(
-                                    "Canonical Child Session has multiple plans."
-                                )
-                            expected_children[unit.child_session_id] = {
-                                "parent_session_id": trace.session_id,
-                                "parent_invocation_id": invocation_id,
-                                "creation_id": payload.creation_id,
-                                "unit_index": unit.unit_index,
-                                "parent_occurrence_id": payload.parent_occurrence_id,
-                                "mode": payload.mode,
-                                "workflow_id": payload.workflow_id,
-                                "workflow_revision_id": payload.workflow_revision_id,
-                                "planned_invocation_id": unit.child_invocation_id,
-                                "planned_event_sequence": planned_sequence,
-                                "planned_log_id": trace.id,
-                                "phase": "planned",
-                            }
-                    elif isinstance(payload, ChildInvocationPhaseChanged):
-                        matches = [
-                            child
-                            for child in expected_children.values()
-                            if child["creation_id"] == payload.creation_id
-                            and child["unit_index"] == payload.unit_index
-                        ]
-                        if len(matches) != 1:
-                            raise RuntimeEventStoreError(
-                                "Canonical Child phase has no unique planned unit."
-                            )
-                        matches[0]["phase"] = payload.phase
-
-                projected_terminal = projected_status in {
-                    "completed",
-                    "failed",
-                    "cancelled",
-                }
-                if projected_terminal != (terminal_status is not None) or (
-                    terminal_status is not None
-                    and projected_status != terminal_status
-                ):
-                    raise RuntimeEventStoreError(
-                        "Stored Invocation status does not match canonical Trace Events."
-                    )
-                if terminal_status is None:
-                    return None
-
-                self._validate_child_ownership_projection(
+                expected_root = self._validated_ownership_root(
+                    connection,
+                    canonical.session_id,
+                )
+                self._validate_child_unit_facts(
                     connection,
                     invocation_id,
-                    expected_children,
+                    parent_session_id=canonical.session_id,
+                    expected_root=expected_root,
+                    children=canonical.children,
                 )
                 if any(
-                    child["phase"] != "terminal"
-                    for child in expected_children.values()
+                    child.phase != "terminal"
+                    for child in canonical.children
                 ):
                     return None
                 if latest <= through_sequence:
@@ -3831,85 +3820,6 @@ class SQLiteRuntimeStore:
                 return None
             finally:
                 connection.rollback()
-
-    @staticmethod
-    def _validate_child_ownership_projection(
-        connection: sqlite3.Connection,
-        parent_invocation_id: str,
-        expected_children: dict[str, dict[str, object]],
-    ) -> None:
-        rows = connection.execute(
-            """
-            SELECT session_id, root_session_id, parent_session_id,
-                   parent_invocation_id, creation_id, unit_index,
-                   parent_occurrence_id, mode, workflow_id,
-                   workflow_revision_id, planned_invocation_id,
-                   planned_event_sequence, planned_log_id, phase
-            FROM session_ownership WHERE parent_invocation_id = ?
-            """,
-            (parent_invocation_id,),
-        ).fetchall()
-        by_session = {
-            _stored_string(row, "session_id"): row
-            for row in rows
-        }
-        if set(by_session) != set(expected_children):
-            raise RuntimeEventStoreError(
-                "Stored Child ownership set does not match canonical Child plans."
-            )
-        parent_root = connection.execute(
-            """
-            SELECT o.root_session_id
-            FROM invocations i
-            JOIN session_ownership o ON o.session_id = i.session_id
-            WHERE i.invocation_id = ?
-            """,
-            (parent_invocation_id,),
-        ).fetchone()
-        if parent_root is None:
-            raise RuntimeEventStoreError(
-                "Stored parent Invocation has no Session ownership projection."
-            )
-        expected_root = _stored_string(parent_root, "root_session_id")
-        for session_id, expected in expected_children.items():
-            row = by_session[session_id]
-            actual = {
-                "parent_session_id": _stored_string(row, "parent_session_id"),
-                "parent_invocation_id": _stored_string(
-                    row,
-                    "parent_invocation_id",
-                ),
-                "creation_id": _stored_string(row, "creation_id"),
-                "unit_index": _stored_integer(row, "unit_index", minimum=0),
-                "parent_occurrence_id": _stored_string(
-                    row,
-                    "parent_occurrence_id",
-                ),
-                "mode": _stored_string(row, "mode"),
-                "workflow_id": _stored_string(row, "workflow_id"),
-                "workflow_revision_id": _stored_string(
-                    row,
-                    "workflow_revision_id",
-                ),
-                "planned_invocation_id": _stored_string(
-                    row,
-                    "planned_invocation_id",
-                ),
-                "planned_event_sequence": _stored_integer(
-                    row,
-                    "planned_event_sequence",
-                    minimum=1,
-                ),
-                "planned_log_id": _stored_string(row, "planned_log_id"),
-                "phase": _stored_enum(row, "phase", _CHILD_PHASES),
-            }
-            if (
-                _stored_string(row, "root_session_id") != expected_root
-                or actual != expected
-            ):
-                raise RuntimeEventStoreError(
-                    "Stored Child ownership does not match its canonical plan."
-                )
 
     def _rebuild_state(
         self, session_id: str, through_sequence: int | None
@@ -4047,6 +3957,7 @@ class SQLiteRuntimeStore:
             connection.execute("BEGIN")
             states: dict[str, RuntimeState] = {}
             visiting: set[str] = set()
+            ownership_cache: _ReadOwnershipCache = {}
 
             def visit(session_id: str) -> None:
                 if session_id in states:
@@ -4063,7 +3974,11 @@ class SQLiteRuntimeStore:
                     raise RuntimeEventStoreError(
                         f"Session {session_id!r} has no recoverable Invocation."
                     )
-                self._validate_state_projection(connection, state)
+                self._validate_state_projection(
+                    connection,
+                    state,
+                    ownership_cache=ownership_cache,
+                )
                 states[session_id] = state
                 for plan in state.invocation.child_plans.values():
                     for unit in plan.units:
@@ -4152,16 +4067,17 @@ class SQLiteRuntimeStore:
         rows = connection.execute(query, parameters).fetchall()
         if not rows:
             raise KeyError(session_id)
-        reducer = StateReducer()
-        state = RuntimeState()
-        for row in rows:
-            runtime_event = _decode_verified_runtime_event(row)
-            try:
-                state = reducer.apply(state, runtime_event)
-            except Exception as error:
-                raise RuntimeEventStoreError(
-                    "Stored Runtime Event chain cannot rebuild Runtime State."
-                ) from error
+        events = tuple(_decode_verified_runtime_event(row) for row in rows)
+        try:
+            # RuntimeEvent ingestion already validates every sealed Event against
+            # its semantic logs.  Recovery still verifies each stored envelope,
+            # digest/header chain and operation batch, but keeps one canonical
+            # record and decodes the typed RuntimeState only at this boundary.
+            state = StateReducer().reduce(events)
+        except Exception as error:
+            raise RuntimeEventStoreError(
+                "Stored Runtime Event chain cannot rebuild Runtime State."
+            ) from error
         if state.sequence != target_sequence:
             raise RuntimeEventStoreError(
                 "Stored Runtime Event chain does not reach the requested prefix."
@@ -4323,6 +4239,43 @@ class SQLiteRuntimeStore:
             return len(self._listener_writers) + len(self._listeners)
 
 
+def _prepare_private_database_path(path: Path) -> None:
+    """Create only missing Store resources with private POSIX defaults."""
+
+    missing_parents: list[Path] = []
+    current = path.parent
+    while True:
+        try:
+            current.stat()
+            break
+        except FileNotFoundError:
+            missing_parents.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+    for directory in reversed(missing_parents):
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            # Another Store initializer won the race. Existing resources are
+            # user-owned and must never be chmod'ed as a side effect of open.
+            pass
+
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return
+    # Keep a private empty file when later schema initialization fails. It is
+    # safe to retry and must not be unlinked because another process may have
+    # observed it and started initialization already.
+    os.close(descriptor)
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
@@ -4452,6 +4405,24 @@ def _expected_schema_objects() -> dict[str, tuple[str, str, str]]:
         return _schema_objects(connection)
     finally:
         connection.close()
+
+
+@lru_cache(maxsize=1)
+def _schema_statements() -> tuple[str, ...]:
+    """Split the static schema so it can run inside an existing transaction."""
+
+    statements: list[str] = []
+    pending = ""
+    for line in _SCHEMA.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            statement = pending.strip()
+            if statement:
+                statements.append(statement)
+            pending = ""
+    if pending.strip():
+        raise RuntimeError("SQLite Runtime Store schema has incomplete SQL.")
+    return tuple(statements)
 
 
 def _schema_objects(
@@ -4637,7 +4608,7 @@ def _decode_anchored_trace_event(
     connection: sqlite3.Connection,
     row: sqlite3.Row,
 ) -> TraceEvent:
-    trace, _ = _decode_anchored_trace(connection, row)
+    trace, _ = _decode_anchored_traces(connection, (row,))[0]
     return trace
 
 
@@ -4647,41 +4618,76 @@ def _decode_anchored_trace(
 ) -> tuple[TraceEvent, object]:
     """Bind a materialized Trace row to its canonical Runtime log."""
 
-    trace = _decode_verified_trace_event(row)
-    runtime_event_id = _stored_string(row, "runtime_event_id")
-    source_row = connection.execute(
-        _RUNTIME_EVENT_SELECT + " WHERE id = ?",
-        (runtime_event_id,),
-    ).fetchone()
-    if source_row is None:
-        raise RuntimeEventStoreError(
-            "Stored Trace Event refers to a missing Runtime Event."
+    return _decode_anchored_traces(connection, (row,))[0]
+
+
+def _decode_anchored_traces(
+    connection: sqlite3.Connection,
+    rows: tuple[sqlite3.Row, ...] | list[sqlite3.Row],
+) -> tuple[tuple[TraceEvent, object], ...]:
+    """Bind a Trace page while decoding each canonical source Event once."""
+
+    decoded = tuple(
+        (
+            _decode_verified_trace_event(row),
+            _stored_string(row, "runtime_event_id"),
         )
-    source = _decode_verified_runtime_event(source_row)
-    if source.session_id != trace.session_id:
-        raise RuntimeEventStoreError(
-            "Stored Trace Event and Runtime Event belong to different Sessions."
-        )
-    for index, log in enumerate(source.logs):
-        if log.id != trace.id:
-            continue
-        start_sequence = trace.trace_sequence - index
-        if start_sequence < 1:
-            raise RuntimeEventStoreError(
-                "Stored Trace Event sequence cannot identify its Runtime log."
-            )
-        expected = project_trace_events(
-            source,
-            start_sequence=start_sequence,
-        )[index]
-        if expected != trace:
-            raise RuntimeEventStoreError(
-                "Stored Trace Event does not match its canonical Runtime log."
-            )
-        return trace, log.payload
-    raise RuntimeEventStoreError(
-        "Stored Trace Event id is absent from its canonical Runtime Event."
+        for row in rows
     )
+    by_source: dict[str, list[tuple[int, TraceEvent]]] = {}
+    for position, (trace, runtime_event_id) in enumerate(decoded):
+        by_source.setdefault(runtime_event_id, []).append((position, trace))
+
+    results: list[tuple[TraceEvent, object] | None] = [None] * len(decoded)
+    for runtime_event_id, items in by_source.items():
+        source_row = connection.execute(
+            _RUNTIME_EVENT_SELECT + " WHERE id = ?",
+            (runtime_event_id,),
+        ).fetchone()
+        if source_row is None:
+            raise RuntimeEventStoreError(
+                "Stored Trace Event refers to a missing Runtime Event."
+            )
+        source = _decode_verified_runtime_event(source_row)
+        log_indexes = {log.id: index for index, log in enumerate(source.logs)}
+        if len(log_indexes) != len(source.logs):
+            raise RuntimeEventStoreError(
+                "Canonical Runtime Event contains duplicate Log identity."
+            )
+        start_sequence: int | None = None
+        for _position, trace in items:
+            if source.session_id != trace.session_id:
+                raise RuntimeEventStoreError(
+                    "Stored Trace Event and Runtime Event belong to different Sessions."
+                )
+            index = log_indexes.get(trace.id)
+            if index is None:
+                raise RuntimeEventStoreError(
+                    "Stored Trace Event id is absent from its canonical Runtime Event."
+                )
+            candidate_start = trace.trace_sequence - index
+            if candidate_start < 1 or (
+                start_sequence is not None
+                and candidate_start != start_sequence
+            ):
+                raise RuntimeEventStoreError(
+                    "Stored Trace Event sequence cannot identify its Runtime log."
+                )
+            start_sequence = candidate_start
+        assert start_sequence is not None
+        expected = project_trace_events(source, start_sequence=start_sequence)
+        for position, trace in items:
+            index = log_indexes[trace.id]
+            if expected[index] != trace:
+                raise RuntimeEventStoreError(
+                    "Stored Trace Event does not match its canonical Runtime log."
+                )
+            results[position] = (trace, source.logs[index].payload)
+    if any(result is None for result in results):
+        raise RuntimeEventStoreError(
+            "Stored Trace page could not be bound to canonical Runtime Events."
+        )
+    return tuple(result for result in results if result is not None)
 
 
 def _decode_verified_workflow_definition(

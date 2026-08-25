@@ -446,7 +446,46 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(database.is_file())
             create.assert_called_once()
+            self.assertEqual(
+                create.call_args.kwargs["allowed_hosts"],
+                ("127.0.0.2",),
+            )
             run.assert_called_once_with(application, host="127.0.0.2", port=9876)
+
+    def test_trace_structures_uvicorn_startup_exit_and_closes_store(self) -> None:
+        """Translate uvicorn startup exit without leaking the read-only Store."""
+
+        class TrackingStore:
+            started = False
+            closed = False
+
+            def start(self) -> None:
+                self.started = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        store = TrackingStore()
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            SQLiteRuntimeStore,
+            "open_read_only",
+            return_value=store,
+        ), patch(
+            "autoagent.tracing.create_tracing_app",
+            return_value=object(),
+        ), patch(
+            "uvicorn.run",
+            side_effect=SystemExit(3),
+        ), redirect_stderr(error):
+            code = main(["trace", "--project", directory])
+        self.assertEqual(code, 1)
+        self.assertTrue(store.started)
+        self.assertTrue(store.closed)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "TRACING_SERVER_FAILED",
+        )
 
     def test_trace_does_not_create_a_missing_database(self) -> None:
         """Require an existing Store instead of creating runtime schema or data."""

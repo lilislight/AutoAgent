@@ -5,16 +5,16 @@ Map、StreamReducer、Wait/Resume、Child await/spawn + Map、唯一 StateReduce
 RuntimeEvent sink 协议、公开 Trace/User Event、Checkpoint Bundle 和同步/异步 App API。
 以下项目是 Host/Harness、可选捕获模式或工程工具，不是当前 Full Core 的未闭合语义。
 
-## P1：Host 与 Harness 原语
+## P1：中心化 Host 与 Harness 原语
 
-### RuntimeEvent Store 与 sink 实现
+### RuntimeEvent Store 的生产部署扩展
 
-Core 协议已经确定：同一 Session 有序，独立 Session 可并发；`append` 成功表示持久接纳，
-失败时 Core 保留 Event 并按相同 id 重试，因此 Host sink 必须幂等。后续 Host 需要实现：
+本地 SQLite Store 已实现 Event 幂等、Session sequence/hash chain、事务内索引/Trace 投影和
+父子 Checkpoint 重建；HTTP Sink 已使用 Event id 作为幂等键。生产部署仍需要：
 
-- Event id 唯一键、Session sequence 连续性和原子 append；
-- 部分外部事务成功后抛错的幂等重试；
-- Outbox、队列容量、进程退出 flush 和运维告警；
+- 远程接收端的 commit 后丢失响应测试与请求查询；
+- 多 Host Session lease、Outbox、队列容量和运维告警；
+- 正式数据库 schema migration 和 PostgreSQL backend；
 - 外部持久化确认不能反向成为 Runtime State 的第二份权威状态。
 
 ### Command、Mailbox 与 Signal
@@ -28,12 +28,12 @@ Core 协议已经确定：同一 Session 有序，独立 Session 可并发；`ap
 
 外部消息使用 Command 驱动当前 Invocation，不直接从普通 Edge 激活任意中间 Node。
 
-### Server
+### 中心化 Server
 
-- Append-only RuntimeEvent Store、独立 UserEvent Store、Outbox；
-- 从 Event 前缀重建 RuntimeState，并形成 App 可加载的 Checkpoint Bundle；
+- 本地只读 Tracing Server/UI 已实现，不持有 App，也不提供执行命令；
+- 远程 RuntimeEvent 接收、独立 UserEvent Store、Artifact Store 与 Outbox；
 - Invoke/Submit/Wait/Resume/Cancel/Recover/Stream 服务接口；
-- Session admission、鉴权、幂等、限流、SSE 背压和优雅关闭；
+- Session admission/lease、鉴权、多租户、幂等、限流和优雅关闭；
 - 历史 Trace、任意 state version 查询、Replay、Fork 与 UI。
 
 Schema migration 在 Event 进入当前 Core codec 前由 Host 完成，Core 继续只接受精确当前

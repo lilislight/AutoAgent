@@ -46,3 +46,16 @@ Checkpoint，并保持严格调用方背压。
 当前测试覆盖 contracts、compiler、DAG/Loop scheduler、executor、Context、Wait/Recovery、
 App、Capability、RuntimeLoop、RuntimeEvent sink、Trace 投影、Checkpoint 图、流式安全
 边界与并发竞态。统一命令见 `TESTING.md`。
+
+## 阶段 8：Host 与持久化
+
+已实现标准 `autoagent.toml`、严格项目/环境诊断、完整父子 Workflow 注册、SQLite 与 HTTP
+RuntimeEvent Sink、Event id 幂等、Session hash chain、Trace 查询投影，以及从 canonical
+Event 重建 Root/Child Checkpoint。`AutoAgentHost` 提供同步/异步 invoke、submit、stream、
+load/recover 和 App→Sink 有序关闭；Host 不保存第二份历史 RuntimeState。
+
+## 阶段 9：本地 Tracing 与 CLI
+
+已实现只读 FastAPI 查询接口、稳定 cursor、历史 State、tail bootstrap 和 SSE 恢复；本地
+UI 包含 Workflow/Session/Invocation 导航、静态图、受限窗口 Timeline、Trace/State
+Inspector。CLI 提供 `compile`、`invoke` 和 `trace`，其中 compile 不创建 Runtime Store。

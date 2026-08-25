@@ -24,6 +24,11 @@
 | `test_phase14_runtime_state_validation.py` | RuntimeState 数值、身份、状态和引用不变量 |
 | `test_runtime_checkpoint_trace.py` | RuntimeEvent 链、Trace 投影、Checkpoint 图校验与原子加载 |
 | `test_executor_hardening.py` | Pydantic 边界、回调失败、同步 Stream 取消与并发名额收敛 |
+| `test_host_project.py` | `autoagent.toml`、`.env`、Settings、Workflow entrypoint 与稳定诊断 |
+| `test_host_runtime_store.py` | SQLite Event 原子写入、hash chain、Trace、父子重建与 HTTP Sink |
+| `test_host_lifecycle.py` | Host 装配、同步/异步执行、恢复、revision 和 App→Sink 关闭顺序 |
+| `test_tracing_server.py` | 只读 API、cursor/tail、历史 State、SSE 恢复、通知与 heartbeat |
+| `test_cli.py` | compile 无副作用、invoke JSON 边界和 tracing server 装配 |
 
 ## 测试说明规则
 
@@ -37,6 +42,14 @@
 ../.venv/bin/python -m unittest discover -s tests -v
 ../.venv/bin/python -m compileall -q autoagent tests
 git diff --check
+```
+
+Tracing UI 独立验证：
+
+```bash
+cd ui
+npm test
+npm run build
 ```
 
 性能基准单独运行。它通过 Host sink 统计 canonical RuntimeEvent，并分别统计 Trace、

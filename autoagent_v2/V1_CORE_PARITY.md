@@ -27,9 +27,10 @@
 | 并发限制 | App 级同步/异步 Operator 全局上限 + Map 局部上限 | phase8、phase9 |
 | Retry/Fallback/Timeout/Backoff | 当前不保留，等待独立语义设计 | `TODO.md` |
 | Standard/Minimal 捕获 | 待做等价 capture profile，不复制 Runtime 实现 | `TODO.md` |
-| 数据库、历史 Event、Server | 移出 Core；由 Host sink 与后续 Event Store 承担 | `TODO.md` |
+| 数据库、历史 Event、Server | 移出 Core；已实现 Host SQLite/HTTP Sink 与本地只读 Tracing | Host/Tracing tests |
 | Mailbox、Signal、父子消息、远程 Task | 后续 Command/Task Runtime 原语 | `TODO.md` |
-| 历史 Replay/Fork/Debug/UI | 后续 Host/Event Store 能力，不是公开 Core API | `TODO.md` |
+| 历史 Trace/UI | 已实现本地只读 Trace、State、SSE、Graph/Timeline/Inspector | Tracing tests、`ui/` |
+| Replay/Fork/Debug | 尚未实现，保留为中心化平台能力 | `TODO.md` |
 
 V2 不恢复旧 Policy、旧单 Session Checkpoint、结果内 canonical Event、历史游标或
 事件前缀恢复兼容接口。对外恢复路径是 Checkpoint；Server 的历史恢复路径是 Host 保存

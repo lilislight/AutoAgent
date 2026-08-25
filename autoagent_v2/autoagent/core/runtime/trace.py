@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 from .events import (
@@ -231,10 +231,23 @@ def project_trace_events(
 ) -> tuple[TraceEvent, ...]:
     """Project a sealed Event when a Host supplies its own Trace sequence."""
 
-    return tuple(
-        project_trace_event(event.session_id, start_sequence + index, log)
-        for index, log in enumerate(event.logs)
-    )
+    traces: list[TraceEvent] = []
+    for index, log in enumerate(event.logs):
+        trace = project_trace_event(
+            event.session_id,
+            start_sequence + index,
+            log,
+        )
+        if isinstance(log.payload, ChildInvocationPlanned):
+            trace = replace(
+                trace,
+                attributes={
+                    **trace.attributes,
+                    "planned_event_sequence": event.sequence,
+                },
+            )
+        traces.append(trace)
+    return tuple(traces)
 
 
 def _safe_projection(payload) -> tuple[
@@ -270,13 +283,13 @@ def _safe_projection(payload) -> tuple[
     elif isinstance(payload, SchedulerInitialized):
         status = "initialized"
     elif isinstance(payload, NodeOccurrenceStarted):
-        subjects["occurrence_id"] = payload.occurrence_id
+        _add_occurrence_subjects(subjects, payload.occurrence_id)
         status = "running"
     elif isinstance(payload, OperatorCallStarted):
+        _add_occurrence_subjects(subjects, payload.occurrence_id)
         subjects.update(
             {
                 "call_id": payload.call_id,
-                "occurrence_id": payload.occurrence_id,
                 "operator_id": payload.operator_id,
             }
         )
@@ -293,9 +306,8 @@ def _safe_projection(payload) -> tuple[
         subjects["call_id"] = payload.call_id
         status, error = "failed", payload.error
     elif isinstance(payload, NodeOccurrenceWaiting):
-        subjects.update(
-            {"occurrence_id": payload.occurrence_id, "wait_id": payload.wait_id}
-        )
+        _add_occurrence_subjects(subjects, payload.occurrence_id)
+        subjects["wait_id"] = payload.wait_id
         status = "waiting"
     elif isinstance(payload, WaitResumed):
         subjects["wait_id"] = payload.wait_id
@@ -303,36 +315,72 @@ def _safe_projection(payload) -> tuple[
     elif isinstance(payload, InvocationRecoveryRequested):
         status = "recovering"
     elif isinstance(payload, ChildInvocationPlanned):
+        _add_occurrence_subjects(
+            subjects,
+            payload.parent_occurrence_id,
+            occurrence_key="parent_occurrence_id",
+            node_key="parent_node_id",
+        )
         subjects.update(
             {
                 "creation_id": payload.creation_id,
-                "parent_occurrence_id": payload.parent_occurrence_id,
                 "workflow_id": payload.workflow_id,
                 "workflow_revision_id": payload.workflow_revision_id,
             }
         )
-        attributes.update({"mode": payload.mode, "unit_count": len(payload.units)})
+        attributes.update(
+            {
+                "mode": payload.mode,
+                "unit_count": len(payload.units),
+                "units": [
+                    {
+                        "invocation_id": unit.child_invocation_id,
+                        "session_id": unit.child_session_id,
+                        "unit_index": unit.unit_index,
+                    }
+                    for unit in payload.units
+                ],
+            }
+        )
         status = "planned"
     elif isinstance(payload, ChildInvocationPhaseChanged):
         subjects["creation_id"] = payload.creation_id
         attributes["unit_index"] = payload.unit_index
         status = payload.phase
     elif isinstance(payload, (ChildAwaitSuspended, ChildAwaitReady)):
+        _add_occurrence_subjects(
+            subjects,
+            payload.parent_occurrence_id,
+            occurrence_key="parent_occurrence_id",
+            node_key="parent_node_id",
+        )
         subjects.update(
             {
                 "creation_id": payload.creation_id,
-                "parent_occurrence_id": payload.parent_occurrence_id,
             }
         )
         status = "waiting" if isinstance(payload, ChildAwaitSuspended) else "ready"
     elif isinstance(payload, NodeOccurrenceCompleted):
-        subjects["occurrence_id"] = payload.occurrence_id
+        _add_occurrence_subjects(subjects, payload.occurrence_id)
         status = "completed"
         metrics = payload.metrics
     elif isinstance(payload, NodeOccurrenceFailed):
-        subjects["occurrence_id"] = payload.occurrence_id
+        _add_occurrence_subjects(subjects, payload.occurrence_id)
         status, error = "failed", payload.error
     return subjects, status, error, metrics, attributes
+
+
+def _add_occurrence_subjects(
+    subjects: dict[str, str],
+    occurrence_id: str,
+    *,
+    occurrence_key: str = "occurrence_id",
+    node_key: str = "node_id",
+) -> None:
+    """Expose the author Node id alongside the durable occurrence identity."""
+
+    subjects[occurrence_key] = occurrence_id
+    subjects[node_key] = occurrence_id.partition("@")[0]
 
 
 def _error_record(error: RuntimeErrorInfo | None) -> dict[str, object] | None:

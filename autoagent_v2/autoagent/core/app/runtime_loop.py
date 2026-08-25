@@ -44,6 +44,7 @@ class RuntimeLoop:
         self._ready = threading.Event()
         self._reader: int | None = None
         self._writer: int | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
 
@@ -102,19 +103,22 @@ class RuntimeLoop:
             self._enqueue_action("stop", None)
         thread.join()
         with self._lifecycle_lock:
-            assert self._reader is not None and self._writer is not None
-            os.close(self._reader)
-            os.close(self._writer)
-            self._reader = None
-            self._writer = None
+            if self._reader is not None:
+                os.close(self._reader)
+                self._reader = None
+            if self._writer is not None:
+                os.close(self._writer)
+                self._writer = None
+            self._loop = None
             self._thread = None
 
     def _ensure_started_locked(self) -> None:
         if self._thread is not None:
             return
-        self._reader, self._writer = os.pipe()
-        os.set_blocking(self._reader, False)
-        os.set_blocking(self._writer, False)
+        if os.name != "nt":
+            self._reader, self._writer = os.pipe()
+            os.set_blocking(self._reader, False)
+            os.set_blocking(self._writer, False)
         self._ready.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -135,76 +139,31 @@ class RuntimeLoop:
 
         with self._actions_lock:
             self._actions.append((kind, value))
-        writer = self._writer
-        if writer is None:
+        if self._writer is not None:
+            try:
+                os.write(self._writer, b"\0")
+            except (BlockingIOError, OSError):
+                pass
             return
-        try:
-            os.write(writer, b"\0")
-        except (BlockingIOError, OSError):
-            pass
+        loop = self._loop
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(self._drain_actions)
+            except RuntimeError:
+                pass
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        assert self._reader is not None
-
-        def drain() -> None:
-            assert self._reader is not None
-            try:
-                while os.read(self._reader, 4096):
-                    pass
-            except (BlockingIOError, OSError):
-                pass
-            with self._actions_lock:
-                actions = tuple(self._actions)
-                self._actions.clear()
-            for kind, value in actions:
-                if kind == "stop":
-                    loop.stop()
-                    continue
-                submission = value
-                assert isinstance(submission, _Submission)
-                if kind == "cancel":
-                    if submission.task is not None:
-                        submission.task.cancel()
-                    continue
-                if submission.future.cancelled():
-                    submission.coroutine.close()
-                    if not submission.future.settled.done():
-                        submission.future.settled.set_result(None)
-                    continue
-                task = loop.create_task(submission.coroutine)
-                submission.task = task
-
-                def finished(
-                    done: asyncio.Task[object],
-                    target: _Submission[object] = submission,
-                ) -> None:
-                    try:
-                        if target.future.done():
-                            # A cancelled bridge Future no longer accepts the Task
-                            # result, but the Task exception must still be observed.
-                            if not done.cancelled():
-                                done.exception()
-                            return
-                        if done.cancelled():
-                            target.future.cancel()
-                            return
-                        error = done.exception()
-                        if error is not None:
-                            target.future.set_exception(error)
-                        else:
-                            target.future.set_result(done.result())
-                    finally:
-                        if not target.future.settled.done():
-                            target.future.settled.set_result(None)
-
-                task.add_done_callback(finished)
-
-        loop.add_reader(self._reader, drain)
-        self._ready.set()
+        self._loop = loop
+        if self._reader is not None:
+            loop.add_reader(self._reader, self._drain_pipe)
+            self._ready.set()
+        else:
+            loop.call_soon(self._ready.set)
         loop.run_forever()
-        loop.remove_reader(self._reader)
+        if self._reader is not None:
+            loop.remove_reader(self._reader)
         pending = asyncio.all_tasks(loop)
         for task in pending:
             task.cancel()
@@ -212,6 +171,64 @@ class RuntimeLoop:
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
+
+    def _drain_pipe(self) -> None:
+        assert self._reader is not None
+        try:
+            while os.read(self._reader, 4096):
+                pass
+        except (BlockingIOError, OSError):
+            pass
+        self._drain_actions()
+
+    def _drain_actions(self) -> None:
+        loop = self._loop
+        assert loop is not None
+        with self._actions_lock:
+            actions = tuple(self._actions)
+            self._actions.clear()
+        for kind, value in actions:
+            if kind == "stop":
+                loop.stop()
+                continue
+            submission = value
+            assert isinstance(submission, _Submission)
+            if kind == "cancel":
+                if submission.task is not None:
+                    submission.task.cancel()
+                continue
+            if submission.future.cancelled():
+                submission.coroutine.close()
+                if not submission.future.settled.done():
+                    submission.future.settled.set_result(None)
+                continue
+            task = loop.create_task(submission.coroutine)
+            submission.task = task
+
+            def finished(
+                done: asyncio.Task[object],
+                target: _Submission[object] = submission,
+            ) -> None:
+                try:
+                    if target.future.done():
+                        # A cancelled bridge Future no longer accepts the Task
+                        # result, but the Task exception must still be observed.
+                        if not done.cancelled():
+                            done.exception()
+                        return
+                    if done.cancelled():
+                        target.future.cancel()
+                        return
+                    error = done.exception()
+                    if error is not None:
+                        target.future.set_exception(error)
+                    else:
+                        target.future.set_result(done.result())
+                finally:
+                    if not target.future.settled.done():
+                        target.future.settled.set_result(None)
+
+            task.add_done_callback(finished)
 
 
 __all__ = ["RuntimeLoop"]

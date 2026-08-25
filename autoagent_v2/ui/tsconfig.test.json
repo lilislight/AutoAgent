@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "outDir": ".test-dist",
+    "rootDir": "."
+  },
+  "include": ["src/api.ts", "src/bootstrap.ts", "src/childEvents.ts", "src/coalescedRefresh.ts", "src/graph.ts", "src/navigation.ts", "src/requestGate.ts", "src/types.ts", "src/components/WorkflowGraph.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
+}

@@ -1,4 +1,4 @@
-"""Cancellation-aware, notification-driven Future bridge."""
+"""Cancellation-aware, cross-platform concurrent Future bridge."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class _Registration:
 
 
 class _FutureNotifier:
-    """Wake one asyncio loop from arbitrary threads through a pipe."""
+    """Wake one POSIX asyncio loop from arbitrary threads through a pipe."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -31,7 +31,12 @@ class _FutureNotifier:
         self._ready: deque[_Registration] = deque()
         self._lock = threading.Lock()
         self.users = 0
-        self.loop.add_reader(self._reader, self._drain)
+        try:
+            self.loop.add_reader(self._reader, self._drain)
+        except BaseException:
+            os.close(self._reader)
+            os.close(self._writer)
+            raise
 
     def notify(self, registration: _Registration) -> None:
         with self._lock:
@@ -91,9 +96,18 @@ def _release_notifier(notifier: _FutureNotifier) -> None:
     notifier.close()
 
 
-async def await_concurrent_future(future: Future[T]) -> T:
-    """Await a concurrent Future without polling and propagate cancellation."""
+async def await_concurrent_future(
+    future: Future[T],
+    *,
+    cancel_future: bool = True,
+) -> T:
+    """Await a concurrent Future without polling or a default executor."""
 
+    if os.name == "nt":
+        return await _await_with_threadsafe_callback(
+            future,
+            cancel_future=cancel_future,
+        )
     loop = asyncio.get_running_loop()
     notifier = _acquire_notifier(loop)
     registration = _Registration(loop.create_future())
@@ -102,11 +116,50 @@ async def await_concurrent_future(future: Future[T]) -> T:
         await registration.waiter
         return future.result()
     except asyncio.CancelledError:
-        future.cancel()
+        if cancel_future:
+            future.cancel()
         raise
     finally:
         notifier.deactivate(registration)
         _release_notifier(notifier)
+
+
+async def _await_with_threadsafe_callback(
+    future: Future[T],
+    *,
+    cancel_future: bool,
+) -> T:
+    """Use the native Windows event-loop thread-safe wakeup path."""
+
+    loop = asyncio.get_running_loop()
+    waiter = loop.create_future()
+    registration_lock = threading.Lock()
+    active = True
+
+    def resolve() -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    def notify(_future: Future[T]) -> None:
+        with registration_lock:
+            if not active:
+                return
+            try:
+                loop.call_soon_threadsafe(resolve)
+            except RuntimeError:
+                pass
+
+    future.add_done_callback(notify)
+    try:
+        await waiter
+        return future.result()
+    except asyncio.CancelledError:
+        if cancel_future:
+            future.cancel()
+        raise
+    finally:
+        with registration_lock:
+            active = False
 
 
 __all__ = ["await_concurrent_future"]

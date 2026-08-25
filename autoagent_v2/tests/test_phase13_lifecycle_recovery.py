@@ -1489,6 +1489,17 @@ class LifecycleRecoveryTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_close_rejects_an_oversized_timeout_before_shutdown(self) -> None:
+        """Reject integers that cannot be represented by the timeout machinery."""
+
+        app = AutoAgentApp()
+        try:
+            with self.assertRaises(ValueError):
+                app.close(timeout=10**1000)
+            self.assertFalse(app._closing)
+        finally:
+            app.close()
+
     def test_close_captures_a_preloaded_journal_before_runtime_loop_start(self) -> None:
         """Verify lazy App shutdown preserves an injected root/child Runtime graph."""
 
@@ -1714,6 +1725,145 @@ class LifecycleRecoveryTests(unittest.TestCase):
         finally:
             sink.enabled = False
             _release_runtime_gate_sync(app._runtime_loop, release_child)
+            if not app._closed:
+                app.close(timeout=1)
+
+    def test_replacement_rejects_a_terminal_child_still_settling(self) -> None:
+        """Keep the old Root until its terminal Child phase is durably settled."""
+
+        class BlockChildTerminalSink:
+            def __init__(self, root_session_id: str) -> None:
+                self.root_session_id = root_session_id
+                self.entered = _ThreadSignal()
+                self.release = _RuntimeGate()
+                self.events: list[RuntimeEvent] = []
+                self.blocked = False
+
+            async def append(self, event: RuntimeEvent) -> None:
+                self.events.append(event)
+                if (
+                    not self.blocked
+                    and event.session_id != self.root_session_id
+                    and any(
+                        log.event_name == "invocation.completed"
+                        for log in event.logs
+                    )
+                ):
+                    self.blocked = True
+                    self.entered.set()
+                    await self.release.wait()
+
+        root_session_id = "settling-replacement-root"
+        child_release = _RuntimeGate()
+        child_started = _ThreadSignal()
+
+        async def child_work(value: Value) -> Value:
+            child_started.set()
+            await child_release.wait()
+            return value
+
+        journal = InMemoryEventJournal()
+        sink = BlockChildTerminalSink(root_session_id)
+        child = Workflow(
+            "settling-replacement-child",
+            nodes=[Node("work", child_work)],
+        )
+        parent = Workflow(
+            "settling-replacement-parent",
+            nodes=[Node("spawn", child, execution_mode="spawn")],
+        )
+        app = AutoAgentApp(runtime_journal=journal, runtime_event_sink=sink)
+        replacement_done = threading.Event()
+        replacement_errors: list[BaseException] = []
+        replacement_results: list[InvocationResult] = []
+
+        def replace_root() -> None:
+            try:
+                replacement_results.append(
+                    app.invoke(
+                        parent,
+                        {"value": 2},
+                        session_id=root_session_id,
+                    )
+                )
+            except BaseException as error:
+                replacement_errors.append(error)
+            finally:
+                replacement_done.set()
+
+        replacement = threading.Thread(target=replace_root)
+        try:
+            first = app.invoke(
+                parent,
+                {"value": 1},
+                session_id=root_session_id,
+            )
+            self.assertEqual(first.status, "completed")
+            self.assertTrue(child_started.wait(1))
+            handle = app.child_handles(first.ref)[0]
+
+            _release_runtime_gate_sync(app._runtime_loop, child_release)
+            self.assertTrue(sink.entered.wait(1))
+            child_state = journal.state(handle["session_id"]).invocation
+            parent_state = journal.state(root_session_id).invocation
+            self.assertIsNotNone(child_state)
+            self.assertIsNotNone(parent_state)
+            assert child_state is not None and parent_state is not None
+            self.assertTrue(child_state.terminal)
+            self.assertEqual(
+                next(iter(parent_state.child_plans.values())).units[0].phase,
+                "accepted",
+            )
+
+            replacement.start()
+            self.assertTrue(replacement_done.wait(1))
+            self.assertEqual(replacement_results, [])
+            self.assertEqual(len(replacement_errors), 1)
+            self.assertIsInstance(replacement_errors[0], RuntimeTransitionError)
+            self.assertEqual(
+                cast(RuntimeTransitionError, replacement_errors[0]).code,
+                "SESSION_CHILDREN_ACTIVE",
+            )
+            self.assertEqual(
+                journal.state(root_session_id).invocation.id,  # type: ignore[union-attr]
+                first.invocation_id,
+            )
+
+            _release_runtime_gate_sync(app._runtime_loop, sink.release)
+            settled = app.wait_child(handle, timeout=1)
+            self.assertEqual(settled.status, "completed")
+            parent_state = journal.state(root_session_id).invocation
+            assert parent_state is not None
+            self.assertEqual(
+                next(iter(parent_state.child_plans.values())).units[0].phase,
+                "terminal",
+            )
+            self.assertTrue(
+                any(
+                    log.event_name == "child_invocation.phase_changed"
+                    and getattr(log.payload, "phase", None) == "terminal"
+                    for event in sink.events
+                    if event.session_id == root_session_id
+                    for log in event.logs
+                )
+            )
+
+            second = app.invoke(
+                parent,
+                {"value": 2},
+                session_id=root_session_id,
+            )
+            self.assertEqual(second.status, "completed")
+            second_handle = app.child_handles(second.ref)[0]
+            self.assertEqual(
+                app.wait_child(second_handle, timeout=1).status,
+                "completed",
+            )
+        finally:
+            _release_runtime_gate_sync(app._runtime_loop, child_release)
+            _release_runtime_gate_sync(app._runtime_loop, sink.release)
+            if replacement.is_alive():
+                replacement.join(1)
             if not app._closed:
                 app.close(timeout=1)
 

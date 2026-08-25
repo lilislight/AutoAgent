@@ -205,6 +205,7 @@ class RuntimeCheckpointTraceTests(unittest.TestCase):
         self.assertEqual(len(traces), 1)
         trace = traces[0]
         self.assertEqual(trace.subject_ids["call_id"], "call")
+        self.assertEqual(trace.subject_ids["node_id"], "node")
         self.assertEqual(trace.status, "running")
         self.assertEqual(trace.attributes["unit_index"], 2)
         record = trace.to_record()

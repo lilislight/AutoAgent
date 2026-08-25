@@ -708,14 +708,16 @@ class AutoAgentApp:
                 child_id
                 for child_id in old_child_sessions
                 if (
-                    self._journal.state(child_id).invocation is not None
-                    and not self._journal.state(child_id).invocation.terminal
+                    (child := self._journal.state(child_id).invocation) is None
+                    or not child.terminal
+                    or self._task_runtime.is_live(child_id)
                 )
             ]
             if active_children:
                 raise RuntimeTransitionError(
                     "SESSION_CHILDREN_ACTIVE",
-                    "A Session cannot replace its Invocation while spawned Children are active.",
+                    "A Session cannot replace its Invocation while spawned "
+                    "Children are active or still settling.",
                 )
             retired_invocation_ids = (
                 state.invocation.id,
@@ -749,6 +751,25 @@ class AutoAgentApp:
                 for previous_session_id in previous_graph:
                     self._journal.flush(previous_session_id)
                 await self._export_runtime_events(previous_graph)
+                # A Child task whose terminal Event export failed is no longer
+                # live, but its parent phase can still be ``accepted``.  Once
+                # the retry above makes every terminal Child durable, converge
+                # those orphaned settle tails from leaves to Root.  Live tasks
+                # were rejected before this point so this cannot race their own
+                # ``_settle_child`` calls.
+                for child_session_id in reversed(old_child_sessions):
+                    child = self._journal.state(child_session_id).invocation
+                    if child is not None and child.terminal:
+                        await self._settle_child(child_session_id, child.id)
+                if not self._child_graph_settled(
+                    session_id,
+                    old_child_sessions,
+                ):
+                    raise RuntimeTransitionError(
+                        "SESSION_CHILDREN_ACTIVE",
+                        "A Session cannot replace its Invocation before every "
+                        "Child plan reaches its terminal phase.",
+                    )
             self._reset_observations(session_id)
             if state.session is None:
                 self._journal.begin_event_group(session_id)
@@ -2097,6 +2118,27 @@ class AutoAgentApp:
                     pending.append(unit.session_id)
         return tuple(result)
 
+    def _child_graph_settled(
+        self,
+        root_session_id: str,
+        descendant_session_ids: tuple[str, ...],
+    ) -> bool:
+        """Return whether a terminal graph has no unfinished Child plan phase."""
+
+        for session_id in (root_session_id, *descendant_session_ids):
+            invocation = self._journal.state(session_id).invocation
+            if invocation is None:
+                return False
+            if session_id != root_session_id and not invocation.terminal:
+                return False
+            if any(
+                unit.phase != "terminal"
+                for plan in invocation.child_plans.values()
+                for unit in plan.units
+            ):
+                return False
+        return True
+
     def _root_session_ids(self) -> tuple[str, ...]:
         sessions = set(self._journal.session_ids())
         children: set[str] = set()
@@ -2359,10 +2401,16 @@ def _positive_integer(value: object, name: str) -> None:
 
 
 def _close_timeout(value: float | None) -> None:
-    if value is not None and (
+    if value is None:
+        return
+    try:
+        finite = math.isfinite(value)
+    except (TypeError, OverflowError):
+        finite = False
+    if (
         not isinstance(value, (int, float))
         or isinstance(value, bool)
-        or not math.isfinite(value)
+        or not finite
         or value < 0
     ):
         raise ValueError("close timeout must be a non-negative number or None.")

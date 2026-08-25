@@ -193,6 +193,45 @@ class StateReducer:
             last_event_semantic_digest=_semantic_event_digest(event),
         )
 
+    def validate_sealed(
+        self,
+        state: RuntimeState,
+        event: RuntimeEvent,
+    ) -> RuntimeState:
+        """Verify sealed operations exactly implement their semantic Runtime Logs."""
+
+        if event.from_state_version is None:
+            raise ValueError("validate_sealed requires a sealed Runtime Event.")
+        semantic = state
+        expected_batches: list[StateOperationBatch] = []
+        for log in event.logs:
+            transition = StateTransition(
+                session_id=event.session_id,
+                payload=log.payload,
+                invocation_id=log.invocation_id,
+                causation_id=log.causation_id,
+                occurred_at_ns=log.occurred_at_ns,
+                id=log.id,
+            )
+            commit = self.transition(semantic, transition)
+            semantic = commit.state
+            expected_batches.extend(commit.event.operation_batches)
+            if log.state_version != commit.event.to_state_version:
+                raise RuntimeTransitionError(
+                    "EVENT_LOG_STATE_MISMATCH",
+                    "Runtime Log state version does not match its semantic transition.",
+                )
+        if (
+            event.from_state_version != state.state_version
+            or event.to_state_version != semantic.state_version
+            or event.operation_batches != tuple(expected_batches)
+        ):
+            raise RuntimeTransitionError(
+                "EVENT_OPERATION_SEMANTIC_MISMATCH",
+                "Runtime Event operations do not match its semantic Runtime Logs.",
+            )
+        return self.commit_event_metadata(semantic, event)
+
     def commit_event_metadata(
         self, state: RuntimeState, event: RuntimeEvent
     ) -> RuntimeState:

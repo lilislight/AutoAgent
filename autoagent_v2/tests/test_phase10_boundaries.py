@@ -484,7 +484,7 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 class RuntimeLoopTests(unittest.TestCase):
     def test_runtime_loop_does_not_schedule_an_idle_heartbeat(self) -> None:
-        """Verify RuntimeLoop relies on pipe notifications, not periodic timers."""
+        """Verify RuntimeLoop relies on notifications, not periodic timers."""
         scheduled: list[float] = []
         new_event_loop = asyncio.new_event_loop
 

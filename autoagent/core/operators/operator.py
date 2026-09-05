@@ -1,178 +1,63 @@
+"""Executable Operator and Wait definitions."""
+
 from __future__ import annotations
 
-import inspect
-from collections.abc import Callable, Mapping
-from functools import partial
-from types import MappingProxyType
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
-from autoagent.core.operators.contract import OperatorContract, callable_contract
+from .contract import OperatorContract, ValueContract
 
 
-def callable_operator_name(handler: Callable[..., Any]) -> str:
-    """Return a callable name that is independent of its import location."""
-
-    target = handler.func if isinstance(handler, partial) else handler
-    name = getattr(target, "__name__", None)
-    if not name:
-        name = target.__class__.__name__
-    return str(name)
+def callable_id(handler: Callable[..., object]) -> str:
+    return str(
+        getattr(handler, "__name__", None)
+        or handler.__class__.__name__
+    )
 
 
-def callable_operator_id(handler: Callable[..., Any]) -> str:
-    """Return the runtime id used for a directly bound callable."""
-
-    return f"python:{callable_operator_name(handler)}"
-
-
+@dataclass(frozen=True, slots=True, init=False)
 class Operator:
-    """One concrete callable implementation registered with an application.
-
-    Operator is a business object rather than a Pydantic model because it owns
-    a live Python callable and mutable availability state. Registry controls its
-    identity and capability relationship; NodeExecutor reads the object and
-    invokes it but does not modify registration metadata.
-    """
+    id: str
+    handler: Callable[..., object] = field(repr=False, compare=False)
+    contract: OperatorContract
+    version: str
 
     def __init__(
         self,
+        handler: Callable[..., object],
         *,
-        id: str,
-        handler: Callable[..., Any],
-        capability_id: str | None = None,
-        version: str | int = 1,
-        priority: int = 0,
-        enabled: bool = True,
-        metadata: dict[str, Any] | None = None,
-        definition_name: str | None = None,
+        id: str | None = None,
+        version: str | int = "1",
     ) -> None:
-        resolved_id = id.strip()
-        if not resolved_id:
-            raise ValueError("Operator id cannot be empty.")
         if not callable(handler):
             raise TypeError("Operator handler must be callable.")
+        if id is not None and not isinstance(id, str):
+            raise TypeError("Operator id must be a string.")
+        operator_id = id or callable_id(handler)
+        if not operator_id.strip():
+            raise ValueError("Operator id cannot be empty.")
+        object.__setattr__(self, "id", operator_id)
+        object.__setattr__(self, "handler", handler)
+        object.__setattr__(self, "contract", OperatorContract.from_callable(handler))
+        object.__setattr__(self, "version", str(version))
 
-        contract, issues = callable_contract(handler)
-        errors = [issue.message for issue in issues if issue.severity == "error"]
-        if errors:
-            raise ValueError(" ".join(errors))
 
-        resolved_capability_id = capability_id.strip() if capability_id else None
-        if capability_id is not None and not resolved_capability_id:
-            raise ValueError("Operator capability_id cannot be empty.")
-        if isinstance(version, str) and not version.strip():
-            raise ValueError("Operator version cannot be empty.")
+@dataclass(frozen=True, slots=True)
+class Wait:
+    """Suspend one NodeOccurrence with durable custom request/response values."""
 
-        self._id = resolved_id
-        self._handler = handler
-        self._capability_id = resolved_capability_id
-        self._version = version
-        self._priority = priority
-        self._enabled = enabled
-        self._contract = contract
-        self._metadata = dict(metadata or {})
-        self._definition_name = definition_name or resolved_id
+    request_type: object
+    response_type: object
+    id: str = "autoagent.wait"
 
-    @property
-    def id(self) -> str:
-        return self._id
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("Wait id cannot be empty.")
 
     @property
-    def handler(self) -> Callable[..., Any]:
-        return self._handler
+    def input_contract(self) -> ValueContract:
+        return ValueContract.create(self.request_type, location="Wait request")
 
     @property
-    def capability_id(self) -> str | None:
-        return self._capability_id
-
-    @property
-    def priority(self) -> int:
-        return self._priority
-
-    @property
-    def version(self) -> str | int:
-        return self._version
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    @property
-    def contract(self) -> OperatorContract:
-        """Contract inferred only from this Operator's Python handler."""
-
-        return self._contract
-
-    @property
-    def metadata(self) -> MappingProxyType[str, Any]:
-        return MappingProxyType(self._metadata)
-
-    @property
-    def definition_name(self) -> str:
-        """Stable name included in Workflow revision semantics."""
-
-        return self._definition_name
-
-    @property
-    def is_async(self) -> bool:
-        """Whether the registered handler should use the async execution lane."""
-
-        return inspect.iscoroutinefunction(self._handler) or inspect.iscoroutinefunction(
-            getattr(self._handler, "__call__", None)
-        )
-
-    def enable(self) -> None:
-        """Make this Operator eligible for future runtime selection."""
-
-        self._enabled = True
-
-    def disable(self) -> None:
-        """Exclude this Operator from future calls without deleting its identity."""
-
-        self._enabled = False
-
-    def invoke(self, input: Any) -> Any:
-        """Invoke the handler from a mapping of parameter names to values."""
-
-        return _call_handler(self._handler, input)
-
-    async def ainvoke(self, input: Any) -> Any:
-        """Invoke the handler and await its result when it is awaitable."""
-
-        result = _call_handler(self._handler, input)
-        if inspect.isawaitable(result):
-            return await result
-        return result
-
-    @classmethod
-    def from_callable(
-        cls,
-        handler: Callable[..., Any],
-        *,
-        operator_id: str | None = None,
-    ) -> Operator:
-        """Create a virtual Operator using the same defaults as registration.
-
-        Direct callables are not a separate recovery mechanism. Without an
-        explicit operator_id they use module/qualified-name identity. Compiler
-        supplies a node-stable binding id so distinct Callable objects become
-        distinct Operators while repeated use of one object can reuse it.
-        Direct Operators use version 1 identity metadata.
-        """
-
-        return cls(
-            id=operator_id or callable_operator_id(handler),
-            handler=handler,
-            definition_name=callable_operator_name(handler),
-        )
-
-
-def _call_handler(handler: Callable[..., Any], input: Any) -> Any:
-    if not isinstance(input, Mapping):
-        raise TypeError(
-            "Operator input must be a mapping whose keys match handler parameters."
-        )
-    arguments = dict(input)
-    signature = inspect.signature(handler)
-    signature.bind(**arguments)
-    return handler(**arguments)
+    def output_contract(self) -> ValueContract:
+        return ValueContract.create(self.response_type, location="Wait response")

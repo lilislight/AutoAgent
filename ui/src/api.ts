@@ -1,503 +1,201 @@
-import { projectEvents } from "./projection";
-import { buildTimelineView } from "./timeline";
-export { buildTimelineView } from "./timeline";
 import type {
-  InvocationDetail,
-  InvocationRecord,
-  InvocationCancelResponse,
+  ChildSessionSummary,
   InvocationSummary,
-  InvocationResumeResponse,
-  InvocationSubmitResponse,
-  NodeExecutionView,
-  RuntimeEvent,
-  RuntimeEventPage,
-  UserEvent,
-  UserEventPage,
-  RuntimeProjection,
-  RuntimeStatus,
-  ServerHealth,
+  InvocationStateResponse,
+  Page,
   SessionSummary,
-  TimelineView,
-  TraceBootstrap,
-  WorkflowGraphView,
+  TraceEvent,
+  TracePage,
+  UserEventPage,
+  WorkflowSnapshot,
   WorkflowSummary,
 } from "./types";
 
 const API = "/api/v1";
 
-async function requestJson<T>(path: string, timeoutMs = 15_000): Promise<T> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(path, {
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as { detail?: string } | null;
-      throw new Error(body?.detail ?? `${response.status} ${response.statusText}`);
-    }
-    return (await response.json()) as T;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error(
-        `AutoAgent Server did not respond within ${Math.round(timeoutMs / 1_000)}s at ${path}.`,
-      );
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
   }
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 30_000);
-  try {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => null) as { detail?: string } | null;
-      throw new Error(payload?.detail ?? `${response.status} ${response.statusText}`);
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${API}${path}`, { signal });
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const body = (await response.json()) as {
+        detail?: string | { message?: string };
+      };
+      message =
+        typeof body.detail === "string"
+          ? body.detail
+          : body.detail?.message ?? message;
+    } catch {
+      // Keep the HTTP status when the response is not JSON.
     }
-    return (await response.json()) as T;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error(`AutoAgent Server action timed out at ${path}.`);
+    throw new ApiError(response.status, message);
+  }
+  return (await response.json()) as T;
+}
+
+function query(values: Record<string, string | number | null | undefined>): string {
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== null && value !== undefined) parameters.set(key, String(value));
+  }
+  const encoded = parameters.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+async function childrenThroughKnown(
+  invocationId: string,
+  knownSessionIds: readonly string[],
+  signal?: AbortSignal,
+): Promise<Page<ChildSessionSummary>> {
+  const remaining = new Set(knownSessionIds);
+  const seenCursors = new Set<string>();
+  const items: ChildSessionSummary[] = [];
+  let cursor: string | null = null;
+  let pagesAfterKnown = 0;
+  do {
+    const knownCompleteBeforePage = remaining.size === 0;
+    const page: Page<ChildSessionSummary> = await get<Page<ChildSessionSummary>>(
+      `/invocations/children${query({
+        invocation_id: invocationId,
+        limit: 200,
+        cursor,
+      })}`,
+      signal,
+    );
+    items.push(...page.items);
+    for (const item of page.items) remaining.delete(item.session_id);
+    cursor = page.next_cursor;
+    if (knownCompleteBeforePage) pagesAfterKnown += 1;
+    if (cursor !== null) {
+      if (seenCursors.has(cursor)) {
+        throw new Error("Child pagination returned a repeated cursor.");
+      }
+      seenCursors.add(cursor);
     }
-    throw error;
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-export interface Page<T> {
-  items: T[];
-  next_cursor: string | null;
-  has_more: boolean;
-}
-
-interface ServerEventPage {
-  items: RuntimeEvent[];
-  first_sequence: number | null;
-  last_sequence: number | null;
-  has_earlier: boolean;
-  has_later: boolean;
-  live_sequence: number;
-  invocation_state: InvocationSummary["state"];
-}
-
-interface ServerTraceBootstrap {
-  workflow: WorkflowGraphView;
-  session: SessionSummary;
-  invocation: InvocationSummary & {
-    input: Record<string, unknown>;
-    result: Record<string, unknown> | null;
-    error: Record<string, unknown> | null;
-  };
-  capabilities: TraceBootstrap["capabilities"];
-  checkpoint: {
-    schema_version: number;
-    through_sequence: number;
-    projection: RuntimeProjection;
-  };
-  event_page: ServerEventPage;
-}
-
-export function listWorkflowPage(
-  cursor: string | null = null,
-): Promise<Page<WorkflowSummary>> {
-  return listPage(`${API}/workflows`, cursor);
-}
-
-export function listRegisteredWorkflowPage(
-  cursor: string | null = null,
-): Promise<Page<WorkflowSummary>> {
-  return listPage(
-    `${API}/registered-workflows`,
-    cursor,
+    // Once the complete loaded prefix has been refreshed, read one more page.
+    // That page discovers children appended just beyond an exact page boundary
+    // even when their planned Trace was missed during an SSE reconnect.
+  } while (
+    cursor !== null &&
+    (remaining.size > 0 || pagesAfterKnown === 0)
   );
+  return { items, next_cursor: cursor, has_more: cursor !== null };
 }
 
-function listPage<T>(
-  path: string,
-  cursor: string | null,
-): Promise<Page<T>> {
-  const query = new URLSearchParams({ limit: "20" });
-  if (cursor) query.set("cursor", cursor);
-  return requestJson<Page<T>>(`${path}?${query.toString()}`);
-}
-
-export function getWorkflowGraph(workflow: WorkflowSummary): Promise<WorkflowGraphView> {
-  return requestJson(`${API}/workflow-revisions/${workflow.revision_id}`);
-}
-
-export function getHealth(): Promise<ServerHealth> {
-  return requestJson(`${API}/health`, 10_000);
-}
-
-export function getRuntimeStatus(): Promise<RuntimeStatus> {
-  return requestJson(`${API}/runtime/status`);
-}
-
-export function subscribeToSystemUpdates(
-  onStatus: (status: RuntimeStatus) => void,
-  onWorkflowDirectoryChange: () => void,
-  onTraceDirectoryChange: () => void,
-  onConnectionChange: (connected: boolean) => void,
-): () => void {
-  const source = new EventSource(`${API}/system/stream`);
-  source.addEventListener("runtime_status", ((message: MessageEvent<string>) => {
-    onStatus(JSON.parse(message.data) as RuntimeStatus);
-  }) as EventListener);
-  source.addEventListener(
-    "workflow_catalog_changed",
-    onWorkflowDirectoryChange,
-  );
-  source.addEventListener(
-    "trace_directory_changed",
-    onTraceDirectoryChange,
-  );
-  source.onopen = () => onConnectionChange(true);
-  source.onerror = () => onConnectionChange(false);
-  return () => {
-    source.close();
-    onConnectionChange(false);
-  };
-}
-
-export async function createAuthenticationSession(token: string): Promise<void> {
-  await postJson(`${API}/auth/session`, { token });
-}
-
-export function listSessionPage(
-  workflowRevisionId: string,
-  cursor: string | null = null,
-): Promise<Page<SessionSummary>> {
-  return listPage(
-    `${API}/workflow-revisions/${
-      encodeURIComponent(workflowRevisionId)
-    }/sessions`,
-    cursor,
-  );
-}
-
-export function listInvocationPage(
-  sessionId: string,
-  cursor: string | null = null,
-): Promise<Page<InvocationSummary>> {
-  return listPage(
-    `${API}/sessions/${sessionId}/invocations`,
-    cursor,
-  );
-}
-
-export function listAgentInvocationNeighbors(
-  sessionId: string,
-  anchorInvocationId: string,
-  direction: "older" | "newer",
-  limit = 20,
-): Promise<{
-  items: InvocationSummary[];
-  has_more: boolean;
-  direction: "older" | "newer";
-  anchor_invocation_id: string;
-}> {
-  const query = new URLSearchParams({
-    anchor_invocation_id: anchorInvocationId,
-    direction,
-    limit: String(limit),
-  });
-  return requestJson(
-    `${API}/sessions/${sessionId}/agent-invocations?${query.toString()}`,
-  );
-}
-
-export function submitInvocation(
-  workflowRevisionId: string,
-  body: {
-    input?: Record<string, unknown> | null;
-    session_id?: string | null;
-    entry_node_id?: string | null;
-    event_mode?: "minimal" | "standard" | "full";
-  },
-): Promise<InvocationSubmitResponse> {
-  return postJson(
-    `${API}/workflow-revisions/${
-      encodeURIComponent(workflowRevisionId)
-    }/invocations`,
-    {
-      input: body.input,
-      session_key: body.session_id,
-      entry_node_id: body.entry_node_id,
-      event_mode: body.event_mode ?? "standard",
-    },
-  );
-}
-
-export function resumeInvocation(
-  workflowRevisionId: string,
-  body: { session_id: string; wait_key: string; output?: unknown },
-): Promise<InvocationResumeResponse> {
-  return postJson(
-    `${API}/workflow-revisions/${
-      encodeURIComponent(workflowRevisionId)
-    }/resume`,
-    {
-      session_key: body.session_id,
-      wait_key: body.wait_key,
-      output: body.output,
-    },
-  );
-}
-
-export function cancelInvocation(
-  invocationId: string,
-): Promise<InvocationCancelResponse> {
-  return postJson(`${API}/invocations/${invocationId}/cancel`, {});
-}
-
-export async function getTraceView(
-  _sessionId: string,
-  invocationId: string,
-): Promise<TraceBootstrap> {
-  const raw = await requestJson<ServerTraceBootstrap>(
-    `${API}/invocations/${invocationId}/trace?tail_limit=200`,
-  );
-  const events = raw.event_page.items;
-  const projection = raw.checkpoint.projection;
-  const invocation = invocationDetail(raw.invocation, projection);
-  return {
-    graph: raw.workflow,
-    session: raw.session,
-    invocation,
-    timeline: buildTimelineView(invocation, projection),
-    checkpoint: raw.checkpoint.projection,
-    events,
-    projection,
-    capabilities: raw.capabilities,
-    has_more_events: raw.event_page.has_later,
-  };
-}
-
-export function getInvocation(
-  invocationId: string,
-): Promise<InvocationRecord> {
-  return requestJson(`${API}/invocations/${invocationId}`);
-}
-
-export async function getEarlierEvents(
-  _sessionId: string,
-  invocationId: string,
-  beforeSequence: number,
-  limit = 200,
-): Promise<RuntimeEventPage> {
-  const raw = await requestJson<ServerEventPage>(
-    `${API}/invocations/${invocationId}/events?before_sequence=${beforeSequence}&limit=${limit}`,
-  );
-  return eventPage(raw);
-}
-
-export async function getLaterEvents(
-  _sessionId: string,
-  invocationId: string,
-  afterSequence: number,
-  limit = 200,
-): Promise<RuntimeEventPage> {
-  const raw = await requestJson<ServerEventPage>(
-    `${API}/invocations/${invocationId}/events?after_sequence=${afterSequence}&limit=${limit}`,
-  );
-  return eventPage(raw);
-}
-
-export async function getEventDetail(
-  invocationId: string,
-  sequence: number,
-): Promise<RuntimeEvent> {
-  return requestJson<RuntimeEvent>(
-    `${API}/invocations/${invocationId}/events/${sequence}`,
-  );
-}
-
-export function getArtifactValue(
-  invocationId: string,
-  artifactId: string,
-): Promise<{ artifact: Record<string, unknown>; value: unknown }> {
-  return requestJson(
-    `${API}/invocations/${encodeURIComponent(invocationId)}/artifacts/${
-      encodeURIComponent(artifactId)
-    }/value`,
-    60_000,
-  );
-}
-
-export function getRuntimeState(
-  invocationId: string,
-  throughSequence: number,
-): Promise<Record<string, unknown>> {
-  return requestJson(
-    `${API}/invocations/${invocationId}/state?through_sequence=${throughSequence}`,
-  );
-}
-
-export function subscribeToInvocation(
-  invocationId: string,
-  afterSequence: number,
-  onEvent: (event: RuntimeEvent) => void,
-  onStatus: (status: InvocationSummary) => void,
-  onConnectionChange: (connected: boolean) => void,
-): () => void {
-  const source = new EventSource(
-    `${API}/invocations/${invocationId}/stream?after_sequence=${afterSequence}`,
-  );
-  source.addEventListener("runtime_event", ((message: MessageEvent<string>) => {
-    onEvent(JSON.parse(message.data) as RuntimeEvent);
-  }) as EventListener);
-  source.addEventListener("invocation_status", ((message: MessageEvent<string>) => {
-    const status = JSON.parse(message.data) as InvocationSummary;
-    onStatus(status);
-  }) as EventListener);
-  source.addEventListener("stream_end", (() => {
-    source.close();
-    onConnectionChange(false);
-  }) as EventListener);
-  source.onopen = () => onConnectionChange(true);
-  source.onerror = () => onConnectionChange(false);
-  return () => {
-    source.close();
-    onConnectionChange(false);
-  };
-}
-
-export function getUserEvents(
-  invocationId: string,
-  afterSequence = 0,
-  limit = 1_000,
-): Promise<UserEventPage> {
-  return requestJson(
-    `${API}/invocations/${invocationId}/user-events?after_sequence=${afterSequence}&limit=${limit}`,
-  );
-}
-
-export async function getAllUserEvents(
-  invocationId: string,
-): Promise<UserEvent[]> {
-  const events: UserEvent[] = [];
-  let cursor = 0;
-  while (true) {
-    const page = await getUserEvents(invocationId, cursor);
-    events.push(...page.items);
-    if (!page.has_later || page.items.length === 0) return events;
-    cursor = page.items.at(-1)!.sequence;
-  }
-}
-
-export function subscribeToUserEvents(
-  invocationId: string,
-  afterSequence: number,
-  onEvent: (event: UserEvent) => void,
-  onConnectionChange: (connected: boolean) => void,
-): () => void {
-  const source = new EventSource(
-    `${API}/invocations/${invocationId}/user-events/stream?after_sequence=${afterSequence}`,
-  );
-  source.addEventListener("user_event", ((message: MessageEvent<string>) => {
-    onEvent(JSON.parse(message.data) as UserEvent);
-  }) as EventListener);
-  source.addEventListener("stream_end", (() => {
-    source.close();
-    onConnectionChange(false);
-  }) as EventListener);
-  source.onopen = () => onConnectionChange(true);
-  source.onerror = () => onConnectionChange(false);
-  return () => {
-    source.close();
-    onConnectionChange(false);
-  };
-}
-
-export function subscribeToSessionUserEventChanges(
-  sessionId: string,
-  onChange: () => void,
-  onConnectionChange: (connected: boolean) => void,
-): () => void {
-  const source = new EventSource(
-    `${API}/sessions/${sessionId}/user-events/stream`,
-  );
-  source.addEventListener("session_user_events_changed", onChange);
-  source.onopen = () => onConnectionChange(true);
-  source.onerror = () => onConnectionChange(false);
-  return () => {
-    source.close();
-    onConnectionChange(false);
-  };
-}
-
-function eventPage(raw: ServerEventPage): RuntimeEventPage {
-  return {
-    events: raw.items,
-    next_after_sequence: raw.last_sequence ?? 0,
-    previous_before_sequence: raw.first_sequence,
-    has_more: raw.has_earlier,
-    has_later: raw.has_later,
-    live_sequence: raw.live_sequence,
-    invocation_state: raw.invocation_state,
-  };
-}
-
-function invocationDetail(
-  value: ServerTraceBootstrap["invocation"],
-  projection: RuntimeProjection,
-): InvocationDetail {
-  return {
-    ...value,
-    context: {},
-    node_executions: Object.values(projection.node_executions).map(
-      (execution): NodeExecutionView => ({
-        id: execution.execution_id,
-        node_id: execution.node_id,
-        sequence: execution.sequence,
-        state: execution.state,
-        input: execution.input ?? null,
-        output: execution.output ?? null,
-        error: execution.error ?? null,
-        execution_scope: [],
-        incoming_activations: [],
-        edge_evaluations: [],
-        operator_calls: (execution.operator_calls ?? []).map((call) => ({
-          id: call.id,
-          operator_id: call.operator_id,
-          call_no: call.call_no,
-          kind: call.kind,
-          reason: call.reason,
-          unit_index: call.unit_index,
-          unit_attempt_no: call.unit_attempt_no,
-          state: call.state,
-          input: null,
-          output: null,
-          error: call.error,
-          resource_usage: {
-            ...call.timing,
-            elapsed_ns: call.elapsed_ns,
-            reason: call.reason,
-          },
-          started_at_ms: call.started_at_ms,
-          ended_at_ms: call.occurred_at_ms,
-          created_at_ms: call.occurred_at_ms,
-          updated_at_ms: call.occurred_at_ms,
-          streaming: call.streaming,
-          stream_chunk_count: call.stream_chunk_count,
-        })),
-        resource_usage: execution.timing ?? {},
-        started_at_ms: execution.started_at_ms ?? null,
-        ended_at_ms: execution.ended_at_ms ?? null,
-        created_at_ms: execution.started_at_ms ?? value.created_at_ms,
-        updated_at_ms: execution.ended_at_ms ?? value.updated_at_ms,
-      }),
+export const api = {
+  workflows: (cursor?: string | null, signal?: AbortSignal) =>
+    get<Page<WorkflowSummary>>(`/workflows${query({ limit: 100, cursor })}`, signal),
+  workflow: (revisionId: string, signal?: AbortSignal) =>
+    get<WorkflowSnapshot>(`/workflows/detail${query({ revision_id: revisionId })}`, signal),
+  sessions: (revisionId: string, cursor?: string | null, signal?: AbortSignal) =>
+    get<Page<SessionSummary>>(
+      `/workflows/sessions${query({ revision_id: revisionId, limit: 100, cursor })}`,
+      signal,
     ),
-  };
-}
+  invocations: (
+    sessionId: string,
+    workflowRevisionId: string,
+    cursor?: string | null,
+    signal?: AbortSignal,
+  ) =>
+    get<Page<InvocationSummary>>(
+      `/sessions/invocations${query({
+        session_id: sessionId,
+        workflow_revision_id: workflowRevisionId,
+        limit: 100,
+        cursor,
+      })}`,
+      signal,
+    ),
+  children: (invocationId: string, cursor?: string | null, signal?: AbortSignal) =>
+    get<Page<ChildSessionSummary>>(
+      `/invocations/children${query({ invocation_id: invocationId, limit: 200, cursor })}`,
+      signal,
+    ),
+  childrenThroughKnown,
+  invocation: (invocationId: string, signal?: AbortSignal) =>
+    get<InvocationSummary>(`/invocations/detail${query({ invocation_id: invocationId })}`, signal),
+  traceTail: (invocationId: string, tailLimit = 500, signal?: AbortSignal) =>
+    get<TracePage>(
+      `/invocations/trace${query({ invocation_id: invocationId, tail_limit: tailLimit })}`,
+      signal,
+    ),
+  traceBefore: (
+    invocationId: string,
+    beforeSequence: number,
+    limit = 500,
+    signal?: AbortSignal,
+  ) =>
+    get<TracePage>(
+      `/invocations/trace${query({
+        invocation_id: invocationId,
+        before_sequence: beforeSequence,
+        limit,
+      })}`,
+      signal,
+    ),
+  tracePage: (
+    invocationId: string,
+    cursor: string | null,
+    limit = 200,
+    signal?: AbortSignal,
+  ) =>
+    get<TracePage>(
+      `/invocations/trace${query({ invocation_id: invocationId, cursor, limit })}`,
+      signal,
+    ),
+  userEventTail: (invocationId: string, tailLimit = 500, signal?: AbortSignal) =>
+    get<UserEventPage>(
+      `/invocations/user-events${query({
+        invocation_id: invocationId,
+        tail_limit: tailLimit,
+      })}`,
+      signal,
+    ),
+  userEventsBefore: (
+    invocationId: string,
+    beforeSequence: number,
+    limit = 500,
+    signal?: AbortSignal,
+  ) =>
+    get<UserEventPage>(
+      `/invocations/user-events${query({
+        invocation_id: invocationId,
+        before_sequence: beforeSequence,
+        limit,
+      })}`,
+      signal,
+    ),
+  state: (
+    invocationId: string,
+    signal?: AbortSignal,
+    throughTraceSequence?: number,
+  ) =>
+    get<InvocationStateResponse>(
+      `/invocations/state${query({
+        invocation_id: invocationId,
+        through_trace_sequence: throughTraceSequence,
+      })}`,
+      signal,
+    ),
+  traceStream: (invocationId: string, cursor: string | null) =>
+    new EventSource(
+      `${API}/invocations/stream${query({ invocation_id: invocationId, cursor })}`,
+    ),
+  userEventStream: (invocationId: string, cursor: string | null) =>
+    new EventSource(
+      `${API}/invocations/user-events/stream${query({
+        invocation_id: invocationId,
+        cursor,
+      })}`,
+    ),
+};

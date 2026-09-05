@@ -1,172 +1,142 @@
+"""Application-local Capability and Operator registries.
+
+The registry is a Runtime resource. Adding an implementation does not mutate a
+compiled Workflow revision; every implementation must preserve the Capability's
+nominal contract.
+"""
+
 from __future__ import annotations
 
-import warnings
-from collections import defaultdict
+from dataclasses import dataclass, replace
 from threading import RLock
 
-from autoagent.core.operators.capability import Capability
-from autoagent.core.operators.contract import (
-    OperatorContract,
-    OperatorContractWarning,
-    compare_contracts,
-)
-from autoagent.core.operators.operator import Operator
+from .operator import Operator
 
 
-class CapabilityRegistry:
-    """Application-local registry of abstract capability contracts.
-
-    Registration is thread-safe and duplicate ids are rejected. Capability
-    replacement is intentionally unsupported because changing a contract could
-    invalidate already compiled Workflow IR and existing runtime inputs.
-    """
-
-    def __init__(self) -> None:
-        self._items: dict[str, Capability] = {}
-        self._lock = RLock()
-
-    def register(self, capability: Capability) -> Capability:
-        with self._lock:
-            if capability.id in self._items:
-                raise ValueError(f"Capability already registered: {capability.id}")
-            self._items[capability.id] = capability
-        return capability
-
-    def get(self, capability_id: str) -> Capability | None:
-        with self._lock:
-            return self._items.get(capability_id)
-
-    def contains(self, capability_id: str) -> bool:
-        with self._lock:
-            return capability_id in self._items
-
-    def values(self) -> tuple[Capability, ...]:
-        with self._lock:
-            return tuple(self._items.values())
-
-    def bind_contract(
-        self,
-        capability_id: str,
-        contract: OperatorContract,
-    ) -> None:
-        """Establish a Capability contract from its first registered Operator."""
-
-        with self._lock:
-            capability = self._items.get(capability_id)
-            if capability is None:
-                raise ValueError(f"Unknown Capability: {capability_id}")
-            capability._bind_contract(contract)
+@dataclass(frozen=True, slots=True)
+class OperatorRegistration:
+    operator: Operator
+    capability_id: str
+    priority: int = 0
+    enabled: bool = True
+    default: bool = False
 
 
 class OperatorRegistry:
-    """Application-local Operator store with a capability-to-operator index.
+    """Thread-safe index of additional implementations for Capabilities."""
 
-    An Operator may be standalone, in which case only OperatorRef can select
-    it. When capability_id is present, registration requires that Capability to
-    exist. Registration rejects only structural contract mismatches that make
-    named invocation impossible; annotation and portability uncertainty emit an
-    OperatorContractWarning. Operators keep stable insertion order inside each
-    Capability. Runtime selection breaks ties by stable Operator id instead of
-    depending on this insertion order.
-    """
-
-    def __init__(self, capability_registry: CapabilityRegistry) -> None:
-        self._capability_registry = capability_registry
-        self._items: dict[str, Operator] = {}
-        self._by_capability: dict[str, list[str]] = defaultdict(list)
-        self._default_by_capability: dict[str, str] = {}
+    def __init__(self) -> None:
+        self._items: dict[str, OperatorRegistration] = {}
+        self._by_capability: dict[str, list[str]] = {}
+        self._defaults: dict[str, str] = {}
+        self._contracts: dict[str, object] = {}
         self._lock = RLock()
 
-    def register(self, operator: Operator, *, default: bool = False) -> Operator:
+    def bind_capability(self, capability) -> None:
+        self.bind_capabilities((capability,))
+
+    def bind_capabilities(self, capabilities) -> None:
+        """Validate and bind one Workflow closure without partial mutation."""
+
+        with self._lock:
+            pending = dict(self._contracts)
+            for capability in capabilities:
+                contract = capability.contract
+                previous = pending.get(capability.id)
+                if previous is not None and not _same_contract(previous, contract):
+                    raise ValueError(
+                        f"Capability {capability.id!r} was rebound with another contract."
+                    )
+                for operator_id in self._by_capability.get(capability.id, ()):
+                    registration = self._items[operator_id]
+                    _require_contract(
+                        capability.id,
+                        contract,
+                        registration.operator.contract,
+                    )
+                pending[capability.id] = contract
+            self._contracts = pending
+
+    def register(
+        self,
+        operator: Operator,
+        *,
+        capability_id: str,
+        priority: int = 0,
+        enabled: bool = True,
+        default: bool = False,
+    ) -> Operator:
+        resolved = capability_id.strip()
+        if not resolved:
+            raise ValueError("Operator capability_id cannot be empty.")
         with self._lock:
             if operator.id in self._items:
                 raise ValueError(f"Operator already registered: {operator.id}")
-
-            capability = None
-            if operator.capability_id is not None:
-                capability = self._capability_registry.get(operator.capability_id)
-                if capability is None:
-                    raise ValueError(
-                        f"Operator references an unknown capability: {operator.capability_id}"
-                    )
-
-            if default and operator.capability_id is None:
-                raise ValueError("A default Operator must implement a Capability.")
-            if (
-                default
-                and operator.capability_id is not None
-                and operator.capability_id in self._default_by_capability
-            ):
-                raise ValueError(
-                    "Capability already has a default Operator: "
-                    f"{operator.capability_id}"
-                )
-
-            if capability is not None:
-                if capability.contract is None:
-                    self._capability_registry.bind_contract(
-                        capability.id,
-                        operator.contract,
-                    )
-                else:
-                    _validate_contract(capability, operator)
-
-            self._items[operator.id] = operator
-            if operator.capability_id is not None:
-                self._by_capability[operator.capability_id].append(operator.id)
-                if default:
-                    self._default_by_capability[operator.capability_id] = operator.id
+            if default and resolved in self._defaults:
+                raise ValueError(f"Capability {resolved!r} already has a default Operator.")
+            contract = self._contracts.get(resolved)
+            if contract is not None:
+                _require_contract(resolved, contract, operator.contract)
+            registration = OperatorRegistration(
+                operator, resolved, priority, enabled, default
+            )
+            self._items[operator.id] = registration
+            self._by_capability.setdefault(resolved, []).append(operator.id)
+            if default:
+                self._defaults[resolved] = operator.id
         return operator
 
-    def get(self, operator_id: str) -> Operator | None:
+    def get(self, operator_id: str) -> OperatorRegistration | None:
         with self._lock:
             return self._items.get(operator_id)
 
-    def contains(self, operator_id: str) -> bool:
-        with self._lock:
-            return operator_id in self._items
-
     def for_capability(
-        self,
-        capability_id: str,
-        *,
-        include_disabled: bool = False,
-    ) -> tuple[Operator, ...]:
+        self, capability_id: str, *, include_disabled: bool = False
+    ) -> tuple[OperatorRegistration, ...]:
         with self._lock:
-            operators = tuple(
+            values = tuple(
                 self._items[operator_id]
                 for operator_id in self._by_capability.get(capability_id, ())
             )
         if include_disabled:
-            return operators
-        return tuple(operator for operator in operators if operator.enabled)
+            return values
+        return tuple(value for value in values if value.enabled)
 
     def default_for_capability(self, capability_id: str) -> Operator | None:
         with self._lock:
-            operator_id = self._default_by_capability.get(capability_id)
-            if operator_id is None:
+            operator_id = self._defaults.get(capability_id)
+            registration = self._items.get(operator_id) if operator_id else None
+            if registration is None or not registration.enabled:
                 return None
-            return self._items.get(operator_id)
+            return registration.operator
 
-    def values(self) -> tuple[Operator, ...]:
+    def set_enabled(self, operator_id: str, enabled: bool) -> None:
         with self._lock:
-            return tuple(self._items.values())
+            registration = self._items.get(operator_id)
+            if registration is None:
+                raise KeyError(operator_id)
+            self._items[operator_id] = replace(registration, enabled=enabled)
 
 
-def _validate_contract(capability: Capability, operator: Operator) -> None:
-    if capability.contract is None:
-        raise ValueError(f"Capability has no established contract: {capability.id}")
-    issues = compare_contracts(capability.contract, operator.contract)
-    errors = [issue.message for issue in issues if issue.severity == "error"]
-    if errors:
+def _same_contract(left, right) -> bool:
+    return (
+        left.input.same_as(right.input)
+        and _same_optional(left.output, right.output)
+        and _same_optional(left.stream_chunk, right.stream_chunk)
+    )
+
+
+def _same_optional(left, right) -> bool:
+    if left is None or right is None:
+        return left is right
+    return left.same_as(right)
+
+
+def _require_contract(capability_id: str, expected, actual) -> None:
+    if not _same_contract(expected, actual):
         raise ValueError(
-            f"Operator {operator.id} does not match Capability "
-            f"{capability.id}: {' '.join(errors)}"
+            f"Operator contract does not match Capability {capability_id!r}."
         )
-    for issue in issues:
-        if issue.severity == "warning":
-            warnings.warn(
-                f"Operator {operator.id} / Capability {capability.id}: {issue.message}",
-                OperatorContractWarning,
-                stacklevel=3,
-            )
+
+
+__all__ = ["OperatorRegistration", "OperatorRegistry"]

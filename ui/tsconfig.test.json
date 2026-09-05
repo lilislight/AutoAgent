@@ -1,32 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
     "strict": true,
     "skipLibCheck": true,
-    "rootDir": ".",
+    "jsx": "react-jsx",
     "outDir": ".test-dist",
-    "noEmit": false
+    "rootDir": "."
   },
-  "include": [
-    "src/graphRouting.ts",
-    "src/agentConversation.ts",
-    "src/invocationStatus.ts",
-    "src/submittedScope.ts",
-    "src/timeline.ts",
-    "src/inspection.ts",
-    "src/elkjs.d.ts",
-    "src/layout.ts",
-    "src/layoutEngine.ts",
-    "src/layoutFallback.ts",
-    "src/layoutTypes.ts",
-    "src/types.ts",
-    "tests/graphRouting.test.ts",
-    "tests/agentConversation.test.ts",
-    "tests/invocationStatus.test.ts",
-    "tests/submittedScope.test.ts",
-    "tests/timeline.test.ts",
-    "tests/inspection.test.ts"
-  ]
+  "include": ["src/api.ts", "src/bootstrap.ts", "src/childEvents.ts", "src/coalescedRefresh.ts", "src/graph.ts", "src/liveState.ts", "src/navigation.ts", "src/requestGate.ts", "src/runtimeProjection.ts", "src/types.ts", "src/components/RuntimeSpans.tsx", "src/components/UserEventTimeline.tsx", "src/components/WorkflowGraph.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
 }

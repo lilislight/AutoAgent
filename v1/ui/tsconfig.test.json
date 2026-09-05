@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "rootDir": ".",
+    "outDir": ".test-dist",
+    "noEmit": false
+  },
+  "include": [
+    "src/graphRouting.ts",
+    "src/agentConversation.ts",
+    "src/invocationStatus.ts",
+    "src/submittedScope.ts",
+    "src/timeline.ts",
+    "src/inspection.ts",
+    "src/elkjs.d.ts",
+    "src/layout.ts",
+    "src/layoutEngine.ts",
+    "src/layoutFallback.ts",
+    "src/layoutTypes.ts",
+    "src/types.ts",
+    "tests/graphRouting.test.ts",
+    "tests/agentConversation.test.ts",
+    "tests/invocationStatus.test.ts",
+    "tests/submittedScope.test.ts",
+    "tests/timeline.test.ts",
+    "tests/inspection.test.ts"
+  ]
+}

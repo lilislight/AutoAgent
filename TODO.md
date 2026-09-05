@@ -1,210 +1,102 @@
-# AutoAgent TODO
+# AutoAgent V2 后续事项
 
-This file tracks current implementation order. Stable product goals and stage
-acceptance criteria live in [MVP.md](MVP.md). Completed implementation history
-belongs in Git, tests, and benchmark results.
+本文只记录当前实现之外仍有价值的工作。当前 Core 已完成静态 Workflow、受控 Loop、
+Map、StreamReducer、Wait/Resume、Child await/spawn + Map、唯一 StateReducer、Host
+RuntimeEvent/UserEvent sink 协议、公开 Trace/User Event、Checkpoint Bundle 和同步/异步
+App API。
+以下项目是 Host/Harness、可选捕获模式或工程工具，不是当前 Full Core 的未闭合语义。
 
-## 1. Finish bounded Runtime and persistence hardening
+## P1：中心化 Host 与 Harness 原语
 
-These are cross-cutting post-foundation limits. They do not make the MVP 1
-authoring contract incomplete. MVP 1 is closed; continue these items only when
-their owning Runtime work is prioritized or a later evaluation reproduces one
-of them.
+### RuntimeEvent Store 的生产部署扩展
 
-- [ ] Split the shared shutdown deadline into independently configurable
-  Invocation grace and persistence flush deadlines. Keep both available through
-  CLI/environment configuration.
-- [ ] Make persistence shutdown a strict upper bound even when a database
-  driver does not acknowledge Task cancellation. Log the undurable record count
-  and byte size before isolating the stuck daemon Runtime.
-- [ ] Finish Trace paging for large in-memory overlays. Database directories are
-  keyset-paged and Graphs load by Revision ID, but Session and Invocation pages
-  still copy and sort complete in-memory collections before merging a database
-  page.
-- [ ] Bound ReAct conversation history with one coherent Context-window policy:
-  configurable token budget, recent complete exchanges, and an optional summary
-  hook. Until then every Session message is retained and copied into later LLM
-  requests.
-- [ ] Decide the next ReAct failure contract before changing it: distinguish
-  infrastructure/transport Tool failures from model-correctable business
-  errors, and decide whether `max_steps` should request one bounded final answer
-  instead of immediately failing the Invocation. Preserve current behavior
-  until that contract and its deterministic tests are agreed.
-- [ ] Document the accepted synchronous Operator timeout limitation. A running
-  `ThreadPoolExecutor` function cannot be force-stopped, so Retry/Fallback side
-  effects must be idempotent. Process isolation remains deferred.
-- [ ] Extend soak and benchmark coverage with large mutable Context/output
-  values, long ReAct Sessions, mixed memory/database Trace pages, database
-  outage recovery, and cancellation-resistant shutdown simulations.
+本地 SQLite Store 已实现 Event 幂等、Session sequence/hash chain、事务内索引/Trace 投影和
+父子 Checkpoint 重建；HTTP Sink 已使用 Event id 作为幂等键。生产部署仍需要：
 
-## 2. Build MVP 2 in dependency order
+- 远程接收端的 commit 后丢失响应测试与请求查询；
+- 多 Host Session lease、Outbox、队列容量和运维告警；
+- 正式数据库 schema migration 和 PostgreSQL backend；
+- 外部持久化确认不能反向成为 Runtime State 的第二份权威状态。
 
-Detailed contracts and acceptance criteria live in [MVP2.md](MVP2.md). Eval
-definitions use one code-first model, live under `evals/` by convention, and
-are registered explicitly in `auto-agent.toml`. `autoagent eval` is the only
-public Eval execution surface; do not duplicate Cases as pytest functions.
+### Command、Mailbox 与 Signal
 
-### Phase 0: Freeze local debugging and evaluation contracts
+在 Server/Host 层定义可持久化、可去重的 Command envelope，再接入：
 
-- [x] Define versioned Invocation Report, value summary, evidence warning, and
-  progressive detail-query models for Minimal, Standard, and Full modes.
-- [x] Define the first public Evaluation and result contracts: Manifest Suite
-  locator, ``Evaluation`` class, ``eval_*`` Case method, internal Invoke/Resume
-  Step, and the Evaluator/Step/Case/Eval Result hierarchy.
-- [x] Record graph path, call counts, Retry/Loop/Wait, performance budgets,
-  scoring, aggregate Gates, and automatic Invocation capture as later
-  extensions rather than Phase 0 requirements.
-- [x] Define the boundary between Invocation Report, Fork, ordinary rerun, and
-  Eval; do not require every bad Invocation to become an Eval Case.
-- [x] Define Eval data realism rules: real Workflow execution, redacted or
-  synthetic representative inputs, real models when model behavior is under
-  evaluation, and sandbox/simulated dependencies when appropriate.
-- [x] Define project testing ownership: Eval for end-to-end Workflow business
-  behavior, optional unit tests for isolated user code, with no duplicated
-  business scenarios.
-- [x] Define the `[[eval_suites]]` Manifest schema, `module:object` loading, ID
-  uniqueness, Workflow targeting, and stable diagnostics.
-- [x] Define the conventional `evals/` layout and `autoagent eval` CLI contract.
-- [x] Define Report value-size limits, redaction, and incomplete-evidence
-  behavior. Eval Results remain stdout plus an optional ordinary report file.
-- [x] Audit current Runtime Events and trace APIs against the Report/Eval models;
-  list missing facts before adding new Runtime recording.
+- Resume/Cancel 的 command id 与 expected state version；
+- `SendSignal`/`AwaitSignal` 的原子“先检查、再等待”；
+- Parent/Child message、question/reply、guidance 和 permission；
+- 长时间 Operator 只在协作安全点读取消息，不能伪装成强制修改已发出的同步调用。
 
-### Phase 1: Eval framework and CLI
+外部消息使用 Command 驱动当前 Invocation，不直接从普通 Edge 激活任意中间 Node。
 
-- [x] Implement the public Evaluation, EvalCase, Evaluator, built-in
-  Invocation-state/result Evaluators, and minimal result models.
-- [x] Implement Manifest loading and stable Evaluation diagnostics without
-  importing Evaluation modules during normal project or Server startup.
-- [x] Run isolated Cases through ProjectHost/AutoAgentApp with explicit
-  multi-turn and Wait/Resume support.
-- [x] Add `autoagent eval list`, `check`, and `run` with report-file teeing and
-  deterministic status/exit-code rendering.
-- [x] Implement bounded Case concurrency and an optional Suite-level timeout.
-- [x] Add strict concurrency-limit, timeout-cancellation, external task
-  cancellation, Runtime cleanup, and Memory/SQLite Suite-scale smoke tests.
+### 中心化 Server
 
-### Phase 2: Authoring integration
+- 本地只读 Tracing Server/UI 已实现，不持有 App，也不提供执行命令；
+- 远程 RuntimeEvent/UserEvent 接收、Artifact Store 与 Outbox；
+- Invoke/Submit/Wait/Resume/Cancel/Recover/Stream 服务接口；
+- Session admission/lease、鉴权、多租户、幂等、限流和优雅关闭；
+- 历史 Trace、任意 state version 查询、Replay、Fork 与 UI。
 
-- [x] Replace standalone authoring-example input/expected pairs with registered
-  Eval Suites and reusable fixtures where appropriate.
-- [x] Update the Authoring Skill to generate and pass Eval Suites before handoff.
-- [x] Forward-test a fresh conditional-orchestration project from only its
-  business requirements using the packaged Wheel and copied Authoring Skill.
-  Project/Workflow/Eval checks passed and all nine business Cases passed.
-- [x] Review the generated project against the hidden hard gates and authoring
-  boundaries. No blocking Skill or framework defect was found; one scenario is
-  accepted as sufficient coverage for the current Authoring Skill milestone.
-- [x] Close Phase 2. Durable Wait/Resume and ReAct forward-test workspaces remain
-  optional future regression fixtures rather than MVP 2 gates.
+Schema migration 在 Event 进入当前 Core codec 前由 Host 完成，Core 继续只接受精确当前
+schema。
 
-### Phase 3: Invocation Report and progressive queries
+### 远程与隔离执行
 
-Phase 3 is closed. Report and progressive-query contracts are stable inputs to
-the local debugging loop.
+- Process/Remote Operator Executor；
+- 远程 Child Workflow 的 admission、status、await 和 cancel；
+- 外部副作用的稳定幂等键与配额服务；
+- Invocation 级 Tool/Capability Registry。
 
-- [x] Add same-project Server discovery and evidence-source resolution: prefer
-  the matching live Server, otherwise use an explicitly configured database,
-  and return an actionable missing-source diagnostic when neither exists.
-- [x] Add the accepted `autoagent.debug` V1 read models: one
-  `InvocationReport` plus bounded value, error, primary-boundary, and warning
-  models; keep them outside the root Workflow authoring API.
-- [x] Add a type-neutral read-only Debug Query service shared by CLI, Server,
-  and future platform adapters.
-- [x] Build bounded Reports for active, waiting, completed, failed, and partially
-  durable Invocations.
-- [x] For `created` or `running` Server Invocations, wait through notifications
-  for at most 10 seconds for `waiting` or a terminal boundary, then return the
-  current Report with an explicit still-running warning.
-- [x] Keep the root Report compact and expose NodeExecution, Edge evaluation,
-  Operator Call, Event, and Full-mode state collections through stable cursor
-  pages fixed to the Report's observed sequence.
-- [x] Record each actual Map/Replication attempt as an Operator Call Event,
-  keep its Full-mode values in one place, support NodeExecution-filtered Call
-  pages, and bound the Timeline projection to 50 Call rows per execution.
-- [x] Include only categorized UserEvent counts in the root Report; page
-  completed semantic/custom events separately and exclude stream deltas unless
-  a stream-diagnostic query explicitly requests them.
-- [x] Add direct CLI detail queries for one Invocation, NodeExecution, Edge
-  evaluation, Operator Call, Event, or Full-mode state boundary.
-- [x] Keep Report and comparison results out of Runtime persistence; render to
-  stdout and optionally tee the same content to an ordinary `--report-file`.
-- [x] Complete fixture coverage for Minimal, Standard, Full, partial durability,
-  Loop, Retry/Fallback, Map, and ReAct evidence. Core active, waiting,
-  completed, failed, memory, and historical-database paths are covered.
-- [x] Add large-journal and large-value performance coverage. The SQLite smoke
-  guard uses an 80-Node journal plus a 100 KB Invocation input and bounds both
-  query latency and rendered Report/page size.
+## P2：Agent SDK
 
-### Phase 4: Local debugging Skill
+- LLM Operator、Tool Dispatch 和动态工具描述；
+- 静态 Agent Loop 模板；
+- Coding Agent Workflow 生成、Compiler 诊断与修复 Skill；
+- Harness 通过 Child、Command、Mailbox、Capability 和 Wait 组合，不热修改运行中的
+  `WorkflowIR`。
 
-**Current focus:** validate the complete CLI-only debugging loop against the
-current Runtime foundation after the Node-owned Map, contract-driven Runtime
-value, and actual Operator Call refactors. Use a freshly built Wheel, a copied
-Debug Skill, and an isolated project so the test cannot accidentally depend on
-the AutoAgent source tree or framework-internal APIs.
+## P3：可选捕获模式与工程工具
 
-- [x] Add a separate Invocation-ID debugging Skill after Report CLI stabilizes.
-- [x] Add isolated same-mode Rerun against the current project Revision. Reuse
-  exact Standard/Full Genesis Session Context and reject Minimal evidence.
-- [x] Add read-only Invocation Comparison for matching Standard or matching
-  Full modes with semantic Node, Loop, Edge, and actual Operator Call alignment;
-  reject Minimal and mixed modes and keep results out of Runtime storage.
-- [x] Update the debugging Skill with side-effect, Wait, Rerun, Comparison, and
-  Eval ownership boundaries.
-- [x] Add a deterministic Full-mode Debug Skill Evaluation with an existing
-  project, business-incorrect Invocation input, registered four-Case Eval
-  Suite, and hidden Report/Query/Rerun/Comparison acceptance gates.
-- [ ] Run one independent Coding Agent forward test through Report -> bounded
-  Query -> optional Case update -> focused code change -> compile -> same-mode
-  Rerun -> Comparison -> Eval Result -> user-review handoff using CLI only.
-- [ ] Audit the forward-test transcript and generated project against the
-  hidden acceptance gates. Fix only demonstrated framework or Skill gaps, then
-  close Phase 4 when the complete loop passes without private APIs.
+当前 StateOperation/Reducer 语义已经与 RuntimeEvent 信封分离。后续可实现
+Full/Standard/Minimal capture profile，但三种模式只能调整 Event 聚合和 Trace 投影，
+不能删除恢复所需的 StateOperationBatch；以最终 RuntimeState、Checkpoint、Resume 和
+Recovery 等价性验收。
 
-### Phase 5: Optional Invocation-to-Case capture
+工程层可补充 Ruff 与 Pyright/Mypy 配置、Port 静态类型验收和持续 import graph 检查；
+这些不改变 Core 运行契约。
 
-- [ ] After the manual loop is stable, capture a provisional redacted Case from
-  an Invocation; require an explicit business oracle before Suite installation.
+Compiler 后续可以在先确定 Workflow authoring 对象的可变性边界后增加按定义摘要复用的
+编译缓存；错误 phase/code 的更细分类也应作为一次统一诊断契约设计，不能零散增加别名。
 
-### Phase 6: Optional Full-mode Replay/Fork
+### Live transition 的长期扩展性
 
-- [ ] Add legal Full-mode Replay/Fork and Workflow compatibility validation only
-  after the ordinary CLI repair loop is stable.
+长串行图仍会超线性：每个 transition 都完整校验持续增长的 NodeOccurrence 和
+OperatorCall 历史。DAG Scheduler 与 Scheduler delta 的 map 复制不是当前瓶颈，契约
+也已经复用编译后的 Pydantic adapter。若真实 workload 需要数百个以上 Node，应先明确
+终态 Occurrence/Call 是否必须常驻当前 Checkpoint；只有收窄权威 RuntimeState 的历史
+范围，才可能在保留逐 transition 完整校验的同时改善渐进复杂度。不要为此增加第二套
+State codec、增量镜像或绕过权威 Validator。
 
-## 3. Complete local Server and journal ownership
+## 明确不在当前模型中
 
-- [ ] Formalize embedded Router lifecycle ownership. Standalone Server and CLI
-  shutdown are bounded and close their ProjectHost on the serving Event Loop;
-  an externally hosted Router still needs an explicit contract that prevents it
-  from closing a host-owned `AutoAgentApp` unexpectedly.
-- [ ] Add an optional local persistence spool for prolonged database outages.
-  Until then, the in-memory backlog and admission limit are the safety boundary
-  and shutdown timeout may abandon undurable records.
-- [ ] Define durable semantic UserEvent compaction and retention together with
-  the process-local delta prefix. Continue excluding `message_delta`,
-  `reasoning_delta`, and `tool_call_delta` from database persistence by default.
-- [ ] Add UserEvent transport/UI batching only after the Agent Activity contract
-  stabilizes; keep notification-driven SSE delivery.
+- 通用 Node 多发生、ActivationGroup 和跨 Trigger Join；
+- 运行中动态修改 Workflow 图；
+- Map item 沿普通 Edge 独立扩散；
+- Stream Chunk 反复激活普通 Node 或 Stream Edge；
+- 同一 Session 内同时运行多个 Invocation；
+- 公开结果暴露 RuntimeEvent、StateOperation、历史游标或 replay API；
+- Operator Retry、Fallback、Timeout 的既定组合策略；
+- Core 内数据库、历史归档、schema migration 或 UI。
 
-## 4. Add offline optimization workflows
+## 统一验收
 
-- [ ] Feed Agent-friendly reports and selected production traces into offline
-  optimization tools.
-- [ ] Generate reviewable Workflow code patches rather than mutating an active
-  Workflow or Invocation.
-- [ ] Evaluate candidate patches with registered Suites, rerun, and Fork
-  before promotion.
-- [ ] Promote accepted code as a new immutable Workflow Revision.
+在仓库根目录运行：
 
-## 5. Prepare for hosted execution
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m compileall -q autoagent tests
+.venv/bin/python -m tests.benchmarks.benchmark_full_core
+git diff --check
+```
 
-- [ ] Separate project management, runner processes, remote persistence
-  ingestion, Artifact storage, and tracing/query services while preserving the
-  local App/Runtime contracts.
-- [ ] Add per-Invocation leases, fencing tokens, and idempotent takeover before
-  multiple runners can own the same durable RuntimeStore.
-- [ ] Add Workflow Revision publishing, rollback, tenancy, authentication,
-  authorization, Secret management, quotas, and observability.
-- [ ] Reuse the local Skill, Compiler Diagnostics, reports, rerun, Eval, and
-  Fork contracts instead of creating platform-only execution semantics.
+每个新增 `test_*` 方法第一行必须用简短 docstring 说明行为或失败边界。

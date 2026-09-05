@@ -1,1660 +1,1087 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from io import StringIO
+import io
 import json
 import os
-from pathlib import Path
-from types import SimpleNamespace
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
-from collections.abc import Iterator
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
+from typing import Iterator
+from unittest.mock import patch
 
-from autoagent.cli import build_parser, main
-from autoagent.cli.main import _server
-from autoagent.cli.server_client import ServerClientError
-from autoagent.cli.settings import app_settings_from_arguments
-from autoagent.core.server import ServerSettings
-from autoagent.project import load_project_environment
+from autoagent.cli import main
+from autoagent.core.app import CheckpointLoadResult, InvocationRef
+from autoagent.hosting import RuntimeEventStoreError, SQLiteRuntimeStore
+from autoagent.tracing import TracingDependencyError
 
 
-class AutoAgentCliTests(unittest.TestCase):
-    def test_server_closes_the_complete_project_host(self) -> None:
-        closed = False
+class CliTests(unittest.TestCase):
+    def test_compile_reports_revision_without_creating_runtime_storage(self) -> None:
+        """Compile every project Workflow without starting a Host or database."""
 
-        class Host:
-            app = object()
+        module = "cli_compile_workflow"
+        with self.project(module) as root:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["compile", "--project", str(root)])
+            document = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertTrue(document["ok"])
+            self.assertEqual(document["workflows"][0]["workflow_id"], "cli-flow")
+            self.assertIn("workflow_revision_id", document["workflows"][0])
+            self.assertFalse((root / ".autoagent").exists())
+        sys.modules.pop(module, None)
 
-            async def close(self) -> None:
-                nonlocal closed
-                closed = True
+    def test_compile_structures_system_exit_from_user_import(self) -> None:
+        """Prevent user module SystemExit from choosing the CLI process exit code."""
 
-        host = Host()
-        server = Mock()
-        with (
-            patch("autoagent.cli.main.ProjectHost", return_value=host),
-            patch(
-                "autoagent.cli.main.server_settings_from_arguments",
-                return_value=SimpleNamespace(
-                    ui_directory=None,
-                    execution_enabled=True,
-                    access_token=None,
-                    secure_cookies=False,
-                    trace_cache_size=128,
-                    host="127.0.0.1",
-                    port=8765,
-                ),
-            ),
-            patch(
-                "autoagent.cli.main.AutoAgentServer",
-                return_value=server,
-            ) as server_type,
-        ):
-            code = _server(
-                SimpleNamespace(root=Path(".")),
-                {},
-                object(),
-                SimpleNamespace(reload=False),
+        module = "cli_system_exit_workflow"
+        with self.project(module) as root:
+            (root / f"{module}.py").write_text(
+                "raise SystemExit(7)\n",
+                encoding="utf-8",
             )
-
-        self.assertEqual(0, code)
-        self.assertTrue(closed)
-        server_type.assert_called_once_with(
-            host.app,
-            execution_enabled=True,
-            access_token=None,
-            secure_cookies=False,
-            ui_directory=None,
-            trace_cache_size=128,
-            shutdown_callback=host.close,
-        )
-        server.run.assert_called_once_with(
-            host="127.0.0.1",
-            port=8765,
-            reload=False,
-        )
-
-    def test_parser_has_one_canonical_output_and_response_names(self) -> None:
-        parser = build_parser()
-
-        arguments = parser.parse_args(
-            [
-                "invocation",
-                "resume",
-                "weather",
-                "--session",
-                "session-a",
-                "--wait-key",
-                "approval",
-                "--response-json",
-                '{"approved": true}',
-            ]
-        )
-
-        self.assertEqual('{"approved": true}', arguments.response_json)
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["--format", "json", "workflow", "list"])
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["serve"])
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["server", "--file", "workflow.py"])
-
-    def test_parser_exposes_eval_list_check_and_run(self) -> None:
-        parser = build_parser()
-
-        listed = parser.parse_args(["eval", "list"])
-        checked = parser.parse_args(["eval", "check", "regression"])
-        run = parser.parse_args(
-            [
-                "eval",
-                "run",
-                "regression",
-                "--case",
-                "eval_happy_path",
-                "--max-concurrency",
-                "2",
-                "--verbose",
-                "--store",
-                "memory",
-            ]
-        )
-
-        self.assertEqual("list", listed.command)
-        self.assertEqual("regression", checked.suite_id)
-        self.assertEqual(["eval_happy_path"], run.cases)
-        self.assertEqual(2, run.max_concurrency)
-        self.assertTrue(run.verbose)
-
-    def test_parser_exposes_progressive_invocation_report(self) -> None:
-        arguments = build_parser().parse_args(
-            [
-                "invocation",
-                "report",
-                "00000000-0000-0000-0000-000000000001",
-                "--source",
-                "database",
-            ]
-        )
-
-        self.assertEqual("report", arguments.command)
-        self.assertEqual("database", arguments.source)
+            error = io.StringIO()
+            with redirect_stderr(error):
+                code = main(["compile", "--project", str(root)])
+        document = json.loads(error.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(document["error"]["code"], "HOST_CONFIGURATION_INVALID")
         self.assertEqual(
-            "00000000-0000-0000-0000-000000000001",
-            arguments.invocation_id,
+            document["error"]["diagnostics"][0]["code"],
+            "WORKFLOW_MODULE_IMPORT_FAILED",
         )
+        sys.modules.pop(module, None)
 
-    def test_parser_exposes_one_progressive_query_surface(self) -> None:
-        arguments = build_parser().parse_args(
-            [
-                "invocation",
-                "query",
-                "00000000-0000-0000-0000-000000000001",
-                "nodes",
-                "--limit",
-                "5",
-                "--source",
-                "database",
-            ]
-        )
+    def test_invoke_prints_one_stable_machine_result(self) -> None:
+        """Invoke through Host and print JSON identity, status, output, and checkpoint."""
 
-        self.assertEqual("query", arguments.command)
-        self.assertEqual("nodes", arguments.kind)
-        self.assertEqual(5, arguments.limit)
-        self.assertEqual("database", arguments.source)
-
-        calls = build_parser().parse_args(
-            [
-                "invocation",
-                "query",
-                "00000000-0000-0000-0000-000000000001",
-                "operator-calls",
-                "--node-execution-id",
-                "00000000-0000-0000-0000-000000000002",
-            ]
-        )
-        self.assertEqual(
-            "00000000-0000-0000-0000-000000000002",
-            calls.node_execution_id,
-        )
-
-    def test_invocation_report_falls_back_to_explicit_database(self) -> None:
-        with self.project(
-            module_name="cli_report_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                "AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///./runtime.db\n",
-                encoding="utf-8",
-            )
-            run_code, run_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "run",
-                "echo",
-                "--store",
-                "database",
-                "--input-json",
-                '{"value":"hello"}',
-            )
-            invocation_line = next(
-                line
-                for line in run_output.splitlines()
-                if line.startswith("INVOCATION ")
-            )
-            invocation_id = invocation_line.split(" ", 1)[1]
-
-            report_code, report_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "report",
-                invocation_id,
-                "--source",
-                "database",
-            )
-            query_code, query_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "query",
-                invocation_id,
-                "nodes",
-                "--source",
-                "database",
-            )
-
-        self.assertEqual(0, run_code, run_output)
-        self.assertEqual(0, report_code, report_output)
-        self.assertIn("SOURCE database", report_output)
-        self.assertIn("STATE completed", report_output)
-        self.assertIn("NODES 1", report_output)
-        self.assertIn("OPERATOR_CALLS 1", report_output)
-        self.assertIn(
-            "OPERATOR_CALL_SEMANTICS ACTUAL_ATTEMPTS",
-            report_output,
-        )
-        self.assertIn("REPORT_RESULT generated", report_output)
-        self.assertEqual(0, query_code, query_output)
-        self.assertIn("EVIDENCE nodes", query_output)
-        self.assertIn("ITEM_COUNT 1", query_output)
-        self.assertIn('"node_id":"echo"', query_output)
-        self.assertIn("QUERY_RESULT generated", query_output)
-
-    def test_local_rerun_and_comparison_use_durable_source_boundary(self) -> None:
-        with self.project(
-            module_name="cli_rerun_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="rerun_echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                "AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///./runtime.db\n",
-                encoding="utf-8",
-            )
-            run_code, run_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "run",
-                "rerun_echo",
-                "--store",
-                "database",
-                "--event-mode",
-                "standard",
-                "--input-json",
-                '{"value":"hello"}',
-            )
-            source_id = next(
-                line.split(" ", 1)[1]
-                for line in run_output.splitlines()
-                if line.startswith("INVOCATION ")
-            )
-            rerun_code, rerun_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "rerun",
-                source_id,
-                "--store",
-                "database",
-            )
-            candidate_id = next(
-                line.split(" ", 1)[1]
-                for line in rerun_output.splitlines()
-                if line.startswith("CANDIDATE ")
-            )
-            compare_code, compare_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "compare",
-                source_id,
-                candidate_id,
-                "--source",
-                "database",
-            )
-
-        self.assertEqual(0, run_code, run_output)
-        self.assertEqual(0, rerun_code, rerun_output)
-        self.assertIn("EVENT_MODE standard", rerun_output)
-        self.assertIn("STATE completed", rerun_output)
-        self.assertEqual(0, compare_code, compare_output)
-        self.assertIn("INPUT_EQUAL true", compare_output)
-        self.assertIn("RESULT_EQUAL true", compare_output)
-        self.assertIn("COMPARISON_RESULT generated", compare_output)
-
-    def test_eval_list_is_lazy_and_check_validates_cases(self) -> None:
-        evaluation_source = """
-            from autoagent.evaluation import EvalCase, Evaluation
-
-            class EchoEvaluation(Evaluation):
-                async def eval_happy_path(self, case: EvalCase) -> None:
-                    pass
-        """
-        with self.project(
-            module_name="cli_eval_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-            eval_module_name="cli_echo_evaluation",
-            eval_source=evaluation_source,
-            eval_suites=(
-                (
-                    "echo_regression",
-                    "echo",
-                    "cli_echo_evaluation:EchoEvaluation",
-                ),
-            ),
-        ) as root:
-            list_code, listed = self.run_cli(
-                "--project",
-                str(root),
-                "eval",
-                "list",
-            )
-            check_code, checked = self.run_cli(
-                "--project",
-                str(root),
-                "eval",
-                "check",
-                "echo_regression",
-            )
-
-        self.assertEqual(0, list_code, listed)
-        self.assertIn("EVAL echo_regression", listed)
-        self.assertIn("ENTRYPOINT cli_echo_evaluation:EchoEvaluation", listed)
-        self.assertEqual(0, check_code, checked)
-        self.assertIn("CASE eval_happy_path", checked)
-        self.assertIn("EVAL_RESULT valid", checked)
-
-    def test_eval_list_does_not_import_broken_evaluation(self) -> None:
-        with self.project(
-            module_name="cli_lazy_eval_workflow",
-            source="""
-                from autoagent import Workflow
-                workflow = Workflow(id="echo")
-            """,
-            eval_module_name="cli_lazy_broken_evaluation",
-            eval_source="raise RuntimeError('must stay lazy')",
-            eval_suites=(
-                (
-                    "lazy",
-                    "echo",
-                    "cli_lazy_broken_evaluation:Evaluation",
-                ),
-            ),
-        ) as root:
-            list_code, listed = self.run_cli(
-                "--project",
-                str(root),
-                "eval",
-                "list",
-            )
-            check_code, checked = self.run_cli(
-                "--project",
-                str(root),
-                "eval",
-                "check",
-                "lazy",
-            )
-
-        self.assertEqual(0, list_code, listed)
-        self.assertEqual(2, check_code, checked)
-        self.assertIn("EVAL_MODULE_IMPORT_FAILED", checked)
-
-    def test_eval_run_executes_full_mode_and_renders_results(self) -> None:
-        with self.project(
-            module_name="cli_eval_run_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-            eval_module_name="cli_eval_run_evaluation",
-            eval_source="""
-                from autoagent.evaluation import EvalCase, Evaluation, evaluators
-
-                class EchoEvaluation(Evaluation):
-                    async def eval_happy_path(self, case: EvalCase) -> None:
-                        await case.invoke(
-                            {"value": "hello"},
-                            evaluators=(
-                                evaluators.InvocationState(expected="completed"),
-                                evaluators.InvocationResult(
-                                    expected={"output": "hello"}
-                                ),
-                            ),
-                        )
-
-                    async def eval_not_selected(self, case: EvalCase) -> None:
-                        await case.invoke(
-                            {"value": "unused"},
-                            evaluators=(
-                                evaluators.InvocationState(expected="failed"),
-                            ),
-                        )
-            """,
-            eval_suites=(
-                (
-                    "echo_regression",
-                    "echo",
-                    "cli_eval_run_evaluation:EchoEvaluation",
-                ),
-            ),
-        ) as root:
-            report_path = root / "reports" / "eval.txt"
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "eval",
-                "run",
-                "echo_regression",
-                "--case",
-                "eval_happy_path",
-                "--store",
-                "memory",
-                "--report-file",
-                str(report_path),
-            )
-            report = report_path.read_text(encoding="utf-8")
-
-        self.assertEqual(0, code, output)
-        self.assertEqual(output.strip(), report.strip())
-        self.assertIn("STATUS passed", output)
-        self.assertIn("CASE eval_happy_path", output)
-        self.assertNotIn("CASE eval_not_selected", output)
-        self.assertIn("EVALUATOR invocation_result passed", output)
-        self.assertNotIn("      VALUE", output)
-        self.assertNotIn('"output": "hello"', output)
-        self.assertRegex(output, r"THROUGH_SEQUENCE [1-9][0-9]*")
-
-    def test_eval_verbose_renders_successful_evaluator_details(self) -> None:
-        with self.project(
-            module_name="cli_eval_verbose_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-            eval_module_name="cli_eval_verbose_evaluation",
-            eval_source="""
-                from autoagent.evaluation import EvalCase, Evaluation, evaluators
-
-                class EchoEvaluation(Evaluation):
-                    async def eval_happy_path(self, case: EvalCase) -> None:
-                        await case.invoke(
-                            {"value": "hello"},
-                            evaluators=(
-                                evaluators.InvocationResult(
-                                    expected={"output": "hello"}
-                                ),
-                            ),
-                        )
-            """,
-            eval_suites=((
-                "echo_regression",
-                "echo",
-                "cli_eval_verbose_evaluation:EchoEvaluation",
-            ),),
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "eval",
-                "run",
-                "echo_regression",
-                "--case",
-                "eval_happy_path",
-                "--store",
-                "memory",
-                "--verbose",
-            )
-
-        self.assertEqual(0, code, output)
-        self.assertIn("      VALUE", output)
-        self.assertIn('"output": "hello"', output)
-
-    def test_eval_business_failure_and_evaluator_error_have_distinct_exit_codes(
-        self,
-    ) -> None:
-        with self.project(
-            module_name="cli_eval_exit_workflow",
-            source="""
-                from autoagent import Workflow
-                def echo() -> str:
-                    return "ok"
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-            eval_module_name="cli_eval_exit_evaluation",
-            eval_source="""
-                from autoagent.evaluation import (
-                    EvalCase,
-                    Evaluation,
-                    EvaluatorResult,
-                    evaluators,
+        module = "cli_invoke_workflow"
+        with self.project(module) as root:
+            output = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            ), redirect_stdout(output):
+                code = main(
+                    [
+                        "invoke",
+                        "cli-flow",
+                        "--project",
+                        str(root),
+                        "--input",
+                        '{"value":7}',
+                        "--session-id",
+                        "cli-session",
+                    ]
                 )
+            document = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(document["status"], "completed")
+            self.assertEqual(document["session_id"], "cli-session")
+            self.assertEqual(document["output"], {"value": 7})
+            self.assertEqual(document["checkpoint"]["root_session_id"], "cli-session")
+        sys.modules.pop(module, None)
 
-                class BrokenEvaluator:
-                    async def evaluate(self, context):
-                        raise RuntimeError("judge unavailable")
+    def test_invalid_json_uses_stderr_and_a_nonzero_exit(self) -> None:
+        """Reject malformed command input without loading or executing a project."""
 
-                class EchoEvaluation(Evaluation):
-                    async def eval_business_failure(self, case: EvalCase) -> None:
-                        await case.invoke(
-                            evaluators=(
-                                evaluators.InvocationResult(
-                                    expected={"output": "wrong"}
-                                ),
-                            ),
-                        )
-
-                    async def eval_evaluator_error(self, case: EvalCase) -> None:
-                        await case.invoke(evaluators=(BrokenEvaluator(),))
-            """,
-            eval_suites=(
-                (
-                    "echo_regression",
-                    "echo",
-                    "cli_eval_exit_evaluation:EchoEvaluation",
-                ),
-            ),
-        ) as root:
-            failed_code, failed = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "eval",
-                "run",
-                "echo_regression",
-                "--case",
-                "eval_business_failure",
-                "--store",
-                "memory",
-            )
-            error_code, errored = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "eval",
-                "run",
-                "echo_regression",
-                "--case",
-                "eval_evaluator_error",
-                "--store",
-                "memory",
-            )
-
-        self.assertEqual(1, failed_code, failed)
-        self.assertIn("RESULT failed", failed)
-        self.assertIn("      VALUE", failed)
-        self.assertIn('"output": "ok"', failed)
-        self.assertIn("COMMENT", failed)
-        self.assertEqual(2, error_code, errored)
-        self.assertIn("EVALUATOR_EXECUTION_ERROR", errored)
-        self.assertIn("RESULT error", errored)
-
-    def test_eval_timeout_renders_partial_result_and_returns_error_code(
-        self,
-    ) -> None:
-        with self.project(
-            module_name="cli_eval_timeout_workflow",
-            source="""
-                import asyncio
-                from autoagent import Workflow
-
-                async def wait(seconds: float) -> None:
-                    await asyncio.sleep(seconds)
-
-                workflow = Workflow(id="timeout")
-                workflow.add_node(wait, node_id="wait")
-            """,
-            eval_module_name="cli_eval_timeout_evaluation",
-            eval_source="""
-                from autoagent.evaluation import EvalCase, Evaluation
-
-                class TimeoutEvaluation(Evaluation):
-                    async def eval_slow(self, case: EvalCase) -> None:
-                        await case.invoke({"seconds": 60})
-            """,
-            eval_suites=(
-                (
-                    "timeout_regression",
-                    "timeout",
-                    "cli_eval_timeout_evaluation:TimeoutEvaluation",
-                ),
-            ),
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "eval",
-                "run",
-                "timeout_regression",
-                "--store",
-                "memory",
-                "--timeout-ms",
-                "20",
-            )
-
-        self.assertEqual(2, code, output)
-        self.assertIn("ERROR EVAL_TIMEOUT", output)
-        self.assertIn("CASE eval_slow", output)
-        self.assertIn("ERROR EVAL_CASE_CANCELLED", output)
-        self.assertIn("ERROR EVAL_STEP_CANCELLED", output)
-        self.assertIn("RESULT error", output)
-
-    def test_cli_overrides_process_environment_and_project_env(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / ".env").write_text(
-                "\n".join(
-                    (
-                        "AUTOAGENT_DATABASE_URL=sqlite+aiosqlite:///from-file.db",
-                        "AUTOAGENT_EXECUTOR_MAX_PARALLEL_UNITS=3",
-                    )
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            environment = load_project_environment(
-                root,
-                environ={
-                    "AUTOAGENT_EXECUTOR_MAX_PARALLEL_UNITS": "4",
-                },
-            )
-            arguments = build_parser().parse_args(
+        error = io.StringIO()
+        with redirect_stderr(error):
+            code = main(
                 [
-                    "invocation",
-                    "run",
-                    "echo",
-                    "--store",
-                    "memory",
-                    "--max-parallel-units",
-                    "5",
+                    "invoke",
+                    "missing",
+                    "--project",
+                    "/does/not/matter",
+                    "--input",
+                    "not-json",
                 ]
             )
-            settings = app_settings_from_arguments(arguments, environment)
+        document = json.loads(error.getvalue())
+        self.assertEqual(code, 1)
+        self.assertFalse(document["ok"])
+        self.assertEqual(document["error"]["code"], "VALUEERROR")
 
-        self.assertIsNone(settings.database_url)
-        self.assertEqual(5, settings.executor_max_parallel_units)
+    def test_input_rejects_non_finite_json_constants(self) -> None:
+        """Reject JSON NaN and Infinity extensions at the command boundary."""
 
-    def test_project_env_is_visible_during_import_and_invocation(self) -> None:
-        variable = "CUSTOM_WORKFLOW_REGION"
-        with self.project(
-            module_name="cli_project_environment",
-            source=f"""
-                import os
-                from autoagent import Workflow
-
-                imported_region = os.getenv("{variable}")
-
-                def read_region() -> dict[str, str | None]:
-                    return {{
-                        "imported": imported_region,
-                        "invoked": os.getenv("{variable}"),
-                    }}
-
-                workflow = Workflow(id="environment")
-                workflow.add_node(read_region, node_id="read_region")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                f"{variable}=from-project-env\n",
-                encoding="utf-8",
-            )
-            output = StringIO()
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                redirect_stdout(output),
-            ):
-                code = main(
-                    (
-                        "--project",
-                        str(root),
-                        "invocation",
-                        "run",
-                        "environment",
-                        "--store",
-                        "memory",
+        for value in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(value=value):
+                error = io.StringIO()
+                with redirect_stderr(error):
+                    code = main(
+                        [
+                            "invoke",
+                            "missing",
+                            "--project",
+                            "/does/not/matter",
+                            f"--input={value}",
+                        ]
                     )
-                )
-                self.assertIsNone(os.getenv(variable))
-
-        self.assertEqual(0, code, output.getvalue())
-        self.assertIn('"imported": "from-project-env"', output.getvalue())
-        self.assertIn('"invoked": "from-project-env"', output.getvalue())
-
-    def test_process_environment_overrides_project_env_and_is_restored(
-        self,
-    ) -> None:
-        variable = "CUSTOM_WORKFLOW_REGION_OVERRIDE"
-        with self.project(
-            module_name="cli_project_environment_override",
-            source=f"""
-                import os
-                from autoagent import Workflow
-
-                def read_region() -> str | None:
-                    return os.getenv("{variable}")
-
-                workflow = Workflow(id="environment_override")
-                workflow.add_node(read_region, node_id="read_region")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                f"{variable}=from-project-env\n",
-                encoding="utf-8",
-            )
-            output = StringIO()
-            with (
-                patch.dict(
-                    os.environ,
-                    {variable: "from-process-environment"},
-                    clear=True,
-                ),
-                redirect_stdout(output),
-            ):
-                code = main(
-                    (
-                        "--project",
-                        str(root),
-                        "invocation",
-                        "run",
-                        "environment_override",
-                        "--store",
-                        "memory",
-                    )
-                )
+                self.assertEqual(code, 1)
                 self.assertEqual(
-                    "from-process-environment",
-                    os.getenv(variable),
+                    json.loads(error.getvalue())["error"]["code"],
+                    "VALUEERROR",
                 )
 
-        self.assertEqual(0, code, output.getvalue())
-        self.assertIn('"output": "from-process-environment"', output.getvalue())
+    def test_user_stdout_is_redirected_away_from_machine_json(self) -> None:
+        """Keep import and Operator prints off the command stdout channel."""
 
-    def test_no_env_file_keeps_project_values_out_of_process_environment(
-        self,
-    ) -> None:
-        variable = "CUSTOM_WORKFLOW_DISABLED_ENV"
-        with self.project(
-            module_name="cli_project_environment_disabled",
-            source=f"""
-                import os
-                from autoagent import Workflow
-
-                imported_value = os.getenv("{variable}", "missing")
-                def read_environment() -> str:
-                    return imported_value
-                workflow = Workflow(id="environment_disabled")
-                workflow.add_node(
-                    read_environment,
-                    node_id="read_environment",
-                )
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                f"{variable}=must-not-load\n",
-                encoding="utf-8",
-            )
-            output = StringIO()
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                redirect_stdout(output),
-            ):
-                code = main(
-                    (
-                        "--project",
-                        str(root),
-                        "--no-env-file",
-                        "invocation",
-                        "run",
-                        "environment_disabled",
-                        "--store",
-                        "memory",
-                    )
-                )
-
-        self.assertEqual(0, code, output.getvalue())
-        self.assertIn('"output": "missing"', output.getvalue())
-
-    def test_server_keeps_project_environment_until_shutdown(self) -> None:
-        variable = "CUSTOM_SERVER_LIFETIME_VALUE"
-        observed: list[str | None] = []
-        server = Mock()
-        server.run.side_effect = lambda **_: observed.append(os.getenv(variable))
-        with self.project(
-            module_name="cli_server_environment",
-            source="""
-                from autoagent import Workflow
-                workflow = Workflow(id="server_environment")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                f"{variable}=available-while-serving\n",
-                encoding="utf-8",
-            )
-            output = StringIO()
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                patch(
-                    "autoagent.cli.main.AutoAgentServer",
-                    return_value=server,
-                ),
-                redirect_stdout(output),
-            ):
-                code = main(
-                    (
-                        "--project",
-                        str(root),
-                        "server",
-                        "--store",
-                        "memory",
-                    )
-                )
-                self.assertIsNone(os.getenv(variable))
-
-        self.assertEqual(0, code, output.getvalue())
-        self.assertEqual(["available-while-serving"], observed)
-
-    def test_project_check_does_not_require_llm_provider_secret(self) -> None:
-        with self.project(
-            module_name="cli_llm_workflow",
-            source="""
-                from autoagent import CapabilityRef, Workflow
-                from autoagent.ai import LLM_CALL_CAPABILITY_ID
-
-                workflow = Workflow(id="llm")
-                workflow.add_node(
-                    CapabilityRef(id=LLM_CALL_CAPABILITY_ID),
-                    node_id="llm_call",
-                )
-            """,
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "project",
-                "check",
-            )
-
-        self.assertEqual(0, code, output)
-        self.assertIn("WORKFLOW llm", output)
-        self.assertIn("RESULT valid", output)
-
-    def test_workflow_list_and_check_use_manifest_ids(self) -> None:
-        with self.project(
-            module_name="cli_list_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo", version="2")
-                workflow.add_node(echo, node_id="echo")
-            """,
-        ) as root:
-            list_code, listed = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "list",
-            )
-            check_code, checked = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "check",
-                "echo",
-            )
-
-        self.assertEqual(0, list_code, listed)
-        self.assertIn("ENTRYPOINT cli_list_workflow:workflow", listed)
-        self.assertEqual(0, check_code, checked)
-        self.assertIn("ENTRIES echo", checked)
-
-    def test_workflow_preview_defaults_to_terminal_and_shares_diagnostics(
-        self,
-    ) -> None:
-        with self.project(
-            module_name="cli_preview_invalid",
-            source="""
-                from autoagent import Workflow
-
-                def source() -> str:
-                    return "value"
-
-                def target(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="preview_invalid")
-                workflow.add_node(source, node_id="source")
-                workflow.add_node(target, node_id="target")
-                workflow.add_edge(
-                    "source",
-                    "target",
-                    condition="output.accepted == true",
-                )
-            """,
-        ) as root:
-            check_code, checked = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "check",
-                "preview_invalid",
-            )
-            preview_code, previewed = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "preview",
-                "preview_invalid",
-            )
-
-        self.assertEqual(1, check_code, checked)
-        self.assertEqual(0, preview_code, previewed)
-        self.assertIn("STATUS invalid", previewed)
-        self.assertIn("FLOW", previewed)
-        self.assertIn("STRING_CONDITION_UNSUPPORTED", checked)
-        self.assertIn("STRING_CONDITION_UNSUPPORTED", previewed)
-
-    def test_workflow_preview_supports_mermaid_and_json(self) -> None:
-        with self.project(
-            module_name="cli_preview_formats",
-            source="""
-                from autoagent import Workflow
-
-                def source() -> str:
-                    return "value"
-
-                def target(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="preview_formats")
-                workflow.add_node(source, node_id="source")
-                workflow.add_node(target, node_id="target")
-                workflow.add_edge("source", "target")
-            """,
-        ) as root:
-            mermaid_code, mermaid = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "preview",
-                "preview_formats",
-                "--format",
-                "mermaid",
-            )
-            json_code, json_output = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "preview",
-                "preview_formats",
-                "--format",
-                "json",
-            )
-
-        self.assertEqual(0, mermaid_code, mermaid)
-        self.assertIn("flowchart LR", mermaid)
-        self.assertIn("edge_source_target", mermaid)
-        self.assertEqual(0, json_code, json_output)
-        document = json.loads(json_output)
-        self.assertTrue(document["valid"])
-        self.assertEqual("preview_formats", document["analysis"]["workflow_id"])
-
-    def test_workflow_preview_writes_relative_output_under_project_root(self) -> None:
-        with self.project(
-            module_name="cli_preview_output",
-            source="""
-                from autoagent import Workflow
-
-                def task() -> str:
-                    return "done"
-
-                workflow = Workflow(id="preview_output")
-                workflow.add_node(task, node_id="task")
-            """,
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "preview",
-                "preview_output",
-                "--format",
-                "mermaid",
-                "--output",
-                "generated/preview.mmd",
-            )
-            target = root / "generated" / "preview.mmd"
-            content = target.read_text(encoding="utf-8")
-
-        self.assertEqual(0, code, output)
-        self.assertIn(f"OUTPUT {target}", output)
-        self.assertIn("RESULT previewed", output)
-        self.assertIn("flowchart LR", content)
-
-    def test_workflow_check_and_preview_load_standalone_python_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            workflow_file = root / "draft-workflow.py"
-            workflow_file.write_text(
+        module = "cli_printing_workflow"
+        with self.project(module) as root:
+            (root / f"{module}.py").write_text(
                 textwrap.dedent(
                     """
-                    from autoagent import Workflow
+                    from typing_extensions import TypedDict
+                    import ctypes
+                    import os
+                    import subprocess
+                    import sys
+                    from autoagent import Node, Workflow
 
-                    def task() -> str:
-                        return "done"
+                    print("module-output")
+                    os.write(1, b"module-fd-output\\n")
 
-                    class Exports:
-                        pass
+                    class Value(TypedDict):
+                        value: int
 
-                    exports = Exports()
-                    exports.draft = Workflow(id="standalone_preview")
-                    exports.draft.add_node(task, node_id="task")
-                    """
-                ).strip()
-                + "\n",
-                encoding="utf-8",
-            )
-            check_code, checked = self.run_cli(
-                "workflow",
-                "check",
-                "--file",
-                str(workflow_file),
-                "--object",
-                "exports.draft",
-            )
-            preview_code, previewed = self.run_cli(
-                "workflow",
-                "preview",
-                "--file",
-                str(workflow_file),
-                "--object",
-                "exports.draft",
-            )
-
-        self.assertEqual(0, check_code, checked)
-        self.assertIn("WORKFLOW standalone_preview", checked)
-        self.assertEqual(0, preview_code, previewed)
-        self.assertIn("STATUS valid", previewed)
-        self.assertIn("task [ENTRY, EXIT]", previewed)
-
-    def test_workflow_check_rejects_invalid_callable_schemas(self) -> None:
-        with self.project(
-            module_name="cli_invalid_callable_schema",
-            source="""
-                import sqlite3
-
-                from autoagent import Workflow
-
-                def missing_schema(value):
-                    return value
-
-                def process_connection(connection: sqlite3.Connection) -> str:
-                    return str(connection)
-
-                workflow = Workflow(id="invalid_callable_schema")
-                workflow.add_node(missing_schema, node_id="missing_schema")
-                workflow.add_node(
-                    process_connection,
-                    node_id="process_connection",
-                )
-            """,
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "workflow",
-                "check",
-                "invalid_callable_schema",
-            )
-
-        self.assertEqual(1, code, output)
-        self.assertIn("ERROR OPERATOR_CONTRACT_INVALID", output)
-        self.assertIn("has no type annotation", output)
-        self.assertIn("has no return type annotation", output)
-        self.assertIn("non-serializable Workflow type", output)
-        self.assertIn("RESULT failed", output)
-
-    def test_invocation_run_executes_standalone_workflow_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            workflow_file = root / "run-workflow.py"
-            workflow_file.write_text(
-                textwrap.dedent(
-                    """
-                    from autoagent import Workflow
-
-                    def echo(value: str) -> str:
+                    def identity(value: Value) -> Value:
+                        print("operator-output")
+                        os.write(1, b"operator-fd-output\\n")
+                        subprocess.run(
+                            [sys.executable, "-c", "print('subprocess-output')"],
+                            check=True,
+                        )
+                        ctypes.CDLL(None).printf(b"native-buffered-output")
                         return value
 
-                    workflow = Workflow(id="standalone_run")
-                    workflow.add_node(echo, node_id="echo")
+                    workflow = Workflow("cli-flow", nodes=[Node("work", identity)])
                     """
-                ).strip()
-                + "\n",
+                ),
                 encoding="utf-8",
             )
-            code, output = self.run_cli(
-                "--no-env-file",
-                "invocation",
-                "run",
-                "--file",
-                str(workflow_file),
-                "--input-json",
-                '{"value":"hello"}',
-                "--store",
-                "memory",
-            )
+            output = io.StringIO()
+            error = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            ), redirect_stdout(output), redirect_stderr(error):
+                code = main(
+                    [
+                        "invoke",
+                        "cli-flow",
+                        "--project",
+                        str(root),
+                        "--input",
+                        '{"value":1}',
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["output"], {"value": 1})
+            self.assertIn("module-output", error.getvalue())
+            self.assertIn("operator-output", error.getvalue())
+            self.assertIn("module-fd-output", error.getvalue())
+            self.assertIn("operator-fd-output", error.getvalue())
+            self.assertIn("subprocess-output", error.getvalue())
+            self.assertIn("native-buffered-output", error.getvalue())
+        sys.modules.pop(module, None)
 
-        self.assertEqual(0, code, output)
-        self.assertIn("WORKFLOW standalone_run", output)
-        self.assertIn("STATE completed", output)
-        self.assertIn('"output": "hello"', output)
+    def test_inherited_stdout_from_a_live_child_cannot_delay_json(self) -> None:
+        """Do not wait for a subprocess that retains the redirected stdout fd."""
 
-    def test_invocation_resume_executes_standalone_workflow_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            database_path = root / "runtime.db"
-            (root / ".env").write_text(
-                "AUTOAGENT_DATABASE_URL="
-                f"sqlite+aiosqlite:///{database_path}\n",
-                encoding="utf-8",
-            )
-            workflow_file = root / "wait-workflow.py"
-            workflow_file.write_text(
+        module = "cli_live_child_workflow"
+        with self.project(module) as root:
+            (root / f"{module}.py").write_text(
                 textwrap.dedent(
                     """
-                    from autoagent import SystemCommand, Workflow
+                    import subprocess
+                    import sys
+                    from typing_extensions import TypedDict
+                    from autoagent import Node, Workflow
 
-                    workflow = Workflow(id="standalone_wait")
-                    workflow.add_node(SystemCommand(id="wait"), node_id="wait")
+                    child = None
+
+                    class Value(TypedDict):
+                        value: int
+
+                    def launch(value: Value) -> Value:
+                        global child
+                        child = subprocess.Popen(
+                            [sys.executable, "-c", "import time; time.sleep(5)"]
+                        )
+                        return value
+
+                    workflow = Workflow("cli-flow", nodes=[Node("work", launch)])
                     """
-                ).strip()
-                + "\n",
+                ),
                 encoding="utf-8",
             )
-            run_code, run_output = self.run_cli(
-                "invocation",
-                "run",
-                "--file",
-                str(workflow_file),
-                "--session",
-                "standalone-session",
-                "--input-json",
-                '{"wait_key":"approval"}',
-            )
-            resume_code, resume_output = self.run_cli(
-                "invocation",
-                "resume",
-                "--file",
-                str(workflow_file),
-                "--session",
-                "standalone-session",
-                "--wait-key",
-                "approval",
-                "--response-json",
-                '{"approved":true}',
-            )
+            output = io.StringIO()
+            error = io.StringIO()
+            started = time.monotonic()
+            try:
+                with patch.dict(
+                    os.environ,
+                    {"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+                ), redirect_stdout(output), redirect_stderr(error):
+                    code = main(
+                        [
+                            "invoke",
+                            "cli-flow",
+                            "--project",
+                            str(root),
+                            "--input",
+                            '{"value":1}',
+                        ]
+                    )
+                elapsed = time.monotonic() - started
+                self.assertEqual(code, 0)
+                self.assertLess(elapsed, 1)
+                self.assertEqual(
+                    json.loads(output.getvalue())["output"],
+                    {"value": 1},
+                )
+            finally:
+                loaded = sys.modules.get(module)
+                child = None if loaded is None else getattr(loaded, "child", None)
+                if child is not None:
+                    child.terminate()
+                    child.wait(timeout=1)
+                sys.modules.pop(module, None)
 
-        self.assertEqual(0, run_code, run_output)
-        self.assertIn("STATE waiting", run_output)
-        self.assertEqual(0, resume_code, resume_output)
-        self.assertIn("STATE completed", resume_output)
+    def test_unexpected_close_failure_is_structured_command_json(self) -> None:
+        """Convert an unexpected Host close failure into a stable CLI error."""
 
-    def test_invocation_run_server_uses_remote_client_without_local_fallback(
-        self,
-    ) -> None:
-        client = MagicMock()
-        client.__aenter__ = AsyncMock(return_value=client)
-        client.__aexit__ = AsyncMock(return_value=None)
-        client.submit = AsyncMock(
-            return_value={
-                "workflow_id": "echo",
-                "workflow_revision_id": "echo:revision",
-                "session_id": "session-id",
-                "session_key": "session-key",
-                "invocation_id": "invocation-id",
-                "state": "created",
-            }
-        )
-        client.wait_for_invocation = AsyncMock(
-            return_value={
-                "id": "invocation-id",
-                "workflow_id": "echo",
-                "state": "completed",
-                "event_mode": "standard",
-                "entry_node_id": "echo",
-                "created_at_ms": 10,
-                "updated_at_ms": 20,
-                "result": {"output": "hello"},
-                "error": None,
-            }
-        )
-        client.events = AsyncMock(return_value=[])
-        with self.project(
-            module_name="cli_remote_workflow",
-            source="""
-                from autoagent import Workflow
-                workflow = Workflow(id="echo")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                "AUTOAGENT_SERVER_URL=http://127.0.0.1:9999\n",
-                encoding="utf-8",
-            )
-            with patch(
-                "autoagent.cli.main.AutoAgentServerClient",
-                return_value=client,
-            ) as client_type:
-                code, output = self.run_cli(
+        class Result:
+            session_id = "session"
+            invocation_id = "invocation"
+            status = "completed"
+            output = None
+            error = None
+            waits = ()
+            checkpoint = type(
+                "Checkpoint",
+                (),
+                {
+                    "id": "checkpoint",
+                    "root_session_id": "session",
+                    "captured_at_ns": 1,
+                    "digest": "digest",
+                },
+            )()
+
+        class FailingHost:
+            def invoke(self, *_args: object, **_kwargs: object) -> object:
+                return Result()
+
+            def close(self) -> None:
+                raise RuntimeError("close failed")
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch(
+            "autoagent.cli.main.AutoAgentHost.from_project",
+            return_value=FailingHost(),
+        ), redirect_stdout(output), redirect_stderr(error):
+            code = main(
+                [
+                    "invoke",
+                    "workflow",
                     "--project",
-                    str(root),
-                    "invocation",
-                    "run",
-                    "echo",
-                    "--server",
-                    "--input-json",
-                    '{"value":"hello"}',
+                    ".",
+                    "--input",
+                    "null",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "INTERNAL_ERROR",
+        )
+
+    def test_non_finite_operator_output_cannot_corrupt_machine_stdout(self) -> None:
+        """Never emit a non-standard JSON result for a non-finite output."""
+
+        module = "cli_non_finite_workflow"
+        with self.project(module) as root:
+            (root / f"{module}.py").write_text(
+                textwrap.dedent(
+                    """
+                    from typing_extensions import TypedDict
+                    from autoagent import Node, Workflow
+
+                    class Input(TypedDict):
+                        value: int
+
+                    class Output(TypedDict):
+                        value: float
+
+                    def non_finite(value: Input) -> Output:
+                        return {"value": float("nan")}
+
+                    workflow = Workflow(
+                        "cli-flow",
+                        nodes=[Node("work", non_finite)],
+                    )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            error = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            ), redirect_stdout(output), redirect_stderr(error):
+                code = main(
+                    [
+                        "invoke",
+                        "cli-flow",
+                        "--project",
+                        str(root),
+                        "--input",
+                        '{"value":1}',
+                    ]
                 )
+            self.assertEqual(code, 1)
+            document = json.loads(output.getvalue())
+            self.assertEqual(document["status"], "failed")
+            self.assertIsNone(document["output"])
+            self.assertEqual(error.getvalue(), "")
+        sys.modules.pop(module, None)
 
-        self.assertEqual(0, code, output)
-        self.assertIn("STATE completed", output)
-        client_type.assert_called_once_with(
-            "http://127.0.0.1:9999",
-            access_token=None,
-        )
-        client.submit.assert_awaited_once()
-        client.wait_for_invocation.assert_awaited_once_with(
-            "invocation-id",
-            timeout=None,
-        )
+    def test_unknown_workflow_preserves_the_domain_error_code(self) -> None:
+        """Expose a stable Core error code instead of a class-name fallback."""
 
-    def test_invocation_submit_is_remote_and_returns_immediately(self) -> None:
-        submitted = {
-            "workflow_id": "echo",
-            "workflow_revision_id": "echo:revision",
-            "session_id": "session-id",
-            "session_key": "session-key",
-            "invocation_id": "invocation-id",
-            "state": "created",
-        }
-        client = MagicMock()
-        client.__aenter__ = AsyncMock(return_value=client)
-        client.__aexit__ = AsyncMock(return_value=None)
-        client.submit = AsyncMock(return_value=submitted)
-        with self.project(
-            module_name="cli_submit_workflow",
-            source="""
-                from autoagent import Workflow
-                workflow = Workflow(id="echo")
-            """,
-        ) as root, patch(
-            "autoagent.cli.main.AutoAgentServerClient",
-            return_value=client,
-        ):
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "submit",
-                "echo",
+        module = "cli_unknown_workflow"
+        with self.project(module) as root:
+            output = io.StringIO()
+            error = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            ), redirect_stdout(output), redirect_stderr(error):
+                code = main(
+                    [
+                        "invoke",
+                        "not-registered",
+                        "--project",
+                        str(root),
+                        "--input",
+                        '{"value":1}',
+                    ]
+                )
+            self.assertEqual(code, 1)
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(
+                json.loads(error.getvalue())["error"]["code"],
+                "WORKFLOW_NOT_REGISTERED",
             )
+        sys.modules.pop(module, None)
 
-        self.assertEqual(0, code, output)
-        self.assertIn("RESULT submitted", output)
-        self.assertIn("INVOCATION invocation-id", output)
-        self.assertFalse(client.wait_for_invocation.called)
+    def test_invoke_cleanup_cannot_replace_the_execution_failure(self) -> None:
+        """Preserve the primary invoke error when Host shutdown also fails."""
 
-    def test_server_connection_failure_does_not_fall_back_to_local(self) -> None:
-        client = MagicMock()
-        client.__aenter__ = AsyncMock(
-            side_effect=ServerClientError(
-                "Cannot connect to AutoAgent Server at http://127.0.0.1:8765."
-            )
-        )
-        client.__aexit__ = AsyncMock(return_value=None)
-        with self.project(
-            module_name="cli_missing_server_workflow",
-            source="""
-                from autoagent import Workflow
-                workflow = Workflow(id="echo")
-            """,
-        ) as root, patch(
-            "autoagent.cli.main.AutoAgentServerClient",
-            return_value=client,
-        ), patch("autoagent.cli.main.ProjectHost") as project_host:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "run",
-                "echo",
-                "--server",
-            )
+        class FailingHost:
+            def invoke(self, *_args: object, **_kwargs: object) -> object:
+                raise ValueError("invoke failed")
 
-        self.assertEqual(2, code, output)
-        self.assertIn("SERVER ERROR", output)
-        self.assertIn("Cannot connect", output)
-        project_host.assert_not_called()
+            def close(self) -> None:
+                raise RuntimeError("close failed")
 
-    def test_standalone_file_selector_rejects_ambiguous_sources(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workflow_file = Path(directory) / "workflow.py"
-            workflow_file.write_text(
-                "from autoagent import Workflow\nworkflow = Workflow(id='draft')\n",
-                encoding="utf-8",
-            )
-            code, output = self.run_cli(
-                "workflow",
-                "check",
-                "manifest_id",
-                "--file",
-                str(workflow_file),
-            )
-            object_code, object_output = self.run_cli(
-                "workflow",
-                "check",
-                "--object",
-                "workflow",
-            )
-
-        self.assertEqual(2, code)
-        self.assertIn("either workflow_id or --file", output)
-        self.assertEqual(2, object_code)
-        self.assertIn("--object requires --file", object_output)
-
-    def test_invocation_run_uses_memory_and_tees_report(self) -> None:
-        with self.project(
-            module_name="cli_run_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-        ) as root:
-            report_path = root / "run-report.txt"
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "invocation",
-                "run",
-                "echo",
-                "--input-json",
-                '{"value":"hello"}',
-                "--trace",
-                "--report-file",
-                str(report_path),
-            )
-
-            persisted_report = report_path.read_text(encoding="utf-8")
-
-        self.assertEqual(0, code, output)
-        self.assertIn("STATE completed", output)
-        self.assertIn('"output": "hello"', output)
-        self.assertIn("TRACE", output)
-        self.assertEqual(f"{output.strip()}\n", persisted_report)
-
-    def test_server_url_environment_does_not_change_local_default(self) -> None:
-        with self.project(
-            module_name="cli_local_default_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-        ) as root:
-            (root / ".env").write_text(
-                "AUTOAGENT_SERVER_URL=http://127.0.0.1:1\n",
-                encoding="utf-8",
-            )
-            with patch("autoagent.cli.main.AutoAgentServerClient") as client:
-                code, output = self.run_cli(
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch(
+            "autoagent.cli.main.AutoAgentHost.from_project",
+            return_value=FailingHost(),
+        ), redirect_stdout(output), redirect_stderr(error):
+            code = main(
+                [
+                    "invoke",
+                    "workflow",
                     "--project",
-                    str(root),
-                    "invocation",
-                    "run",
-                    "echo",
-                    "--store",
-                    "memory",
-                    "--input-json",
-                    '{"value":"local"}',
-                )
-
-        self.assertEqual(0, code, output)
-        self.assertIn('"output": "local"', output)
-        client.assert_not_called()
-
-    def test_invocation_run_rejects_non_object_input(self) -> None:
-        with self.project(
-            module_name="cli_input_workflow",
-            source="""
-                from autoagent import Workflow
-
-                def echo(value: str) -> str:
-                    return value
-
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
-            """,
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "run",
-                "echo",
-                "--input-json",
-                '["not", "an", "object"]',
+                    ".",
+                    "--input",
+                    "null",
+                ]
             )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.getvalue(), "")
+        document = json.loads(error.getvalue())
+        self.assertEqual(document["error"]["code"], "VALUEERROR")
+        self.assertEqual(document["error"]["message"], "invoke failed")
 
-        self.assertEqual(2, code)
-        self.assertIn(
-            "Invocation input must be a JSON object or null.",
-            output,
-        )
+    def test_waiting_invocation_can_resume_in_a_later_cli_process(self) -> None:
+        """Persist a Wait, restore its Root Session, and answer it in a second call."""
 
-    def test_database_wait_can_resume_in_a_new_cli_process(self) -> None:
-        with self.project(
-            module_name="cli_wait_workflow",
-            source="""
-                from autoagent import SystemCommand, Workflow
-
-                workflow = Workflow(id="approval")
-                workflow.add_node(SystemCommand(id="wait"), node_id="approval")
-            """,
-        ) as root:
-            database_path = root / "runtime.db"
-            env_file = root / ".env"
-            env_file.write_text(
-                "AUTOAGENT_DATABASE_URL="
-                f"sqlite+aiosqlite:///{database_path}\n",
+        module = "cli_wait_resume_workflow"
+        with self.project(module) as root:
+            self._write_wait_workflow(root, module)
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=sqlite\n"
+                "AUTOAGENT_SQLITE_PATH=runtime.db\n",
                 encoding="utf-8",
             )
+            first_output = io.StringIO()
+            second_output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True):
+                with redirect_stdout(first_output):
+                    first_code = main(
+                        [
+                            "invoke",
+                            "cli-flow",
+                            "--project",
+                            str(root),
+                            "--input",
+                            '{"value":1}',
+                            "--session-id",
+                            "cli-wait-session",
+                        ]
+                    )
+                first = json.loads(first_output.getvalue())
+                with redirect_stdout(second_output):
+                    second_code = main(
+                        [
+                            "resume",
+                            "cli-wait-session",
+                            first["waits"][0]["id"],
+                            "--project",
+                            str(root),
+                            "--response",
+                            '{"value":9}',
+                        ]
+                    )
+            second = json.loads(second_output.getvalue())
+            self.assertEqual(first_code, 0)
+            self.assertEqual(first["status"], "waiting")
+            self.assertEqual(second_code, 0)
+            self.assertEqual(second["status"], "completed")
+            self.assertEqual(second["session_id"], "cli-wait-session")
+            self.assertEqual(second["output"], {"value": 9})
+        sys.modules.pop(module, None)
 
-            run_code, run_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "run",
-                "approval",
-                "--session",
-                "session-a",
-                "--input-json",
-                '{"wait_key":"approval"}',
+    def test_recover_restores_an_unfinished_root_session(self) -> None:
+        """Restore a durable waiting Root and recover it to the same boundary."""
+
+        module = "cli_recover_workflow"
+        with self.project(module) as root:
+            self._write_wait_workflow(root, module)
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=sqlite\n"
+                "AUTOAGENT_SQLITE_PATH=runtime.db\n",
+                encoding="utf-8",
             )
-            resume_code, resume_output = self.run_cli(
-                "--project",
-                str(root),
-                "invocation",
-                "resume",
-                "approval",
-                "--session",
-                "session-a",
-                "--wait-key",
-                "approval",
-                "--response-json",
-                '{"approved":true}',
+            invoked_output = io.StringIO()
+            recovered_output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True):
+                with redirect_stdout(invoked_output):
+                    invoked_code = main(
+                        [
+                            "invoke",
+                            "cli-flow",
+                            "--project",
+                            str(root),
+                            "--input",
+                            '{"value":3}',
+                            "--session-id",
+                            "cli-recover-session",
+                        ]
+                    )
+                with redirect_stdout(recovered_output):
+                    recovered_code = main(
+                        [
+                            "recover",
+                            "cli-recover-session",
+                            "--project",
+                            str(root),
+                        ]
+                    )
+            self.assertEqual(invoked_code, 0)
+            self.assertEqual(recovered_code, 0)
+            recovered = json.loads(recovered_output.getvalue())
+            self.assertEqual(recovered["status"], "waiting")
+            self.assertEqual(recovered["session_id"], "cli-recover-session")
+            self.assertEqual(len(recovered["waits"]), 1)
+        sys.modules.pop(module, None)
+
+    def test_recover_reports_a_missing_session_with_a_stable_code(self) -> None:
+        """Preserve Host's not-found identity for a nonexistent Root Session."""
+
+        module = "cli_missing_recovery_workflow"
+        with self.project(module) as root:
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=sqlite\n"
+                "AUTOAGENT_SQLITE_PATH=runtime.db\n",
+                encoding="utf-8",
             )
-
-        self.assertEqual(0, run_code, run_output)
-        self.assertIn("STATE waiting", run_output)
-        self.assertEqual(0, resume_code, resume_output)
-        self.assertIn("STATE completed", resume_output)
-
-    def test_llm_runtime_requires_provider_environment(self) -> None:
-        with self.project(
-            module_name="cli_missing_provider",
-            source="""
-                from autoagent import CapabilityRef, Workflow
-                from autoagent.ai import LLM_CALL_CAPABILITY_ID
-
-                workflow = Workflow(id="llm")
-                workflow.add_node(
-                    CapabilityRef(id=LLM_CALL_CAPABILITY_ID),
-                    node_id="llm_call",
+            error = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True), redirect_stderr(error):
+                code = main(
+                    ["recover", "missing-session", "--project", str(root)]
                 )
-            """,
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "invocation",
-                "run",
-                "llm",
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                json.loads(error.getvalue())["error"]["code"],
+                "HOST_SESSION_NOT_FOUND",
             )
+        sys.modules.pop(module, None)
 
-        self.assertEqual(2, code)
-        self.assertIn("AUTOAGENT_LLM_API_KEY is required", output)
+    def test_recover_rejects_a_child_session_with_a_stable_code(self) -> None:
+        """Require callers to restore a persisted graph through its Root Session."""
 
-    def test_non_llm_invocation_ignores_unselected_llm_provider(self) -> None:
-        with self.project(
-            module_name="cli_mixed_workflows",
-            source="""
-                from autoagent import CapabilityRef, Workflow
-                from autoagent.ai import LLM_CALL_CAPABILITY_ID
+        module = "cli_child_recovery_workflow"
+        with self.project(module) as root:
+            (root / f"{module}.py").write_text(
+                textwrap.dedent(
+                    """
+                    from typing_extensions import TypedDict
+                    from autoagent import Node, Wait, Workflow
 
-                def echo(value: str) -> str:
-                    return value
+                    class Value(TypedDict):
+                        value: int
 
-                workflow = Workflow(id="echo")
-                workflow.add_node(echo, node_id="echo")
+                    child = Workflow(
+                        "cli-child",
+                        nodes=[Node("approval", Wait(Value, Value))],
+                    )
+                    workflow = Workflow(
+                        "cli-flow",
+                        nodes=[Node("spawn", child, execution_mode="spawn")],
+                    )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=sqlite\n"
+                "AUTOAGENT_SQLITE_PATH=runtime.db\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            error = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True):
+                with redirect_stdout(output):
+                    invoked_code = main(
+                        [
+                            "invoke",
+                            "cli-flow",
+                            "--project",
+                            str(root),
+                            "--input",
+                            '{"value":1}',
+                            "--session-id",
+                            "cli-parent-session",
+                        ]
+                    )
+                child_session_id = json.loads(output.getvalue())["output"][
+                    "session_id"
+                ]
+                with redirect_stderr(error):
+                    recovered_code = main(
+                        ["recover", child_session_id, "--project", str(root)]
+                    )
+            self.assertEqual(invoked_code, 0)
+            self.assertEqual(recovered_code, 1)
+            self.assertEqual(
+                json.loads(error.getvalue())["error"]["code"],
+                "HOST_SESSION_NOT_ROOT",
+            )
+        sys.modules.pop(module, None)
 
-                llm_workflow = Workflow(id="llm")
-                llm_workflow.add_node(
-                    CapabilityRef(id=LLM_CALL_CAPABILITY_ID),
-                    node_id="llm_call",
+    def test_recover_rejects_a_noncurrent_restored_root(self) -> None:
+        """Reject a restore result that does not identify the requested current Root."""
+
+        class Host:
+            environment: dict[str, str] = {}
+
+            def restore_session(self, _session_id: str) -> CheckpointLoadResult:
+                return CheckpointLoadResult(
+                    roots=(InvocationRef("other-session", "invocation"),),
+                    invocations=(InvocationRef("other-session", "invocation"),),
                 )
-            """,
-            entrypoints=("workflow", "llm_workflow"),
-        ) as root:
-            code, output = self.run_cli(
-                "--project",
-                str(root),
-                "--no-env-file",
-                "invocation",
-                "run",
-                "echo",
-                "--input-json",
-                '{"value":"hello"}',
-            )
 
-        self.assertEqual(0, code, output)
-        self.assertIn("STATE completed", output)
+            def close(self) -> None:
+                return None
 
-    def test_server_settings_validate_all_environment_values(self) -> None:
-        settings = ServerSettings.from_env(
-            env_file=None,
-            environ={
-                "AUTOAGENT_SERVER_HOST": "127.0.0.1",
-                "AUTOAGENT_SERVER_PORT": "9000",
-                "AUTOAGENT_SERVER_ACCESS_TOKEN": "secret",
-                "AUTOAGENT_SERVER_SECURE_COOKIES": "true",
-                "AUTOAGENT_SERVER_EXECUTION_ENABLED": "false",
-                "AUTOAGENT_SERVER_UI_DIRECTORY": "./custom-ui",
-                "AUTOAGENT_SERVER_TRACE_CACHE_SIZE": "64",
-            },
+        error = io.StringIO()
+        with patch(
+            "autoagent.cli.main.AutoAgentHost.from_project",
+            return_value=Host(),
+        ), redirect_stderr(error):
+            code = main(["recover", "requested-session", "--project", "."])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "HOST_SESSION_NOT_CURRENT",
         )
 
-        self.assertEqual("127.0.0.1", settings.host)
-        self.assertEqual(9000, settings.port)
-        self.assertEqual("secret", settings.access_token)
-        self.assertTrue(settings.secure_cookies)
-        self.assertFalse(settings.execution_enabled)
-        self.assertEqual(Path("./custom-ui"), settings.ui_directory)
-        self.assertEqual(64, settings.trace_cache_size)
+    def test_compile_custom_env_file_is_visible_during_import(self) -> None:
+        """Apply a selected environment file before importing Workflow code."""
 
-    def run_cli(self, *arguments: str) -> tuple[int, str]:
-        output = StringIO()
-        clean_environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AUTOAGENT_")
-        }
-        with patch.dict(
-            os.environ,
-            clean_environment,
-            clear=True,
-        ), redirect_stdout(output):
-            code = main(arguments)
-        return code, output.getvalue()
+        module = "cli_compile_environment_workflow"
+        with self.project(module) as root:
+            (root / "custom.env").write_text(
+                "CLI_IMPORT_VALUE=available\n",
+                encoding="utf-8",
+            )
+            source = (root / f"{module}.py").read_text(encoding="utf-8")
+            (root / f"{module}.py").write_text(
+                "import os\n"
+                "if os.environ.get('CLI_IMPORT_VALUE') != 'available':\n"
+                "    raise RuntimeError('missing import environment')\n"
+                + source,
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True), redirect_stdout(output):
+                code = main(
+                    [
+                        "compile",
+                        "--project",
+                        str(root),
+                        "--env-file",
+                        "custom.env",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(output.getvalue())["ok"])
+        sys.modules.pop(module, None)
 
-    @contextmanager
-    def project(
-        self,
-        *,
-        module_name: str,
-        source: str,
-        entrypoints: tuple[str, ...] = ("workflow",),
-        eval_module_name: str | None = None,
-        eval_source: str | None = None,
-        eval_suites: tuple[tuple[str, str, str], ...] = (),
-    ) -> Iterator[Path]:
+    def test_invoke_env_file_is_visible_at_runtime_and_then_restored(self) -> None:
+        """Keep the Project snapshot active for Operators and restore os.environ."""
+
+        module = "cli_runtime_environment_workflow"
+        with self.project(module) as root:
+            self._write_environment_workflow(root, module)
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=none\nCLI_RUNTIME_VALUE=7\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True):
+                with redirect_stdout(output):
+                    code = main(
+                        [
+                            "invoke",
+                            "cli-flow",
+                            "--project",
+                            str(root),
+                            "--input",
+                            '{"value":1}',
+                        ]
+                    )
+                self.assertNotIn("CLI_RUNTIME_VALUE", os.environ)
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["output"], {"value": 7})
+        sys.modules.pop(module, None)
+
+    def test_process_environment_overrides_the_project_env_file(self) -> None:
+        """Give process values precedence over matching .env assignments."""
+
+        module = "cli_environment_precedence_workflow"
+        with self.project(module) as root:
+            self._write_environment_workflow(root, module)
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=none\nCLI_RUNTIME_VALUE=7\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AUTOAGENT_RUNTIME_EVENT_SINK": "none",
+                    "CLI_RUNTIME_VALUE": "9",
+                },
+                clear=True,
+            ), redirect_stdout(output):
+                code = main(
+                    [
+                        "invoke",
+                        "cli-flow",
+                        "--project",
+                        str(root),
+                        "--input",
+                        '{"value":1}',
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["output"], {"value": 9})
+        sys.modules.pop(module, None)
+
+    def test_no_env_file_disables_project_environment_loading(self) -> None:
+        """Ignore .env values when the command explicitly disables the file."""
+
+        module = "cli_environment_disabled_workflow"
+        with self.project(module) as root:
+            self._write_environment_workflow(root, module)
+            (root / ".env").write_text(
+                "CLI_RUNTIME_VALUE=7\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+                clear=True,
+            ), redirect_stdout(output):
+                code = main(
+                    [
+                        "invoke",
+                        "cli-flow",
+                        "--project",
+                        str(root),
+                        "--input",
+                        '{"value":1}',
+                        "--no-env-file",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["output"], {"value": 11})
+        sys.modules.pop(module, None)
+
+    def test_failed_import_restores_the_original_process_environment(self) -> None:
+        """Restore os.environ even when Workflow import fails inside the scope."""
+
+        module = "cli_environment_failure_workflow"
+        with self.project(module) as root:
+            (root / ".env").write_text(
+                "CLI_TRANSIENT_VALUE=temporary\n",
+                encoding="utf-8",
+            )
+            (root / f"{module}.py").write_text(
+                "raise RuntimeError('import failed')\n",
+                encoding="utf-8",
+            )
+            error = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True):
+                with redirect_stderr(error):
+                    code = main(["compile", "--project", str(root)])
+                self.assertNotIn("CLI_TRANSIENT_VALUE", os.environ)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                json.loads(error.getvalue())["error"]["code"],
+                "HOST_CONFIGURATION_INVALID",
+            )
+        sys.modules.pop(module, None)
+
+    def test_trace_assembles_read_only_server_with_overrides(self) -> None:
+        """Open the selected SQLite Store and pass explicit listen values to uvicorn."""
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            workflow_entries = "\n\n".join(
-                "[[workflows]]\n"
-                f'entrypoint = "{module_name}:{entrypoint}"'
-                for entrypoint in entrypoints
+            database = root / "trace.db"
+            store = SQLiteRuntimeStore(database)
+            store.start()
+            store.close()
+            application = object()
+            with patch(
+                "autoagent.tracing.create_tracing_app",
+                return_value=application,
+            ) as create, patch("uvicorn.run") as run:
+                code = main(
+                    [
+                        "trace",
+                        "--project",
+                        str(root),
+                        "--database",
+                        str(database),
+                        "--host",
+                        "127.0.0.2",
+                        "--port",
+                        "9876",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(database.is_file())
+            create.assert_called_once()
+            self.assertEqual(
+                create.call_args.kwargs["allowed_hosts"],
+                ("127.0.0.2",),
             )
-            evaluation_entries = "\n\n".join(
-                "[[eval_suites]]\n"
-                f'id = "{suite_id}"\n'
-                f'workflow_id = "{workflow_id}"\n'
-                f'entrypoint = "{entrypoint}"'
-                for suite_id, workflow_id, entrypoint in eval_suites
+            run.assert_called_once_with(application, host="127.0.0.2", port=9876)
+
+    def test_trace_uses_the_selected_environment_file(self) -> None:
+        """Apply shared CLI environment controls to local Tracing settings."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "trace.db"
+            store = SQLiteRuntimeStore(database)
+            store.start()
+            store.close()
+            (root / "trace.env").write_text(
+                "AUTOAGENT_TRACE_HOST=127.0.0.2\nAUTOAGENT_TRACE_PORT=9988\n",
+                encoding="utf-8",
             )
-            (root / "auto-agent.toml").write_text(
+            application = object()
+            with patch(
+                "autoagent.tracing.create_tracing_app",
+                return_value=application,
+            ), patch("uvicorn.run") as run:
+                code = main(
+                    [
+                        "trace",
+                        "--project",
+                        str(root),
+                        "--database",
+                        str(database),
+                        "--env-file",
+                        "trace.env",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            run.assert_called_once_with(application, host="127.0.0.2", port=9988)
+
+    def test_trace_structures_uvicorn_startup_exit_and_closes_store(self) -> None:
+        """Translate uvicorn startup exit without leaking the read-only Store."""
+
+        class TrackingStore:
+            started = False
+            closed = False
+
+            def start(self) -> None:
+                self.started = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        store = TrackingStore()
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            SQLiteRuntimeStore,
+            "open_read_only",
+            return_value=store,
+        ), patch(
+            "autoagent.tracing.create_tracing_app",
+            return_value=object(),
+        ), patch(
+            "uvicorn.run",
+            side_effect=SystemExit(3),
+        ), redirect_stderr(error):
+            code = main(["trace", "--project", directory])
+        self.assertEqual(code, 1)
+        self.assertTrue(store.started)
+        self.assertTrue(store.closed)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "TRACING_SERVER_FAILED",
+        )
+
+    def test_trace_does_not_create_a_missing_database(self) -> None:
+        """Require an existing Store instead of creating runtime schema or data."""
+
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(error):
+            database = Path(directory) / "missing.db"
+            code = main(
+                [
+                    "trace",
+                    "--project",
+                    directory,
+                    "--database",
+                    str(database),
+                ]
+            )
+            self.assertFalse(database.exists())
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "RUNTIMEEVENTSTOREERROR",
+        )
+
+    def test_trace_rejects_explicit_zero_port(self) -> None:
+        """Reject an invalid explicit port instead of replacing it with the default."""
+
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(error):
+            code = main(
+                [
+                    "trace",
+                    "--project",
+                    directory,
+                    "--port",
+                    "0",
+                ]
+            )
+        document = json.loads(error.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(document["error"]["code"], "VALUEERROR")
+
+    def test_trace_rejects_an_empty_explicit_host(self) -> None:
+        """Treat a blank host override as invalid instead of using the default."""
+
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(error):
+            code = main(
+                ["trace", "--project", directory, "--host", "   "]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"], "VALUEERROR"
+        )
+
+    def test_trace_rejects_a_missing_project_root(self) -> None:
+        """Reject a nonexistent project instead of reading its parent settings."""
+
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(error):
+            missing = Path(directory) / "missing"
+            code = main(["trace", "--project", str(missing)])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"], "VALUEERROR"
+        )
+
+    def test_trace_rejects_an_empty_custom_ui_directory(self) -> None:
+        """Never resolve an empty UI override to the current project directory."""
+
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(error):
+            code = main(
+                [
+                    "trace",
+                    "--project",
+                    directory,
+                    "--ui-directory",
+                    "   ",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"], "VALUEERROR"
+        )
+
+    def test_trace_requires_explicit_unauthenticated_remote_exposure(self) -> None:
+        """Keep full Runtime context on loopback unless the caller opts in."""
+
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(error):
+            code = main(
+                [
+                    "trace",
+                    "--project",
+                    directory,
+                    "--host",
+                    "0.0.0.0",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "TRACING_REMOTE_UNAUTHENTICATED",
+        )
+
+    def test_trace_dependency_failure_is_structured_command_json(self) -> None:
+        """Translate optional Tracing dependency failures into a CLI error."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "trace.db"
+            store = SQLiteRuntimeStore(database)
+            store.start()
+            store.close()
+            error = io.StringIO()
+            with patch(
+                "autoagent.tracing.create_tracing_app",
+                side_effect=TracingDependencyError("server dependency missing"),
+            ), redirect_stderr(error):
+                code = main(
+                    [
+                        "trace",
+                        "--project",
+                        directory,
+                        "--database",
+                        str(database),
+                    ]
+                )
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "CLI_DEPENDENCY_MISSING",
+        )
+
+    def test_trace_closes_a_store_whose_start_fails(self) -> None:
+        """Release read resources even when Store validation cannot start."""
+
+        class FailingStore:
+            closed = False
+
+            def start(self) -> None:
+                raise RuntimeEventStoreError("start failed")
+
+            def close(self) -> None:
+                self.closed = True
+
+        store = FailingStore()
+        error = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            SQLiteRuntimeStore,
+            "open_read_only",
+            return_value=store,
+        ), redirect_stderr(error):
+            code = main(["trace", "--project", directory])
+        self.assertEqual(code, 1)
+        self.assertTrue(store.closed)
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "RUNTIMEEVENTSTOREERROR",
+        )
+
+    @staticmethod
+    def _write_wait_workflow(root: Path, module: str) -> None:
+        (root / f"{module}.py").write_text(
+            textwrap.dedent(
+                """
+                from typing_extensions import TypedDict
+                from autoagent import Node, Wait, Workflow
+
+                class Value(TypedDict):
+                    value: int
+
+                workflow = Workflow(
+                    "cli-flow",
+                    nodes=[Node("approval", Wait(Value, Value))],
+                )
+                """
+            ),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_environment_workflow(root: Path, module: str) -> None:
+        (root / f"{module}.py").write_text(
+            textwrap.dedent(
+                """
+                import os
+                from typing_extensions import TypedDict
+                from autoagent import Node, Workflow
+
+                class Value(TypedDict):
+                    value: int
+
+                def read_environment(_value: Value) -> Value:
+                    return {"value": int(os.environ.get("CLI_RUNTIME_VALUE", "11"))}
+
+                workflow = Workflow(
+                    "cli-flow",
+                    nodes=[Node("work", read_environment)],
+                )
+                """
+            ),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    @contextmanager
+    def project(module: str) -> Iterator[Path]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "autoagent.toml").write_text(
                 textwrap.dedent(
                     f"""
                     schema_version = 1
@@ -1663,32 +1090,30 @@ class AutoAgentCliTests(unittest.TestCase):
                     name = "cli-test"
                     version = "1"
 
-                    {workflow_entries}
-
-                    {evaluation_entries}
+                    [[workflows]]
+                    entrypoint = "{module}:workflow"
                     """
-                ).strip()
-                + "\n",
+                ),
                 encoding="utf-8",
             )
-            (root / f"{module_name}.py").write_text(
-                textwrap.dedent(source).strip() + "\n",
+            (root / f"{module}.py").write_text(
+                textwrap.dedent(
+                    """
+                    from typing_extensions import TypedDict
+                    from autoagent import Node, Workflow
+
+                    class Value(TypedDict):
+                        value: int
+
+                    def identity(value: Value) -> Value:
+                        return value
+
+                    workflow = Workflow("cli-flow", nodes=[Node("work", identity)])
+                    """
+                ),
                 encoding="utf-8",
             )
-            if eval_module_name is not None and eval_source is not None:
-                (root / f"{eval_module_name}.py").write_text(
-                    textwrap.dedent(eval_source).strip() + "\n",
-                    encoding="utf-8",
-                )
-            original_cwd = Path.cwd()
-            try:
-                os.chdir(root)
-                yield root
-            finally:
-                os.chdir(original_cwd)
-                sys.modules.pop(module_name, None)
-                if eval_module_name is not None:
-                    sys.modules.pop(eval_module_name, None)
+            yield root
 
 
 if __name__ == "__main__":

@@ -1,55 +1,70 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Project Structure
 
-This repository contains the AutoAgent implementation, tests, UI, runnable
-examples, and an archived design snapshot.
+The repository root is the AutoAgent V2 project and the only active development
+target.
 
-- `autoagent/` contains the Python framework and embedded tracing server.
-- `tests/` contains the automated Python test suite.
-- `ui/` contains the tracing UI.
-- `examples/` contains runnable examples.
-- `docs-deprecated/` is an obsolete design snapshot and is not a source of
-  truth for the current implementation.
+- `autoagent/` contains the V2 Python package: Core, Host, hosting adapters, CLI,
+  and tracing server.
+- `tests/` contains the V2 Python test suite.
+- `ui/` contains the V2 tracing UI.
+- `examples/` contains V2 runnable examples.
+- Root Markdown and packaging files describe and build V2.
+- `.agents/` and `.codex/` are workspace metadata, not product source trees.
+- `v1/` contains the complete archived V1 project, including its source, tests,
+  UI, examples, documentation, Skills, Skill Evals, build scripts, and packaging
+  files.
 
-Do not add current documentation to `docs-deprecated/`.
+V1 is reference material only. Do not import V1 from V2, preserve V1
+compatibility in V2, or place new work in `v1/` unless the user explicitly asks
+to modify the archived implementation.
 
 ## Build, Test, and Development Commands
 
-Run Python commands through the repository-root virtual environment:
+Run V2 commands from the repository root through the root virtual environment:
 
-- `python -m unittest discover -v`
+- `.venv/bin/python -m unittest discover -s tests -v`
+- `.venv/bin/python -m compileall -q autoagent tests`
+- `.venv/bin/python -m tests.benchmarks.benchmark_full_core`
+- `cd ui && npm test`
 - `cd ui && npm run build`
 
-## Coding Style & Naming Conventions
+Run an archived V1 command only when work is explicitly scoped to `v1/`, and
+run it with `cwd=v1` so its same-named `autoagent` package cannot shadow V2.
 
-Write Markdown with short sections, descriptive headings, and direct explanations. Preserve the numbered documentation directories and the `N - Title.md` filename style. Capitalize domain terms consistently: Workflow, Workflow IR, Runtime, Scheduler, Kernel, Operator, Runtime Session, and Runtime Run.
+## Sources of Truth
 
-Use fenced code blocks with language tags, for example `mermaid` for diagrams and `text` for state sketches. Keep diagrams close to the section they explain.
+Treat current V2 source, configuration, tests, and run paths as authoritative.
+`Refactor.md` records the V2 target architecture. Files below `v1/` are
+historical evidence and are not current product documentation.
 
-## Testing Guidelines
+Keep V2 changes within the root V2 trees. Do not add compatibility layers for
+the V1 API or data model. Reuse a V1 algorithm only after verifying that its
+semantics match the current V2 contracts.
 
-Keep Python tests in `tests/`. Treat current source and tests as authoritative;
-the archived documentation may be used only as historical context.
+## Coding and Testing
 
-## Commit & Pull Request Guidelines
+Write Markdown with short sections, descriptive headings, and direct
+explanations. Capitalize domain terms consistently: Workflow, Workflow IR,
+Runtime, Scheduler, Operator, Runtime Session, Runtime Event, Trace Event, and
+User Event.
 
-The current history uses concise, imperative commit messages, for example `Add comprehensive documentation for Workflow authoring, compilation, and runtime execution`. Follow that style: start with a verb, describe the visible change, and avoid vague messages like `update docs`.
+Keep Python tests in `tests/`. Every `test_*` method must start with a short
+docstring describing the behavior or failure boundary it verifies. Run focused
+tests while iterating and the full V2 suite before completing broad Runtime or
+repository changes.
 
-Pull requests should include a short summary, affected documentation areas, and any terminology or architecture decisions reviewers should validate. Link related issues when available. Include screenshots only when changing rendered diagrams or other visual artifacts.
+## Implementation Authorization
 
-## Agent-Specific Instructions
+Treat requests as read-only design discussion unless the user explicitly
+authorizes implementation with wording such as "开始实现", "开始写代码", or
+"改一下 xxx". Before authorization, do not create, edit, move, delete, format,
+or commit repository files. After authorization, modify only the requested
+scope.
 
-Do not overwrite an existing `AGENTS.md`. Keep edits scoped to the requested documentation area, and avoid introducing build or test instructions that are not backed by repository files.
+## Commits and Pull Requests
 
-- Treat every request as design discussion unless the user explicitly authorizes implementation with wording such as "开始实现", "开始写代码", or "改一下 xxx". Questions, design confirmation, agreement, or continued discussion do not authorize file changes. Before explicit implementation authorization, perform only read-only investigation and analysis: do not create, edit, delete, format, commit, or otherwise modify repository files. After authorization, modify only the explicitly requested scope.
-
-## AutoAgent V2 Rewrite
-
-- Treat `autoagent_v2/` as a completely independent new project root for the V2 rewrite.
-- Put all V2 source, tests, skills, documentation, packaging files, and future examples under `autoagent_v2/`.
-- Do not implement V2 by modifying the existing `autoagent/`, `tests/`, `docs-deprecated/`, `skills/`, `examples/`, or `ui/` trees.
-- Do not add compatibility layers for the existing AutoAgent API or data model. V2 follows `Refactor.md` and may intentionally be incompatible.
-- Existing source may be inspected to understand proven algorithms. Reuse only logic that still matches the V2 design; do not copy the old architecture or preserve obsolete abstractions.
-- Design and implement V2 as a complete standalone project with its own future `autoagent/`, `tests/`, `skills/`, and packaging structure. During the initial Core implementation, create only the directories and files required by the implemented code and tests.
-- Run V2 tests from the repository-root environment while targeting `autoagent_v2/`; do not modify legacy tests to make V2 pass.
+Use concise imperative commit messages that describe the visible change. Pull
+requests should summarize the behavior, affected areas, validation, and any
+architecture or terminology decisions reviewers should check.

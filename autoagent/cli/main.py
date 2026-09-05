@@ -1,837 +1,556 @@
+"""Small, script-friendly commands for V2 projects and local tracing."""
+
 from __future__ import annotations
 
 import argparse
-import asyncio
+import ctypes
+import io
+import ipaddress
 import json
-import logging
-from pathlib import Path
+import os
 import sys
-from typing import Any, Sequence
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager, redirect_stdout
+from dataclasses import fields, is_dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Iterator, TextIO
 
-from autoagent.core.server import AutoAgentServer
-from autoagent.project import (
-    ProjectCompiler,
-    ProjectHost,
-    ProjectLoadError,
+from pydantic import BaseModel
+
+from autoagent.core.app import CheckpointLoadResult, InvocationRef, InvocationResult
+from autoagent.core.errors import AutoAgentError
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.host import (
+    AutoAgentHost,
+    HostConfigurationError,
+    HostOperationError,
     ProjectLoader,
     load_project_environment,
+    load_host_settings,
+    project_environment_scope,
+    resolve_manifest_path,
 )
-from autoagent.project.environment import _project_environment_scope
-from autoagent.cli.render import (
-    render_compile_result,
-    render_invocation,
-    render_project_diagnostics,
-    render_remote_invocation,
-    render_submitted_invocation,
-    render_workflow_list,
-    write_report,
-)
-from autoagent.cli.evaluation import (
-    check_evaluation,
-    list_evaluations,
-    run_evaluation,
-)
-from autoagent.cli.debugging import (
-    InvocationReportCliError,
-    run_invocation_comparison,
-    run_invocation_query,
-    run_invocation_report,
-    run_invocation_rerun,
-)
-from autoagent.cli.server_client import (
-    AutoAgentServerClient,
-    ServerClientError,
-    resolve_server_url,
-)
-from autoagent.cli.settings import (
-    add_runtime_arguments,
-    app_settings_from_arguments,
-    server_settings_from_arguments,
-)
+from autoagent.hosting import RuntimeEventStoreError, SQLiteRuntimeStore
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="autoagent",
-        description="Check, run, and host an AutoAgent project.",
-    )
-    parser.add_argument(
-        "--project",
-        help=(
-            "Project directory or explicit auto-agent.toml path; with --file, "
-            "sets the standalone root for .env and relative outputs."
-        ),
-    )
-    env_group = parser.add_mutually_exclusive_group()
-    env_group.add_argument(
-        "--env-file",
-        help="Environment file; relative paths resolve from the project root.",
-    )
-    env_group.add_argument(
-        "--no-env-file",
-        action="store_true",
-        help="Do not load the project-root .env file.",
-    )
-    parser.add_argument(
-        "--log-level",
-        choices=("debug", "info", "warning", "error"),
-        default="warning",
-    )
-    parser.add_argument("--version", action="version", version="AutoAgent 0.1.0")
+class _CliError(RuntimeError):
+    """An expected command environment failure."""
 
-    commands = parser.add_subparsers(dest="group", required=True)
-    project = commands.add_parser("project")
-    project_commands = project.add_subparsers(dest="command", required=True)
-    project_check = project_commands.add_parser("check")
-    _add_check_arguments(project_check)
-
-    workflow = commands.add_parser("workflow")
-    workflow_commands = workflow.add_subparsers(dest="command", required=True)
-    workflow_list = workflow_commands.add_parser("list")
-    workflow_list.add_argument("--report-file")
-    workflow_check = workflow_commands.add_parser("check")
-    _add_workflow_source_arguments(workflow_check)
-    _add_check_arguments(workflow_check)
-    workflow_preview = workflow_commands.add_parser(
-        "preview",
-        help="Analyze and render an expanded Workflow execution graph.",
-        description="Analyze and render an expanded Workflow execution graph.",
-    )
-    _add_workflow_source_arguments(workflow_preview)
-    workflow_preview.add_argument(
-        "--format",
-        dest="preview_format",
-        choices=("terminal", "mermaid", "json"),
-        default="terminal",
-        help="Output format (default: terminal).",
-    )
-    workflow_preview.add_argument(
-        "-o",
-        "--output",
-        help=(
-            "Write to this path instead of stdout; relative paths use the "
-            "project root. Use '-' for stdout."
-        ),
-    )
-
-    invocation = commands.add_parser("invocation")
-    invocation_commands = invocation.add_subparsers(dest="command", required=True)
-    invocation_run = invocation_commands.add_parser("run")
-    _add_workflow_source_arguments(invocation_run)
-    _add_server_connection_arguments(invocation_run, selectable=True)
-    _add_json_input_arguments(
-        invocation_run,
-        file_flag="--input-file",
-        json_flag="--input-json",
-    )
-    invocation_run.add_argument("--session")
-    invocation_run.add_argument("--entry-node")
-    invocation_run.add_argument(
-        "--event-mode",
-        choices=("minimal", "standard", "full"),
-        default="standard",
-    )
-    _add_execution_arguments(invocation_run)
-
-    invocation_submit = invocation_commands.add_parser("submit")
-    invocation_submit.add_argument("workflow_id")
-    _add_server_connection_arguments(invocation_submit, selectable=False)
-    _add_json_input_arguments(
-        invocation_submit,
-        file_flag="--input-file",
-        json_flag="--input-json",
-    )
-    invocation_submit.add_argument("--session")
-    invocation_submit.add_argument("--entry-node")
-    invocation_submit.add_argument(
-        "--event-mode",
-        choices=("minimal", "standard", "full"),
-        default="standard",
-    )
-    invocation_submit.add_argument("--report-file")
-
-    invocation_resume = invocation_commands.add_parser("resume")
-    _add_workflow_source_arguments(invocation_resume)
-    _add_server_connection_arguments(invocation_resume, selectable=True)
-    invocation_resume.add_argument("--session", required=True)
-    invocation_resume.add_argument("--wait-key", required=True)
-    _add_json_input_arguments(
-        invocation_resume,
-        file_flag="--response-file",
-        json_flag="--response-json",
-    )
-    _add_execution_arguments(invocation_resume)
-
-    invocation_report = invocation_commands.add_parser(
-        "report",
-        help="Build a compact progressive-debugging index for one Invocation.",
-    )
-    invocation_report.add_argument("invocation_id")
-    invocation_report.add_argument(
-        "--source",
-        choices=("auto", "server", "database"),
-        default="auto",
-        help="Prefer a matching Server, require Server, or require database.",
-    )
-    invocation_report.add_argument("--server-url")
-    invocation_report.add_argument("--report-file")
-
-    invocation_query = invocation_commands.add_parser(
-        "query",
-        help="Progressively query bounded evidence for one Invocation.",
-    )
-    invocation_query.add_argument("invocation_id")
-    invocation_query.add_argument(
-        "kind",
-        choices=(
-            "nodes",
-            "node",
-            "edges",
-            "edge",
-            "operator-calls",
-            "operator-call",
-            "runtime-events",
-            "runtime-event",
-            "user-events",
-            "user-event",
-            "runtime-state",
-        ),
-    )
-    invocation_query.add_argument(
-        "subject_id",
-        nargs="?",
-        help="Required by singular node, edge, Operator Call, or Event queries.",
-    )
-    invocation_query.add_argument("--cursor")
-    invocation_query.add_argument("--through-sequence", type=int)
-    invocation_query.add_argument("--limit", type=int, default=20)
-    invocation_query.add_argument("--path")
-    invocation_query.add_argument("--include-stream-deltas", action="store_true")
-    invocation_query.add_argument(
-        "--node-execution-id",
-        help="Restrict operator-calls to one NodeExecution.",
-    )
-    invocation_query.add_argument(
-        "--source",
-        choices=("auto", "server", "database"),
-        default="auto",
-    )
-    invocation_query.add_argument("--server-url")
-    invocation_query.add_argument("--report-file")
-
-    invocation_compare = invocation_commands.add_parser(
-        "compare",
-        help="Compare two observed Invocations without assigning a business verdict.",
-    )
-    invocation_compare.add_argument("baseline_invocation_id")
-    invocation_compare.add_argument("candidate_invocation_id")
-    invocation_compare.add_argument(
-        "--source",
-        choices=("auto", "server", "database"),
-        default="auto",
-    )
-    invocation_compare.add_argument("--server-url")
-    invocation_compare.add_argument("--report-file")
-
-    invocation_rerun = invocation_commands.add_parser(
-        "rerun",
-        help="Run the current Workflow revision from an Invocation start boundary.",
-    )
-    invocation_rerun.add_argument("source_invocation_id")
-    _add_server_connection_arguments(invocation_rerun, selectable=True)
-    invocation_rerun.add_argument("--timeout-ms", type=int)
-    invocation_rerun.add_argument("--report-file")
-    add_runtime_arguments(invocation_rerun)
-
-    evaluation = commands.add_parser(
-        "eval",
-        help="List, validate, and run project-owned Workflow Evaluations.",
-    )
-    evaluation_commands = evaluation.add_subparsers(
-        dest="command",
-        required=True,
-    )
-    evaluation_list = evaluation_commands.add_parser("list")
-    evaluation_list.add_argument("--report-file")
-    evaluation_check = evaluation_commands.add_parser("check")
-    evaluation_check.add_argument("suite_id")
-    evaluation_check.add_argument("--report-file")
-    evaluation_run = evaluation_commands.add_parser("run")
-    evaluation_run.add_argument("suite_id")
-    evaluation_run.add_argument(
-        "--case",
-        dest="cases",
-        action="append",
-        help="Run one eval_* Case method; repeat to select several Cases.",
-    )
-    evaluation_run.add_argument(
-        "--max-concurrency",
-        type=int,
-        default=1,
-        help="Maximum number of isolated Cases to execute concurrently.",
-    )
-    evaluation_run.add_argument("--timeout-ms", type=int)
-    evaluation_run.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Include values and comments for successful Evaluators.",
-    )
-    evaluation_run.add_argument("--report-file")
-    add_runtime_arguments(evaluation_run)
-
-    server = commands.add_parser("server")
-    server.add_argument("--host")
-    server.add_argument("--port", type=int)
-    server.add_argument("--reload", action="store_true")
-    server.add_argument("--read-only", action="store_true")
-    server.add_argument("--secure-cookies", action="store_true")
-    server.add_argument("--ui-directory")
-    server.add_argument("--trace-cache-size", type=int)
-    add_runtime_arguments(server)
-    return parser
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
+    """Parse arguments and return a conventional process exit code."""
+
+    parser = _parser()
     arguments = parser.parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, arguments.log_level.upper()),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
     try:
-        return _dispatch(arguments)
-    except ProjectLoadError as exc:
-        write_report(
-            render_project_diagnostics(exc.diagnostics),
-            getattr(arguments, "report_file", None),
+        return int(arguments.handler(arguments))
+    except HostConfigurationError as error:
+        _write_error(
+            "HOST_CONFIGURATION_INVALID",
+            str(error),
+            diagnostics=[item.model_dump(mode="json") for item in error.diagnostics],
         )
-        return 2
-    except InvocationReportCliError as exc:
-        write_report(
-            f"REPORT ERROR\nMESSAGE {exc}\n\nREPORT_RESULT failed",
-            getattr(arguments, "report_file", None),
-        )
-        return 2
-    except (KeyError, ValueError) as exc:
-        write_report(
-            f"CONFIGURATION ERROR\nMESSAGE {exc}\n\nRESULT failed",
-            getattr(arguments, "report_file", None),
-        )
-        return 2
-    except ServerClientError as exc:
-        write_report(
-            f"SERVER ERROR\nMESSAGE {exc}\n\nRESULT failed",
-            getattr(arguments, "report_file", None),
-        )
-        return 2
-    except TimeoutError:
-        subject = (
-            "Evaluation"
-            if getattr(arguments, "group", None) == "eval"
-            else "Invocation"
-        )
-        write_report(
-            f"EXECUTION ERROR\nMESSAGE {subject} timed out.\n\nRESULT failed",
-            getattr(arguments, "report_file", None),
-        )
-        return 1
+    except (AutoAgentError, HostOperationError, RuntimeEventStoreError, _CliError) as error:
+        _write_error(_error_code(error), str(error))
+    except (ValueError, TypeError, OSError) as error:
+        _write_error(type(error).__name__.upper(), str(error))
     except KeyboardInterrupt:
-        print("\nRESULT cancelled", file=sys.stderr)
+        _write_error("INTERRUPTED", "Command interrupted.")
         return 130
+    except SystemExit as error:
+        _write_error(
+            "USER_CODE_EXITED",
+            f"User code terminated the command with SystemExit({error.code!r}).",
+        )
+    except Exception:
+        _write_error(
+            "INTERNAL_ERROR",
+            "The command failed with an unexpected internal error.",
+        )
+    return 1
 
 
-def _dispatch(arguments: argparse.Namespace) -> int:
-    _validate_command_project_source(arguments)
-    loader = ProjectLoader()
-    project_root = loader._resolve_root(
-        arguments.project,
-        workflow_file=getattr(arguments, "workflow_file", None),
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="autoagent",
+        description="Compile and run an AutoAgent V2 project.",
     )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    compile_command = commands.add_parser(
+        "compile", help="Load and validate every configured Workflow."
+    )
+    compile_command.add_argument(
+        "--project", default=".", help="Project directory or autoagent.toml."
+    )
+    _add_environment_arguments(compile_command)
+    compile_command.set_defaults(handler=_compile)
+
+    invoke_command = commands.add_parser(
+        "invoke", help="Invoke one configured Workflow to a stable boundary."
+    )
+    invoke_command.add_argument("workflow_id")
+    invoke_command.add_argument(
+        "--project", default=".", help="Project directory or autoagent.toml."
+    )
+    invoke_command.add_argument(
+        "--input", required=True, help="A JSON value or @path to a JSON file."
+    )
+    invoke_command.add_argument("--session-id")
+    invoke_command.add_argument("--entry", dest="entry_node_id")
+    _add_environment_arguments(invoke_command)
+    invoke_command.set_defaults(handler=_invoke)
+
+    resume_command = commands.add_parser(
+        "resume", help="Restore one Root Session and answer a durable Wait."
+    )
+    resume_command.add_argument("session_id")
+    resume_command.add_argument("wait_id")
+    resume_command.add_argument(
+        "--response", required=True, help="A JSON value or @path to a JSON file."
+    )
+    resume_command.add_argument(
+        "--project", default=".", help="Project directory or autoagent.toml."
+    )
+    _add_environment_arguments(resume_command)
+    resume_command.set_defaults(handler=_resume)
+
+    recover_command = commands.add_parser(
+        "recover", help="Restore and recover one unfinished Root Session."
+    )
+    recover_command.add_argument("session_id")
+    recover_command.add_argument(
+        "--project", default=".", help="Project directory or autoagent.toml."
+    )
+    _add_environment_arguments(recover_command)
+    recover_command.set_defaults(handler=_recover)
+
+    trace_command = commands.add_parser(
+        "trace", help="Serve a read-only local tracing database and UI."
+    )
+    trace_command.add_argument(
+        "--project", default=".", help="Project directory used for environment settings."
+    )
+    trace_command.add_argument("--database", help="Override the SQLite database path.")
+    trace_command.add_argument("--host", help="Override the listen host.")
+    trace_command.add_argument("--port", type=int, help="Override the listen port.")
+    trace_command.add_argument("--ui-directory", help="Override static UI files.")
+    trace_command.add_argument(
+        "--allow-remote-without-auth",
+        action="store_true",
+        help="Explicitly expose full local traces on a non-loopback address.",
+    )
+    _add_environment_arguments(trace_command)
+    trace_command.set_defaults(handler=_trace)
+    return parser
+
+
+def _add_environment_arguments(command: argparse.ArgumentParser) -> None:
+    group = command.add_mutually_exclusive_group()
+    group.add_argument(
+        "--env-file",
+        help="Load this environment file relative to the Project root.",
+    )
+    group.add_argument(
+        "--no-env-file",
+        action="store_true",
+        help="Do not load the Project .env file.",
+    )
+
+
+def _compile(arguments: argparse.Namespace) -> int:
+    manifest_path, environment = _workflow_command_environment(arguments)
+    with project_environment_scope(environment), _redirect_user_stdout():
+        project = ProjectLoader().load(
+            manifest_path,
+            environment=environment,
+        )
+        compiler = WorkflowCompiler()
+        workflows: list[dict[str, object]] = []
+        ok = True
+        for loaded in project.workflows:
+            result = compiler.compile(loaded.workflow)
+            item = result.to_diagnostic_document()
+            if result.workflow_definition_snapshot is not None:
+                snapshot = result.workflow_definition_snapshot
+                item.update(
+                    {
+                        "workflow_version": snapshot.workflow_version,
+                        "workflow_revision_id": snapshot.workflow_revision_id,
+                        "definition_hash": snapshot.definition_hash,
+                    }
+                )
+            workflows.append(item)
+            ok = ok and result.ok
+    _write_json({"ok": ok, "project": project.manifest.project.name, "workflows": workflows})
+    return 0 if ok else 1
+
+
+def _invoke(arguments: argparse.Namespace) -> int:
+    value = _read_json_argument(arguments.input)
+    with _redirect_user_stdout():
+        host = AutoAgentHost.from_project(
+            arguments.project,
+            env_file=arguments.env_file,
+            use_env_file=not arguments.no_env_file,
+        )
+        with project_environment_scope(getattr(host, "environment", None)):
+            try:
+                result = host.invoke(
+                    arguments.workflow_id,
+                    value,
+                    session_id=arguments.session_id,
+                    entry_node_id=arguments.entry_node_id,
+                )
+            except BaseException as error:
+                _close_after_failure(host, error)
+                raise
+            else:
+                host.close()
+    _write_json(_invocation_result_record(result))
+    return 0 if result.status in {"completed", "waiting"} else 1
+
+
+def _resume(arguments: argparse.Namespace) -> int:
+    response = _read_json_argument(arguments.response)
+    result = _run_restored_command(
+        arguments,
+        lambda host, ref: host.resume(ref, arguments.wait_id, response),
+    )
+    _write_json(_invocation_result_record(result))
+    return 0 if result.status in {"completed", "waiting"} else 1
+
+
+def _recover(arguments: argparse.Namespace) -> int:
+    result = _run_restored_command(
+        arguments,
+        lambda host, ref: host.recover(ref),
+    )
+    _write_json(_invocation_result_record(result))
+    return 0 if result.status in {"completed", "waiting"} else 1
+
+
+def _run_restored_command(
+    arguments: argparse.Namespace,
+    operation: Callable[[AutoAgentHost, InvocationRef], InvocationResult],
+) -> InvocationResult:
+    with _redirect_user_stdout():
+        host = AutoAgentHost.from_project(
+            arguments.project,
+            env_file=arguments.env_file,
+            use_env_file=not arguments.no_env_file,
+        )
+        with project_environment_scope(getattr(host, "environment", None)):
+            try:
+                loaded = host.restore_session(arguments.session_id)
+                ref = _restored_root_ref(loaded, arguments.session_id)
+                result = operation(host, ref)
+            except BaseException as error:
+                _close_after_failure(host, error)
+                raise
+            else:
+                host.close()
+    return result
+
+
+def _restored_root_ref(
+    loaded: CheckpointLoadResult,
+    session_id: str,
+) -> InvocationRef:
+    matches = tuple(
+        ref for ref in loaded.roots if ref.session_id == session_id
+    )
+    if len(matches) != 1:
+        raise _CliError(
+            "HOST_SESSION_NOT_CURRENT",
+            f"Session {session_id!r} is not the current restored Root Session.",
+        )
+    return matches[0]
+
+
+def _trace(arguments: argparse.Namespace) -> int:
+    project_root = _project_root(arguments.project)
     environment = load_project_environment(
         project_root,
         env_file=arguments.env_file,
         use_env_file=not arguments.no_env_file,
     )
-    with _project_environment_scope(environment):
-        project = _load_command_project(arguments, loader=loader)
-        return _dispatch_project_command(project, environment, arguments)
+    with project_environment_scope(environment):
+        return _trace_with_environment(arguments, project_root, environment)
 
 
-def _dispatch_project_command(
-    project: Any,
-    environment: dict[str, str],
+def _trace_with_environment(
     arguments: argparse.Namespace,
+    project_root: Path,
+    environment: Mapping[str, str],
 ) -> int:
-    if arguments.group == "project" and arguments.command == "check":
-        return _project_check(project, arguments)
-    if arguments.group == "workflow" and arguments.command == "list":
-        return _workflow_list(project, arguments)
-    if arguments.group == "workflow" and arguments.command == "check":
-        return _workflow_check(project, arguments)
-    if arguments.group == "workflow" and arguments.command == "preview":
-        return _workflow_preview(project, arguments)
-    if arguments.group == "eval" and arguments.command == "list":
-        return list_evaluations(project, arguments)
-    if arguments.group == "eval" and arguments.command == "check":
-        return check_evaluation(project, arguments)
-
-    if arguments.group == "invocation":
-        if arguments.command == "report":
-            return asyncio.run(
-                run_invocation_report(project, environment, arguments)
-            )
-        if arguments.command == "query":
-            return asyncio.run(
-                run_invocation_query(project, environment, arguments)
-            )
-        if arguments.command == "compare":
-            return asyncio.run(
-                run_invocation_comparison(project, environment, arguments)
-            )
-        if arguments.command == "rerun":
-            if _uses_server(arguments):
-                _validate_remote_runtime_arguments(arguments)
-            app_settings = (
-                None
-                if _uses_server(arguments)
-                else app_settings_from_arguments(arguments, environment)
-            )
-            return asyncio.run(
-                run_invocation_rerun(
-                    project,
-                    environment,
-                    app_settings,
-                    arguments,
-                )
-            )
-        if _uses_server(arguments):
-            return asyncio.run(
-                _remote_invocation_command(environment, arguments)
-            )
-        app_settings = app_settings_from_arguments(arguments, environment)
-        return asyncio.run(
-            _invocation_command(project, environment, app_settings, arguments)
-        )
-    if arguments.group == "eval" and arguments.command == "run":
-        app_settings = app_settings_from_arguments(arguments, environment)
-        return asyncio.run(
-            run_evaluation(project, environment, app_settings, arguments)
-        )
-    if arguments.group == "server":
-        app_settings = app_settings_from_arguments(arguments, environment)
-        return _server(project, environment, app_settings, arguments)
-    raise RuntimeError("Unknown CLI command.")
-
-
-def _load_command_project(
-    arguments: argparse.Namespace,
-    *,
-    loader: ProjectLoader | None = None,
-) -> Any:
-    loader = ProjectLoader() if loader is None else loader
-    workflow_file = getattr(arguments, "workflow_file", None)
-    if workflow_file is not None:
-        project = loader.load_workflow_file(
-            workflow_file,
-            object_path=(
-                getattr(arguments, "workflow_object", None) or "workflow"
-            ),
-            project_root=arguments.project,
-        )
-        arguments.workflow_id = project.workflows[0].workflow.id
-        return project
-    return loader.load(arguments.project)
-
-
-def _validate_command_project_source(arguments: argparse.Namespace) -> None:
-    workflow_file = getattr(arguments, "workflow_file", None)
-    workflow_object = getattr(arguments, "workflow_object", None)
-    workflow_id = getattr(arguments, "workflow_id", None)
-    if workflow_file is not None:
-        if _uses_server(arguments):
-            raise ValueError("--file cannot be combined with Server execution.")
-        if workflow_id is not None:
-            raise ValueError("Pass either workflow_id or --file, not both.")
-        return
-    if workflow_object is not None:
-        raise ValueError("--object requires --file.")
-    if hasattr(arguments, "workflow_id") and workflow_id is None:
-        raise ValueError("Pass a manifest workflow_id or --file.")
-
-
-def _uses_server(arguments: argparse.Namespace) -> bool:
-    return (
-        arguments.group == "invocation"
-        and (
-            arguments.command == "submit"
-            or bool(getattr(arguments, "server", False))
-            or getattr(arguments, "server_url", None) is not None
-        )
+    settings = load_host_settings(
+        project_root,
+        use_env_file=False,
+        environ=environment,
     )
-
-
-def _project_check(project: Any, arguments: argparse.Namespace) -> int:
-    compiler = ProjectCompiler()
-    results = [
-        compiler.compile(loaded.workflow) for loaded in project.workflows
-    ]
-    report = "\n\n".join(render_compile_result(result) for result in results)
-    write_report(report, arguments.report_file)
-    failed = any(not result.ok for result in results)
-    warned = any(
-        diagnostic.severity == "warning"
-        for result in results
-        for diagnostic in result.diagnostics
+    database = (
+        Path(arguments.database).expanduser().resolve()
+        if arguments.database is not None
+        else settings.sqlite_path
     )
-    return 1 if failed or (arguments.warnings_as_errors and warned) else 0
-
-
-def _workflow_list(project: Any, arguments: argparse.Namespace) -> int:
-    compiler = ProjectCompiler()
-    results = {
-        loaded.workflow.id: compiler.compile(loaded.workflow)
-        for loaded in project.workflows
-    }
-    write_report(
-        render_workflow_list(project, results),
-        arguments.report_file,
+    host = (
+        settings.trace_host
+        if arguments.host is None
+        else arguments.host.strip()
     )
-    return 0
-
-
-def _workflow_check(project: Any, arguments: argparse.Namespace) -> int:
-    workflow = project.workflow_by_id(arguments.workflow_id)
-    result = ProjectCompiler().compile(workflow)
-    write_report(render_compile_result(result), arguments.report_file)
-    warned = any(
-        diagnostic.severity == "warning"
-        for diagnostic in result.diagnostics
+    if not host:
+        raise ValueError("host cannot be empty")
+    port = settings.trace_port if arguments.port is None else arguments.port
+    if not 1 <= port <= 65_535:
+        raise ValueError("port must be between 1 and 65535")
+    if not arguments.allow_remote_without_auth and not _is_loopback_host(host):
+        raise _CliError(
+            "TRACING_REMOTE_UNAUTHENTICATED",
+            "Tracing exposes Runtime context without authentication; use a "
+            "loopback host or pass --allow-remote-without-auth explicitly.",
+        )
+    if arguments.ui_directory is not None and not arguments.ui_directory.strip():
+        raise ValueError("ui-directory cannot be empty")
+    ui_directory = (
+        Path(arguments.ui_directory).expanduser().resolve()
+        if arguments.ui_directory is not None
+        else settings.trace_ui_directory
     )
-    return 1 if not result.ok or (arguments.warnings_as_errors and warned) else 0
-
-
-def _workflow_preview(project: Any, arguments: argparse.Namespace) -> int:
-    workflow = project.workflow_by_id(arguments.workflow_id)
-    preview = ProjectCompiler().preview(workflow)
-    output = arguments.output
-    if output is None or output == "-":
-        print(preview.render(arguments.preview_format))
-        return 0
-
-    target = Path(output).expanduser()
-    if not target.is_absolute():
-        target = project.root / target
     try:
-        path = preview.save(target, format=arguments.preview_format)
-    except OSError as exc:
-        raise ValueError(f"Could not write Workflow preview: {exc}") from exc
-    status = (
-        "invalid"
-        if preview.error_count
-        else "warning"
-        if preview.warning_count
-        else "valid"
-    )
-    print(
-        "\n".join(
-            (
-                f"WORKFLOW {workflow.id}",
-                f"FORMAT {arguments.preview_format}",
-                f"OUTPUT {path}",
-                f"STATUS {status}",
-                "RESULT previewed",
-            )
-        )
-    )
-    return 0
+        import uvicorn
+        from autoagent.tracing import TracingDependencyError, create_tracing_app
+    except ImportError as error:
+        raise _CliError(
+            "CLI_DEPENDENCY_MISSING",
+            "The trace command requires the 'server' optional dependency."
+        ) from error
 
-
-async def _invocation_command(
-    project: Any,
-    environment: dict[str, str],
-    app_settings: Any,
-    arguments: argparse.Namespace,
-) -> int:
-    host = ProjectHost(
-        project,
-        app_settings=app_settings,
-        environment=environment,
-        workflow_ids=(arguments.workflow_id,),
+    store = SQLiteRuntimeStore.open_read_only(
+        database,
+        refresh_seconds=settings.trace_refresh_seconds,
     )
-    async with host:
-        workflow = host.workflow(arguments.workflow_id)
-        timeout = (
-            None
-            if arguments.timeout_ms is None
-            else arguments.timeout_ms / 1000
-        )
-        if arguments.command == "run":
-            invocation_input = _read_json_argument(arguments)
-            if invocation_input is not None and not isinstance(
-                invocation_input,
-                dict,
-            ):
-                raise ValueError(
-                    "Invocation input must be a JSON object or null."
-                )
-            invocation = await _with_timeout(
-                host.app.ainvoke(
-                    workflow,
-                    input=invocation_input,
-                    session_id=arguments.session,
-                    entry_node_id=arguments.entry_node,
-                    event_mode=arguments.event_mode,
-                ),
-                timeout,
-            )
-        else:
-            response_supplied = (
-                arguments.response_file is not None
-                or arguments.response_json is not None
-            )
-            resume_options: dict[str, Any] = {
-                "session_id": arguments.session,
-                "wait_key": arguments.wait_key,
-            }
-            if response_supplied:
-                resume_options["output"] = _read_json_argument(arguments)
-            invocation = await _with_timeout(
-                host.app.aresume(workflow, **resume_options),
-                timeout,
-            )
-        events = list(host.app.runtime_store.runtime_events.get(invocation.id, ()))
-        write_report(
-            render_invocation(
-                invocation,
-                events=events,
-                include_trace=arguments.trace,
-                serializer=host.app.runtime_serializer,
-            ),
-            arguments.report_file,
-        )
-        return 1 if invocation.state in {"failed", "interrupted", "cancelled"} else 0
-
-
-async def _remote_invocation_command(
-    environment: dict[str, str],
-    arguments: argparse.Namespace,
-) -> int:
-    _validate_remote_runtime_arguments(arguments)
-    server_url = resolve_server_url(
-        environment,
-        explicit_url=arguments.server_url,
-    )
-    access_token = environment.get("AUTOAGENT_SERVER_ACCESS_TOKEN") or None
-    timeout = (
-        None
-        if getattr(arguments, "timeout_ms", None) is None
-        else arguments.timeout_ms / 1_000
-    )
-    if timeout is not None and timeout <= 0:
-        raise ValueError("--timeout-ms must be positive.")
-
-    async with AutoAgentServerClient(
-        server_url,
-        access_token=access_token,
-    ) as client:
-        if arguments.command in {"run", "submit"}:
-            invocation_input = _read_json_argument(arguments)
-            if invocation_input is not None and not isinstance(
-                invocation_input,
-                dict,
-            ):
-                raise ValueError(
-                    "Invocation input must be a JSON object or null."
-                )
-            submitted = await client.submit(
-                arguments.workflow_id,
-                input=invocation_input,
-                session_key=arguments.session,
-                entry_node_id=arguments.entry_node,
-                event_mode=arguments.event_mode,
-            )
-            if arguments.command == "submit":
-                write_report(
-                    render_submitted_invocation(submitted),
-                    arguments.report_file,
-                )
-                return 0
-            invocation_id = str(submitted["invocation_id"])
-        else:
-            output_supplied = (
-                arguments.response_file is not None
-                or arguments.response_json is not None
-            )
-            resumed = await client.resume(
-                arguments.workflow_id,
-                session_key=arguments.session,
-                wait_key=arguments.wait_key,
-                output_supplied=output_supplied,
-                output=(
-                    _read_json_argument(arguments)
-                    if output_supplied
+    try:
+        store.start()
+        try:
+            application = create_tracing_app(
+                store,
+                ui_directory=ui_directory,
+                allowed_hosts=(
+                    _local_tracing_hosts(host)
+                    if _is_loopback_host(host)
                     else None
                 ),
             )
-            invocation_id = str(resumed["invocation_id"])
-
-        detail = await client.wait_for_invocation(
-            invocation_id,
-            timeout=timeout,
-        )
-        include_trace = bool(arguments.trace)
-        events = (
-            await client.events(invocation_id)
-            if include_trace
-            or detail["state"] in {"failed", "interrupted", "cancelled"}
-            else []
-        )
-        write_report(
-            render_remote_invocation(
-                detail,
-                events=events,
-                include_trace=include_trace,
-            ),
-            arguments.report_file,
-        )
-        return (
-            1
-            if detail["state"] in {"failed", "interrupted", "cancelled"}
-            else 0
-        )
-
-
-def _server(
-    project: Any,
-    environment: dict[str, str],
-    app_settings: Any,
-    arguments: argparse.Namespace,
-) -> int:
-    host = ProjectHost(
-        project,
-        app_settings=app_settings,
-        environment=environment,
-    )
-    server_settings = server_settings_from_arguments(arguments, environment)
-    ui_directory = server_settings.ui_directory
-    if ui_directory is not None and not ui_directory.is_absolute():
-        ui_directory = project.root / ui_directory
-    server = AutoAgentServer(
-        host.app,
-        execution_enabled=server_settings.execution_enabled,
-        access_token=server_settings.access_token,
-        secure_cookies=server_settings.secure_cookies,
-        ui_directory=ui_directory,
-        trace_cache_size=server_settings.trace_cache_size,
-        shutdown_callback=host.close,
-    )
-    try:
-        server.run(
-            host=server_settings.host,
-            port=server_settings.port,
-            reload=arguments.reload,
-        )
-    finally:
-        asyncio.run(host.close())
+        except TracingDependencyError as error:
+            raise _CliError("CLI_DEPENDENCY_MISSING", str(error)) from error
+        try:
+            uvicorn.run(application, host=host, port=port)
+        except SystemExit as error:
+            raise _CliError(
+                "TRACING_SERVER_FAILED",
+                f"Tracing server exited with status {error.code!r}.",
+            ) from error
+    except BaseException as error:
+        _close_after_failure(store, error)
+        raise
+    else:
+        store.close()
     return 0
 
 
-async def _with_timeout(awaitable: Any, timeout: float | None) -> Any:
-    if timeout is None:
-        return await awaitable
-    if timeout <= 0:
-        raise ValueError("--timeout-ms must be positive.")
-    return await asyncio.wait_for(awaitable, timeout=timeout)
-
-
-def _read_json_argument(arguments: argparse.Namespace) -> Any:
-    file_value = getattr(
-        arguments,
-        "input_file",
-        getattr(arguments, "response_file", None),
+def _workflow_command_environment(
+    arguments: argparse.Namespace,
+) -> tuple[Path, dict[str, str]]:
+    manifest_path = resolve_manifest_path(arguments.project)
+    environment = load_project_environment(
+        manifest_path.parent,
+        env_file=arguments.env_file,
+        use_env_file=not arguments.no_env_file,
     )
-    json_value = getattr(
-        arguments,
-        "input_json",
-        getattr(arguments, "response_json", None),
-    )
-    if json_value is not None:
-        return json.loads(json_value)
-    if file_value is None:
-        return None
-    if file_value == "-":
-        return json.load(sys.stdin)
-    with Path(file_value).expanduser().open(encoding="utf-8") as stream:
-        return json.load(stream)
+    return manifest_path, environment
 
 
-def _add_check_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--warnings-as-errors", action="store_true")
-    parser.add_argument("--report-file")
+def _project_root(project: str | Path) -> Path:
+    path = Path(project).expanduser().resolve()
+    if path.is_dir():
+        return path
+    if path.is_file():
+        return path.parent
+    raise ValueError(f"project path does not exist: {path}")
 
 
-def _add_workflow_source_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "workflow_id",
-        nargs="?",
-        help="Workflow id declared by the project manifest; omit with --file.",
-    )
-    parser.add_argument(
-        "--file",
-        dest="workflow_file",
-        help="Standalone Python file exporting a Workflow object.",
-    )
-    parser.add_argument(
-        "--object",
-        dest="workflow_object",
-        help="Exported object path inside --file (default: workflow).",
-    )
-
-
-def _add_server_connection_arguments(
-    parser: argparse.ArgumentParser,
-    *,
-    selectable: bool,
-) -> None:
-    if selectable:
-        parser.add_argument(
-            "--server",
-            action="store_true",
-            help="Execute through the configured AutoAgent Server.",
+def _close_after_failure(resource: object, primary: BaseException) -> None:
+    try:
+        resource.close()
+    except BaseException as cleanup:
+        primary.add_note(
+            f"Cleanup also failed with {type(cleanup).__name__}: {cleanup}"
         )
-    parser.add_argument(
-        "--server-url",
-        help=(
-            "Override AUTOAGENT_SERVER_URL or the configured Server host/port."
+
+
+@contextmanager
+def _redirect_user_stdout() -> Iterator[None]:
+    """Keep Python, native, and subprocess output off the JSON stdout channel."""
+
+    destination = sys.stderr
+    _flush_text_stream(sys.stdout)
+    saved_stdout = os.dup(1)
+    capture_reader: int | None = None
+    capture_writer: int | None = None
+    try:
+        try:
+            target = destination.fileno()
+        except (AttributeError, io.UnsupportedOperation):
+            target, path = tempfile.mkstemp(prefix="autoagent-cli-stdout-")
+            capture_writer = target
+            capture_reader = os.open(path, os.O_RDONLY)
+            os.unlink(path)
+        os.dup2(target, 1)
+        if capture_writer is not None:
+            os.close(capture_writer)
+            capture_writer = None
+        with redirect_stdout(destination):
+            yield
+    finally:
+        _flush_text_stream(sys.stdout)
+        _flush_native_streams()
+        os.dup2(saved_stdout, 1)
+        os.close(saved_stdout)
+        if capture_writer is not None:
+            os.close(capture_writer)
+        if capture_reader is not None:
+            chunks: list[bytes] = []
+            while chunk := os.read(capture_reader, 8192):
+                chunks.append(chunk)
+            os.close(capture_reader)
+            destination.write(b"".join(chunks).decode("utf-8", errors="replace"))
+            destination.flush()
+
+
+def _flush_text_stream(stream: TextIO) -> None:
+    try:
+        stream.flush()
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _flush_native_streams() -> None:
+    """Flush C stdio while fd 1 still points away from machine stdout."""
+
+    try:
+        ctypes.CDLL(None).fflush(None)
+    except (AttributeError, OSError):
+        pass
+
+
+def _is_loopback_host(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _local_tracing_hosts(value: str) -> tuple[str, ...]:
+    normalized = value.strip().lower()
+    if normalized == "localhost":
+        return ("localhost", "127.0.0.1", "::1")
+    address = ipaddress.ip_address(normalized)
+    if address in {
+        ipaddress.ip_address("127.0.0.1"),
+        ipaddress.ip_address("::1"),
+    }:
+        return ("localhost", "127.0.0.1", "::1")
+    return (address.compressed,)
+
+
+def _read_json_argument(source: str) -> object:
+    if source.startswith("@"):
+        path = Path(source[1:]).expanduser()
+        if not source[1:]:
+            raise ValueError("JSON file path cannot be empty")
+        text = path.read_text(encoding="utf-8")
+    else:
+        text = source
+    try:
+        return json.loads(text, parse_constant=_reject_json_constant)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"input is not valid JSON: {error.msg}") from error
+
+
+def _invocation_result_record(result: object) -> dict[str, object]:
+    return {
+        "session_id": result.session_id,
+        "invocation_id": result.invocation_id,
+        "status": result.status,
+        "output": _json_value(result.output),
+        "error": _json_value(result.error),
+        "waits": [
+            {"id": wait.id, "request": _json_value(wait.request)}
+            for wait in result.waits
+        ],
+        "checkpoint": {
+            "id": result.checkpoint.id,
+            "root_session_id": result.checkpoint.root_session_id,
+            "captured_at_ns": str(result.checkpoint.captured_at_ns),
+            "digest": result.checkpoint.digest,
+        },
+    }
+
+
+def _json_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, Enum):
+        return _json_value(value.value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_value(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: _json_value(getattr(value, item.name)) for item in fields(value)}
+    raise TypeError(f"Cannot encode {type(value).__name__} as command JSON")
+
+
+def _write_json(value: object, *, stream: object | None = None) -> None:
+    destination = sys.stdout if stream is None else stream
+    print(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         ),
+        file=destination,
     )
 
 
-def _validate_remote_runtime_arguments(arguments: argparse.Namespace) -> None:
-    if getattr(arguments, "store", "auto") != "auto":
-        raise ValueError("--store applies only to local execution.")
-    for name, flag in (
-        ("max_thread_workers", "--max-thread-workers"),
-        ("max_parallel_units", "--max-parallel-units"),
-        ("shutdown_timeout_ms", "--shutdown-timeout-ms"),
-    ):
-        if getattr(arguments, name, None) is not None:
-            raise ValueError(f"{flag} applies only to local execution.")
+def _write_error(code: str, message: str, **details: object) -> None:
+    _write_json(
+        {"ok": False, "error": {"code": code, "message": message, **details}},
+        stream=sys.stderr,
+    )
 
 
-def _add_json_input_arguments(
-    parser: argparse.ArgumentParser,
-    *,
-    file_flag: str,
-    json_flag: str,
-) -> None:
-    inputs = parser.add_mutually_exclusive_group()
-    inputs.add_argument(file_flag)
-    inputs.add_argument(json_flag)
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"input is not valid JSON: {value} is not permitted")
 
 
-def _add_execution_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--timeout-ms", type=int)
-    parser.add_argument("--trace", action="store_true")
-    parser.add_argument("--report-file")
-    add_runtime_arguments(parser)
+def _error_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) and code.strip() else type(error).__name__.upper()
+
+
+__all__ = ["main"]

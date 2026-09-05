@@ -1,5 +1,5 @@
-"""AutoAgent command-line interface."""
+"""Command-line entry point for V2 project validation and local execution."""
 
-from autoagent.cli.main import build_parser, main
+from .main import main
 
-__all__ = ["build_parser", "main"]
+__all__ = ["main"]

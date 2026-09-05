@@ -1,2095 +1,1267 @@
+"""Control loop for one Workflow Invocation.
+
+This module owns scheduling and Runtime transition orchestration. It never
+compiles Workflows and exposes no public application API.
+"""
+
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from copy import deepcopy
-import inspect
-import logging
-from time import perf_counter_ns
-from typing import Any
-from uuid import UUID
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
+from typing import cast
+from uuid import uuid4
 
-from autoagent.core.compiler import NodeIR, WorkflowIR, WorkflowVersionSnapshot
-from autoagent.core.executor.node_executor import (
-    NodeExecutionJob,
-    NodeExecutor,
-)
-from autoagent.core.executor.result import (
-    NodeExecutionProgress,
-    NodeExecutionResult,
-)
-from autoagent.core.runtime import (
-    InputMappingContext,
-    IncomingOutput,
-    Invocation,
-    OperatorCall,
-    EdgeEvaluation,
-    NodeExecution,
-    OutputBindingContext,
+from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
+from ..operators import Operator, Wait
+from ..runtime import (
+    ChildAwaitSuspended,
+    ChildInvocationPlan,
+    ChildInvocationPhaseChanged,
+    ChildInvocationPlanned,
+    ChildUnitSpec,
+    InvocationCancelled,
+    InvocationCompleted,
+    InvocationFailed,
+    InvocationOpened,
+    InvocationState,
+    InvocationStarted,
+    InvocationWaiting,
+    NodeOccurrenceWaiting,
     RuntimeErrorInfo,
-    RuntimeEvent,
-    RuntimeEventSubjectType,
-    RuntimeEventType,
-    RuntimeStore,
-    Session,
-    UserEventSpec,
-    build_state_operations,
+    RuntimeState,
+    SessionOpened,
+    StateReducer,
+    StateTransition,
+    TaskRuntime,
+    UserEvent,
+    thaw,
 )
-from autoagent.core.runtime.context import capture_hook_context
-from autoagent.core.runtime.scheduler import NodeExecutionRequest, node_instance_key
-from autoagent.core.runtime.hooks import invoke_hook_async
-from autoagent.core.runtime.time import utc_timestamp_ms
-from autoagent.core.scheduler import Scheduler
-from autoagent.core.workflow.user_event import normalize_user_event_mappings
+from ..workflow import (
+    AggregationContext,
+    Capability,
+    ChildInvocationHandle,
+    ErrorInfo,
+    NodeIR,
+    OutputBindingContext,
+    WorkflowIR,
+)
+from .node_executor import NodeExecutor, UserCallableCancelledError
+from .result import ExecutionMetrics, NodeExecutionResult
 
 
-_MISSING = object()
-logger = logging.getLogger(__name__)
+CapabilityResolver = Callable[[Capability, object], Operator | Awaitable[Operator]]
+EmitRuntimeEvent = Callable[
+    [str, str | None, object, str | None], Awaitable[StateTransition]
+]
+EmitUserEvent = Callable[
+    [str, str, str, object, str | None], Awaitable[UserEvent]
+]
+StartChild = Callable[
+    [WorkflowIR, str, str, asyncio.Semaphore | None, asyncio.Event | None],
+    asyncio.Task[None],
+]
+BeginChildAdmission = Callable[[str], None]
+AbortChildAdmission = Callable[[str], None]
+EnsureChildDurable = Callable[[str], Awaitable[None]]
 
 
-def _event_identity(event_name: str) -> tuple[RuntimeEventType, str]:
-    if event_name.startswith("invocation."):
-        return "state_change", event_name
-    if event_name.startswith("recovery."):
-        return "recovery", event_name
-    if event_name.startswith("wait."):
-        return "wait", event_name
-    if event_name.startswith("edge.") or event_name.startswith("routing."):
-        return "routing", event_name
-    if event_name.startswith("operator_call."):
-        return "operator_call", event_name
-    if event_name.startswith("node."):
-        return "state_change", event_name
-    return "phase", event_name
-
-
-def _event_subject(
-    invocation: Invocation,
-    *,
-    event_type: RuntimeEventType,
-    event_name: str,
-    node_execution_ids: tuple[UUID, ...],
-    detail: dict[str, Any] | None,
-) -> tuple[RuntimeEventSubjectType, str]:
-    data = detail or {}
-    if event_type == "routing" and data.get("edge_id") is not None:
-        return "edge", str(data["edge_id"])
-    if event_type == "operator_call" and data.get("operator_call_id") is not None:
-        return "operator_call", str(data["operator_call_id"])
-    if event_type == "wait" and data.get("wait_key") is not None:
-        return "wait", str(data["wait_key"])
-    if event_type == "recovery":
-        return "recovery", str(invocation.id)
-    if node_execution_ids:
-        return "node", str(node_execution_ids[0])
-    if data.get("node_execution_id") is not None:
-        return "node", str(data["node_execution_id"])
-    if data.get("node_id") is not None:
-        return "node", str(data["node_id"])
-    return "invocation", str(invocation.id)
-
-
-def _event_status(
-    event_name: str,
-    detail: dict[str, Any] | None,
-) -> str | None:
-    data = detail or {}
-    if data.get("state") is not None:
-        return str(data["state"])
-    return event_name.rsplit(".", 1)[-1] if "." in event_name else None
+class _ChildAwaitPending(Exception):
+    """Internal control signal: durable Child wait replaced this coroutine."""
 
 
 class WorkflowExecutor:
-    """Main control loop for one workflow invocation.
-
-    WorkflowExecutor is the only object that connects scheduler decisions,
-    node execution, runtime state mutation, and persistence. It is deliberately
-    the layer that knows about running NodeExecutions; Scheduler does not.
-
-    Loop order:
-      1. Drain stable transitions and let Scheduler produce ready requests.
-      2. Drain ready requests, create NodeExecutions, and submit them to
-         NodeExecutor without waiting for the whole batch to finish.
-      3. If no immediate work exists but nodes are running, await the first
-         completed NodeExecution Task.
-      4. Apply results on this main control path and persist.
-      5. Return only when invocation is completed, failed, or externally waiting.
-    """
+    """Drive exactly one Invocation through Scheduler and NodeExecutor."""
 
     def __init__(
         self,
         *,
-        scheduler: Scheduler | None = None,
-        node_executor: NodeExecutor | None = None,
-        runtime_store: RuntimeStore,
+        journal,
+        scheduler,
+        node_executor: NodeExecutor,
+        task_runtime: TaskRuntime,
+        operator_registry,
+        emit: EmitRuntimeEvent,
+        emit_user: EmitUserEvent,
+        start_child: StartChild,
+        begin_child_admission: BeginChildAdmission,
+        abort_child_admission: AbortChildAdmission,
+        ensure_child_durable: EnsureChildDurable,
+        max_node_executions_per_invocation: int,
+        capability_resolver: CapabilityResolver | None = None,
     ) -> None:
-        self.scheduler = scheduler or Scheduler()
-        self.node_executor = node_executor or NodeExecutor()
-        self.runtime_store = runtime_store
+        self._journal = journal
+        self._scheduler = scheduler
+        self._node_executor = node_executor
+        self._tasks = task_runtime
+        self._operator_registry = operator_registry
+        self._emit = emit
+        self._emit_user = emit_user
+        self._start_child = start_child
+        self._begin_child_admission = begin_child_admission
+        self._abort_child_admission = abort_child_admission
+        self._ensure_child_durable = ensure_child_durable
+        self._max_node_executions = max_node_executions_per_invocation
+        self._capability_resolver = capability_resolver
+        self._completion_locks: dict[str, asyncio.Lock] = {}
 
-    async def _record_event(
-        self,
-        session: Session,
-        invocation: Invocation,
-        event_name: str,
-        *,
-        node_execution_ids: tuple[UUID, ...] = (),
-        force_recovery_checkpoint: bool = False,
-        detail: dict[str, Any] | None = None,
-        elapsed_ns: int | None = None,
-        timing: dict[str, int] | None = None,
-        input: Any | None = None,
-        output: Any | None = None,
-        occurred_at_ms: int | None = None,
-    ) -> RuntimeEvent | None:
-        """Record one mode-dependent Runtime fact after its change is applied."""
+    async def drive(self, workflow: WorkflowIR, session_id: str) -> None:
+        """Run until terminal state or a stable external Wait boundary."""
 
-        event_type, normalized_name = _event_identity(event_name)
-        if invocation.event_mode == "minimal":
-            if (
-                normalized_name.startswith("invocation.")
-                or normalized_name in {"wait.created", "wait.resumed"}
-            ):
-                await self.runtime_store.apersist_invocation_state(
-                    session,
-                    invocation,
-                )
-            return None
-
-        if invocation.event_mode == "standard" and event_type == "phase":
-            return None
-        sequence = invocation.next_event_sequence()
-        operations = (
-            build_state_operations(
-                self.runtime_store.reduced_state(invocation.id),
-                session,
-                invocation,
-                node_execution_ids=node_execution_ids,
-                copy_operation_values=False,
-            )
-            if invocation.event_mode == "full"
-            else None
-        )
-        subject_type, subject_id = _event_subject(
-            invocation,
-            event_type=event_type,
-            event_name=normalized_name,
-            node_execution_ids=node_execution_ids,
-            detail=detail,
-        )
-        event = RuntimeEvent(
-            invocation_id=invocation.id,
-            sequence=sequence,
-            event_type=event_type,
-            event_name=normalized_name,
-            subject_type=subject_type,
-            subject_id=subject_id,
-            occurred_at_ms=occurred_at_ms or utc_timestamp_ms(),
-            elapsed_ns=elapsed_ns,
-            status=_event_status(normalized_name, detail),
-            timing=timing or {},
-            payload=detail or {},
-            input=input if invocation.event_mode == "full" else None,
-            output=output if invocation.event_mode == "full" else None,
-            operations=operations,
-        )
-        applied = await self.runtime_store.arecord_event(
-            session,
-            invocation,
-            event,
-            node_execution_ids=node_execution_ids,
-            force_recovery_checkpoint=force_recovery_checkpoint,
-        )
-        return applied
-
-    async def ainvoke(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-    ) -> Invocation:
-        if invocation.state == "created":
-            invocation.mark_running()
-            await self._record_event(
-                session,
-                invocation,
-                "invocation.running",
-                detail={"state": "running"},
-            )
-        skipped_before_initialization = set(
-            invocation.scheduler.skipped_node_instances
-        )
-        self.scheduler.initialize(workflow_ir=workflow_ir, invocation=invocation)
-        await self._record_new_skipped_nodes(
-            session,
-            invocation,
-            skipped_before_initialization,
-        )
+        tasks: dict[str, asyncio.Task[None]] = {}
+        wake_task: asyncio.Task[bool] | None = None
+        wake = self._tasks.wake_event(session_id)
         try:
-            return await self._drive(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-            )
-        except asyncio.CancelledError:
-            await self._cancel_invocation(session=session, invocation=invocation)
-            raise
-        except BaseException:
-            await self.node_executor.abandon(invocation.execution_mailbox)
-            raise
-
-    async def afail_infrastructure(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-        error: Exception,
-    ) -> Invocation:
-        """Turn an escaped framework exception into one terminal Runtime fact."""
-
-        if invocation.state in {
-            "completed",
-            "failed",
-            "cancelled",
-            "interrupted",
-        }:
-            return invocation
-        runtime_error = RuntimeErrorInfo(
-            code="INVOCATION_INFRASTRUCTURE_ERROR",
-            message=(
-                "Invocation failed because execution infrastructure raised an "
-                "unexpected error."
-            ),
-            detail={
-                "exception_type": type(error).__name__,
-                "message": str(error),
-            },
-        )
-        invocation.mark_failed(runtime_error)
-        try:
-            await self._cancel_unfinished_nodes(
-                session=session,
-                invocation=invocation,
-                error=runtime_error,
-            )
-            await self._record_event(
-                session,
-                invocation,
-                "invocation.failed",
-                detail={
-                    "state": "failed",
-                    "error": runtime_error.to_record(),
-                },
-                force_recovery_checkpoint=True,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record infrastructure RuntimeEvent; persisting the "
-                "terminal Invocation state directly: invocation_id=%s",
-                invocation.id,
-            )
-            try:
-                await self.runtime_store.apersist_invocation_state(
-                    session,
-                    invocation,
+            while True:
+                state = self._journal.state(session_id)
+                invocation = state.invocation
+                if invocation is None or invocation.terminal:
+                    return
+                execution_count = sum(
+                    item.started_state_version is not None
+                    for item in invocation.scheduler.occurrences.values()
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to persist terminal infrastructure failure; the "
-                    "in-memory Invocation remains failed: invocation_id=%s",
-                    invocation.id,
-                )
-        return invocation
-
-    async def arecover(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        workflow_snapshot: WorkflowVersionSnapshot,
-        session: Session,
-        invocation: Invocation,
-    ) -> Invocation:
-        """Automatically continue or terminate one process-interrupted Invocation.
-
-        Recovery never restores Python stacks. It rebuilds the durable prefix,
-        marks the execution mode as sticky ``recovery``, and follows only the
-        path Scheduler actually selects. Each selected parallel Node batch is
-        gated immediately before execution; no speculative graph scan occurs.
-        """
-
-        if invocation.state not in {"created", "running"}:
-            return invocation
-        if invocation.workflow_definition_hash != workflow_ir.definition_hash:
-            await self._interrupt_recovery(
-                session,
-                invocation,
-                code="WORKFLOW_DEFINITION_CHANGED",
-                message="Current Workflow definition does not match interrupted work.",
-            )
-            return invocation
-        self._materialize_persisted_outputs(workflow_ir, invocation)
-        invocation.execution_mode = "recovery"
-        if invocation.state == "created":
-            return await self.ainvoke(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-            )
-
-        active = [
-            execution
-            for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running"}
-        ]
-        if not active:
-            invocation.mark_running()
-            return await self._drive(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-            )
-
-        changed_execution_ids: list[UUID] = []
-        for interrupted in active:
-            changed_execution_ids.append(interrupted.id)
-            interrupted.mark_interrupted(
-                RuntimeErrorInfo(
-                    code="WORKER_LOST",
-                    message="Process ended while this NodeExecution was running.",
-                )
-            )
-            await self._record_terminal_node_events(
-                session=session,
-                invocation=invocation,
-                executions=(interrupted,),
-            )
-            request = NodeExecutionRequest(
-                node_id=interrupted.node_id,
-                activations=interrupted.incoming_activations,
-                execution_scope=interrupted.execution_scope,
-            )
-            node_ir = workflow_ir.nodes.get(interrupted.node_id)
-            reason = self._recovery_rejection_reason(
-                node_ir=node_ir,
-                interrupted=interrupted,
-            )
-            if reason is not None:
-                error = RuntimeErrorInfo(
-                    code="NODE_RECOVERY_REJECTED",
-                    message=reason,
-                    detail={"node_id": interrupted.node_id},
-                )
-                if workflow_ir.policy.failure.mode == "fail_fast":
-                    await self._interrupt_recovery(
-                        session,
-                        invocation,
-                        code=error.code,
-                        message=error.message,
+                for occurrence_id in invocation.scheduler.ready:
+                    if occurrence_id in tasks:
+                        continue
+                    occurrence = invocation.scheduler.occurrences[occurrence_id]
+                    node = workflow.node(occurrence.node_id)
+                    if execution_count >= self._max_node_executions:
+                        await self._emit(
+                            session_id,
+                            invocation.id,
+                            InvocationFailed(
+                                RuntimeErrorInfo(
+                                    "InvocationExecutionLimitExceeded",
+                                    "Invocation exceeded its Node execution limit.",
+                                )
+                            ),
+                            None,
+                        )
+                        return
+                    await self._emit(
+                        session_id,
+                        invocation.id,
+                        self._scheduler.start(occurrence_id),
+                        None,
                     )
-                    return invocation
-                invocation.defer_terminal(error, state="interrupted")
-                self.scheduler.skip_ready_request(
-                    workflow_ir=workflow_ir,
-                    invocation=invocation,
-                    request=request,
+                    execution_count += 1
+                    tasks[occurrence_id] = asyncio.create_task(
+                        self._execute_occurrence(workflow, session_id, occurrence_id)
+                    )
+                if not tasks:
+                    await self._finish_if_quiescent(workflow, session_id)
+                    # A Child completion or resume may make an occurrence ready
+                    # while _finish_if_quiescent is awaiting an emitted boundary.
+                    # Re-read durable State before this Task returns.  There is
+                    # deliberately no await between this check and return, so a
+                    # later producer either sees this Task live and wakes it, or
+                    # sees it done and starts a replacement drive.
+                    current = self._journal.state(session_id).invocation
+                    if current is not None and not current.terminal:
+                        if current.scheduler.ready:
+                            wake.clear()
+                            continue
+                    return
+                wake_task = asyncio.create_task(wake.wait())
+                done, _pending = await asyncio.wait(
+                    (*tasks.values(), wake_task),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                continue
-            invocation.scheduler.enqueue_ready(
-                request.node_id,
-                activations=request.activations,
-                execution_scope=request.execution_scope,
-                idempotency_key=(
-                    interrupted.idempotency_key or str(interrupted.id)
+                if wake_task in done:
+                    wake.clear()
+                else:
+                    wake_task.cancel()
+                    await asyncio.gather(wake_task, return_exceptions=True)
+                wake_task = None
+                for occurrence_id, task in tuple(tasks.items()):
+                    if task in done:
+                        result = (await asyncio.gather(task, return_exceptions=True))[0]
+                        del tasks[occurrence_id]
+                        if isinstance(result, RuntimeInfrastructureError):
+                            raise result
+                        if isinstance(result, asyncio.CancelledError):
+                            raise RuntimeError(
+                                "Node occurrence task was cancelled outside "
+                                "the Invocation drive."
+                            )
+                error = self._fail_fast_error(workflow, session_id)
+                if error is not None:
+                    current = self._journal.state(session_id).invocation
+                    if current is not None and not current.terminal:
+                        await self._emit(
+                            session_id,
+                            current.id,
+                            InvocationFailed(error),
+                            None,
+                        )
+                    return
+        except _ChildAwaitPending:
+            return
+        except asyncio.CancelledError:
+            raise
+        except RuntimeInfrastructureError:
+            raise
+        except BaseException as error:
+            state = self._journal.state(session_id)
+            invocation = state.invocation
+            if invocation is not None and not invocation.terminal:
+                await self._emit(
+                    session_id,
+                    invocation.id,
+                    InvocationFailed(
+                        RuntimeErrorInfo(
+                            type(error).__name__,
+                            str(error) or type(error).__name__,
+                        )
+                    ),
+                    None,
+                )
+        finally:
+            if wake_task is not None and not wake_task.done():
+                wake_task.cancel()
+                await asyncio.gather(wake_task, return_exceptions=True)
+            for task in tasks.values():
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
+            self._tasks.release_wake_event(session_id)
+            self._completion_locks.pop(session_id, None)
+
+    async def _execute_occurrence(
+        self, workflow: WorkflowIR, session_id: str, occurrence_id: str
+    ) -> None:
+        state = self._journal.state(session_id)
+        invocation = _active_invocation(state)
+        occurrence = invocation.scheduler.occurrences[occurrence_id]
+        node = workflow.node(occurrence.node_id)
+        metrics: ExecutionMetrics | None = None
+        try:
+            resumed = next(
+                (
+                    item
+                    for item in invocation.scheduler.waits.values()
+                    if item.occurrence_id == occurrence_id and item.status == "resumed"
                 ),
-                recovery_of_execution_id=interrupted.id,
-                recovery_attempt=interrupted.recovery_attempt + 1,
+                None,
             )
+            if isinstance(node.executable, Wait) and resumed is not None:
+                output = node.executable.output_contract.restore(
+                    thaw(resumed.response)
+                )
+            else:
+                child_plan = (
+                    self._child_plan(invocation, occurrence_id)
+                    if isinstance(node.executable, WorkflowIR)
+                    else None
+                )
+                if child_plan is None:
+                    mapped = await self._node_executor.map_input(
+                        node,
+                        invocation_input=thaw(invocation.input),
+                        incoming=self._incoming_values(invocation, occurrence_id),
+                        invocation_context=invocation.context,
+                        session_context=state.session.context,  # type: ignore[union-attr]
+                    )
+                else:
+                    saved_inputs = [thaw(unit.input) for unit in child_plan.units]
+                    if node.input_contract is not None:
+                        saved_inputs = [
+                            node.input_contract.restore(item)
+                            for item in saved_inputs
+                        ]
+                    mapped = saved_inputs if node.map is not None else saved_inputs[0]
+                if isinstance(node.executable, Wait):
+                    request = node.executable.input_contract.to_record(mapped)
+                    await self._emit(
+                        session_id,
+                        invocation.id,
+                        NodeOccurrenceWaiting(occurrence_id, str(uuid4()), request),
+                        None,
+                    )
+                    return
+                output, metrics = await self._execute_node_value(
+                    workflow, node, occurrence_id, mapped, state
+                )
+            if node.output_contract is not None:
+                output = node.output_contract.to_record(output)
+            completion_lock = self._completion_locks.setdefault(
+                session_id, asyncio.Lock()
+            )
+            async with completion_lock:
+                latest = self._journal.state(session_id)
+                current = _active_invocation(latest)
+                session_context = latest.session.context  # type: ignore[union-attr]
+                invocation_context = current.context
+                patch = await self._node_executor.bind_output(
+                    node,
+                    output,
+                    invocation_context=invocation_context,
+                    session_context=session_context,
+                )
+                candidate_session_context, candidate_invocation_context = (
+                    StateReducer().preview_context_patch(
+                        latest, occurrence_id, patch
+                    )
+                )
+                selected = await self._node_executor.select_edges(
+                    workflow.outgoing(node.id),
+                    source_status="complete",
+                    source_node_id=node.id,
+                    output=output,
+                    error=None,
+                    invocation_context=candidate_invocation_context,
+                    session_context=candidate_session_context,
+                )
+                payload = self._scheduler.complete(
+                    workflow,
+                    latest,
+                    occurrence_id,
+                    output,
+                    selected_edge_ids=selected,
+                )
+                event = await self._emit(
+                    session_id,
+                    current.id,
+                    replace(
+                        payload,
+                        patch=patch,
+                        metrics=(
+                            {
+                                "duration_ns": metrics.duration_ns,
+                                "call_count": metrics.call_count,
+                                "peak_parallelism": metrics.peak_parallelism,
+                            }
+                            if metrics is not None
+                            else None
+                        ),
+                    ),
+                    None,
+                )
+            await self._emit_mapped_user_events(
+                node,
+                session_id=session_id,
+                invocation_id=current.id,
+                occurrence_id=occurrence_id,
+                output=output,
+                invocation_context=candidate_invocation_context,
+                session_context=candidate_session_context,
+                causation_id=event.id,
+            )
+        except _ChildAwaitPending:
+            return
+        except asyncio.CancelledError:
+            raise
+        except RuntimeInfrastructureError:
+            raise
+        except BaseException as exc:
+            latest = self._journal.state(session_id)
+            current = latest.invocation
+            if current is None or current.terminal:
+                return
+            current_occurrence = current.scheduler.occurrences.get(occurrence_id)
+            if current_occurrence is not None and current_occurrence.status == "completed":
+                return
+            error = _runtime_error(exc)
+            try:
+                completion_lock = self._completion_locks.setdefault(
+                    session_id, asyncio.Lock()
+                )
+                async with completion_lock:
+                    latest = self._journal.state(session_id)
+                    current = _active_invocation(latest)
+                    session_context = latest.session.context  # type: ignore[union-attr]
+                    invocation_context = current.context
+                    selected = await self._node_executor.select_edges(
+                        workflow.outgoing(node.id),
+                        source_status="error",
+                        source_node_id=node.id,
+                        output=None,
+                        error=ErrorInfo(error.type, error.message),
+                        invocation_context=invocation_context,
+                        session_context=session_context,
+                    )
+                    payload = self._scheduler.fail(
+                        workflow,
+                        latest,
+                        occurrence_id,
+                        error,
+                        selected_edge_ids=selected,
+                    )
+                    await self._emit(
+                        session_id, current.id, payload, None
+                    )
+            except asyncio.CancelledError:
+                raise
+            except RuntimeInfrastructureError:
+                raise
+            except BaseException as transition_error:
+                final_error = _runtime_error(transition_error)
+                await self._emit(
+                    session_id, current.id, InvocationFailed(final_error), None
+                )
 
-        invocation.mark_running()
-        await self._record_event(
-            session,
-            invocation,
-            "recovery.requeued",
-            node_execution_ids=tuple(changed_execution_ids),
-            detail={"recovery_requeued": [str(value) for value in changed_execution_ids]},
-        )
-        return await self._drive(
-            workflow_ir=workflow_ir,
-            session=session,
-            invocation=invocation,
-        )
-
-    def _recovery_rejection_reason(
+    async def _execute_node_value(
         self,
-        *,
-        node_ir: NodeIR | None,
-        interrupted: NodeExecution,
-    ) -> str | None:
-        if node_ir is None:
-            return f"Interrupted node is absent from current Workflow: {interrupted.node_id}"
-        recovery = node_ir.policy.recovery if node_ir.policy is not None else None
-        if recovery is None or recovery.mode == "never":
-            return f"Node {interrupted.node_id} does not permit crash recovery."
-        if interrupted.recovery_attempt >= recovery.max_attempts:
-            return (
-                f"Node {interrupted.node_id} exhausted RecoveryPolicy.max_attempts."
+        workflow: WorkflowIR,
+        node: NodeIR,
+        occurrence_id: str,
+        value: object,
+        state: RuntimeState,
+    ) -> tuple[object, ExecutionMetrics | None]:
+        if isinstance(node.executable, WorkflowIR):
+            return await self._execute_child_node(node, occurrence_id, value, state)
+
+        executable_node = await self._resolve_executable(node, value)
+
+        async def emit_call(payload) -> None:
+            session_id = state.session.id  # type: ignore[union-attr]
+            current = _active_invocation(self._journal.state(session_id))
+            await self._emit(session_id, current.id, payload, None)
+
+        async def emit_chunk(chunk: object) -> None:
+            session_id = state.session.id  # type: ignore[union-attr]
+            current = _active_invocation(self._journal.state(session_id))
+            try:
+                await self._emit_user(
+                    session_id, current.id, "stream.chunk", chunk, occurrence_id
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # User Events are observations, not canonical Runtime State.
+                return
+
+        result = await self._node_executor.execute(
+            executable_node,
+            occurrence_id,
+            value,
+            invocation_context=state.invocation.context,  # type: ignore[union-attr]
+            session_context=state.session.context,  # type: ignore[union-attr]
+            on_call_event=emit_call,
+            on_stream_chunk=emit_chunk,
+        )
+        return result.output, result.metrics
+
+    async def _execute_child_node(
+        self,
+        node: NodeIR,
+        occurrence_id: str,
+        value: object,
+        state: RuntimeState,
+    ) -> tuple[object, None]:
+        """Plan every Child unit once and reuse that plan after recovery/waits."""
+
+        child = cast(WorkflowIR, node.executable)
+        if node.map is None:
+            inputs = [value]
+        else:
+            if not isinstance(value, list):
+                raise TypeError("Map Node input must be a list of Child Workflow inputs.")
+            inputs = value
+        input_records = (
+            [node.input_contract.to_record(item) for item in inputs]
+            if node.input_contract is not None
+            else inputs
+        )
+        if not input_records:
+            return await self._aggregate_child_outputs(node, inputs, [], state)
+
+        parent_session = state.session
+        parent = state.invocation
+        assert parent_session is not None and parent is not None
+        plan = self._child_plan(parent, occurrence_id)
+        if plan is None:
+            creation_id = f"{parent.id}:{occurrence_id}:child"
+            await self._emit(
+                parent_session.id,
+                parent.id,
+                ChildInvocationPlanned(
+                    creation_id=creation_id,
+                    parent_occurrence_id=occurrence_id,
+                    mode=node.execution_mode,
+                    workflow_id=child.workflow_id,
+                    workflow_revision_id=child.workflow_revision_id,
+                    units=tuple(
+                        ChildUnitSpec(
+                            unit_index=index,
+                            child_session_id=str(uuid4()),
+                            child_invocation_id=str(uuid4()),
+                            input=item,
+                        )
+                        for index, item in enumerate(input_records)
+                    ),
+                ),
+                None,
             )
+            parent = _active_invocation(self._journal.state(parent_session.id))
+            plan = self._child_plan(parent, occurrence_id)
+            assert plan is not None
+        self._validate_child_plan(node, child, plan, input_records)
+
+        limit = min(
+            len(plan.units),
+            node.map.max_parallelism
+            if node.map is not None and node.map.max_parallelism is not None
+            else self._node_executor.max_operator_concurrency,
+            self._node_executor.max_operator_concurrency,
+        )
+        capacity = asyncio.Semaphore(limit)
+        tasks: list[asyncio.Task[None]] = []
+        for unit in plan.units:
+            task = await self._ensure_child_unit(
+                child,
+                parent_session.id,
+                parent.id,
+                plan.creation_id,
+                unit.unit_index,
+                capacity,
+            )
+            if task is not None:
+                tasks.append(task)
+
+        if node.execution_mode == "spawn":
+            handles = [self._child_handle(child, unit) for unit in plan.units]
+            if node.map is None:
+                return handles[0], None
+            return await self._aggregate_child_outputs(
+                node, inputs, cast(list[object], handles), state
+            )
+
+        failed = await self._wait_for_child_tasks_or_failure(plan, tasks)
+        if failed is not None:
+            message = (
+                failed.error.message
+                if failed.error is not None
+                else "Child Invocation did not complete successfully."
+            )
+            await self.converge_failed_child_plan(
+                parent_session.id,
+                parent.id,
+                plan.creation_id,
+            )
+            raise RuntimeError(message)
+        parent = _active_invocation(self._journal.state(parent_session.id))
+        plan = self._child_plan(parent, occurrence_id)
+        assert plan is not None
+        child_states = [
+            self._journal.state(unit.session_id).invocation for unit in plan.units
+        ]
+        if any(item is None for item in child_states):
+            raise RuntimeError("Child Invocation state is missing.")
+        if any(
+            item.status in {"created", "running", "waiting"}
+            for item in child_states  # type: ignore[union-attr]
+        ):
+            occurrence = parent.scheduler.occurrences[occurrence_id]
+            if occurrence.status == "running":
+                await self._emit(
+                    parent_session.id,
+                    parent.id,
+                    ChildAwaitSuspended(plan.creation_id, occurrence_id),
+                    None,
+                )
+            raise _ChildAwaitPending()
+        failed = next(
+            (item for item in child_states if item.status != "completed"),  # type: ignore[union-attr]
+            None,
+        )
+        if failed is not None:
+            await self.converge_failed_child_plan(
+                parent_session.id,
+                parent.id,
+                plan.creation_id,
+            )
+            raise RuntimeError(
+                failed.error.message if failed.error is not None else "Child failed."
+            )
+        child_output_contract = child.node(child.exit_node_ids[0]).output_contract
+        outputs = [thaw(item.output) for item in child_states]  # type: ignore[union-attr]
+        if child_output_contract is not None:
+            outputs = [child_output_contract.restore(item) for item in outputs]
+        return await self._aggregate_child_outputs(node, inputs, outputs, state)
+
+    async def _wait_for_child_tasks_or_failure(
+        self,
+        plan: ChildInvocationPlan,
+        tasks: list[asyncio.Task[None]],
+    ) -> InvocationState | None:
+        """Observe Child completion incrementally and return the first failure."""
+
+        failed = self._first_unsuccessful_child(plan)
+        if failed is not None:
+            return failed
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            results = await asyncio.gather(*done, return_exceptions=True)
+            infrastructure_error = next(
+                (
+                    item
+                    for item in results
+                    if isinstance(item, RuntimeInfrastructureError)
+                ),
+                None,
+            )
+            if infrastructure_error is not None:
+                raise infrastructure_error
+            failed = self._first_unsuccessful_child(plan)
+            if failed is not None:
+                return failed
         return None
 
-    async def _interrupt_recovery(
-        self,
-        session: Session,
-        invocation: Invocation,
-        *,
-        code: str,
-        message: str,
-    ) -> None:
-        error = RuntimeErrorInfo(code=code, message=message)
-        changed_execution_ids = await self._interrupt_unfinished_nodes(
-            session=session,
-            invocation=invocation,
-            error=error,
-            abandon_workers=False,
-        )
-        invocation.mark_interrupted(error)
-        await self._record_event(
-            session,
-            invocation,
-            "recovery.interrupted",
-            node_execution_ids=changed_execution_ids,
-            force_recovery_checkpoint=True,
-            detail={"code": code, "message": message},
-        )
-
-    async def _drive(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-    ) -> Invocation:
-        """Advance one Invocation until it reaches a stable public state."""
-
-        while True:
-            if invocation.state == "failed":
-                return await self._finish_failed_invocation(
-                    workflow_ir=workflow_ir,
-                    session=session,
-                    invocation=invocation,
-                )
-
-            transitions = invocation.scheduler.drain_transitions()
-            if transitions:
-                skipped_before_routing = set(
-                    invocation.scheduler.skipped_node_instances
-                )
-                await self.scheduler.next(
-                    workflow_ir=workflow_ir,
-                    session=session,
-                    invocation=invocation,
-                    transitions=transitions,
-                    on_edge_evaluated=lambda execution, evaluation: (
-                        self._record_edge_event(
-                            session,
-                            invocation,
-                            execution,
-                            evaluation,
-                        )
-                    ),
-                )
-                await self._record_new_skipped_nodes(
-                    session,
-                    invocation,
-                    skipped_before_routing,
-                )
-                if invocation.state == "failed":
-                    return await self._finish_failed_invocation(
-                        workflow_ir=workflow_ir,
-                        session=session,
-                        invocation=invocation,
-                    )
-                continue
-
-            ready_requests = invocation.scheduler.drain_ready()
-            if ready_requests:
-                changed_execution_ids, jobs = await self._submit_ready_requests(
-                    workflow_ir=workflow_ir,
-                    session=session,
-                    invocation=invocation,
-                    ready_requests=ready_requests,
-                )
-                if jobs:
-                    self.node_executor.submit_batch(
-                        jobs,
-                        mailbox=invocation.execution_mailbox,
-                    )
-                if invocation.state in {"failed", "interrupted"}:
-                    if invocation.state == "interrupted":
-                        return invocation
-                    return await self._finish_failed_invocation(
-                        workflow_ir=workflow_ir,
-                        session=session,
-                        invocation=invocation,
-                    )
-                continue
-
-            if self.node_executor.has_running(invocation.execution_mailbox):
-                messages = await self.node_executor.wait_next_messages(
-                    invocation.execution_mailbox
-                )
-                changed_execution_ids = []
-                for message in messages:
-                    if isinstance(message, NodeExecutionProgress):
-                        await self._apply_progress(
-                            session=session,
-                            invocation=invocation,
-                            progress=message,
-                        )
-                        continue
-                    changed_execution_id = await self._apply_result(
-                        workflow_ir=workflow_ir,
-                        session=session,
-                        invocation=invocation,
-                        result=message,
-                    )
-                    if changed_execution_id is not None:
-                        changed_execution_ids.append(changed_execution_id)
-                continue
-
-            if invocation.scheduler.waiting_executions:
-                invocation.mark_waiting()
-                await self._record_event(
-                    session,
-                    invocation,
-                    "wait.created",
-                    node_execution_ids=tuple(
-                        waiting.node_execution_id
-                        for waiting in invocation.scheduler.waiting_executions.values()
-                    ),
-                    force_recovery_checkpoint=True,
-                    detail={
-                        "state": "waiting",
-                        "wait_keys": sorted(
-                            invocation.scheduler.waiting_executions
-                        ),
-                        "waits": [
-                            waiting.to_record()
-                            for waiting in (
-                                invocation.scheduler.waiting_executions[
-                                    wait_key
-                                ]
-                                for wait_key in sorted(
-                                    invocation.scheduler.waiting_executions
-                                )
-                            )
-                        ],
-                    },
-                )
+    def _first_unsuccessful_child(
+        self, plan: ChildInvocationPlan
+    ) -> InvocationState | None:
+        for unit in plan.units:
+            invocation = self._journal.state(unit.session_id).invocation
+            if invocation is not None and invocation.status in {"failed", "cancelled"}:
                 return invocation
+        return None
 
-            if invocation.deferred_terminal_state is not None:
-                error = invocation.deferred_error or RuntimeErrorInfo(
-                    code="DEFERRED_BRANCH_FAILURE",
-                    message="A branch could not complete.",
-                )
-                changed_execution_ids: tuple[UUID, ...] = ()
-                if invocation.deferred_terminal_state == "interrupted":
-                    changed_execution_ids = (
-                        await self._interrupt_unfinished_nodes(
-                            session=session,
-                            invocation=invocation,
-                            error=error,
-                        )
-                    )
-                    invocation.mark_interrupted(error)
-                    terminal_event_name = "recovery.interrupted"
-                else:
-                    invocation.mark_failed(error)
-                    terminal_event_name = "invocation.failed"
-                if invocation.state == "failed":
-                    return await self._finish_failed_invocation(
-                        workflow_ir=workflow_ir,
-                        session=session,
-                        invocation=invocation,
-                    )
-                await self._record_event(
-                    session,
-                    invocation,
-                    terminal_event_name,
-                    node_execution_ids=(
-                        changed_execution_ids
-                        if invocation.state == "interrupted"
-                        else ()
-                    ),
-                    force_recovery_checkpoint=True,
-                    detail={
-                        "state": invocation.state,
-                        "error": error.to_record(),
-                    },
-                )
-                self._record_agent_failed_user_event(
-                    workflow_ir,
-                    invocation,
-                )
-                invocation.execution_mailbox.close()
-                return invocation
-
-            if self._is_completed(workflow_ir=workflow_ir, invocation=invocation):
-                invocation.mark_completed(
-                    result=self._build_invocation_result(
-                        workflow_ir=workflow_ir,
-                        invocation=invocation,
-                    )
-                )
-                await self._record_event(
-                    session,
-                    invocation,
-                    "invocation.completed",
-                )
-                invocation.execution_mailbox.close()
-                return invocation
-
-            invocation.mark_failed(
-                RuntimeErrorInfo(
-                    code="WORKFLOW_DEAD_END",
-                    message="Workflow has no ready, running, waiting, or completed exit node.",
-                )
-            )
-            return await self._finish_failed_invocation(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-            )
-
-    async def _record_edge_event(
+    async def converge_failed_child_plan(
         self,
-        session: Session,
-        invocation: Invocation,
-        execution: NodeExecution,
-        evaluation: EdgeEvaluation,
+        parent_session_id: str,
+        parent_invocation_id: str,
+        creation_id: str,
     ) -> None:
-        """Freeze one edge decision before Scheduler evaluates another edge."""
+        """Cancel non-terminal units, await physical tasks, then close plan phases."""
 
-        await self._record_event(
-            session,
-            invocation,
-            "edge.evaluated",
-            node_execution_ids=(execution.id,),
-            detail={
-                "edge_id": evaluation.edge_id,
-                "node_id": execution.node_id,
-                "source_execution_id": str(execution.id),
-                "target_node_id": evaluation.target_node_id,
-                "state": evaluation.state,
-                "selected": evaluation.selected,
-                "reason": evaluation.reason,
-            },
-            elapsed_ns=evaluation.elapsed_ns,
-            timing=(
-                {"execution_ns": evaluation.elapsed_ns}
-                if evaluation.elapsed_ns is not None
-                else None
-            ),
-            occurred_at_ms=evaluation.updated_at_ms,
-        )
-
-    async def _record_new_skipped_nodes(
-        self,
-        session: Session,
-        invocation: Invocation,
-        previous: set[str],
-    ) -> None:
-        for instance_key in sorted(
-            invocation.scheduler.skipped_node_instances - previous
-        ):
-            await self._record_event(
-                session,
-                invocation,
-                "node.skipped",
-                detail={
-                    "node_id": instance_key.split("@", 1)[0],
-                    "node_instance_key": instance_key,
-                    "state": "skipped",
-                },
-            )
-
-    async def _cancel_invocation(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-    ) -> None:
-        error = RuntimeErrorInfo(
-            code="INVOCATION_CANCELLED",
-            message="Invocation was cancelled by its caller.",
-        )
-        changed_execution_ids = await self._cancel_unfinished_nodes(
-            session=session,
-            invocation=invocation,
-            error=error,
-        )
-        invocation.mark_cancelled()
-        await self._record_event(
-            session,
-            invocation,
-            "invocation.cancelled",
-            node_execution_ids=changed_execution_ids,
-        )
-
-    async def acancel(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-    ) -> Invocation:
-        """Cancel an Invocation that is not currently owned by a caller task."""
-
-        if invocation.state not in {"created", "running", "waiting"}:
-            raise ValueError(
-                f"Invocation cannot be cancelled from state {invocation.state}."
-            )
-        await self._cancel_invocation(session=session, invocation=invocation)
-        return invocation
-
-    async def aresume(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        wait_key: str,
-        output: Any = _MISSING,
-    ) -> Invocation:
-        try:
-            return await self._aresume_impl(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-                wait_key=wait_key,
-                output=output,
-            )
-        except asyncio.CancelledError:
-            await self._cancel_invocation(session=session, invocation=invocation)
-            raise
-
-    async def _aresume_impl(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        wait_key: str,
-        output: Any = _MISSING,
-    ) -> Invocation:
-        """Resume one persisted wait and continue the same Invocation.
-
-        The external signal completes the existing waiting NodeExecution and
-        exposes its transition to Scheduler. No second NodeExecution record is
-        created.
-        """
-
-        self._materialize_persisted_outputs(workflow_ir, invocation)
-
-        waiting = invocation.scheduler.waiting_executions.get(wait_key)
-        if waiting is None:
-            raise KeyError(f"Unknown wait key: {wait_key}")
-        node_execution = invocation.get_node_execution(waiting.node_execution_id)
-        if node_execution is None:
-            raise KeyError(f"Unknown waiting NodeExecution: {waiting.node_execution_id}")
-
-        invocation.scheduler.remove_waiting_execution(wait_key)
-        final_output = node_execution.output if output is _MISSING else output
-        node_execution.output = final_output
-        await self._record_event(
-            session,
-            invocation,
-            "wait.resumed",
-            node_execution_ids=(node_execution.id,),
-            detail={
-                "node_id": node_execution.node_id,
-                "node_execution_id": str(node_execution.id),
-                "wait_key": wait_key,
-                "resumed": True,
-            },
-        )
-        await self._complete_resumed_execution(
-            workflow_ir=workflow_ir,
-            session=session,
-            invocation=invocation,
-            node_execution=node_execution,
-            output=final_output,
-        )
-        await self._record_event(
-            session,
-            invocation,
-            f"node.{node_execution.state}",
-            node_execution_ids=(node_execution.id,),
-            detail={
-                "node_id": node_execution.node_id,
-                "node_execution_id": str(node_execution.id),
-                "resumed": True,
-            },
-        )
-
-        if not invocation.scheduler.waiting_executions:
-            invocation.mark_running()
-            await self._record_event(
-                session,
-                invocation,
-                "invocation.running",
-                detail={
-                    "state": "running",
-                    "resumed_wait_key": wait_key,
-                },
-            )
-        return await self._drive(
-            workflow_ir=workflow_ir,
-            session=session,
-            invocation=invocation,
-        )
-
-    @staticmethod
-    def _materialize_persisted_outputs(
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-    ) -> None:
-        """Restore completed Node JSON through the exact registered revision."""
-
-        for execution in invocation.node_executions:
-            if execution.output is None:
+        parent = _active_invocation(self._journal.state(parent_session_id))
+        plan = parent.child_plans[creation_id]
+        live_tasks: list[asyncio.Task[None]] = []
+        for unit in plan.units:
+            child = self._journal.state(unit.session_id).invocation
+            if child is None:
+                raise RuntimeError("Child Invocation state is missing.")
+            if child.terminal:
                 continue
-            node_ir = workflow_ir.nodes.get(execution.node_id)
-            if node_ir is None:
-                raise ValueError(
-                    f"Persisted Node is absent from Workflow revision: {execution.node_id}"
-                )
-            execution.output = node_ir.output_contract.restore(execution.output)
-        invocation.rebuild_output_index()
-
-    async def _submit_ready_requests(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        ready_requests: list[NodeExecutionRequest],
-    ) -> tuple[tuple[UUID, ...], list[NodeExecutionJob]]:
-        jobs: list[NodeExecutionJob] = []
-        changed_execution_ids: list[UUID] = []
-
-        for request in ready_requests:
-            node_ir = workflow_ir.nodes.get(request.node_id)
-            if node_ir is None:
-                invocation.mark_failed(
-                    RuntimeErrorInfo(
-                        code="UNKNOWN_NODE",
-                        message=f"Ready request references unknown node: {request.node_id}",
-                    )
-                )
-                return tuple(changed_execution_ids), jobs
-
-            if invocation.execution_mode == "recovery":
-                recovery = (
-                    node_ir.policy.recovery
-                    if node_ir.policy is not None
-                    else None
-                )
-                rejected = (
-                    recovery is None
-                    or recovery.mode == "never"
-                    or request.recovery_attempt > recovery.max_attempts
-                )
-                if rejected:
-                    error = RuntimeErrorInfo(
-                        code="NODE_RECOVERY_REJECTED",
-                        message=(
-                            f"Node {request.node_id} does not permit another "
-                            "crash-recovery replay."
-                        ),
-                        detail={"node_id": request.node_id},
-                    )
-                    if workflow_ir.policy.failure.mode == "fail_fast":
-                        await self._interrupt_recovery(
-                            session,
-                            invocation,
-                            code=error.code,
-                            message=error.message,
-                        )
-                        return tuple(changed_execution_ids), jobs
-                    invocation.defer_terminal(error, state="interrupted")
-                    self.scheduler.skip_ready_request(
-                        workflow_ir=workflow_ir,
-                        invocation=invocation,
-                        request=request,
-                    )
-                    await self._record_event(
-                        session,
-                        invocation,
-                        "recovery.node_skipped",
-                        detail={
-                            "recovery_blocked_node_id": request.node_id,
-                        },
-                    )
-                    continue
-
-            resource_error = self._check_node_execution_resource(
-                invocation=invocation,
-                node_ir=node_ir,
-            )
-            if resource_error is not None:
-                invocation.mark_failed(resource_error)
-                return tuple(changed_execution_ids), jobs
-
-            node_execution = invocation.create_node_execution(
-                node_ir.id,
-                idempotency_key=request.idempotency_key,
-                recovery_of_execution_id=request.recovery_of_execution_id,
-                recovery_attempt=request.recovery_attempt,
-                incoming_activations=request.activations,
-                execution_scope=request.execution_scope,
-            )
-            changed_execution_ids.append(node_execution.id)
-            if node_execution.idempotency_key is None:
-                node_execution.idempotency_key = str(node_execution.id)
-            invocation.scheduler.scheduled_node_instances.add(
-                node_instance_key(node_ir.id, request.execution_scope)
-            )
-            node_execution.base_invocation_context_revision = (
-                invocation.context.revision
-            )
-            node_execution.base_session_context_revision = (
-                session.context.revision
-            )
-            invocation.mark_node_running(node_execution.id)
-            await self._record_event(
-                session,
-                invocation,
-                "node.running",
-                node_execution_ids=(node_execution.id,),
-                detail={
-                    "node_id": node_ir.id,
-                    "node_execution_id": str(node_execution.id),
-                    "state": "running",
-                },
-            )
-
-            mapping_phase = "input_mapping"
-            mapping_failure_code = "INPUT_MAPPING_FAILED"
-            mapping_started_ns = perf_counter_ns()
+            task = self._tasks.task(unit.session_id)
+            if task is not None:
+                live_tasks.append(task)
             try:
-                map_policy = (
-                    node_ir.policy.map
-                    if node_ir.policy is not None
-                    else None
+                await self._emit(
+                    unit.session_id,
+                    unit.invocation_id,
+                    InvocationCancelled("Sibling Child Invocation failed."),
+                    None,
                 )
-                node_input, node_incoming = await self._build_node_input(
-                    workflow_ir=workflow_ir,
-                    session=session,
-                    invocation=invocation,
-                    node_ir=node_ir,
-                    request=request,
-                )
-                recovery = (
-                    node_ir.policy.recovery
-                    if node_ir.policy is not None
-                    else None
-                )
-                if recovery is not None and recovery.mode == "idempotent":
-                    accepted = {
-                        parameter.name
-                        for parameter in node_ir.input_contract.parameters
-                    }
-                    if "idempotency_key" not in accepted:
-                        raise ValueError(
-                            "Idempotent RecoveryPolicy requires an "
-                            "idempotency_key Operator parameter."
-                        )
-                    if map_policy is None:
-                        if not isinstance(node_input, dict):
-                            raise TypeError(
-                                "Idempotent recovery requires mapping Node input."
-                            )
-                        node_input = dict(node_input)
-                        node_input["idempotency_key"] = (
-                            node_execution.idempotency_key
-                        )
-            except Exception as exc:
-                mapping_elapsed_ns = max(0, perf_counter_ns() - mapping_started_ns)
-                await self._record_event(
-                    session,
-                    invocation,
-                    "input_mapping.completed",
-                    node_execution_ids=(node_execution.id,),
-                    detail={
-                        "node_id": node_ir.id,
-                        "state": "failed",
-                        "error_type": type(exc).__name__,
-                    },
-                    elapsed_ns=mapping_elapsed_ns,
-                    timing={"execution_ns": mapping_elapsed_ns},
-                )
-                # Mapping is a workflow data-shaping phase, not an Operator Call.
-                # Finalize the node here so retry and operator fallback cannot run.
-                invocation.mark_node_failed(
-                    node_execution.id,
-                    RuntimeErrorInfo(
-                        code=mapping_failure_code,
-                        message=str(exc),
-                        detail={
-                            "node_id": node_ir.id,
-                            "error_type": type(exc).__name__,
-                        },
-                    ),
-                )
-                await self._record_event(
-                    session,
-                    invocation,
-                    "node.failed",
-                    node_execution_ids=(node_execution.id,),
-                    detail={
-                        "node_id": node_ir.id,
-                        "phase": mapping_phase,
-                        "state": "failed",
-                    },
-                )
+            except RuntimeTransitionError:
+                current = self._journal.state(unit.session_id).invocation
+                if current is None or not current.terminal:
+                    raise
+
+        for task in live_tasks:
+            if not task.done():
+                task.cancel()
+        if live_tasks:
+            await asyncio.gather(*live_tasks, return_exceptions=True)
+
+        for unit_index in range(len(plan.units)):
+            parent = _active_invocation(self._journal.state(parent_session_id))
+            current_plan = parent.child_plans[creation_id]
+            unit = current_plan.units[unit_index]
+            if unit.phase == "terminal":
                 continue
-            mapping_elapsed_ns = max(0, perf_counter_ns() - mapping_started_ns)
-            node_execution.input = node_input
-            invocation.updated_at_ms = utc_timestamp_ms()
-            await self._record_event(
-                session,
-                invocation,
-                "input_mapping.completed",
-                node_execution_ids=(node_execution.id,),
-                detail={
-                    "node_id": node_ir.id,
-                    "node_execution_id": str(node_execution.id),
-                    "state": "completed",
-                },
-                elapsed_ns=mapping_elapsed_ns,
-                timing={"execution_ns": mapping_elapsed_ns},
-            )
-
-            resource_error = self._check_operator_attempt_resource(
-                invocation=invocation,
-                node_ir=node_ir,
-            )
-            if resource_error is not None:
-                invocation.mark_node_failed(node_execution.id, resource_error)
-                continue
-
-            jobs.append(
-                NodeExecutionJob(
-                    node_ir=node_ir,
-                    node_execution=node_execution,
-                    input=node_input,
-                    incoming=node_incoming,
-                    max_operator_attempts=self._remaining_operator_attempts(
-                        invocation=invocation,
-                        node_ir=node_ir,
-                    ),
-                    concurrency_key=f"{workflow_ir.workflow_id}:{node_ir.id}",
-                    recovery=invocation.execution_mode == "recovery",
-                    event_mode=invocation.event_mode,
-                    hook_context=capture_hook_context(
-                        invocation_input=invocation.input,
-                        invocation_context=invocation.context,
-                        session_context=session.context,
-                        outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
-                    ),
+            child = self._journal.state(unit.session_id).invocation
+            if child is None or not child.terminal:
+                raise RuntimeError(
+                    "Child Invocation did not converge to a terminal state."
                 )
-            )
+            await self._ensure_child_durable(unit.session_id)
+            try:
+                await self._emit(
+                    parent_session_id,
+                    parent_invocation_id,
+                    ChildInvocationPhaseChanged(creation_id, unit_index, "terminal"),
+                    None,
+                )
+            except RuntimeTransitionError:
+                current = _active_invocation(
+                    self._journal.state(parent_session_id)
+                )
+                if current.child_plans[creation_id].units[unit_index].phase != "terminal":
+                    raise
 
-        return tuple(changed_execution_ids), jobs
-
-    async def _apply_progress(
+    async def _aggregate_child_outputs(
         self,
-        *,
-        session: Session,
-        invocation: Invocation,
-        progress: NodeExecutionProgress,
-    ) -> None:
-        """Apply one completed internal Node step on the Runtime control path."""
-
-        node_execution = invocation.get_node_execution(progress.node_execution_id)
-        if node_execution is None:
-            invocation.mark_failed(
-                RuntimeErrorInfo(
-                    code="UNKNOWN_NODE_EXECUTION_PROGRESS",
-                    message=(
-                        "NodeExecutor returned progress for an unknown "
-                        "NodeExecution."
-                    ),
-                    detail={
-                        "node_execution_id": str(progress.node_execution_id),
-                    },
-                )
-            )
-            return
-
-        if progress.kind == "user_event":
-            if progress.user_event_specs:
-                self._record_user_event_specs(
-                    invocation,
-                    progress.user_event_specs,
-                )
-            return
-
-        if progress.kind == "operator_call":
-            operator_call = progress.operator_call
-            if operator_call is None:  # pragma: no cover - validated message.
-                return
-            node_execution.operator_summary.record(operator_call)
-            node_execution.last_operator_call_id = operator_call.id
-            await self._record_operator_call(
-                session,
-                invocation,
-                node_execution,
-                operator_call,
-            )
-            return
-
-        phase = progress.phase
-        if phase is None:  # pragma: no cover - validated message.
-            return
-        if phase.name == "aggregation.completed" and phase.status == "completed":
-            node_execution.output = deepcopy(phase.output)
-        await self._record_event(
-            session,
-            invocation,
-            phase.name,
-            node_execution_ids=(node_execution.id,),
-            detail={
-                "node_id": node_execution.node_id,
-                "state": phase.status,
-            },
-            elapsed_ns=phase.elapsed_ns,
-            timing=phase.timing,
-            input=phase.input,
-            output=phase.output,
-            occurred_at_ms=phase.occurred_at_ms,
+        node: NodeIR,
+        inputs: list[object],
+        outputs: list[object],
+        state: RuntimeState,
+    ) -> tuple[object, None]:
+        if node.map is None:
+            return outputs[0], None
+        if node.map.aggregate is None:
+            return outputs, None
+        parent = state.invocation
+        session = state.session
+        assert parent is not None and session is not None
+        result = await self._node_executor.call_hook(
+            node.map.aggregate,
+            AggregationContext(
+                invocation_context=parent.context,
+                session_context=session.context,
+                inputs=tuple(inputs),
+                outputs=tuple(outputs),
+            ),
         )
+        return result, None
 
-    async def _apply_result(
+    async def _ensure_child_unit(
         self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        result: NodeExecutionResult,
-    ) -> UUID | None:
-        node_execution = invocation.get_node_execution(result.node_execution_id)
-        if node_execution is None:
-            invocation.mark_failed(
-                RuntimeErrorInfo(
-                    code="UNKNOWN_NODE_EXECUTION_RESULT",
-                    message="NodeExecutor returned a result for an unknown NodeExecution.",
-                    detail={"node_execution_id": str(result.node_execution_id)},
-                )
+        child: WorkflowIR,
+        parent_session_id: str,
+        parent_invocation_id: str,
+        creation_id: str,
+        unit_index: int,
+        capacity: asyncio.Semaphore,
+    ) -> asyncio.Task[None] | None:
+        parent = _active_invocation(self._journal.state(parent_session_id))
+        plan = parent.child_plans[creation_id]
+        unit = plan.units[unit_index]
+        child_state = self._journal.state(unit.session_id)
+        if unit.phase == "planned":
+            await self._open_compiled(
+                child,
+                thaw(unit.input),
+                unit.session_id,
+                unit.invocation_id,
             )
+            await self._emit(
+                parent_session_id,
+                parent_invocation_id,
+                ChildInvocationPhaseChanged(creation_id, unit_index, "opened"),
+                None,
+            )
+            parent = _active_invocation(self._journal.state(parent_session_id))
+            unit = parent.child_plans[creation_id].units[unit_index]
+            child_state = self._journal.state(unit.session_id)
+        self._validate_child_state(child, unit, child_state)
+        child_invocation = child_state.invocation
+        assert child_invocation is not None
+        live = self._tasks.task(unit.session_id)
+
+        if unit.phase == "opened" and (
+            live is not None
+            or child_invocation.status == "waiting"
+            or child_invocation.terminal
+        ):
+            # Recovery may restart a spawn Child, or let it reach waiting,
+            # before the parent Node resumes.  A complete Child Invocation is
+            # already durably admitted; reconcile the parent marker before
+            # choosing the live/waiting/terminal branch below.
+            await self._emit(
+                parent_session_id,
+                parent_invocation_id,
+                ChildInvocationPhaseChanged(
+                    creation_id, unit_index, "accepted"
+                ),
+                None,
+            )
+            parent = _active_invocation(
+                self._journal.state(parent_session_id)
+            )
+            unit = parent.child_plans[creation_id].units[unit_index]
+            child_invocation = self._journal.state(unit.session_id).invocation
+            assert child_invocation is not None
+
+        if child_invocation.terminal:
+            # A checkpoint may be captured after the Child State advanced but
+            # before its parent phase marker did.  Reconstruct every durable
+            # phase in order; the Reducer intentionally rejects skipped phases.
+            if unit.phase == "opened":
+                await self._emit(
+                    parent_session_id,
+                    parent_invocation_id,
+                    ChildInvocationPhaseChanged(
+                        creation_id, unit_index, "accepted"
+                    ),
+                    None,
+                )
+                parent = _active_invocation(
+                    self._journal.state(parent_session_id)
+                )
+                unit = parent.child_plans[creation_id].units[unit_index]
+            if live is not None:
+                # Join the Child's short settle tail before deciding whether
+                # it already wrote the terminal parent marker.
+                await live
+                parent = _active_invocation(
+                    self._journal.state(parent_session_id)
+                )
+                unit = parent.child_plans[creation_id].units[unit_index]
+            if unit.phase == "accepted":
+                await self._ensure_child_durable(unit.session_id)
+                await self._emit(
+                    parent_session_id,
+                    parent_invocation_id,
+                    ChildInvocationPhaseChanged(creation_id, unit_index, "terminal"),
+                    None,
+                )
+            return None
+        if live is not None:
+            return live
+        if child_invocation.status == "waiting":
             return None
 
-        before_operator = tuple(
-            phase for phase in result.phases
-            if phase.name == "item_selection.completed"
+        gate: asyncio.Event | None = None
+        if unit.phase == "opened":
+            gate = asyncio.Event()
+        task = self._start_child(
+            child,
+            unit.session_id,
+            unit.invocation_id,
+            capacity,
+            gate,
         )
-        after_operator = tuple(
-            phase for phase in result.phases
-            if phase.name != "item_selection.completed"
-        )
-        for phase in before_operator:
-            await self._record_event(
-                session,
-                invocation,
-                phase.name,
-                node_execution_ids=(node_execution.id,),
-                detail={
-                    "node_id": node_execution.node_id,
-                    "state": phase.status,
-                },
-                elapsed_ns=phase.elapsed_ns,
-                timing=phase.timing,
-                input=phase.input,
-                output=phase.output,
-                occurred_at_ms=phase.occurred_at_ms,
-            )
-        if invocation.event_mode == "minimal":
-            node_execution.operator_summary = result.operator_summary
-        elif node_execution.operator_summary.attempt_count == 0:
-            node_execution.operator_summary = result.operator_summary
-        node_execution.parallel_summary = result.parallel_summary
-        if result.last_operator_call_id is not None:
-            node_execution.last_operator_call_id = result.last_operator_call_id
-        node_execution.resource_usage = result.resource_usage
-        if after_operator and result.state == "completed":
-            node_execution.output = result.output
-        for phase in after_operator:
-            await self._record_event(
-                session,
-                invocation,
-                phase.name,
-                node_execution_ids=(node_execution.id,),
-                detail={
-                    "node_id": node_execution.node_id,
-                    "state": phase.status,
-                },
-                elapsed_ns=phase.elapsed_ns,
-                timing=phase.timing,
-                input=phase.input,
-                output=phase.output,
-                occurred_at_ms=phase.occurred_at_ms,
-            )
-
-        node_ir = workflow_ir.nodes[node_execution.node_id]
-
-        runtime_error = self._check_runtime_resource_after_result(
-            workflow_ir=workflow_ir,
-            invocation=invocation,
-            node_execution=node_execution,
-        )
-        if runtime_error is not None:
-            invocation.mark_node_failed(node_execution.id, runtime_error)
-            await self._record_event(
-                session,
-                invocation,
-                "node.failed",
-                node_execution_ids=(node_execution.id,),
-                detail={
-                    "node_id": node_execution.node_id,
-                    "node_execution_id": str(node_execution.id),
-                    "state": "failed",
-                    "error": runtime_error.to_record(),
-                },
-            )
-            return node_execution.id
-
-        if result.state == "completed":
-            node_execution.output = result.output
-            has_output_binding = callable(node_ir.output_binding)
-            binding_started_ns = perf_counter_ns()
+        if gate is not None:
             try:
-                await self._run_output_binding(
-                    workflow_ir=workflow_ir,
-                    session=session,
-                    invocation=invocation,
-                    node_execution=node_execution,
-                    output=result.output,
+                await self._emit(
+                    parent_session_id,
+                    parent_invocation_id,
+                    ChildInvocationPhaseChanged(creation_id, unit_index, "accepted"),
+                    None,
                 )
-            except Exception as exc:
-                binding_elapsed_ns = max(
-                    0,
-                    perf_counter_ns() - binding_started_ns,
-                )
-                if has_output_binding:
-                    await self._record_event(
-                        session,
-                        invocation,
-                        "output_binding.completed",
-                        node_execution_ids=(node_execution.id,),
-                        detail={
-                            "node_id": node_execution.node_id,
-                            "state": "failed",
-                            "error_type": type(exc).__name__,
-                        },
-                        elapsed_ns=binding_elapsed_ns,
-                        timing={"execution_ns": binding_elapsed_ns},
-                    )
-                # Binding runs after successful operator execution. Its failure
-                # rolls back its isolated Context copies and finalizes the node
-                # without retrying or selecting another operator.
-                invocation.mark_node_failed(
-                    node_execution.id,
-                    RuntimeErrorInfo(
-                        code="OUTPUT_BINDING_FAILED",
-                        message=str(exc),
-                        detail={
-                            "node_id": node_execution.node_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    ),
-                )
-                session.mark_context_updated()
-            else:
-                binding_elapsed_ns = max(
-                    0,
-                    perf_counter_ns() - binding_started_ns,
-                )
-                if has_output_binding:
-                    await self._record_event(
-                        session,
-                        invocation,
-                        "output_binding.completed",
-                        node_execution_ids=(node_execution.id,),
-                        detail={
-                            "node_id": node_execution.node_id,
-                            "state": "completed",
-                        },
-                        elapsed_ns=binding_elapsed_ns,
-                        timing={"execution_ns": binding_elapsed_ns},
-                    )
-                invocation.mark_node_completed(node_execution.id, result.output)
-                session.mark_context_updated()
-                self._record_completed_user_events(
-                    invocation=invocation,
-                    node_ir=node_ir,
-                    node_execution=node_execution,
-                    output=result.output,
-                )
-        elif result.state == "waiting":
-            try:
-                invocation.mark_node_waiting(
-                    node_execution.id,
-                    wait_key=result.wait_key or str(node_execution.id),
-                    wait_type=result.wait_type,
-                    payload=result.wait_payload,
-                    pending_output=result.output,
-                )
-            except ValueError as exc:
-                invocation.mark_node_failed(
-                    node_execution.id,
-                    RuntimeErrorInfo(
-                        code="WAIT_KEY_CONFLICT",
-                        message=str(exc),
-                        detail={"node_id": node_execution.node_id},
-                    ),
-                )
-        else:
-            invocation.mark_node_failed(
-                node_execution.id,
-                result.error or RuntimeErrorInfo(
-                    code="NODE_EXECUTION_FAILED",
-                    message="Node execution failed.",
-                ),
-            )
-        await self._record_event(
-            session,
-            invocation,
-            f"node.{node_execution.state}",
-            node_execution_ids=(node_execution.id,),
-            detail={
-                "node_id": node_execution.node_id,
-                "node_execution_id": str(node_execution.id),
-                "state": node_execution.state,
-                "error": (
-                    node_execution.error.to_record()
-                    if node_execution.error is not None
-                    else None
-                ),
-                "operator_summary": node_execution.operator_summary.to_record(),
-                "parallel_summary": (
-                    node_execution.parallel_summary.to_record()
-                    if node_execution.parallel_summary is not None
-                    else None
-                ),
-            },
-            elapsed_ns=(
-                max(
-                    0,
-                    perf_counter_ns() - node_execution.started_at_monotonic_ns,
-                )
-                if node_execution.started_at_monotonic_ns
-                else None
-            ),
-            timing={
-                key: value
-                for key, value in {
-                    "concurrency_slot_ns": (
-                        node_execution.resource_usage.concurrency_wait_ns
-                    ),
-                    "thread_pool_queue_ns": (
-                        node_execution.resource_usage.thread_pool_queue_ns
-                    ),
-                    "retry_backoff_ns": (
-                        node_execution.resource_usage.retry_backoff_ns
-                    ),
-                }.items()
-                if value
-            },
-        )
-        return node_execution.id
+            except BaseException:
+                task.cancel()
+                gate.set()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+            gate.set()
+        return task
 
-    def _record_completed_user_events(
-        self,
-        *,
-        invocation: Invocation,
-        node_ir: NodeIR,
-        node_execution: NodeExecution,
-        output: Any,
-    ) -> None:
-        mappings = normalize_user_event_mappings(node_ir.user_event_mapping)
-        if not mappings:
-            return
-        operator_call_id = (
-            node_execution.last_operator_call_id
-            if node_execution.parallel_summary is None
-            else None
-        )
-        specs: list[UserEventSpec] = []
-        for mapping in mappings:
-            try:
-                data = mapping.transform(deepcopy(output))
-                if inspect.isawaitable(data):
-                    close = getattr(data, "close", None)
-                    if callable(close):
-                        close()
-                    raise TypeError(
-                        "UserEventMapping.transform() must be synchronous."
-                    )
-                if data is None:
-                    continue
-                spec = UserEventSpec(
-                    type=mapping.type,
-                    # Output mappings run on an isolated output copy and are
-                    # recorded synchronously below, so RuntimeStore's JSON
-                    # detachment is the only additional ownership copy needed.
-                    data=data,
-                    node_id=node_ir.id,
-                    node_execution_id=node_execution.id,
-                    workflow_path=node_ir.workflow_path,
-                    operator_call_id=operator_call_id,
-                )
-            except Exception as exc:
-                spec = UserEventSpec(
-                    type="user_event_mapping_failed",
-                    data={
-                        "mapping_type": mapping.type,
-                        "error_type": type(exc).__name__,
-                        "message": str(exc),
-                        "source": "output",
-                    },
-                    node_id=node_ir.id,
-                    node_execution_id=node_execution.id,
-                    workflow_path=node_ir.workflow_path,
-                    operator_call_id=operator_call_id,
-                )
-            specs.append(spec)
-        self._record_user_event_specs(invocation, tuple(specs))
-
-    def _record_user_event_spec(
-        self,
-        invocation: Invocation,
-        spec: UserEventSpec,
-    ) -> None:
-        self._record_user_event_specs(invocation, (spec,))
-
-    def _record_user_event_specs(
-        self,
-        invocation: Invocation,
-        specs: tuple[UserEventSpec, ...],
-    ) -> None:
-        if not specs:
-            return
-        try:
-            self.runtime_store._record_user_events(
-                invocation_id=invocation.id,
-                specs=specs,
-            )
-        except Exception as exc:
-            # Batch serialization is all-or-nothing. Isolate the invalid spec
-            # only on this exceptional path so valid siblings remain visible.
-            if len(specs) > 1:
-                for spec in specs:
-                    self._record_user_event_specs(invocation, (spec,))
-                return
-            spec = specs[0]
-            if spec.type != "user_event_mapping_failed":
-                self.runtime_store._record_user_events(
-                    invocation_id=invocation.id,
-                    specs=(
-                        UserEventSpec(
-                            type="user_event_mapping_failed",
-                            data={
-                                "mapping_type": spec.type,
-                                "error_type": type(exc).__name__,
-                                "message": str(exc),
-                                "source": "serialization",
-                            },
-                            node_id=spec.node_id,
-                            node_execution_id=spec.node_execution_id,
-                            workflow_path=spec.workflow_path,
-                            operator_call_id=spec.operator_call_id,
-                        ),
-                    ),
-                )
-
-    def _record_agent_failed_user_event(
-        self,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-    ) -> None:
-        if invocation.state != "failed":
-            return
-        llm_execution = next(
+    @staticmethod
+    def _child_plan(invocation, occurrence_id: str):
+        return next(
             (
-                execution
-                for execution in reversed(invocation.node_executions)
-                if workflow_ir.nodes[execution.node_id].metadata.get(
-                    "_autoagent_user_event_stream"
-                )
-                == "message"
+                plan
+                for plan in invocation.child_plans.values()
+                if plan.parent_occurrence_id == occurrence_id
             ),
             None,
         )
-        if llm_execution is None:
-            return
-        error = invocation.error or RuntimeErrorInfo(
-            code="AGENT_FAILED",
-            message="ReAct Workflow failed.",
-        )
-        self._record_user_event_spec(
-            invocation,
-            UserEventSpec(
-                type="agent_failed",
-                data=error.to_record(),
-                node_id=llm_execution.node_id,
-                node_execution_id=llm_execution.id,
-                workflow_path=workflow_ir.nodes[
-                    llm_execution.node_id
-                ].workflow_path,
-                operator_call_id=llm_execution.last_operator_call_id,
-            ),
-        )
 
-    async def _record_abandoned_progress(
-        self,
-        session: Session,
-        invocation: Invocation,
-        messages: list[NodeExecutionProgress | NodeExecutionResult],
+    @staticmethod
+    def _validate_child_plan(
+        node: NodeIR, child: WorkflowIR, plan, inputs: list[object]
     ) -> None:
-        for message in messages:
-            if not isinstance(message, NodeExecutionProgress):
-                continue
-            if message.kind == "user_event" and message.user_event_specs:
-                self._record_user_event_specs(invocation, message.user_event_specs)
-                continue
-            if message.kind != "operator_call":
-                continue
-            call = message.operator_call
-            node_execution = invocation.get_node_execution(
-                message.node_execution_id
-            )
-            if call is None or node_execution is None:
-                continue
-            node_execution.operator_summary.record(call)
-            node_execution.last_operator_call_id = call.id
-            await self._record_operator_call(
-                session,
-                invocation,
-                node_execution,
-                call,
+        if (
+            plan.mode != node.execution_mode
+            or plan.workflow_id != child.workflow_id
+            or plan.workflow_revision_id != child.workflow_revision_id
+            or len(plan.units) != len(inputs)
+            or any(thaw(unit.input) != item for unit, item in zip(plan.units, inputs))
+        ):
+            raise RuntimeTransitionError(
+                "CHILD_PLAN_MISMATCH",
+                "Recovered Child plan does not match this Node execution.",
             )
 
-    async def _record_operator_call(
-        self,
-        session: Session,
-        invocation: Invocation,
-        node_execution: NodeExecution,
-        operator_call: OperatorCall,
-    ) -> None:
-        usage = operator_call.resource_usage
-        await self._record_event(
-            session,
-            invocation,
-            f"operator_call.{operator_call.state}",
-            node_execution_ids=(node_execution.id,),
-            detail={
-                "node_id": node_execution.node_id,
-                "node_execution_id": str(node_execution.id),
-                "operator_call_id": str(operator_call.id),
-                "kind": operator_call.kind,
-                "operator_id": operator_call.operator_id,
-                "call_no": operator_call.sequence,
-                "unit_index": operator_call.unit_index,
-                "unit_attempt_no": operator_call.unit_attempt_no,
-                "reason": operator_call.reason,
-                "state": operator_call.state,
-                "started_at_ms": operator_call.started_at_ms,
-                "streaming": operator_call.streaming,
-                "stream_chunk_count": operator_call.stream_chunk_count,
-                "error": (
-                    operator_call.error.to_record()
-                    if operator_call.error is not None
-                    else None
-                ),
+    @staticmethod
+    def _validate_child_state(child: WorkflowIR, unit, state: RuntimeState) -> None:
+        invocation = state.invocation
+        if (
+            state.session is None
+            or state.session.id != unit.session_id
+            or invocation is None
+            or invocation.id != unit.invocation_id
+            or invocation.workflow_id != child.workflow_id
+            or invocation.workflow_revision_id != child.workflow_revision_id
+        ):
+            raise RuntimeTransitionError(
+                "CHILD_STATE_MISMATCH",
+                "Child Runtime State does not match its durable plan.",
+            )
+
+    @staticmethod
+    def _child_handle(child: WorkflowIR, unit) -> ChildInvocationHandle:
+        return cast(
+            ChildInvocationHandle,
+            {
+                "session_id": unit.session_id,
+                "invocation_id": unit.invocation_id,
+                "workflow_id": child.workflow_id,
+                "workflow_revision_id": child.workflow_revision_id,
             },
-            elapsed_ns=usage.duration_ns,
-            timing={
-                key: value
-                for key, value in {
-                    "execution_ns": usage.execution_ns,
-                    "thread_pool_queue_ns": usage.thread_pool_queue_ns,
-                    "stream_consumption_ns": (
-                        usage.stream_consumption_ns
-                    ),
-                    "stream_reduction_ns": usage.stream_reduction_ns,
-                }.items()
-                if value
-            },
-            input=operator_call.input,
-            output=operator_call.output,
-            occurred_at_ms=operator_call.ended_at_ms,
         )
 
-    async def _build_node_input(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        node_ir: NodeIR,
-        request: NodeExecutionRequest,
-    ) -> tuple[Any, tuple[IncomingOutput, ...]]:
-        incoming = self._build_incoming_outputs(
-            invocation=invocation,
-            request=request,
-        )
-        scoped_incoming = self._scope_incoming_outputs(
-            workflow_ir=workflow_ir,
-            node_ir=node_ir,
-            incoming=incoming,
-        )
-        map_policy = node_ir.policy.map if node_ir.policy is not None else None
-        if map_policy is not None:
-            if map_policy.item_selector is None:
-                if len(incoming) != 1:
-                    raise ValueError(
-                        "MapPolicy without item_selector requires exactly one "
-                        "incoming activation."
+    async def _resolve_executable(self, node: NodeIR, value: object) -> NodeIR:
+        if not isinstance(node.executable, Capability):
+            return node
+        registrations = self._operator_registry.for_capability(node.executable.id)
+        candidates = tuple(item.operator for item in registrations)
+        if not candidates:
+            raise RuntimeError(
+                f"Capability {node.executable.id!r} has no enabled Operator."
+            )
+        if self._capability_resolver is None:
+            default = self._operator_registry.default_for_capability(
+                node.executable.id
+            )
+            if default is not None:
+                selected_operator = default
+            elif len(candidates) == 1:
+                selected_operator = candidates[0]
+            else:
+                priorities = {
+                    item.operator.id: item.priority for item in registrations
+                }
+                highest = max(priorities[operator.id] for operator in candidates)
+                preferred = tuple(
+                    operator
+                    for operator in candidates
+                    if priorities[operator.id] == highest
+                )
+                if len(preferred) != 1:
+                    raise RuntimeError(
+                        f"Capability {node.executable.id!r} requires a CapabilityResolver."
                     )
-                return incoming[0].value, scoped_incoming
-            if not incoming:
-                return dict(invocation.input), scoped_incoming
-            if len(incoming) == 1:
-                return incoming[0].value, scoped_incoming
-            return (
-                {
-                    item.source_node_id: item.value
-                    for item in scoped_incoming
-                },
-                scoped_incoming,
-            )
-        if callable(node_ir.input_mapping):
-            return (
-                await invoke_hook_async(
-                    node_ir.input_mapping,
-                    InputMappingContext.create(
-                        invocation_input=invocation.input,
-                        invocation_context=invocation.context,
-                        session_context=session.context,
-                        outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
-                        node_id=node_ir.local_id or node_ir.id,
-                        workflow_path=node_ir.workflow_path,
-                        incoming=scoped_incoming,
-                    ),
-                ),
-                scoped_incoming,
-            )
-
-        incoming_edge_ids = workflow_ir.graph.incoming_edges.get(node_ir.id, ())
-        if not incoming_edge_ids:
-            return dict(invocation.input), scoped_incoming
-
-        if len(incoming) == 1:
-            return incoming[0].value, scoped_incoming
-
-        values: dict[str, Any] = {}
-        for item in scoped_incoming:
-            values[item.source_node_id] = item.value
-        return values, scoped_incoming
-
-    def _scope_incoming_outputs(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        node_ir: NodeIR,
-        incoming: tuple[IncomingOutput, ...],
-    ) -> tuple[IncomingOutput, ...]:
-        """Expose local ids for activations authored in the same child scope."""
-
-        scoped: list[IncomingOutput] = []
-        for item in incoming:
-            edge = workflow_ir.edges.get(item.edge_id)
-            same_scope = edge is not None and edge.workflow_path == node_ir.workflow_path
-            edge_id = item.edge_id
-            source_node_id = item.source_node_id
-            if same_scope:
-                edge_id = edge.local_id or edge.id
-                source_node_id = edge.local_from_node or item.source_node_id
-            scoped.append(
-                IncomingOutput(
-                    edge_id=edge_id,
-                    source_node_id=source_node_id,
-                    source_execution_id=item.source_execution_id,
-                    value=item.value,
-                )
-            )
-        return tuple(scoped)
-
-    def _build_incoming_outputs(
-        self,
-        *,
-        invocation: Invocation,
-        request: NodeExecutionRequest,
-    ) -> tuple[IncomingOutput, ...]:
-        incoming: list[IncomingOutput] = []
-        for activation in request.activations:
-            source = invocation.get_node_execution(activation.source_execution_id)
-            if source is None:
-                raise KeyError(
-                    "Ready request references unknown source execution: "
-                    f"{activation.source_execution_id}"
-                )
-            incoming.append(
-                IncomingOutput(
-                    edge_id=activation.edge_id,
-                    source_node_id=activation.source_node_id,
-                    source_execution_id=activation.source_execution_id,
-                    value=source.output,
-                )
-            )
-        return tuple(incoming)
-
-    async def _run_output_binding(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        node_execution: NodeExecution,
-        output: Any,
-    ) -> None:
-        node_ir = workflow_ir.nodes[node_execution.node_id]
-        if not callable(node_ir.output_binding):
-            return
-        # WorkflowExecutor is the single Context writer. The hook works on two
-        # detached copies; both candidate commits are validated before either
-        # authoritative Context reference is replaced.
-        working_invocation_context = deepcopy(invocation.context)
-        working_session_context = deepcopy(session.context)
-        await invoke_hook_async(
-            node_ir.output_binding,
-            OutputBindingContext.create(
-                invocation_input=invocation.input,
-                invocation_context=working_invocation_context,
-                session_context=working_session_context,
-                outputs=invocation.outputs.scoped(node_ir.scope_node_ids),
-                node_id=node_ir.local_id or node_ir.id,
-                output=output,
-                workflow_path=node_ir.workflow_path,
-            ),
-        )
-        candidate_invocation_context = deepcopy(invocation.context)
-        candidate_session_context = deepcopy(session.context)
-        candidate_invocation_context.commit_isolated(
-            working_invocation_context,
-            base_revision=node_execution.base_invocation_context_revision,
-            node_id=node_execution.node_id,
-        )
-        candidate_session_context.commit_isolated(
-            working_session_context,
-            base_revision=node_execution.base_session_context_revision,
-            node_id=node_execution.node_id,
-        )
-        invocation.context = candidate_invocation_context
-        session.context = candidate_session_context
-
-    async def _complete_resumed_execution(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        node_execution: NodeExecution,
-        output: Any,
-    ) -> None:
-        node_ir = workflow_ir.nodes[node_execution.node_id]
-        try:
-            output = node_ir.output_contract.restore(output)
-            output = node_ir.output_contract.validate(output)
-            await self._run_output_binding(
-                workflow_ir=workflow_ir,
-                session=session,
-                invocation=invocation,
-                node_execution=node_execution,
-                output=output,
-            )
-        except Exception as exc:
-            # Resumed completion follows the same non-retryable binding contract.
-            invocation.mark_node_failed(
-                node_execution.id,
-                RuntimeErrorInfo(
-                    code="OUTPUT_BINDING_FAILED",
-                    message=str(exc),
-                    detail={
-                        "node_id": node_execution.node_id,
-                        "error_type": type(exc).__name__,
-                    },
-                ),
-            )
-            session.mark_context_updated()
+                selected_operator = preferred[0]
         else:
-            invocation.mark_node_completed(node_execution.id, output)
-            session.mark_context_updated()
-            self._record_completed_user_events(
-                invocation=invocation,
-                node_ir=node_ir,
-                node_execution=node_execution,
-                output=output,
+            selected_operator = await self._node_executor.call_hook(
+                self._capability_resolver, node.executable, value
             )
-
-    def _check_node_execution_resource(
-        self,
-        *,
-        invocation: Invocation,
-        node_ir: NodeIR,
-    ) -> RuntimeErrorInfo | None:
-        resource = node_ir.policy.resource if node_ir.policy is not None else None
-        if resource is None or resource.max_node_executions_per_invocation is None:
-            return None
-        actual = invocation.count_node_executions(node_ir.id)
-        limit = resource.max_node_executions_per_invocation
-        if actual >= limit:
-            return RuntimeErrorInfo(
-                code="RESOURCE_LIMIT_EXCEEDED",
-                message="Node execution limit exceeded.",
-                detail={
-                    "scope": "invocation",
-                    "resource": "node_executions",
-                    "node_id": node_ir.id,
-                    "limit": limit,
-                    "actual": actual + 1,
-                },
+            registered_operator = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate is selected_operator
+                ),
+                None,
             )
-        return None
-
-    async def _abandon_active_work(
-        self,
-        session: Session,
-        invocation: Invocation,
-    ) -> tuple[UUID, ...]:
-        error = RuntimeErrorInfo(
-            code="INVOCATION_FAILED_FAST",
-            message="Node execution was cancelled after fail-fast invocation failure.",
-            detail={
-                "invocation_error": (
-                    invocation.error.to_record()
-                    if invocation.error is not None
-                    else None
+            if registered_operator is None:
+                raise RuntimeError(
+                    "CapabilityResolver returned an Operator outside the Capability."
                 )
-            },
-        )
-        return await self._cancel_unfinished_nodes(
-            session=session,
-            invocation=invocation,
-            error=error,
-        )
+            selected_operator = registered_operator
+        return replace(node, executable=selected_operator)
 
-    async def _finish_failed_invocation(
+    async def _emit_mapped_user_events(
         self,
+        node: NodeIR,
         *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-    ) -> Invocation:
-        abandoned = await self._abandon_active_work(session, invocation)
-        await self._record_event(
-            session,
-            invocation,
-            "invocation.failed",
-            node_execution_ids=abandoned,
-            force_recovery_checkpoint=True,
-            detail={
-                "state": "failed",
-                "error": (
-                    invocation.error.to_record()
-                    if invocation.error is not None
-                    else None
-                ),
-            },
-        )
-        self._record_agent_failed_user_event(workflow_ir, invocation)
-        invocation.execution_mailbox.close()
-        return invocation
-
-    async def _cancel_unfinished_nodes(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-        error: RuntimeErrorInfo,
-    ) -> tuple[UUID, ...]:
-        changed_executions = tuple(
-            execution
-            for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running", "waiting"}
-        )
-        abandoned_messages = await self.node_executor.abandon(
-            invocation.execution_mailbox
-        )
-        await self._record_abandoned_progress(
-            session,
-            invocation,
-            abandoned_messages,
-        )
-        invocation.cancel_active_node_executions(error)
-        await self._record_terminal_node_events(
-            session=session,
-            invocation=invocation,
-            executions=changed_executions,
-        )
-        return tuple(execution.id for execution in changed_executions)
-
-    async def _interrupt_unfinished_nodes(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-        error: RuntimeErrorInfo,
-        abandon_workers: bool = True,
-    ) -> tuple[UUID, ...]:
-        changed_executions = tuple(
-            execution
-            for execution in invocation.node_executions
-            if execution.state in {"created", "ready", "running", "waiting"}
-        )
-        if abandon_workers:
-            abandoned_messages = await self.node_executor.abandon(
-                invocation.execution_mailbox
-            )
-            await self._record_abandoned_progress(
-                session,
-                invocation,
-                abandoned_messages,
-            )
-        invocation.interrupt_active_node_executions(error)
-        await self._record_terminal_node_events(
-            session=session,
-            invocation=invocation,
-            executions=changed_executions,
-        )
-        return tuple(execution.id for execution in changed_executions)
-
-    async def _record_terminal_node_events(
-        self,
-        *,
-        session: Session,
-        invocation: Invocation,
-        executions: tuple[NodeExecution, ...],
+        session_id: str,
+        invocation_id: str,
+        occurrence_id: str,
+        output: object,
+        invocation_context: object,
+        session_context: object,
+        causation_id: str,
     ) -> None:
-        for execution in executions:
-            await self._record_event(
-                session,
-                invocation,
-                f"node.{execution.state}",
-                node_execution_ids=(execution.id,),
-                detail={
-                    "node_id": execution.node_id,
-                    "node_execution_id": str(execution.id),
-                    "state": execution.state,
-                    "error": (
-                        execution.error.to_record()
-                        if execution.error is not None
-                        else None
-                    ),
-                },
-                elapsed_ns=(
-                    max(
-                        0,
-                        perf_counter_ns()
-                        - execution.started_at_monotonic_ns,
+        if not node.user_events:
+            return
+        context = OutputBindingContext(
+            invocation_context=(
+                invocation_context if isinstance(invocation_context, Mapping) else {}
+            ),
+            session_context=(
+                session_context if isinstance(session_context, Mapping) else {}
+            ),
+            output=output,
+        )
+        for mapping in node.user_events:
+            try:
+                payload = await self._node_executor.call_hook(mapping.mapper, context)
+                payload = mapping.output_contract.to_record(payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                try:
+                    await self._emit_user(
+                        session_id,
+                        invocation_id,
+                        "user_event.mapping_failed",
+                        {
+                            "mapping_kind": mapping.kind,
+                            "error_type": type(error).__name__,
+                            "message": str(error) or type(error).__name__,
+                            "causation_id": causation_id,
+                        },
+                        occurrence_id,
                     )
-                    if execution.started_at_monotonic_ns
-                    else None
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                continue
+            try:
+                await self._emit_user(
+                    session_id,
+                    invocation_id,
+                    mapping.kind,
+                    payload,
+                    occurrence_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    async def invoke_compiled(
+        self,
+        workflow: WorkflowIR,
+        value: object,
+        session_id: str,
+        invocation_id: str,
+    ) -> None:
+        await self._open_compiled(workflow, value, session_id, invocation_id)
+        await self.drive(workflow, session_id)
+
+    async def _open_compiled(
+        self,
+        workflow: WorkflowIR,
+        value: object,
+        session_id: str,
+        invocation_id: str,
+    ) -> None:
+        """Idempotently establish a complete Child admission boundary."""
+
+        state = self._journal.state(session_id)
+        grouped = state.session is None
+        if grouped:
+            self._begin_child_admission(session_id)
+        try:
+            if state.session is None:
+                await self._emit(session_id, None, SessionOpened({}), None)
+                state = self._journal.state(session_id)
+            invocation = state.invocation
+            if invocation is None:
+                await self._emit(
+                    session_id,
+                    invocation_id,
+                    InvocationOpened(
+                        workflow.workflow_id,
+                        workflow.workflow_revision_id,
+                        _single_entry(workflow),
+                        value,
+                    ),
+                    None,
+                )
+                state = self._journal.state(session_id)
+                invocation = state.invocation
+            assert invocation is not None
+            if (
+                invocation.id != invocation_id
+                or invocation.workflow_id != workflow.workflow_id
+                or invocation.workflow_revision_id != workflow.workflow_revision_id
+                or thaw(invocation.input) != value
+            ):
+                raise RuntimeTransitionError(
+                    "CHILD_STATE_MISMATCH",
+                    "Existing Child admission state belongs to another Invocation.",
+                )
+            causation_id: str | None = None
+            if invocation.status == "created":
+                started = await self._emit(
+                    session_id, invocation_id, InvocationStarted(), None
+                )
+                causation_id = started.id
+                invocation = self._journal.state(session_id).invocation
+                assert invocation is not None
+            if invocation.status == "running" and not invocation.scheduler.initialized:
+                await self._emit(
+                    session_id,
+                    invocation_id,
+                    self._scheduler.initialize(
+                        workflow, self._journal.state(session_id)
+                    ),
+                    causation_id,
+                )
+            # Parent phases and the Child execution gate cannot advance until
+            # the complete Child admission Event is durably accepted by Host.
+            await self._ensure_child_durable(session_id)
+        except BaseException:
+            if grouped:
+                self._abort_child_admission(session_id)
+            raise
+
+    async def _finish_if_quiescent(
+        self, workflow: WorkflowIR, session_id: str
+    ) -> None:
+        state = self._journal.state(session_id)
+        invocation = _active_invocation(state)
+        scheduler = invocation.scheduler
+        if any(
+            item.status in {"ready", "running"}
+            for item in scheduler.occurrences.values()
+        ):
+            return
+        if any(item.status == "waiting" for item in scheduler.occurrences.values()):
+            if invocation.status == "running":
+                await self._emit(
+                    session_id, invocation.id, InvocationWaiting(), None
+                )
+            return
+        if any(item.status == "waiting" for item in scheduler.waits.values()):
+            if invocation.status == "running":
+                await self._emit(
+                    session_id, invocation.id, InvocationWaiting(), None
+                )
+            return
+        unhandled = [
+            item
+            for item in scheduler.occurrences.values()
+            if item.status == "failed"
+            and not self._failure_handled(workflow, scheduler, item.id)
+        ]
+        if unhandled:
+            error = unhandled[0].error or RuntimeErrorInfo(
+                "NodeFailed", "Node failed."
+            )
+            await self._emit(session_id, invocation.id, InvocationFailed(error), None)
+            return
+        exits = [
+            item
+            for item in scheduler.occurrences.values()
+            if item.node_id in workflow.exit_node_ids and item.status == "completed"
+        ]
+        if not exits:
+            await self._emit(
+                session_id,
+                invocation.id,
+                InvocationFailed(
+                    RuntimeErrorInfo("WorkflowNoOutput", "No Exit completed.")
                 ),
+                None,
             )
-
-    def _check_operator_attempt_resource(
-        self,
-        *,
-        invocation: Invocation,
-        node_ir: NodeIR,
-    ) -> RuntimeErrorInfo | None:
-        resource = node_ir.policy.resource if node_ir.policy is not None else None
-        if resource is None or resource.max_operator_attempts_per_invocation is None:
-            return None
-        actual = invocation.count_operator_attempts(node_ir.id)
-        limit = resource.max_operator_attempts_per_invocation
-        if actual >= limit:
-            return RuntimeErrorInfo(
-                code="RESOURCE_LIMIT_EXCEEDED",
-                message="Operator attempt limit exceeded.",
-                detail={
-                    "scope": "invocation",
-                    "resource": "operator_attempts",
-                    "node_id": node_ir.id,
-                    "limit": limit,
-                    "actual": actual + 1,
-                },
-            )
-        return None
-
-    def _remaining_operator_attempts(
-        self,
-        *,
-        invocation: Invocation,
-        node_ir: NodeIR,
-    ) -> int | None:
-        """Return the remaining fallback-call budget for this node submission."""
-
-        resource = node_ir.policy.resource if node_ir.policy is not None else None
-        if resource is None or resource.max_operator_attempts_per_invocation is None:
-            return None
-        return max(
-            0,
-            resource.max_operator_attempts_per_invocation
-            - invocation.count_operator_attempts(node_ir.id),
+            return
+        output = (
+            thaw(exits[0].output)
+            if len(workflow.exit_node_ids) == 1
+            else {item.node_id: thaw(item.output) for item in exits}
+        )
+        await self._emit(
+            session_id, invocation.id, InvocationCompleted(output), None
         )
 
-    def _check_runtime_resource_after_result(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        node_execution: NodeExecution,
+    def _fail_fast_error(
+        self, workflow: WorkflowIR, session_id: str
     ) -> RuntimeErrorInfo | None:
-        node_ir = workflow_ir.nodes[node_execution.node_id]
-        resource = node_ir.policy.resource if node_ir.policy is not None else None
-        if resource is None or resource.max_runtime_ms_per_invocation is None:
+        if workflow.failure_mode != "fail_fast":
             return None
-        actual = invocation.sum_node_runtime_ms(node_ir.id)
-        limit = resource.max_runtime_ms_per_invocation
-        if actual > limit:
-            return RuntimeErrorInfo(
-                code="RESOURCE_LIMIT_EXCEEDED",
-                message="Runtime limit exceeded.",
-                detail={
-                    "scope": "invocation",
-                    "resource": "runtime_ms",
-                    "node_id": node_ir.id,
-                    "limit": limit,
-                    "actual": actual,
-                },
-            )
+        invocation = self._journal.state(session_id).invocation
+        if invocation is None:
+            return None
+        return next(
+            (
+                item.error or RuntimeErrorInfo("NodeFailed", "Node failed.")
+                for item in invocation.scheduler.occurrences.values()
+                if item.status == "failed"
+                and not self._failure_handled(
+                    workflow, invocation.scheduler, item.id
+                )
+            ),
+            None,
+        )
+
+    def recovery_preflight_error(
+        self,
+        workflow: WorkflowIR,
+        state: RuntimeState,
+    ) -> RuntimeErrorInfo | None:
+        """Return a terminal failure already decided by persisted Scheduler State."""
+
+        invocation = state.invocation
+        if invocation is None:
+            return RuntimeErrorInfo("RecoveryStateInvalid", "Invocation is missing.")
+        scheduler = invocation.scheduler
+        if not scheduler.initialized:
+            return None
+        unhandled = next(
+            (
+                item.error or RuntimeErrorInfo("NodeFailed", "Node failed.")
+                for item in scheduler.occurrences.values()
+                if item.status == "failed"
+                and not self._failure_handled(workflow, scheduler, item.id)
+            ),
+            None,
+        )
+        if workflow.failure_mode == "fail_fast" and unhandled is not None:
+            return unhandled
+        if any(
+            item.status in {"ready", "running", "waiting"}
+            for item in scheduler.occurrences.values()
+        ) or any(item.status == "waiting" for item in scheduler.waits.values()):
+            return None
+        if unhandled is not None:
+            return unhandled
+        if not any(
+            item.node_id in workflow.exit_node_ids and item.status == "completed"
+            for item in scheduler.occurrences.values()
+        ):
+            return RuntimeErrorInfo("WorkflowNoOutput", "No Exit completed.")
         return None
 
-    def _is_completed(self, *, workflow_ir: WorkflowIR, invocation: Invocation) -> bool:
+    @staticmethod
+    def _failure_handled(workflow: WorkflowIR, scheduler, occurrence_id: str) -> bool:
+        error_edge_ids = {
+            edge.id
+            for edge in workflow.outgoing(
+                scheduler.occurrences[occurrence_id].node_id
+            )
+            if edge.on == "error"
+        }
         return any(
-            execution.state == "completed" and execution.node_id in workflow_ir.exit_node_ids
-            for execution in invocation.node_executions
+            activation.edge_id in error_edge_ids
+            and activation.source_occurrence_id == occurrence_id
+            for occurrence in scheduler.occurrences.values()
+            for activation in occurrence.activations
+        ) or any(
+            item.selected
+            and item.edge_id in error_edge_ids
+            and item.activation is not None
+            and item.activation.source_occurrence_id == occurrence_id
+            for item in (
+                *scheduler.resolutions.values(),
+                *scheduler.boundary_resolutions.values(),
+            )
         )
 
-    def _build_invocation_result(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-    ) -> dict[str, Any]:
-        outputs: dict[str, Any] = {}
-        for node_id in workflow_ir.exit_node_ids:
-            execution = invocation.latest_node_execution(node_id)
-            if execution is not None and execution.state == "completed":
-                outputs[node_id] = deepcopy(execution.output)
-        if len(outputs) == 1:
-            return {"output": next(iter(outputs.values()))}
-        return {"outputs": outputs}
+    @staticmethod
+    def _incoming_values(invocation, occurrence_id: str) -> dict[str, object]:
+        occurrence = invocation.scheduler.occurrences[occurrence_id]
+        result: dict[str, object] = {}
+        for activation in occurrence.activations:
+            source = invocation.scheduler.occurrences[
+                activation.source_occurrence_id
+            ]
+            result[activation.edge_id] = (
+                thaw(source.output)
+                if source.status == "completed"
+                else {"type": source.error.type, "message": source.error.message}
+                if source.error is not None
+                else None
+            )
+        return result
+
+
+def _single_entry(workflow: WorkflowIR) -> str:
+    if len(workflow.entry_node_ids) != 1:
+        raise RuntimeTransitionError(
+            "INVOCATION_ENTRY_REQUIRED",
+            "Workflow with multiple Entries requires entry_node_id.",
+        )
+    return workflow.entry_node_ids[0]
+
+
+def _active_invocation(state: RuntimeState):
+    invocation = state.invocation
+    if invocation is None or invocation.status not in {"running", "waiting"}:
+        raise RuntimeTransitionError(
+            "INVOCATION_NOT_RUNNING", "Invocation is not running."
+        )
+    return invocation
+
+
+def _runtime_error(error: BaseException) -> RuntimeErrorInfo:
+    if isinstance(error, UserCallableCancelledError):
+        return RuntimeErrorInfo("CancelledError", str(error))
+    return RuntimeErrorInfo(
+        type(error).__name__, str(error) or type(error).__name__
+    )
+
+
+__all__ = ["CapabilityResolver", "WorkflowExecutor"]

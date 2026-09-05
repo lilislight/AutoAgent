@@ -1,751 +1,236 @@
+"""Pure DAG scheduling planner over Workflow IR and Runtime State."""
+
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
-from time import perf_counter_ns
+from collections import deque
 
-from autoagent.core.compiler import EdgeIR, LoopRegionIR, WorkflowIR
-from autoagent.core.runtime import (
-    ConditionContext,
-    EdgeEvaluation,
-    Invocation,
-    NodeExecution,
+from ..errors import RuntimeTransitionError
+from ..runtime.events import (
+    NodeOccurrenceCompleted,
+    NodeOccurrenceFailed,
+    NodeOccurrenceStarted,
     RuntimeErrorInfo,
-    Session,
+    SchedulerInitialized,
 )
-from autoagent.core.runtime.hooks import invoke_hook_async
-from autoagent.core.runtime.scheduler import (
-    EdgeActivation,
+from ..runtime.scheduling import (
+    Activation,
     EdgeResolution,
-    ExecutionScope,
-    LoopIteration,
-    NodeExecutionRequest,
-    NodeExecutionTransition,
-    edge_occurrence_key,
-    execution_scope_key,
-    node_instance_key,
+    OccurrencePlan,
+    SchedulerDelta,
+    occurrence_key,
+    resolution_key,
 )
+from ..runtime.state import RuntimeState
+from ..workflow import EdgeIR, WorkflowIR
+from ._routing import validate_edge_selection
 
 
-class Scheduler:
-    """Advance scoped node instances with ordinary fan-out and complete fan-in.
+class DAGScheduler:
+    """Plan root-scope transitions for acyclic Workflows."""
 
-    A static edge resolves once per target execution scope, not once per
-    Invocation. Natural-loop back and exit edges first resolve at the boundary
-    of one loop iteration. After the whole acyclic iteration body quiesces, the
-    boundary either creates the next header scope or resolves exits into the
-    parent scope.
-    """
-
-    def initialize(self, *, workflow_ir: WorkflowIR, invocation: Invocation) -> None:
-        cursor = invocation.scheduler
-        if cursor.entry_paths_initialized:
-            return
-        cursor.entry_paths_initialized = True
-
-        # Invocation creates the initial request before WorkflowIR is available.
-        # Attach the natural-loop scope now that the compiled graph is known.
-        initial_scope = self._initial_scope(workflow_ir, invocation.entry_node_id)
-        existing = cursor.drain_ready()
-        if existing:
-            cursor.enqueue_ready(
-                invocation.entry_node_id,
-                activations=existing[0].activations,
-                execution_scope=initial_scope,
+    def initialize(
+        self, workflow: WorkflowIR, state: RuntimeState
+    ) -> SchedulerInitialized:
+        invocation = _running_invocation(state)
+        if workflow.loop_regions:
+            raise RuntimeTransitionError(
+                "DAG_SCHEDULER_LOOP_UNSUPPORTED",
+                "Loop Workflow requires the scope-aware Scheduler.",
             )
-        else:
-            cursor.enqueue_ready(
-                invocation.entry_node_id,
-                execution_scope=initial_scope,
+        if invocation.scheduler.initialized:
+            raise RuntimeTransitionError(
+                "SCHEDULER_ALREADY_INITIALIZED", "Scheduler is already initialized."
             )
-        cursor.scheduled_node_instances.add(
-            node_instance_key(invocation.entry_node_id, initial_scope)
+        entry = invocation.entry_node_id
+        if entry not in workflow.entry_node_ids:
+            raise RuntimeTransitionError(
+                "INVOCATION_ENTRY_INVALID",
+                f"Node {entry!r} is not a Workflow Entry.",
+            )
+
+        entry_plan = OccurrencePlan(occurrence_key(entry), entry, ())
+        skipped_entries = tuple(
+            OccurrencePlan(occurrence_key(node_id), node_id, ())
+            for node_id in workflow.entry_node_ids
+            if node_id != entry
         )
-        for frame in initial_scope:
-            cursor.entered_loop_instances.add(
-                self._loop_instance_key(initial_scope, frame.loop_region_id)
-            )
-
-        for entry_node_id in workflow_ir.entry_node_ids:
-            if entry_node_id == invocation.entry_node_id:
-                continue
-            self._skip_node_instance(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                node_id=entry_node_id,
-                scope=self._initial_scope(workflow_ir, entry_node_id),
-            )
-
-    async def next(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        transitions: Iterable[NodeExecutionTransition],
-        on_edge_evaluated: Callable[
-            [NodeExecution, EdgeEvaluation], Awaitable[None]
-        ] | None = None,
-    ) -> None:
-        for transition in transitions:
-            if invocation.state == "failed":
-                return
-            if transition.state == "completed":
-                await self._advance_completed(
-                    workflow_ir=workflow_ir,
-                    session=session,
-                    invocation=invocation,
-                    transition=transition,
-                    on_edge_evaluated=on_edge_evaluated,
-                )
-            elif transition.state == "failed":
-                execution = invocation.get_node_execution(transition.node_execution_id)
-                error = (
-                    execution.error
-                    if execution is not None and execution.error is not None
-                    else RuntimeErrorInfo(
-                        code="NODE_EXECUTION_FAILED",
-                        message=f"Node failed: {transition.node_id}",
-                        detail={
-                            "node_id": transition.node_id,
-                            "node_execution_id": str(transition.node_execution_id),
-                        },
-                    )
-                )
-                if workflow_ir.policy.failure.mode == "fail_fast":
-                    invocation.mark_failed(error)
-                    continue
-                invocation.defer_terminal(error, state="failed")
-                if execution is not None:
-                    self._advance_blocked_execution(
-                        workflow_ir=workflow_ir,
-                        invocation=invocation,
-                        execution=execution,
-                        reason=error.code,
-                    )
-
-    def skip_ready_request(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        request: NodeExecutionRequest,
-    ) -> None:
-        """Resolve a recovery-blocked node as a skipped branch."""
-
-        targets = self._skip_node_instance(
-            workflow_ir=workflow_ir,
-            invocation=invocation,
-            node_id=request.node_id,
-            scope=request.execution_scope,
+        initial_resolutions = tuple(
+            self._skipped_outgoing(workflow, plan)
+            for plan in skipped_entries
         )
-        self._resolve_node_instances(
-            workflow_ir=workflow_ir,
-            invocation=invocation,
-            targets=targets,
+        flattened = tuple(item for group in initial_resolutions for item in group)
+        propagated = self._propagate(
+            workflow,
+            state,
+            flattened,
+            known_plans=(entry_plan, *skipped_entries),
         )
-
-    def _advance_blocked_execution(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        execution: NodeExecution,
-        reason: str,
-    ) -> None:
-        targets: list[tuple[str, ExecutionScope]] = []
-        boundaries: set[tuple[str, ExecutionScope]] = set()
-        for edge_id in workflow_ir.graph.outgoing_edges.get(execution.node_id, ()):
-            edge = workflow_ir.edges[edge_id]
-            execution.add_edge_evaluation(
-                edge_id=edge.id,
-                target_node_id=edge.to_node,
-                state="skipped",
-                selected=False,
-                reason=reason,
-            )
-            boundary = self._boundary_owner(
-                workflow_ir,
-                edge,
-                execution.execution_scope,
-            )
-            if boundary is not None:
-                loop_scope = self._loop_scope(
-                    execution.execution_scope,
-                    boundary.id,
-                )
-                invocation.scheduler.resolve_loop_boundary(
-                    loop_region_id=boundary.id,
-                    loop_scope=loop_scope,
-                    edge_id=edge.id,
-                    state="skipped",
-                )
-                boundaries.add((boundary.id, loop_scope))
-            else:
-                target_scope = self._target_scope(
-                    workflow_ir,
-                    edge,
-                    execution.execution_scope,
-                )
-                invocation.scheduler.resolve_edge(
-                    edge.id,
-                    state="skipped",
-                    scope=target_scope,
-                )
-                targets.append((edge.to_node, target_scope))
-        self._resolve_node_instances(
-            workflow_ir=workflow_ir,
-            invocation=invocation,
-            targets=targets,
-        )
-        for loop_region_id, loop_scope in boundaries:
-            self._finalize_loop_boundary(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                loop_region=workflow_ir.graph.loop_regions[loop_region_id],
-                loop_scope=loop_scope,
-            )
-
-    async def _advance_completed(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        session: Session,
-        invocation: Invocation,
-        transition: NodeExecutionTransition,
-        on_edge_evaluated: Callable[
-            [NodeExecution, EdgeEvaluation], Awaitable[None]
-        ] | None,
-    ) -> None:
-        source_execution = invocation.get_node_execution(transition.node_execution_id)
-        if source_execution is None:
-            invocation.mark_failed(
-                RuntimeErrorInfo(
-                    code="SCHEDULER_UNKNOWN_EXECUTION",
-                    message="Transition references an unknown node execution.",
-                    detail={"node_execution_id": str(transition.node_execution_id)},
-                )
-            )
-            return
-
-        affected: list[tuple[str, ExecutionScope]] = []
-        affected_boundaries: set[tuple[str, ExecutionScope]] = set()
-        for edge_id in workflow_ir.graph.outgoing_edges.get(
-            source_execution.node_id, ()
-        ):
-            edge = workflow_ir.edges[edge_id]
-            selected, reason, elapsed_ns = await self._evaluate_edge(
-                edge=edge,
-                session=session,
-                invocation=invocation,
-                source_output=source_execution.output,
-            )
-            if selected is None:
-                evaluation = source_execution.add_edge_evaluation(
-                    edge_id=edge.id,
-                    target_node_id=edge.to_node,
-                    state="failed",
-                    selected=False,
-                    reason=reason,
-                    elapsed_ns=elapsed_ns,
-                )
-                if on_edge_evaluated is not None:
-                    await on_edge_evaluated(source_execution, evaluation)
-                invocation.mark_failed(
-                    RuntimeErrorInfo(
-                        code="EDGE_CONDITION_FAILED",
-                        message=f"Edge condition failed: {edge.id}",
-                        detail={"edge_id": edge.id, "reason": reason},
-                    )
-                )
-                return
-            evaluation = source_execution.add_edge_evaluation(
-                edge_id=edge.id,
-                target_node_id=edge.to_node,
-                state="selected" if selected else "skipped",
-                selected=selected,
-                reason=reason,
-                elapsed_ns=elapsed_ns,
-            )
-            activation = (
-                EdgeActivation(
-                    edge_id=edge.id,
-                    source_node_id=edge.from_node,
-                    source_execution_id=source_execution.id,
-                )
-                if selected
-                else None
-            )
-            boundary = self._boundary_owner(
-                workflow_ir, edge, source_execution.execution_scope
-            )
-            if boundary is not None:
-                loop_scope = self._loop_scope(
-                    source_execution.execution_scope, boundary.id
-                )
-                invocation.scheduler.resolve_loop_boundary(
-                    loop_region_id=boundary.id,
-                    loop_scope=loop_scope,
-                    edge_id=edge.id,
-                    state="selected" if selected else "skipped",
-                    activation=activation,
-                )
-                affected_boundaries.add((boundary.id, loop_scope))
-            else:
-                target_scope = self._target_scope(
-                    workflow_ir, edge, source_execution.execution_scope
-                )
-                invocation.scheduler.resolve_edge(
-                    edge.id,
-                    state="selected" if selected else "skipped",
-                    activation=activation,
-                    scope=target_scope,
-                )
-                affected.append((edge.to_node, target_scope))
-            if on_edge_evaluated is not None:
-                await on_edge_evaluated(source_execution, evaluation)
-
-        self._resolve_node_instances(
-            workflow_ir=workflow_ir,
-            invocation=invocation,
-            targets=affected,
-        )
-        for loop_region_id, loop_scope in affected_boundaries:
-            self._finalize_loop_boundary(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                loop_region=workflow_ir.graph.loop_regions[loop_region_id],
-                loop_scope=loop_scope,
-            )
-
-    async def _evaluate_edge(
-        self,
-        *,
-        edge: EdgeIR,
-        session: Session,
-        invocation: Invocation,
-        source_output: object,
-    ) -> tuple[bool | None, str | None, int | None]:
-        if edge.condition is None:
-            return True, None, None
-        if isinstance(edge.condition, str):
-            return False, "String edge conditions are not supported at runtime yet.", None
-        if not callable(edge.condition):
-            return False, "Edge condition is not callable.", None
-        context = ConditionContext.create(
-            invocation_input=invocation.input,
-            invocation_context=invocation.context,
-            session_context=session.context,
-            outputs=invocation.outputs.scoped(edge.scope_node_ids),
-            edge_id=edge.local_id or edge.id,
-            source_node_id=edge.local_from_node or edge.from_node,
-            target_node_id=edge.local_to_node or edge.to_node,
-            source_output=source_output,
-        )
-        started_ns = perf_counter_ns()
-        try:
-            return (
-                bool(await invoke_hook_async(edge.condition, context)),
-                None,
-                max(0, perf_counter_ns() - started_ns),
-            )
-        except Exception as exc:
-            return (
-                None,
-                f"{type(exc).__name__}: {exc}",
-                max(0, perf_counter_ns() - started_ns),
-            )
-
-    def _resolve_node_instances(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        targets: Iterable[tuple[str, ExecutionScope]],
-    ) -> None:
-        pending = self._ordered_targets(workflow_ir, targets)
-        while pending and invocation.state != "failed":
-            node_id, scope = pending.pop(0)
-            instance_key = node_instance_key(node_id, scope)
-            if (
-                instance_key in invocation.scheduler.scheduled_node_instances
-                or instance_key in invocation.scheduler.skipped_node_instances
-            ):
-                continue
-            incoming_edge_ids = self._incoming_edges_for_instance(
-                workflow_ir, node_id, scope
-            )
-            resolutions = [
-                invocation.scheduler.edge_resolutions.get(
-                    edge_occurrence_key(edge_id, scope)
-                )
-                for edge_id in incoming_edge_ids
-            ]
-            if not incoming_edge_ids or any(item is None for item in resolutions):
-                continue
-            activations = tuple(
-                item.activation
-                for item in resolutions
-                if item is not None
-                and item.state == "selected"
-                and item.activation is not None
-            )
-            if activations:
-                invocation.scheduler.scheduled_node_instances.add(instance_key)
-                invocation.scheduler.enqueue_ready(
-                    node_id,
-                    activations=activations,
-                    execution_scope=scope,
-                )
-                for frame in scope:
-                    invocation.scheduler.entered_loop_instances.add(
-                        self._loop_instance_key(scope, frame.loop_region_id)
-                    )
-                continue
-
-            header_region = self._header_region(workflow_ir, node_id)
-            if header_region is not None and self._frame(scope, header_region.id).iteration == 0:
-                pending.extend(
-                    self._skip_inactive_loop(
-                        workflow_ir=workflow_ir,
-                        invocation=invocation,
-                        loop_region=header_region,
-                        loop_scope=scope[: header_region.depth + 1],
-                    )
-                )
-            else:
-                pending.extend(
-                    self._skip_node_instance(
-                        workflow_ir=workflow_ir,
-                        invocation=invocation,
-                        node_id=node_id,
-                        scope=scope,
-                    )
-                )
-
-    def _skip_node_instance(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        node_id: str,
-        scope: ExecutionScope,
-    ) -> list[tuple[str, ExecutionScope]]:
-        instance_key = node_instance_key(node_id, scope)
-        if instance_key in invocation.scheduler.skipped_node_instances:
-            return []
-        invocation.scheduler.skipped_node_instances.add(instance_key)
-        targets: list[tuple[str, ExecutionScope]] = []
-        boundaries: set[tuple[str, ExecutionScope]] = set()
-        for edge_id in workflow_ir.graph.outgoing_edges.get(node_id, ()):
-            edge = workflow_ir.edges[edge_id]
-            boundary = self._boundary_owner(workflow_ir, edge, scope)
-            if boundary is not None:
-                loop_scope = self._loop_scope(scope, boundary.id)
-                invocation.scheduler.resolve_loop_boundary(
-                    loop_region_id=boundary.id,
-                    loop_scope=loop_scope,
-                    edge_id=edge.id,
-                    state="skipped",
-                )
-                boundaries.add((boundary.id, loop_scope))
-            else:
-                target_scope = self._target_scope(workflow_ir, edge, scope)
-                invocation.scheduler.resolve_edge(
-                    edge.id, state="skipped", scope=target_scope
-                )
-                targets.append((edge.to_node, target_scope))
-        for loop_region_id, loop_scope in boundaries:
-            self._finalize_loop_boundary(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                loop_region=workflow_ir.graph.loop_regions[loop_region_id],
-                loop_scope=loop_scope,
-            )
-        return targets
-
-    def _skip_inactive_loop(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        loop_region: LoopRegionIR,
-        loop_scope: ExecutionScope,
-    ) -> list[tuple[str, ExecutionScope]]:
-        targets: list[tuple[str, ExecutionScope]] = []
-        for node_id in loop_region.node_ids:
-            node_scope = self._scope_for_node(workflow_ir, node_id, loop_scope)
-            invocation.scheduler.skipped_node_instances.add(
-                node_instance_key(node_id, node_scope)
-            )
-        invocation.scheduler.exited_loop_instances.add(
-            self._loop_instance_key(loop_scope, loop_region.id)
-        )
-        for edge_id in loop_region.exit_edge_ids:
-            edge = workflow_ir.edges[edge_id]
-            targets.extend(
-                self._propagate_finalized_boundary_edge(
-                    workflow_ir=workflow_ir,
-                    invocation=invocation,
-                    loop_scope=loop_scope,
-                    edge=edge,
-                    resolution=EdgeResolution(
-                        edge_id=edge.id,
-                        state="skipped",
-                        scope=loop_scope,
-                    ),
-                )
-            )
-        return targets
-
-    def _finalize_loop_boundary(
-        self,
-        *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        loop_region: LoopRegionIR,
-        loop_scope: ExecutionScope,
-    ) -> None:
-        boundary_edge_ids = loop_region.back_edge_ids + loop_region.exit_edge_ids
-        resolutions: list[EdgeResolution] = []
-        for edge_id in boundary_edge_ids:
-            key = f"{loop_region.id}@{execution_scope_key(loop_scope)}:{edge_id}"
-            resolution = invocation.scheduler.loop_boundary_resolutions.get(key)
-            if resolution is None:
-                return
-            resolutions.append(resolution)
-
-        selected_back = [
-            item
-            for item in resolutions
-            if item.edge_id in loop_region.back_edge_ids and item.state == "selected"
-        ]
-        selected_exit = [
-            item
-            for item in resolutions
-            if item.edge_id in loop_region.exit_edge_ids and item.state == "selected"
-        ]
-        if selected_back and selected_exit:
-            invocation.mark_failed(
-                RuntimeErrorInfo(
-                    code="LOOP_CONTINUE_EXIT_CONFLICT",
-                    message=(
-                        "One loop iteration cannot select both a back edge and "
-                        "an exit edge."
-                    ),
-                    detail={
-                        "loop_region_id": loop_region.id,
-                        "loop_scope": execution_scope_key(loop_scope),
-                        "back_edge_ids": [item.edge_id for item in selected_back],
-                        "exit_edge_ids": [item.edge_id for item in selected_exit],
-                    },
-                )
-            )
-            return
-
-        if selected_back:
-            current = self._frame(loop_scope, loop_region.id)
-            next_scope = loop_scope[:-1] + (
-                LoopIteration(loop_region.id, current.iteration + 1),
-            )
-            for edge_id in loop_region.back_edge_ids:
-                resolution = next(
-                    item for item in resolutions if item.edge_id == edge_id
-                )
-                invocation.scheduler.resolve_edge(
-                    edge_id,
-                    state=resolution.state,
-                    activation=resolution.activation,
-                    scope=next_scope,
-                )
-            self._resolve_node_instances(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                targets=((loop_region.header_node_id, next_scope),),
-            )
-            return
-
-        if selected_exit:
-            invocation.scheduler.exited_loop_instances.add(
-                self._loop_instance_key(loop_scope, loop_region.id)
-            )
-            targets: list[tuple[str, ExecutionScope]] = []
-            for edge_id in loop_region.exit_edge_ids:
-                edge = workflow_ir.edges[edge_id]
-                resolution = next(
-                    item for item in resolutions if item.edge_id == edge_id
-                )
-                targets.extend(
-                    self._propagate_finalized_boundary_edge(
-                        workflow_ir=workflow_ir,
-                        invocation=invocation,
-                        loop_scope=loop_scope,
-                        edge=edge,
-                        resolution=resolution,
-                    )
-                )
-            self._resolve_node_instances(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                targets=targets,
-            )
-            return
-
-        invocation.mark_failed(
-            RuntimeErrorInfo(
-                code="LOOP_DEAD_END",
-                message="Loop iteration selected neither a back edge nor an exit edge.",
-                detail={
-                    "loop_region_id": loop_region.id,
-                    "loop_scope": execution_scope_key(loop_scope),
-                },
+        return SchedulerInitialized(
+            SchedulerDelta(
+                resolutions=propagated.resolutions,
+                ready=(entry_plan, *propagated.ready),
+                skipped=(*skipped_entries, *propagated.skipped),
             )
         )
 
-    def _propagate_finalized_boundary_edge(
+    def start(self, occurrence_id: str) -> NodeOccurrenceStarted:
+        return NodeOccurrenceStarted(occurrence_id)
+
+    def complete(
         self,
+        workflow: WorkflowIR,
+        state: RuntimeState,
+        occurrence_id: str,
+        output: object,
         *,
-        workflow_ir: WorkflowIR,
-        invocation: Invocation,
-        loop_scope: ExecutionScope,
-        edge: EdgeIR,
-        resolution: EdgeResolution,
-    ) -> list[tuple[str, ExecutionScope]]:
-        """Move a finalized exit through enclosing loop boundaries if needed."""
-
-        outer_scope = loop_scope[:-1]
-        for frame in reversed(outer_scope):
-            outer = workflow_ir.graph.loop_regions[frame.loop_region_id]
-            if edge.id not in outer.back_edge_ids and edge.id not in outer.exit_edge_ids:
-                continue
-            owner_scope = self._loop_scope(outer_scope, outer.id)
-            invocation.scheduler.resolve_loop_boundary(
-                loop_region_id=outer.id,
-                loop_scope=owner_scope,
-                edge_id=edge.id,
-                state=resolution.state,
-                activation=resolution.activation,
-            )
-            self._finalize_loop_boundary(
-                workflow_ir=workflow_ir,
-                invocation=invocation,
-                loop_region=outer,
-                loop_scope=owner_scope,
-            )
-            return []
-
-        target_scope = self._target_scope(workflow_ir, edge, loop_scope)
-        invocation.scheduler.resolve_edge(
-            edge.id,
-            state=resolution.state,
-            activation=resolution.activation,
-            scope=target_scope,
+        selected_edge_ids: set[str] | frozenset[str] = frozenset(),
+    ) -> NodeOccurrenceCompleted:
+        occurrence = _running_occurrence(state, occurrence_id)
+        resolutions = self._resolve_outgoing(
+            workflow,
+            occurrence.id,
+            occurrence.node_id,
+            "complete",
+            selected_edge_ids,
         )
-        return [(edge.to_node, target_scope)]
+        delta = self._propagate(workflow, state, resolutions)
+        return NodeOccurrenceCompleted(occurrence_id, output, delta)  # type: ignore[arg-type]
 
-    def _incoming_edges_for_instance(
+    def fail(
         self,
-        workflow_ir: WorkflowIR,
-        node_id: str,
-        scope: ExecutionScope,
-    ) -> tuple[str, ...]:
-        region = self._header_region(workflow_ir, node_id)
-        if region is None:
-            return workflow_ir.graph.incoming_edges.get(node_id, ())
-        frame = self._frame(scope, region.id)
-        return (
-            region.external_entry_edge_ids
-            if frame.iteration == 0
-            else region.back_edge_ids
+        workflow: WorkflowIR,
+        state: RuntimeState,
+        occurrence_id: str,
+        error: RuntimeErrorInfo,
+        *,
+        selected_edge_ids: set[str] | frozenset[str] = frozenset(),
+    ) -> NodeOccurrenceFailed:
+        occurrence = _running_occurrence(state, occurrence_id)
+        resolutions = self._resolve_outgoing(
+            workflow,
+            occurrence.id,
+            occurrence.node_id,
+            "error",
+            selected_edge_ids,
         )
+        delta = self._propagate(workflow, state, resolutions)
+        return NodeOccurrenceFailed(occurrence_id, error, delta)
 
-    def _boundary_owner(
+    def _resolve_outgoing(
         self,
-        workflow_ir: WorkflowIR,
-        edge: EdgeIR,
-        source_scope: ExecutionScope,
-    ) -> LoopRegionIR | None:
-        for frame in reversed(source_scope):
-            region = workflow_ir.graph.loop_regions[frame.loop_region_id]
-            if edge.id in region.back_edge_ids or edge.id in region.exit_edge_ids:
-                return region
-        return None
-
-    def _target_scope(
-        self,
-        workflow_ir: WorkflowIR,
-        edge: EdgeIR,
-        source_scope: ExecutionScope,
-    ) -> ExecutionScope:
-        target_stack = workflow_ir.graph.node_loop_stacks.get(edge.to_node, ())
-        source_ids = tuple(frame.loop_region_id for frame in source_scope)
-        common = 0
-        while (
-            common < len(source_ids)
-            and common < len(target_stack)
-            and source_ids[common] == target_stack[common]
-        ):
-            common += 1
-        target_scope = source_scope[:common]
-        for loop_region_id in target_stack[common:]:
-            target_scope += (LoopIteration(loop_region_id, 0),)
-        return target_scope
-
-    def _initial_scope(self, workflow_ir: WorkflowIR, node_id: str) -> ExecutionScope:
+        workflow: WorkflowIR,
+        source_occurrence_id: str,
+        source_node_id: str,
+        source_status: str,
+        selected_edge_ids: set[str] | frozenset[str],
+    ) -> tuple[EdgeResolution, ...]:
+        outgoing = workflow.outgoing(source_node_id)
+        validate_edge_selection(outgoing, source_status, selected_edge_ids)
         return tuple(
-            LoopIteration(loop_region_id, 0)
-            for loop_region_id in workflow_ir.graph.node_loop_stacks.get(node_id, ())
+            self._resolution(edge, source_occurrence_id, edge.id in selected_edge_ids)
+            for edge in outgoing
         )
 
-    def _scope_for_node(
-        self,
-        workflow_ir: WorkflowIR,
-        node_id: str,
-        available_scope: ExecutionScope,
-    ) -> ExecutionScope:
-        depth = len(workflow_ir.graph.node_loop_stacks.get(node_id, ()))
-        scope = available_scope[:depth]
-        for loop_region_id in workflow_ir.graph.node_loop_stacks.get(node_id, ())[len(scope):]:
-            scope += (LoopIteration(loop_region_id, 0),)
-        return scope
-
-    def _header_region(
-        self, workflow_ir: WorkflowIR, node_id: str
-    ) -> LoopRegionIR | None:
-        for loop_region_id in reversed(
-            workflow_ir.graph.node_loop_stacks.get(node_id, ())
-        ):
-            region = workflow_ir.graph.loop_regions[loop_region_id]
-            if region.header_node_id == node_id:
-                return region
-        return None
-
-    def _loop_scope(
-        self, scope: ExecutionScope, loop_region_id: str
-    ) -> ExecutionScope:
-        for index, frame in enumerate(scope):
-            if frame.loop_region_id == loop_region_id:
-                return scope[: index + 1]
-        raise KeyError(f"Execution scope does not contain loop: {loop_region_id}")
-
-    def _frame(self, scope: ExecutionScope, loop_region_id: str) -> LoopIteration:
-        for frame in scope:
-            if frame.loop_region_id == loop_region_id:
-                return frame
-        raise KeyError(f"Execution scope does not contain loop: {loop_region_id}")
-
-    def _loop_instance_key(
-        self, scope: ExecutionScope, loop_region_id: str
-    ) -> str:
-        return f"{loop_region_id}@{execution_scope_key(self._loop_scope(scope, loop_region_id))}"
-
-    def _ordered_targets(
-        self,
-        workflow_ir: WorkflowIR,
-        targets: Iterable[tuple[str, ExecutionScope]],
-    ) -> list[tuple[str, ExecutionScope]]:
-        unique = {(node_id, scope) for node_id, scope in targets}
-        node_order = {node_id: index for index, node_id in enumerate(workflow_ir.nodes)}
-        return sorted(
-            unique,
-            key=lambda item: (node_order[item[0]], execution_scope_key(item[1])),
+    def _skipped_outgoing(
+        self, workflow: WorkflowIR, plan: OccurrencePlan
+    ) -> tuple[EdgeResolution, ...]:
+        return tuple(
+            self._resolution(edge, plan.id, False)
+            for edge in workflow.outgoing(plan.node_id)
         )
+
+    @staticmethod
+    def _resolution(
+        edge: EdgeIR, source_occurrence_id: str, selected: bool
+    ) -> EdgeResolution:
+        activation = (
+            Activation(edge.id, source_occurrence_id, edge.target)
+            if selected
+            else None
+        )
+        return EdgeResolution(edge.id, edge.target, (), selected, activation)
+
+    def _propagate(
+        self,
+        workflow: WorkflowIR,
+        state: RuntimeState,
+        initial: tuple[EdgeResolution, ...],
+        *,
+        known_plans: tuple[OccurrencePlan, ...] = (),
+    ) -> SchedulerDelta:
+        invocation = _running_invocation(state)
+        existing_occurrences = set(invocation.scheduler.occurrences)
+        planned = {item.id for item in known_plans}
+        resolutions = dict(invocation.scheduler.resolutions)
+        new_resolutions: list[EdgeResolution] = []
+        ready: list[OccurrencePlan] = []
+        skipped: list[OccurrencePlan] = []
+        consumed: list[str] = []
+        targets: deque[str] = deque()
+
+        def add_resolution(item: EdgeResolution) -> None:
+            if item.id in resolutions:
+                raise RuntimeTransitionError(
+                    "EDGE_RESOLUTION_DUPLICATE",
+                    f"Edge Resolution {item.id!r} already exists.",
+                )
+            resolutions[item.id] = item
+            new_resolutions.append(item)
+            targets.append(item.target_node_id)
+
+        for item in initial:
+            add_resolution(item)
+
+        while targets:
+            target = targets.popleft()
+            target_occurrence = occurrence_key(target)
+            if target_occurrence in existing_occurrences or target_occurrence in planned:
+                continue
+            incoming = workflow.incoming(target)
+            values = [resolutions.get(resolution_key(edge.id)) for edge in incoming]
+            if any(item is None for item in values):
+                continue
+            plan = OccurrencePlan(
+                target_occurrence,
+                target,
+                (),
+                tuple(resolution_key(edge.id) for edge in incoming),
+            )
+            planned.add(plan.id)
+            for edge in incoming:
+                key = resolution_key(edge.id)
+                resolutions.pop(key, None)
+                consumed.append(key)
+            if any(item.selected for item in values if item is not None):
+                ready.append(plan)
+                continue
+            skipped.append(plan)
+            for item in self._skipped_outgoing(workflow, plan):
+                add_resolution(item)
+
+        return SchedulerDelta(
+            resolutions=tuple(new_resolutions),
+            consumed_resolution_ids=tuple(consumed),
+            ready=tuple(ready),
+            skipped=tuple(skipped),
+        )
+
+
+def _running_invocation(state: RuntimeState):
+    invocation = state.invocation
+    if invocation is None or invocation.status != "running":
+        raise RuntimeTransitionError(
+            "INVOCATION_NOT_RUNNING", "Scheduler requires a running Invocation."
+        )
+    return invocation
+
+
+def _running_occurrence(state: RuntimeState, occurrence_id: str):
+    invocation = _running_invocation(state)
+    occurrence = invocation.scheduler.occurrences.get(occurrence_id)
+    if occurrence is None or occurrence.status != "running":
+        raise RuntimeTransitionError(
+            "NODE_OCCURRENCE_NOT_RUNNING",
+            f"Node Occurrence {occurrence_id!r} is not running.",
+        )
+    return occurrence

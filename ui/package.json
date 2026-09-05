@@ -1,25 +1,20 @@
 {
-  "name": "autoagent-tracing-ui",
+  "name": "autoagent-v2-tracing-ui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "test": "tsc -p tsconfig.test.json && node .test-dist/tests/graphRouting.test.js && node .test-dist/tests/agentConversation.test.js && node .test-dist/tests/invocationStatus.test.js && node .test-dist/tests/submittedScope.test.js && node .test-dist/tests/timeline.test.js && node .test-dist/tests/inspection.test.js",
-    "preview": "vite preview"
+    "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "test": "tsc -p tsconfig.test.json && node --test .test-dist/tests/*.test.js"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.90.20",
-    "@xyflow/react": "^12.10.1",
-    "elkjs": "^0.11.0",
     "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "zustand": "^5.0.8"
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@types/node": "^24.10.0",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.0.4",

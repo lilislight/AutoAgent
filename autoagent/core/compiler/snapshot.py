@@ -1,207 +1,358 @@
+"""Portable, JSON-compatible snapshots of compiled Workflow definitions."""
+
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
-from collections.abc import Mapping
-from enum import Enum
-from typing import Any
-from uuid import UUID, uuid5
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import TypeAdapter
 
-from autoagent.core.compiler.workflow_ir import WorkflowIR
-from autoagent.core.operators import Operator, callable_operator_name
-from autoagent.core.operators.contract import SchemaContract
-from autoagent.core.workflow import CapabilityRef, OperatorRef, SystemCommand
-from autoagent.core.workflow.hooks import get_workflow_hook_version
+from ..operators import Operator, Wait
+from ..workflow import Capability, WorkflowIR, workflow_hook_version
+from ._hooks import resolve_hook_contract
 
 
-_WORKFLOW_REVISION_NAMESPACE = UUID("fe569b0d-f5dd-4de8-aa91-fc77bb4ddd21")
+WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION = 1
 
 
-def workflow_revision_id(
-    workflow_id: str,
-    definition_hash: str,
-) -> str:
-    """Return the stable identity of one compiled Workflow definition."""
+@dataclass(frozen=True, slots=True)
+class WorkflowDefinitionSnapshot:
+    """Portable graph semantics for display and compatibility checks.
 
-    identity = "\0".join((workflow_id, definition_hash))
-    return str(uuid5(_WORKFLOW_REVISION_NAMESPACE, identity))
-
-
-class WorkflowVersionSnapshot(BaseModel):
-    """Portable description of one successfully compiled Workflow definition.
-
-    Durable stores use ``definition_hash`` to bind every Invocation to the exact
-    graph semantics it started with. ``definition`` is JSON-compatible and is
-    sufficient for historical graph display, but it intentionally cannot execute
-    Python hooks by itself. Recovery still requires the application to register
-    the current Workflow and Operators and pass compatibility checks.
-
-    Fixed Operator identity and its compiled input/output contracts are part of
-    ``definition`` and therefore ``definition_hash``. Capability
-    implementations are selected by the deployment environment and do not
-    participate in Workflow revision identity.
+    The snapshot intentionally contains no live callable. Executing or recovering
+    still requires the application to register compatible Python code.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+    schema_version: int
     workflow_id: str
-    workflow_version: str | int | None
-    ir_version: str
-    compiler_version: str
+    workflow_version: str
+    workflow_revision_id: str
     definition_hash: str
-    definition: dict[str, Any] = Field(
-        description="JSON-compatible graph and execution-semantic snapshot."
-    )
+    definition: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported Workflow Definition Snapshot schema {self.schema_version}."
+            )
+        for name, value in (
+            ("workflow_id", self.workflow_id),
+            ("workflow_version", self.workflow_version),
+            ("workflow_revision_id", self.workflow_revision_id),
+            ("definition_hash", self.definition_hash),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Workflow Definition Snapshot {name} cannot be empty.")
+        if not isinstance(self.definition, Mapping):
+            raise TypeError("Workflow Definition Snapshot definition must be a mapping.")
+        detached = json.loads(canonical_json(_thaw_json(self.definition)))
+        if definition_digest(detached) != self.definition_hash:
+            raise ValueError("Workflow Definition Snapshot hash does not match definition.")
+        if detached.get("workflow_id") != self.workflow_id:
+            raise ValueError("Workflow Definition Snapshot Workflow id is inconsistent.")
+        if detached.get("workflow_version") != self.workflow_version:
+            raise ValueError("Workflow Definition Snapshot version is inconsistent.")
+        if self.workflow_revision_id != f"{self.workflow_id}:{self.definition_hash}":
+            raise ValueError("Workflow Definition Snapshot revision id is inconsistent.")
+        object.__setattr__(self, "definition", _freeze_json(detached))
 
     @classmethod
-    def from_workflow_ir(
-        cls,
-        workflow_ir: WorkflowIR,
-    ) -> WorkflowVersionSnapshot:
-        semantic = _semantic_definition(workflow_ir)
-        definition = {
-            **semantic,
-            "name": workflow_ir.name,
-            "description": workflow_ir.description,
-            "nodes": [
-                {
-                    **node,
-                    "name": workflow_ir.nodes[node["id"]].name,
-                    "description": workflow_ir.nodes[node["id"]].description,
-                }
-                for node in semantic["nodes"]
-            ],
-        }
+    def from_workflow_ir(cls, workflow: WorkflowIR) -> "WorkflowDefinitionSnapshot":
+        definition = workflow_semantic_definition(
+            workflow_id=workflow.workflow_id,
+            workflow_version=workflow.workflow_version,
+            failure_mode=workflow.failure_mode,
+            nodes=workflow.nodes,
+            edges=workflow.edges,
+            loops=workflow.loop_regions,
+            entry_node_ids=workflow.entry_node_ids,
+            exit_node_ids=workflow.exit_node_ids,
+        )
+        definition_hash = definition_digest(definition)
+        if definition_hash != workflow.definition_hash:
+            raise ValueError("Workflow IR definition hash does not match its snapshot.")
         return cls(
-            workflow_id=workflow_ir.workflow_id,
-            workflow_version=workflow_ir.workflow_version,
-            ir_version=workflow_ir.ir_version,
-            compiler_version=workflow_ir.compiler_version,
-            definition_hash=_hash_json(semantic),
+            schema_version=WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION,
+            workflow_id=workflow.workflow_id,
+            workflow_version=workflow.workflow_version,
+            workflow_revision_id=workflow.workflow_revision_id,
+            definition_hash=definition_hash,
             definition=definition,
         )
 
+    def to_record(self) -> dict[str, object]:
+        """Return a detached JSON-compatible record."""
 
-def _semantic_definition(workflow_ir: WorkflowIR) -> dict[str, Any]:
-    """Build only fields that change execution or recovery compatibility."""
+        return {
+            "schema_version": self.schema_version,
+            "workflow_id": self.workflow_id,
+            "workflow_version": self.workflow_version,
+            "workflow_revision_id": self.workflow_revision_id,
+            "definition_hash": self.definition_hash,
+            "definition": _thaw_json(self.definition),
+        }
 
-    nodes = []
-    for node in workflow_ir.nodes.values():
-        nodes.append(
+    @classmethod
+    def from_record(cls, record: dict[str, object]) -> "WorkflowDefinitionSnapshot":
+        """Decode and validate one exact portable Snapshot schema."""
+
+        if not isinstance(record, dict) or set(record) != {
+            "schema_version",
+            "workflow_id",
+            "workflow_version",
+            "workflow_revision_id",
+            "definition_hash",
+            "definition",
+        }:
+            raise TypeError(
+                "Workflow Definition Snapshot contains missing or unknown fields."
+            )
+        schema_version = record.get("schema_version")
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise TypeError("Workflow Definition Snapshot schema_version must be an integer.")
+        definition = record.get("definition")
+        if not isinstance(definition, dict):
+            raise TypeError("Workflow Definition Snapshot definition must be a mapping.")
+        snapshot = cls(
+            schema_version=schema_version,
+            workflow_id=_record_string(record, "workflow_id"),
+            workflow_version=_record_string(record, "workflow_version"),
+            workflow_revision_id=_record_string(record, "workflow_revision_id"),
+            definition_hash=_record_string(record, "definition_hash"),
+            definition=definition,
+        )
+        if snapshot.to_record() != record:
+            raise TypeError("Workflow Definition Snapshot record is not canonical.")
+        return snapshot
+
+
+def workflow_semantic_definition(
+    *,
+    workflow_id: str,
+    workflow_version: str,
+    failure_mode: str,
+    nodes: tuple[object, ...],
+    edges: tuple[object, ...],
+    loops: tuple[object, ...],
+    entry_node_ids: tuple[str, ...],
+    exit_node_ids: tuple[str, ...],
+) -> dict[str, object]:
+    """Build the single canonical definition used by revision and snapshot."""
+
+    return {
+        "workflow_id": workflow_id,
+        "workflow_version": workflow_version,
+        "failure_mode": failure_mode,
+        "nodes": [
             {
                 "id": node.id,
-                "local_id": node.local_id,
-                "scope_node_ids": dict(node.scope_node_ids),
-                "workflow_path": list(node.workflow_path),
-                "capability": _binding_definition(node.capability),
-                "input_contract": node.input_contract.describe(),
-                "operator_output_contract": node.operator_output_contract.describe(),
-                "output_contract": node.output_contract.describe(),
+                "executable": _executable_definition(node.executable),
+                "input_contract": _contract_definition(node.input_contract),
+                "output_contract": _contract_definition(node.output_contract),
                 "input_mapping": _hook_definition(node.input_mapping),
                 "output_binding": _hook_definition(node.output_binding),
-                "stream_user_event_mapping": _canonicalize(
-                    node.stream_user_event_mapping
+                "execution_mode": node.execution_mode,
+                "map": (
+                    {
+                        "aggregate": _hook_definition(node.map.aggregate),
+                        "max_parallelism": node.map.max_parallelism,
+                    }
+                    if node.map is not None
+                    else None
                 ),
-                "user_event_mapping": _canonicalize(
-                    node.user_event_mapping
+                "stream": (
+                    {
+                        "reducer": _callable_name(type(node.stream.reducer)),
+                        "initial": _hook_definition(node.stream.reducer.initial),
+                        "add": _hook_definition(node.stream.reducer.add),
+                        "finish": _hook_definition(node.stream.reducer.finish),
+                    }
+                    if node.stream is not None
+                    else None
                 ),
-                "policy": _canonicalize(node.policy),
-                "entry": node.entry,
-                "exit": node.exit,
+                "user_events": [
+                    {
+                        "kind": mapping.kind,
+                        "mapper": _hook_definition(mapping.mapper),
+                        "output_contract": _contract_definition(
+                            mapping.output_contract
+                        ),
+                    }
+                    for mapping in node.user_events
+                ],
+                "recovery": {
+                    "mode": node.recovery_mode.mode,
+                    "max_attempts": node.recovery_mode.max_attempts,
+                },
             }
-        )
-
-    edges = []
-    for edge in sorted(workflow_ir.edges.values(), key=lambda item: item.order):
-        edges.append(
+            for node in nodes
+        ],
+        "edges": [
             {
                 "id": edge.id,
-                "local_id": edge.local_id,
-                "local_from_node": edge.local_from_node,
-                "local_to_node": edge.local_to_node,
-                "scope_node_ids": dict(edge.scope_node_ids),
-                "workflow_path": list(edge.workflow_path),
-                "from_node": edge.from_node,
-                "to_node": edge.to_node,
+                "source": edge.source,
+                "target": edge.target,
+                "on": edge.on,
                 "condition": _hook_definition(edge.condition),
-                "order": edge.order,
             }
-        )
-
-    loop_regions = [
-        _canonicalize(region)
-        for region in sorted(
-            workflow_ir.graph.loop_regions.values(),
-            key=lambda item: item.id,
-        )
-    ]
-    return {
-        "ir_version": workflow_ir.ir_version,
-        "workflow_version": workflow_ir.workflow_version,
-        "policy": _canonicalize(workflow_ir.policy),
-        "nodes": nodes,
-        "edges": edges,
-        "entry_node_ids": list(workflow_ir.entry_node_ids),
-        "exit_node_ids": list(workflow_ir.exit_node_ids),
-        "loop_regions": loop_regions,
+            for edge in edges
+        ],
+        "entry_node_ids": list(entry_node_ids),
+        "exit_node_ids": list(exit_node_ids),
+        "loops": [
+            {
+                "id": loop.id,
+                "header": loop.header_node_id,
+                "nodes": list(loop.node_ids),
+                "entries": list(loop.entry_edge_ids),
+                "backs": list(loop.back_edge_ids),
+                "exits": list(loop.exit_edge_ids),
+                "parent": loop.parent_loop_region_id,
+            }
+            for loop in loops
+        ],
     }
 
 
-def _binding_definition(binding: Any) -> dict[str, Any]:
-    if isinstance(binding, Operator):
-        return {"kind": "operator", "id": binding.definition_name}
-    if callable(binding):
-        return {"kind": "operator", "id": callable_operator_name(binding)}
-    if isinstance(binding, CapabilityRef):
-        return {"kind": "capability", "id": binding.id}
-    if isinstance(binding, OperatorRef):
-        return {"kind": "operator", "id": binding.id}
-    if isinstance(binding, SystemCommand):
-        return {"kind": "system_command", "id": binding.id}
-    raise TypeError(f"Unsupported Workflow IR capability: {type(binding).__name__}")
+def definition_digest(definition: dict[str, object]) -> str:
+    return hashlib.sha256(canonical_json(definition).encode("utf-8")).hexdigest()
 
 
-def _hook_definition(hook: Any) -> Any:
-    if hook is None:
-        return None
-    if callable(hook):
-        version = get_workflow_hook_version(hook)
-        return {"version": version}
-    return _canonicalize(hook)
-
-
-def _canonicalize(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, Enum):
-        return _canonicalize(value.value)
-    if isinstance(value, SchemaContract):
-        return value.describe()
-    if isinstance(value, BaseModel):
-        return {
-            name: _canonicalize(getattr(value, name))
-            for name in type(value).model_fields
-        }
-    if isinstance(value, Mapping):
-        return {
-            str(key): _canonicalize(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, (list, tuple)):
-        return [_canonicalize(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        encoded = [_canonicalize(item) for item in value]
-        return sorted(encoded, key=_canonical_json)
-    if callable(value):
-        return _hook_definition(value)
-    raise TypeError(f"Value is not canonicalizable: {type(value).__name__}")
-
-
-def _canonical_json(value: Any) -> str:
+def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def _hash_json(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+def _contract_definition(contract: object | None) -> object | None:
+    if contract is None:
+        return None
+    # JSON Schema carries the complete durable shape. ``ValueContract.name``
+    # contains a Python module path and is deliberately excluded from revision.
+    return {"schema": json.loads(contract.schema)}
+
+
+def _executable_definition(executable: object) -> dict[str, object]:
+    if isinstance(executable, WorkflowIR):
+        return {
+            "kind": "workflow",
+            "id": executable.workflow_id,
+            "definition_hash": executable.definition_hash,
+        }
+    if isinstance(executable, Operator):
+        return {
+            "kind": "operator",
+            "id": executable.id,
+            "handler": _hook_definition(executable.handler),
+            "input_contract": _contract_definition(executable.contract.input),
+            "output_contract": _contract_definition(executable.contract.output),
+            "stream_chunk_contract": _contract_definition(
+                executable.contract.stream_chunk
+            ),
+        }
+    if isinstance(executable, Capability):
+        return {
+            "kind": "capability",
+            "id": executable.id,
+            "input_contract": _contract_definition(executable.contract.input),
+            "output_contract": _contract_definition(executable.contract.output),
+            "stream_chunk_contract": _contract_definition(
+                executable.contract.stream_chunk
+            ),
+        }
+    if isinstance(executable, Wait):
+        return {
+            "kind": "wait",
+            "id": executable.id,
+            "request_contract": _contract_definition(executable.input_contract),
+            "response_contract": _contract_definition(executable.output_contract),
+        }
+    raise TypeError(f"Unsupported executable: {type(executable).__name__}")
+
+
+def _hook_definition(handler: Callable[..., object] | None) -> object | None:
+    if handler is None:
+        return None
+    contract = resolve_hook_contract(handler)
+    target = contract.target
+    hints = contract.hints
+    signature = contract.signature
+    version = workflow_hook_version(target)
+    if version is None:
+        version = workflow_hook_version(contract.annotation_source)
+    return {
+        "name": _callable_name(target),
+        "contract": {
+            "parameters": [
+                _annotation_definition(
+                    hints.get(parameter.name, parameter.annotation)
+                )
+                for parameter in signature.parameters.values()
+            ],
+            "return": _annotation_definition(
+                hints.get("return", signature.return_annotation)
+            ),
+        },
+        "version": version,
+    }
+
+
+def _callable_name(value: object) -> str:
+    return str(
+        getattr(value, "__name__", None)
+        or getattr(value, "__class__", type(value)).__name__
+    )
+
+
+def _annotation_definition(annotation: object) -> object:
+    if annotation is inspect.Signature.empty:
+        return None
+    try:
+        return TypeAdapter(annotation).json_schema()
+    except Exception:
+        origin = get_origin(annotation)
+        if origin is not None:
+            return {
+                "type": _callable_name(origin),
+                "arguments": [
+                    _annotation_definition(argument)
+                    for argument in get_args(annotation)
+                ],
+            }
+        return {"type": _callable_name(annotation)}
+
+
+def _record_string(record: dict[str, object], key: str) -> str:
+    value = record.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"Workflow Definition Snapshot {key} must be a string.")
+    return value
+
+
+def _freeze_json(value: object) -> object:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+__all__ = [
+    "WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION",
+    "WorkflowDefinitionSnapshot",
+    "definition_digest",
+    "workflow_semantic_definition",
+]

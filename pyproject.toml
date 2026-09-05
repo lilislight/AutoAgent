@@ -1,36 +1,38 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "autoagent"
-version = "0.1.0"
-description = "A code-first framework for durable, observable AI workflows"
+version = "2.0.0a1"
+description = "AutoAgent V2 Workflow Core, Host, and local tracing tools"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiosqlite>=0.22.1",
-    "asyncpg>=0.30.0",
-    "fastapi>=0.135.0",
-    "httpx>=0.28.1",
-    "openai>=2.0.0",
-    "pydantic>=2.13.4",
-    "python-dotenv>=1.2.2",
-    "sqlalchemy[asyncio]>=2.0.51",
-    "uvicorn[standard]>=0.35.0",
+  "pydantic>=2.11,<3",
+  "typing-extensions>=4.12",
+]
+
+[project.optional-dependencies]
+http = [
+  "httpx>=0.28,<1",
+]
+server = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+]
+all = [
+  "httpx>=0.28,<1",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
 ]
 
 [project.scripts]
 autoagent = "autoagent.cli:main"
 
-[build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
-
 [tool.setuptools.packages.find]
 include = ["autoagent*"]
 
 [tool.setuptools.package-data]
-"autoagent.core.server" = ["ui/index.html", "ui/assets/*"]
-"autoagent" = [
-    "examples/authoring/**/*.json",
-    "examples/authoring/**/*.md",
-    "examples/authoring/**/*.py",
-    "examples/authoring/**/*.toml",
-]
+"autoagent" = ["py.typed"]
+"autoagent.tracing" = ["ui/*", "ui/assets/*"]

@@ -27,6 +27,7 @@ from autoagent.core.runtime import (
     RuntimeEvent,
     RuntimeState,
     StateReducer,
+    UserEvent,
 )
 from autoagent.hosting import (
     HttpRuntimeEventSink,
@@ -2914,6 +2915,19 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
     def test_constructor_rejects_nonfinite_or_ambiguous_limits(self) -> None:
         """Validate HTTP timeout and worker limits before allocating threads."""
 
+        with self.assertRaisesRegex(ValueError, "user_event_url is required"):
+            HttpRuntimeEventSink(
+                "https://events.example.test/v1/ingest",
+                client=_Client(),
+            )
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            HttpRuntimeEventSink(
+                "https://events.example.test/v1/runtime-events",
+                user_event_url=(
+                    "https://events.example.test/v1/runtime-events"
+                ),
+                client=_Client(),
+            )
         for timeout in (True, 0, float("nan"), float("inf"), 10**1000):
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                 HttpRuntimeEventSink(
@@ -3023,7 +3037,7 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
             release.set()
             with self.assertRaisesRegex(
                 RuntimeEventStoreError,
-                "returned 503: unavailable",
+                "returned 503",
             ):
                 await sending
 
@@ -3169,6 +3183,10 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
         )
         try:
             asyncio.run(sink.append(event))
+            self.assertEqual(
+                sink.user_event_url,
+                "https://events.example.test/v1/user-events",
+            )
             url, payload, headers = client.calls[0]
             self.assertEqual(url, "https://events.example.test/v1/runtime-events")
             self.assertEqual(payload, event.to_record())
@@ -3176,6 +3194,45 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
             self.assertEqual(headers["Authorization"], "Bearer secret")
             self.assertEqual(headers["X-AutoAgent-Record-Type"], "runtime_event")
             self.assertNotIn("X-AutoAgent-Session-Id", headers)
+        finally:
+            sink.close()
+
+    def test_http_sink_sends_user_events_to_the_independent_endpoint(self) -> None:
+        """Use a separate User Event URL, sequence header, and record identity."""
+
+        runtime = _capture_events()[0]
+        event = UserEvent(
+            id="http-user-event",
+            session_id=runtime.session_id,
+            invocation_id=runtime.invocation_id,
+            sequence=3,
+            kind="message.delta",
+            payload={"text": "hello"},
+            occurred_at_ns=123,
+        )
+        client = _Client()
+        sink = HttpRuntimeEventSink(
+            "https://events.example.test/v1/runtime-events",
+            user_event_url="https://events.example.test/v1/user-events",
+            token="secret",
+            client=client,
+        )
+        try:
+            asyncio.run(sink.append_user_event(event))
+            url, payload, headers = client.calls[0]
+            self.assertEqual(
+                url,
+                "https://events.example.test/v1/user-events",
+            )
+            self.assertEqual(payload, event.to_record())
+            self.assertEqual(headers["Idempotency-Key"], event.id)
+            self.assertEqual(
+                headers["X-AutoAgent-User-Event-Sequence"],
+                "3",
+            )
+            self.assertEqual(headers["X-AutoAgent-Record-Type"], "user_event")
+            self.assertEqual(headers["Authorization"], "Bearer secret")
+            self.assertNotIn("X-AutoAgent-Event-Sequence", headers)
         finally:
             sink.close()
 
@@ -3277,6 +3334,40 @@ class HttpRuntimeEventSinkTests(unittest.TestCase):
         try:
             with self.assertRaises(RuntimeEventStoreError):
                 asyncio.run(sink.append(event))
+        finally:
+            sink.close()
+
+    def test_http_sink_does_not_echo_a_remote_error_body(self) -> None:
+        """Keep an untrusted non-success response body out of local errors."""
+
+        secret = "remote-private-diagnostic"
+        body_read = False
+
+        class ErrorResponse:
+            status_code = 503
+
+            @property
+            def text(self) -> str:
+                nonlocal body_read
+                body_read = True
+                return secret
+
+        client = _Client()
+
+        def rejected_post(*_args: object, **_kwargs: object) -> _Response:
+            return ErrorResponse()  # type: ignore[return-value]
+
+        client.post = rejected_post  # type: ignore[method-assign]
+        sink = HttpRuntimeEventSink(
+            "https://events.example.test/v1/runtime-events",
+            client=client,
+        )
+        try:
+            with self.assertRaises(RuntimeEventStoreError) as captured:
+                asyncio.run(sink.append(_capture_events()[0]))
+            self.assertIn("503", str(captured.exception))
+            self.assertNotIn(secret, str(captured.exception))
+            self.assertFalse(body_read)
         finally:
             sink.close()
 

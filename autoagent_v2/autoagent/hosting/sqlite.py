@@ -40,6 +40,7 @@ from autoagent.core.runtime import (
     SessionOpened,
     StateReducer,
     TraceEvent,
+    UserEvent,
     WaitResumed,
     project_trace_events,
 )
@@ -52,11 +53,11 @@ from .errors import (
     RuntimeEventStoreError,
     RuntimeSessionNotRootError,
 )
-from .models import Page
+from .models import Page, ResumablePage
 from ._worker import ConcurrentWorker, SerialWorker, run_in_daemon
 
 
-SQLITE_STORE_SCHEMA_VERSION = 4
+SQLITE_STORE_SCHEMA_VERSION = 5
 _PAGE_CURSOR_VERSION = 1
 _SQLITE_MAX_INTEGER = (1 << 63) - 1
 _VALIDATED_STATE_CACHE_SIZE = 256
@@ -75,6 +76,11 @@ _TRACE_EVENT_SELECT = """
 SELECT id, runtime_event_id, session_id, invocation_id, trace_sequence,
        kind, status, occurred_at_ns, record_json
 FROM trace_events
+"""
+_USER_EVENT_SELECT = """
+SELECT id, session_id, invocation_id, sequence, kind, occurred_at_ns,
+       event_digest, record_json
+FROM user_events
 """
 _WORKFLOW_DEFINITION_SELECT = """
 SELECT row_id, revision_id, workflow_id, workflow_version, definition_hash,
@@ -96,6 +102,8 @@ _REQUIRED_TABLES = frozenset(
         "session_ownership",
         "sessions",
         "trace_events",
+        "user_events",
+        "user_event_streams",
         "workflow_definitions",
     }
 )
@@ -143,6 +151,30 @@ _REQUIRED_COLUMNS = {
             "record_json",
         }
     ),
+    "user_events": frozenset(
+        {
+            "row_id",
+            "id",
+            "session_id",
+            "invocation_id",
+            "sequence",
+            "kind",
+            "occurred_at_ns",
+            "event_digest",
+            "record_json",
+        }
+    ),
+    "user_event_streams": frozenset(
+        {
+            "invocation_id",
+            "session_id",
+            "event_count",
+            "last_sequence",
+            "last_event_id",
+            "last_event_digest",
+            "updated_at_ns",
+        }
+    ),
     "session_ownership": frozenset(
         {
             "session_id",
@@ -158,6 +190,7 @@ _REQUIRED_COLUMNS = {
             "planned_invocation_id",
             "planned_event_sequence",
             "planned_log_id",
+            "change_event_sequence",
             "phase",
             "updated_at_ns",
         }
@@ -207,10 +240,13 @@ _REQUIRED_INDEXES = frozenset(
         "runtime_events_invocation",
         "runtime_events_session_time",
         "session_ownership_parent_unit",
+        "session_ownership_parent_change",
         "session_ownership_root",
         "sessions_root",
         "trace_events_invocation",
         "trace_events_invocation_kind",
+        "user_events_invocation",
+        "user_events_session_time",
         "workflow_definitions_workflow",
     }
 )
@@ -230,6 +266,7 @@ class _CanonicalChildOwnership:
     child_session_id: str
     planned_event_sequence: int
     planned_log_id: str
+    change_event_sequence: int
     phase: str
 
 
@@ -436,6 +473,17 @@ class SQLiteRuntimeStore:
         self._ensure_writable()
         self.start()
         inserted = await self._write_async(self._append, event)
+        if inserted:
+            self._announce_change()
+
+    async def append_user_event(self, event: UserEvent) -> None:
+        """Durably append one independent Invocation-ordered User Event."""
+
+        if not isinstance(event, UserEvent):
+            raise TypeError("event must be a UserEvent.")
+        self._ensure_writable()
+        self.start()
+        inserted = await self._write_async(self._append_user_event, event)
         if inserted:
             self._announce_change()
 
@@ -676,6 +724,47 @@ class SQLiteRuntimeStore:
             ),
         )
 
+    async def list_user_events(
+        self,
+        invocation_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> tuple[UserEvent, ...]:
+        """Read independent User Events after an Invocation-local sequence."""
+
+        _sqlite_integer(after_sequence, "after_sequence", minimum=0)
+        return await self._read_async(
+            self._list_user_events,
+            _identity(invocation_id),
+            after_sequence,
+            _limit(limit, maximum=1_000),
+        )
+
+    async def tail_user_events(
+        self,
+        invocation_id: str,
+        *,
+        limit: int = 200,
+        before_sequence: int | None = None,
+    ) -> tuple[UserEvent, ...]:
+        """Read the latest User Events before an optional sequence."""
+
+        return await self._read_async(
+            self._tail_user_events,
+            _identity(invocation_id),
+            _limit(limit, maximum=1_000),
+            (
+                None
+                if before_sequence is None
+                else _sqlite_integer(
+                    before_sequence,
+                    "before_sequence",
+                    minimum=1,
+                )
+            ),
+        )
+
     async def rebuild_state(
         self, session_id: str, *, through_sequence: int | None = None
     ) -> RuntimeState:
@@ -714,6 +803,19 @@ class SQLiteRuntimeStore:
             through_sequence,
         )
 
+    async def runtime_event_sequence_for_trace(
+        self,
+        invocation_id: str,
+        trace_sequence: int,
+    ) -> int:
+        """Resolve one Trace position to its canonical Runtime Event boundary."""
+
+        return await self._read_async(
+            self._runtime_event_sequence_for_trace,
+            _identity(invocation_id),
+            _sqlite_integer(trace_sequence, "trace_sequence", minimum=1),
+        )
+
     async def rebuild_checkpoint(
         self, root_session_id: str
     ) -> RuntimeCheckpointBundle:
@@ -729,6 +831,14 @@ class SQLiteRuntimeStore:
 
         return await self._read_async(
             self._latest_trace_sequence,
+            _identity(invocation_id),
+        )
+
+    async def latest_user_event_sequence(self, invocation_id: str) -> int:
+        """Return the latest independent User Event sequence."""
+
+        return await self._read_async(
+            self._latest_user_event_sequence,
             _identity(invocation_id),
         )
 
@@ -764,6 +874,24 @@ class SQLiteRuntimeStore:
         No background polling task exists when there are no callers.
         """
 
+        return await self._wait_for_projected_sequence(
+            invocation_id,
+            after_sequence=after_sequence,
+            timeout=timeout,
+            latest_reader=self._latest_trace_sequence_hint,
+        )
+
+    async def _wait_for_projected_sequence(
+        self,
+        invocation_id: str,
+        *,
+        after_sequence: int,
+        timeout: float,
+        latest_reader: Callable[[str], int],
+    ) -> bool:
+        """Share event-driven waits across independent projection streams."""
+
+        invocation_id = _identity(invocation_id)
         _sqlite_integer(after_sequence, "after_sequence", minimum=0)
         try:
             finite_timeout = math.isfinite(timeout)
@@ -782,7 +910,7 @@ class SQLiteRuntimeStore:
             if remaining <= 0:
                 return (
                     await self._read_async(
-                        self._latest_trace_sequence_hint,
+                        latest_reader,
                         invocation_id,
                     )
                     > after_sequence
@@ -791,11 +919,11 @@ class SQLiteRuntimeStore:
             waiter = asyncio.create_task(self._wait_for_change(wait_for))
             await asyncio.sleep(0)
             try:
-                latest = await self._read_async(
-                    self._latest_trace_sequence_hint,
+                latest_sequence = await self._read_async(
+                    latest_reader,
                     invocation_id,
                 )
-                if latest > after_sequence:
+                if latest_sequence > after_sequence:
                     return True
                 await waiter
             finally:
@@ -805,6 +933,22 @@ class SQLiteRuntimeStore:
                         await waiter
                     except asyncio.CancelledError:
                         pass
+
+    async def wait_for_user_event(
+        self,
+        invocation_id: str,
+        *,
+        after_sequence: int,
+        timeout: float = 15.0,
+    ) -> bool:
+        """Wait efficiently until a newer User Event becomes queryable."""
+
+        return await self._wait_for_projected_sequence(
+            invocation_id,
+            after_sequence=after_sequence,
+            timeout=timeout,
+            latest_reader=self._latest_user_event_sequence_hint,
+        )
 
     # ------------------------------------------------------------------
     # Writer implementation
@@ -1012,6 +1156,143 @@ class SQLiteRuntimeStore:
                 )
             connection.commit()
             self._cache_validated_state(event.session_id, next_state)
+            return True
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def _append_user_event(self, event: UserEvent) -> bool:
+        """Commit one observation without changing canonical Runtime State."""
+
+        connection = self._connection()
+        encoded = _canonical_json(event.to_record())
+        event_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            invocation = connection.execute(
+                """
+                SELECT invocation_id, session_id
+                FROM invocations WHERE invocation_id = ?
+                """,
+                (event.invocation_id,),
+            ).fetchone()
+            if invocation is None:
+                raise RuntimeEventSequenceError(
+                    "User Event requires an already persisted Invocation."
+                )
+            if _stored_string(invocation, "session_id") != event.session_id:
+                raise RuntimeEventConflictError(
+                    "User Event Session does not own its Invocation."
+                )
+
+            existing = connection.execute(
+                _USER_EVENT_SELECT + " WHERE id = ?",
+                (event.id,),
+            ).fetchone()
+            if existing is not None:
+                stored = _decode_verified_user_event(existing)
+                if existing["record_json"] != encoded or stored != event:
+                    raise RuntimeEventConflictError(
+                        f"User Event id {event.id!r} has conflicting content."
+                    )
+                latest = self._validated_user_event_stream(
+                    connection,
+                    event.invocation_id,
+                )
+                if latest < event.sequence:
+                    raise RuntimeEventStoreError(
+                        "Stored User Event stream head does not cover the retry."
+                    )
+                connection.commit()
+                return False
+
+            at_sequence = connection.execute(
+                """
+                SELECT id FROM user_events
+                WHERE invocation_id = ? AND sequence = ?
+                """,
+                (event.invocation_id, event.sequence),
+            ).fetchone()
+            if at_sequence is not None:
+                raise RuntimeEventConflictError(
+                    "An Invocation User Event sequence already contains another Event."
+                )
+            tail = connection.execute(
+                """
+                SELECT sequence FROM user_events
+                WHERE invocation_id = ? ORDER BY sequence DESC LIMIT 1
+                """,
+                (event.invocation_id,),
+            ).fetchone()
+            expected = (
+                1
+                if tail is None
+                else _stored_integer(tail, "sequence", minimum=1) + 1
+            )
+            if event.sequence != expected:
+                raise RuntimeEventSequenceError(
+                    "User Event sequence is not continuous for its Invocation."
+                )
+            connection.execute(
+                """
+                INSERT INTO user_events(
+                    id, session_id, invocation_id, sequence, kind,
+                    occurred_at_ns, event_digest, record_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.session_id,
+                    event.invocation_id,
+                    event.sequence,
+                    event.kind,
+                    event.occurred_at_ns,
+                    event_digest,
+                    encoded,
+                ),
+            )
+            if tail is None:
+                connection.execute(
+                    """
+                    INSERT INTO user_event_streams(
+                        invocation_id, session_id, event_count, last_sequence,
+                        last_event_id, last_event_digest, updated_at_ns
+                    ) VALUES (?, ?, 1, 1, ?, ?, ?)
+                    """,
+                    (
+                        event.invocation_id,
+                        event.session_id,
+                        event.id,
+                        event_digest,
+                        event.occurred_at_ns,
+                    ),
+                )
+            else:
+                updated = connection.execute(
+                    """
+                    UPDATE user_event_streams
+                    SET event_count = event_count + 1,
+                        last_sequence = ?, last_event_id = ?,
+                        last_event_digest = ?, updated_at_ns = ?
+                    WHERE invocation_id = ? AND session_id = ?
+                      AND event_count = ? AND last_sequence = ?
+                    """,
+                    (
+                        event.sequence,
+                        event.id,
+                        event_digest,
+                        event.occurred_at_ns,
+                        event.invocation_id,
+                        event.session_id,
+                        event.sequence - 1,
+                        event.sequence - 1,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeEventStoreError(
+                        "User Event did not advance exactly one stream head."
+                    )
+            connection.commit()
             return True
         except BaseException:
             connection.rollback()
@@ -1491,6 +1772,7 @@ class SQLiteRuntimeStore:
                             child_session_id=unit.child_session_id,
                             planned_event_sequence=event.sequence,
                             planned_log_id=log.id,
+                            change_event_sequence=event.sequence,
                             phase="planned",
                         )
                         builder.children[(payload.creation_id, unit.unit_index)] = child
@@ -1523,6 +1805,7 @@ class SQLiteRuntimeStore:
                         child_session_id=child.child_session_id,
                         planned_event_sequence=child.planned_event_sequence,
                         planned_log_id=child.planned_log_id,
+                        change_event_sequence=event.sequence,
                         phase=payload.phase,
                     )
                 elif isinstance(payload, InvocationCompleted):
@@ -1826,7 +2109,8 @@ class SQLiteRuntimeStore:
                        parent_invocation_id, creation_id, unit_index,
                        parent_occurrence_id, mode, workflow_id,
                        workflow_revision_id, planned_invocation_id,
-                       planned_event_sequence, planned_log_id, phase,
+                       planned_event_sequence, planned_log_id,
+                       change_event_sequence, phase,
                        updated_at_ns
                 FROM session_ownership WHERE session_id = ?
                 """,
@@ -1871,6 +2155,12 @@ class SQLiteRuntimeStore:
                         minimum=1,
                     ),
                     _stored_string(row, "planned_log_id", optional=True),
+                    _stored_integer(
+                        row,
+                        "change_event_sequence",
+                        optional=True,
+                        minimum=1,
+                    ),
                     _stored_string(row, "phase", optional=True),
                 )
                 if any(value is not None for value in optional_fields):
@@ -1902,6 +2192,11 @@ class SQLiteRuntimeStore:
                 minimum=1,
             )
             planned_log_id = _stored_string(row, "planned_log_id")
+            change_event_sequence = _stored_integer(
+                row,
+                "change_event_sequence",
+                minimum=planned_event_sequence,
+            )
             projected_phase = _stored_enum(row, "phase", _CHILD_PHASES)
             _stored_integer(row, "updated_at_ns", minimum=0)
             canonical = self._canonical_child_ownership(
@@ -1925,6 +2220,7 @@ class SQLiteRuntimeStore:
                 unit_index,
                 planned_event_sequence,
                 planned_log_id,
+                change_event_sequence,
             )
             canonical_descriptor = (
                 canonical.creation_id,
@@ -1937,6 +2233,7 @@ class SQLiteRuntimeStore:
                 canonical.unit_index,
                 canonical.planned_event_sequence,
                 canonical.planned_log_id,
+                canonical.change_event_sequence,
             )
             if actual_descriptor != canonical_descriptor:
                 raise RuntimeEventStoreError(
@@ -2089,6 +2386,7 @@ class SQLiteRuntimeStore:
                             child_session_id=unit.child_session_id,
                             planned_event_sequence=event.sequence,
                             planned_log_id=log.id,
+                            change_event_sequence=event.sequence,
                             phase="planned",
                         )
                         existing = children.get(key)
@@ -2132,6 +2430,7 @@ class SQLiteRuntimeStore:
                         child_session_id=canonical.child_session_id,
                         planned_event_sequence=canonical.planned_event_sequence,
                         planned_log_id=canonical.planned_log_id,
+                        change_event_sequence=event.sequence,
                         phase=payload.phase,
                     )
         return children, last_row
@@ -2239,6 +2538,7 @@ class SQLiteRuntimeStore:
                 child_session_id=unit.session_id,
                 planned_event_sequence=0,
                 planned_log_id="",
+                change_event_sequence=0,
                 phase=unit.phase,
             )
             for plan in invocation.child_plans.values()
@@ -2279,7 +2579,11 @@ class SQLiteRuntimeStore:
                 child.planned_invocation_id,
                 child.phase,
                 *(
-                    (child.planned_event_sequence, child.planned_log_id)
+                    (
+                        child.planned_event_sequence,
+                        child.planned_log_id,
+                        child.change_event_sequence,
+                    )
                     if include_plan_source
                     else ()
                 ),
@@ -2287,7 +2591,7 @@ class SQLiteRuntimeStore:
             for child in children
         }
         selected_source = (
-            ", planned_event_sequence, planned_log_id"
+            ", planned_event_sequence, planned_log_id, change_event_sequence"
             if include_plan_source
             else ""
         )
@@ -2322,6 +2626,11 @@ class SQLiteRuntimeStore:
                             minimum=1,
                         ),
                         _stored_string(child, "planned_log_id"),
+                        _stored_integer(
+                            child,
+                            "change_event_sequence",
+                            minimum=1,
+                        ),
                     )
                     if include_plan_source
                     else ()
@@ -3107,7 +3416,7 @@ class SQLiteRuntimeStore:
                        creation_id, unit_index, parent_occurrence_id, mode,
                        workflow_id, workflow_revision_id,
                        planned_invocation_id, planned_event_sequence,
-                       planned_log_id
+                       planned_log_id, change_event_sequence
                 FROM session_ownership WHERE session_id = ?
                 """,
                 (unit.child_session_id,),
@@ -3125,6 +3434,7 @@ class SQLiteRuntimeStore:
                 unit.child_invocation_id,
                 event.sequence,
                 planned_log_id,
+                event.sequence,
             )
             if existing is not None and tuple(existing) != descriptor:
                 raise RuntimeEventConflictError(
@@ -3138,8 +3448,8 @@ class SQLiteRuntimeStore:
                     parent_occurrence_id, mode, workflow_id,
                     workflow_revision_id, planned_invocation_id,
                     planned_event_sequence, planned_log_id,
-                    phase, updated_at_ns
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)
+                    change_event_sequence, phase, updated_at_ns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     updated_at_ns = MAX(updated_at_ns, excluded.updated_at_ns)
                 """,
@@ -3162,12 +3472,14 @@ class SQLiteRuntimeStore:
         updated = connection.execute(
             """
             UPDATE session_ownership
-            SET phase = ?, updated_at_ns = MAX(updated_at_ns, ?)
+            SET phase = ?, change_event_sequence = ?,
+                updated_at_ns = MAX(updated_at_ns, ?)
             WHERE parent_invocation_id = ?
               AND creation_id = ? AND unit_index = ?
             """,
             (
                 payload.phase,
+                event.sequence,
                 event.occurred_at_ns,
                 parent_invocation_id,
                 payload.creation_id,
@@ -3420,7 +3732,7 @@ class SQLiteRuntimeStore:
                    o.workflow_id AS planned_workflow_id,
                    o.workflow_revision_id AS planned_workflow_revision_id,
                    o.planned_invocation_id, o.planned_event_sequence,
-                   o.planned_log_id, o.phase,
+                   o.planned_log_id, o.change_event_sequence, o.phase,
                    s.root_session_id AS session_root_session_id,
                    s.current_invocation_id, s.invocation_count,
                    s.created_at_ns, s.updated_at_ns,
@@ -3590,9 +3902,11 @@ class SQLiteRuntimeStore:
                         SELECT 1 FROM runtime_events WHERE invocation_id = ?
                         UNION ALL
                         SELECT 1 FROM trace_events WHERE invocation_id = ?
+                        UNION ALL
+                        SELECT 1 FROM user_events WHERE invocation_id = ?
                         LIMIT 1
                         """,
-                        (invocation_id, invocation_id),
+                        (invocation_id, invocation_id, invocation_id),
                     ).fetchone()
                     if evidence is not None:
                         raise RuntimeEventStoreError(
@@ -3666,6 +3980,57 @@ class SQLiteRuntimeStore:
             finally:
                 connection.rollback()
 
+    def _runtime_event_sequence_for_trace(
+        self,
+        invocation_id: str,
+        trace_sequence: int,
+    ) -> int:
+        with closing(self._reader()) as connection:
+            connection.execute("BEGIN")
+            try:
+                row = connection.execute(
+                    _TRACE_EVENT_SELECT
+                    + """
+                    WHERE invocation_id = ? AND trace_sequence = ?
+                    """,
+                    (invocation_id, trace_sequence),
+                ).fetchone()
+                if row is None:
+                    # Distinguish a missing Invocation from an invalid position.
+                    invocation = connection.execute(
+                        "SELECT 1 FROM invocations WHERE invocation_id = ?",
+                        (invocation_id,),
+                    ).fetchone()
+                    if invocation is None:
+                        raise KeyError(invocation_id)
+                    raise ValueError(
+                        "trace_sequence does not exist for this Invocation."
+                    )
+                _decode_anchored_trace_event(connection, row)
+                source = connection.execute(
+                    """
+                    SELECT sequence, invocation_id FROM runtime_events
+                    WHERE id = ?
+                    """,
+                    (_stored_string(row, "runtime_event_id"),),
+                ).fetchone()
+                if source is None:
+                    raise RuntimeEventStoreError(
+                        "Stored Trace Event has no canonical Runtime Event."
+                    )
+                source_invocation = _stored_string(
+                    source,
+                    "invocation_id",
+                    optional=True,
+                )
+                if source_invocation != invocation_id:
+                    raise RuntimeEventStoreError(
+                        "Stored Trace source belongs to another Invocation."
+                    )
+                return _stored_integer(source, "sequence", minimum=1)
+            finally:
+                connection.rollback()
+
     def _tail_trace_events(
         self,
         invocation_id: str,
@@ -3696,6 +4061,171 @@ class SQLiteRuntimeStore:
                 )
             finally:
                 connection.rollback()
+
+    def _list_user_events(
+        self,
+        invocation_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> tuple[UserEvent, ...]:
+        with closing(self._reader()) as connection:
+            connection.execute("BEGIN")
+            try:
+                latest = self._validated_user_event_stream(
+                    connection,
+                    invocation_id,
+                    allow_absent=True,
+                )
+                rows = connection.execute(
+                    _USER_EVENT_SELECT
+                    + """
+                    WHERE invocation_id = ? AND sequence > ?
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    (invocation_id, after_sequence, limit),
+                ).fetchall()
+                events = tuple(_decode_verified_user_event(row) for row in rows)
+                expected = after_sequence + 1
+                for event in events:
+                    if event.sequence != expected:
+                        raise RuntimeEventStoreError(
+                            "Stored Invocation User Event sequence is incomplete."
+                        )
+                    expected += 1
+                if not events and after_sequence < latest:
+                    raise RuntimeEventStoreError(
+                        "Stored Invocation User Event sequence is incomplete."
+                    )
+                return events
+            finally:
+                connection.rollback()
+
+    def _tail_user_events(
+        self,
+        invocation_id: str,
+        limit: int,
+        before_sequence: int | None,
+    ) -> tuple[UserEvent, ...]:
+        query = _USER_EVENT_SELECT + " WHERE invocation_id = ?"
+        parameters: list[object] = [invocation_id]
+        if before_sequence is not None:
+            query += " AND sequence < ?"
+            parameters.append(before_sequence)
+        query += " ORDER BY sequence DESC LIMIT ?"
+        parameters.append(limit)
+        with closing(self._reader()) as connection:
+            connection.execute("BEGIN")
+            try:
+                self._validated_user_event_stream(connection, invocation_id)
+                rows = connection.execute(query, parameters).fetchall()
+                return tuple(
+                    _decode_verified_user_event(row)
+                    for row in reversed(rows)
+                )
+            finally:
+                connection.rollback()
+
+    @staticmethod
+    def _validated_user_event_stream(
+        connection: sqlite3.Connection,
+        invocation_id: str,
+        *,
+        allow_absent: bool = False,
+    ) -> int:
+        invocation = connection.execute(
+            "SELECT session_id FROM invocations WHERE invocation_id = ?",
+            (invocation_id,),
+        ).fetchone()
+        if invocation is None:
+            raise KeyError(invocation_id)
+        head = connection.execute(
+            "SELECT * FROM user_event_streams WHERE invocation_id = ?",
+            (invocation_id,),
+        ).fetchone()
+        aggregate = connection.execute(
+            """
+            SELECT COUNT(*) AS event_count, MIN(sequence) AS first_sequence,
+                   MAX(sequence) AS last_sequence
+            FROM user_events WHERE invocation_id = ?
+            """,
+            (invocation_id,),
+        ).fetchone()
+        assert aggregate is not None
+        count = _stored_integer(aggregate, "event_count", minimum=0)
+        if head is None:
+            if count:
+                raise RuntimeEventStoreError(
+                    "Stored User Events have no stream projection."
+                )
+            if allow_absent:
+                return 0
+            return 0
+        expected_count = _stored_integer(head, "event_count", minimum=1)
+        latest = _stored_integer(head, "last_sequence", minimum=1)
+        if (
+            expected_count != count
+            or count != latest
+            or _stored_integer(aggregate, "first_sequence", minimum=1) != 1
+            or _stored_integer(aggregate, "last_sequence", minimum=1) != latest
+            or _stored_string(head, "session_id")
+            != _stored_string(invocation, "session_id")
+        ):
+            raise RuntimeEventStoreError(
+                "Stored User Event stream projection is inconsistent."
+            )
+        tail = connection.execute(
+            _USER_EVENT_SELECT
+            + " WHERE invocation_id = ? ORDER BY sequence DESC LIMIT 1",
+            (invocation_id,),
+        ).fetchone()
+        if tail is None:
+            raise RuntimeEventStoreError(
+                "Stored User Event stream has no tail Event."
+            )
+        tail_event = _decode_verified_user_event(tail)
+        if (
+            tail_event.sequence != latest
+            or tail_event.id != _stored_string(head, "last_event_id")
+            or _stored_string(tail, "event_digest")
+            != _stored_string(head, "last_event_digest")
+        ):
+            raise RuntimeEventStoreError(
+                "Stored User Event stream head does not match its tail."
+            )
+        return latest
+
+    def _latest_user_event_sequence(self, invocation_id: str) -> int:
+        with closing(self._reader()) as connection:
+            connection.execute("BEGIN")
+            try:
+                return self._validated_user_event_stream(
+                    connection,
+                    invocation_id,
+                    allow_absent=True,
+                )
+            finally:
+                connection.rollback()
+
+    def _latest_user_event_sequence_hint(self, invocation_id: str) -> int:
+        with closing(self._reader()) as connection:
+            invocation = connection.execute(
+                "SELECT 1 FROM invocations WHERE invocation_id = ?",
+                (invocation_id,),
+            ).fetchone()
+            if invocation is None:
+                raise KeyError(invocation_id)
+            row = connection.execute(
+                """
+                SELECT last_sequence FROM user_event_streams
+                WHERE invocation_id = ?
+                """,
+                (invocation_id,),
+            ).fetchone()
+            return (
+                0
+                if row is None
+                else _stored_integer(row, "last_sequence", minimum=1)
+            )
 
     def _latest_trace_sequence(self, invocation_id: str) -> int:
         with closing(self._reader()) as connection:
@@ -4382,7 +4912,7 @@ def _validate_existing_schema(
             WHERE type = 'trigger' AND tbl_name IN (
                 'invocations', 'runtime_events', 'schema_metadata',
                 'session_ownership', 'sessions', 'trace_events',
-                'workflow_definitions'
+                'user_events', 'user_event_streams', 'workflow_definitions'
             )
             """
         ).fetchall()
@@ -4600,6 +5130,48 @@ def _decode_verified_trace_event(row: sqlite3.Row) -> TraceEvent:
     if envelope != expected:
         raise RuntimeEventStoreError(
             "Stored Trace Event SQL envelope does not match its record."
+        )
+    return event
+
+
+def _decode_verified_user_event(row: sqlite3.Row) -> UserEvent:
+    """Decode one independent observation and verify its SQL envelope."""
+
+    record_json = row["record_json"]
+    event_digest = row["event_digest"]
+    if not isinstance(record_json, str) or not isinstance(event_digest, str):
+        raise RuntimeEventStoreError(
+            "Stored User Event record and digest must be text."
+        )
+    actual_digest = hashlib.sha256(record_json.encode("utf-8")).hexdigest()
+    if event_digest != actual_digest:
+        raise RuntimeEventStoreError(
+            "Stored User Event digest does not match its canonical record."
+        )
+    event = _decode_stored_record(
+        record_json,
+        "User Event",
+        UserEvent.from_record,
+    )
+    envelope = {
+        "id": _stored_string(row, "id"),
+        "session_id": _stored_string(row, "session_id"),
+        "invocation_id": _stored_string(row, "invocation_id"),
+        "sequence": _stored_integer(row, "sequence", minimum=1),
+        "kind": _stored_string(row, "kind"),
+        "occurred_at_ns": _stored_integer(row, "occurred_at_ns", minimum=0),
+    }
+    expected = {
+        "id": event.id,
+        "session_id": event.session_id,
+        "invocation_id": event.invocation_id,
+        "sequence": event.sequence,
+        "kind": event.kind,
+        "occurred_at_ns": event.occurred_at_ns,
+    }
+    if envelope != expected:
+        raise RuntimeEventStoreError(
+            "Stored User Event SQL envelope does not match its record."
         )
     return event
 
@@ -5000,6 +5572,9 @@ def _child_session_summary(row: sqlite3.Row) -> dict[str, object]:
         "planned_event_sequence": _stored_integer(
             row, "planned_event_sequence", minimum=1
         ),
+        "change_event_sequence": _stored_integer(
+            row, "change_event_sequence", minimum=1
+        ),
         "phase": _stored_enum(row, "phase", _CHILD_PHASES),
         "current_invocation_id": _stored_string(
             row, "current_invocation_id", optional=True
@@ -5196,6 +5771,33 @@ CREATE INDEX IF NOT EXISTS trace_events_invocation
 CREATE INDEX IF NOT EXISTS trace_events_invocation_kind
     ON trace_events(invocation_id, kind, trace_sequence DESC);
 
+CREATE TABLE IF NOT EXISTS user_event_streams (
+    invocation_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    event_count INTEGER NOT NULL,
+    last_sequence INTEGER NOT NULL,
+    last_event_id TEXT NOT NULL,
+    last_event_digest TEXT NOT NULL,
+    updated_at_ns INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS user_events (
+    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    session_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    occurred_at_ns INTEGER NOT NULL,
+    event_digest TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    UNIQUE(invocation_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS user_events_invocation
+    ON user_events(invocation_id, sequence);
+CREATE INDEX IF NOT EXISTS user_events_session_time
+    ON user_events(session_id, occurred_at_ns);
+
 CREATE TABLE IF NOT EXISTS session_ownership (
     session_id TEXT PRIMARY KEY,
     root_session_id TEXT NOT NULL,
@@ -5210,6 +5812,7 @@ CREATE TABLE IF NOT EXISTS session_ownership (
     planned_invocation_id TEXT,
     planned_event_sequence INTEGER,
     planned_log_id TEXT,
+    change_event_sequence INTEGER,
     phase TEXT,
     updated_at_ns INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -5218,6 +5821,11 @@ CREATE INDEX IF NOT EXISTS session_ownership_root
 CREATE UNIQUE INDEX IF NOT EXISTS session_ownership_parent_unit
     ON session_ownership(
         parent_invocation_id, planned_event_sequence, planned_log_id, unit_index
+    )
+    WHERE parent_invocation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS session_ownership_parent_change
+    ON session_ownership(
+        parent_invocation_id, change_event_sequence, session_id
     )
     WHERE parent_invocation_id IS NOT NULL;
 

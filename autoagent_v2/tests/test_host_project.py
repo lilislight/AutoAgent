@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import textwrap
@@ -8,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Iterator
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -19,10 +21,70 @@ from autoagent.host import (
     load_host_settings,
     load_project_environment,
     load_project_manifest,
+    project_environment_scope,
+    resolve_manifest_path,
 )
 
 
 class HostProjectTests(unittest.TestCase):
+    def test_manifest_discovery_uses_the_nearest_existing_project(self) -> None:
+        """Find the nearest ancestor manifest while keeping explicit paths strict."""
+
+        with self.project(self.manifest("workflow:workflow")) as root:
+            nested_project = root / "nested"
+            nested_project.mkdir()
+            nested_manifest = nested_project / "autoagent.toml"
+            nested_manifest.write_text(
+                self.manifest("workflow:workflow"),
+                encoding="utf-8",
+            )
+            working_directory = nested_project / "src" / "package"
+            working_directory.mkdir(parents=True)
+
+            self.assertEqual(
+                resolve_manifest_path(working_directory),
+                nested_manifest.resolve(),
+            )
+            with patch(
+                "autoagent.host.manifest.Path.cwd",
+                return_value=working_directory,
+            ):
+                self.assertEqual(
+                    resolve_manifest_path(),
+                    nested_manifest.resolve(),
+                )
+            self.assertEqual(
+                resolve_manifest_path(root / "autoagent.toml"),
+                (root / "autoagent.toml").resolve(),
+            )
+            explicit_missing = working_directory / "autoagent.toml"
+            with self.assertRaises(ProjectLoadError) as captured:
+                load_project_manifest(explicit_missing)
+            self.assertEqual(
+                captured.exception.diagnostics[0].code,
+                "PROJECT_MANIFEST_NOT_FOUND",
+            )
+            self.assertEqual(
+                captured.exception.diagnostics[0].path,
+                str(explicit_missing.resolve()),
+            )
+
+            wrong_file = root / "project.toml"
+            wrong_file.write_text("", encoding="utf-8")
+            with self.assertRaises(ProjectLoadError) as captured:
+                resolve_manifest_path(wrong_file)
+            self.assertEqual(
+                captured.exception.diagnostics[0].code,
+                "PROJECT_MANIFEST_FILENAME_INVALID",
+            )
+
+            with self.assertRaises(ProjectLoadError) as captured:
+                resolve_manifest_path(root / "missing" / "project")
+            self.assertEqual(
+                captured.exception.diagnostics[0].code,
+                "PROJECT_MANIFEST_NOT_FOUND",
+            )
+
     def test_manifest_parses_the_standard_strict_schema(self) -> None:
         """Verify autoagent.toml exposes immutable project and locator values."""
 
@@ -121,6 +183,46 @@ class HostProjectTests(unittest.TestCase):
         self.assertEqual(settings.trace_host, "from-file")
         self.assertIsNone(settings.model_extra)
 
+    def test_environment_file_can_be_disabled_completely(self) -> None:
+        """Ignore even an explicit malformed env file when loading is disabled."""
+
+        with self.project(self.manifest("workflow:workflow")) as root:
+            (root / ".env").write_text("not an assignment\n", encoding="utf-8")
+            environment = load_project_environment(
+                root,
+                env_file=".env",
+                use_env_file=False,
+                environ={"PROCESS_ONLY": "present"},
+            )
+            settings = load_host_settings(
+                root,
+                env_file=".env",
+                use_env_file=False,
+                environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            )
+
+        self.assertEqual(environment, {"PROCESS_ONLY": "present"})
+        self.assertEqual(settings.runtime_event_sink, "none")
+
+    def test_project_environment_scope_restores_the_exact_process_state(self) -> None:
+        """Apply an explicit snapshot temporarily and restore caller values."""
+
+        with patch.dict(
+            os.environ,
+            {"ORIGINAL_VALUE": "preserved"},
+            clear=True,
+        ):
+            with project_environment_scope({"PROJECT_VALUE": "visible"}):
+                self.assertEqual(
+                    dict(os.environ),
+                    {"PROJECT_VALUE": "visible"},
+                )
+                os.environ["PROJECT_MUTATION"] = "temporary"
+            self.assertEqual(
+                dict(os.environ),
+                {"ORIGINAL_VALUE": "preserved"},
+            )
+
     def test_settings_apply_defaults_and_resolve_project_paths(self) -> None:
         """Verify default and configured relative paths resolve under the project."""
 
@@ -174,6 +276,7 @@ class HostProjectTests(unittest.TestCase):
                 sqlite_path=Path("runtime.db"),
                 runtime_event_sink="http",
                 http_sink_url="http://example.test:99999/events",
+                http_user_event_sink_url="https://example.test/user-events",
             )
         for field in (
             "http_sink_timeout_seconds",
@@ -200,16 +303,38 @@ class HostProjectTests(unittest.TestCase):
                     with self.assertRaises(HostSettingsError):
                         load_host_settings(root, environ=environment)
 
+            with self.assertRaises(HostSettingsError) as captured:
+                load_host_settings(
+                    root,
+                    environ={
+                        "AUTOAGENT_RUNTIME_EVENT_SINK": "http",
+                        "AUTOAGENT_HTTP_SINK_URL": (
+                            "https://events.example.test/v1/runtime-events"
+                        ),
+                    },
+                )
+            self.assertIn(
+                "AUTOAGENT_HTTP_USER_EVENT_SINK_URL",
+                {item.field for item in captured.exception.diagnostics},
+            )
+
             settings = load_host_settings(
                 root,
                 environ={
                     "AUTOAGENT_RUNTIME_EVENT_SINK": "http",
                     "AUTOAGENT_HTTP_SINK_URL": "https://events.example.test/v1",
+                    "AUTOAGENT_HTTP_USER_EVENT_SINK_URL": (
+                        "https://events.example.test/v1/user-events"
+                    ),
                     "AUTOAGENT_HTTP_SINK_TOKEN": " token ",
                 },
             )
 
         self.assertEqual(settings.http_sink_url, "https://events.example.test/v1")
+        self.assertEqual(
+            settings.http_user_event_sink_url,
+            "https://events.example.test/v1/user-events",
+        )
         self.assertEqual(settings.http_sink_token, "token")
         self.assertNotIn("token", repr(settings))
         self.assertNotIn("token", str(settings))
@@ -218,6 +343,7 @@ class HostProjectTests(unittest.TestCase):
             HostSettings(
                 runtime_event_sink="http",
                 http_sink_url="https://user:password@example.test/events",
+                http_user_event_sink_url="https://example.test/user-events",
             )
         self.assertNotIn("password", str(captured.exception))
 
@@ -271,6 +397,64 @@ class HostProjectTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             loaded.workflow_by_id("hidden")
         self.assertEqual(tuple(sys.path), before)
+        sys.modules.pop(module_name, None)
+
+    def test_loader_applies_and_restores_one_environment_snapshot(self) -> None:
+        """Expose the supplied environment only while Workflow modules import."""
+
+        module_name = "host_project_environment_snapshot"
+        with self.project(
+            self.manifest(f"{module_name}:workflow"),
+            modules={
+                f"{module_name}.py": """
+                    import os
+                    from autoagent import Workflow
+
+                    IMPORT_VALUE = os.environ.get("PROJECT_IMPORT_VALUE")
+                    workflow = Workflow("environment-snapshot")
+                """,
+            },
+        ) as root:
+            with patch.dict(
+                os.environ,
+                {"ORIGINAL_VALUE": "preserved"},
+                clear=True,
+            ):
+                loaded = ProjectLoader().load(
+                    root,
+                    environment={"PROJECT_IMPORT_VALUE": "visible"},
+                )
+                self.assertEqual(
+                    dict(os.environ),
+                    {"ORIGINAL_VALUE": "preserved"},
+                )
+
+        self.assertEqual(loaded.workflows[0].workflow.id, "environment-snapshot")
+        self.assertEqual(sys.modules[module_name].IMPORT_VALUE, "visible")
+        sys.modules.pop(module_name, None)
+
+    def test_loader_restores_environment_after_an_import_failure(self) -> None:
+        """Restore the process environment when project module import fails."""
+
+        module_name = "host_project_environment_failure"
+        with self.project(
+            self.manifest(f"{module_name}:workflow"),
+            modules={f"{module_name}.py": "raise RuntimeError('broken import')\n"},
+        ) as root:
+            with patch.dict(
+                os.environ,
+                {"ORIGINAL_VALUE": "preserved"},
+                clear=True,
+            ):
+                with self.assertRaises(ProjectLoadError):
+                    ProjectLoader().load(
+                        root,
+                        environment={"PROJECT_IMPORT_VALUE": "temporary"},
+                    )
+                self.assertEqual(
+                    dict(os.environ),
+                    {"ORIGINAL_VALUE": "preserved"},
+                )
         sys.modules.pop(module_name, None)
 
     def test_loader_rejects_module_names_already_owned_by_another_project(self) -> None:

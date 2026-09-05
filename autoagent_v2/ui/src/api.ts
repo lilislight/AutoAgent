@@ -6,6 +6,7 @@ import type {
   SessionSummary,
   TraceEvent,
   TracePage,
+  UserEventPage,
   WorkflowSnapshot,
   WorkflowSummary,
 } from "./types";
@@ -65,7 +66,7 @@ async function childrenThroughKnown(
     const page: Page<ChildSessionSummary> = await get<Page<ChildSessionSummary>>(
       `/invocations/children${query({
         invocation_id: invocationId,
-        limit: 100,
+        limit: 200,
         cursor,
       })}`,
       signal,
@@ -117,7 +118,7 @@ export const api = {
     ),
   children: (invocationId: string, cursor?: string | null, signal?: AbortSignal) =>
     get<Page<ChildSessionSummary>>(
-      `/invocations/children${query({ invocation_id: invocationId, limit: 100, cursor })}`,
+      `/invocations/children${query({ invocation_id: invocationId, limit: 200, cursor })}`,
       signal,
     ),
   childrenThroughKnown,
@@ -152,13 +153,49 @@ export const api = {
       `/invocations/trace${query({ invocation_id: invocationId, cursor, limit })}`,
       signal,
     ),
-  state: (invocationId: string, signal?: AbortSignal) =>
+  userEventTail: (invocationId: string, tailLimit = 500, signal?: AbortSignal) =>
+    get<UserEventPage>(
+      `/invocations/user-events${query({
+        invocation_id: invocationId,
+        tail_limit: tailLimit,
+      })}`,
+      signal,
+    ),
+  userEventsBefore: (
+    invocationId: string,
+    beforeSequence: number,
+    limit = 500,
+    signal?: AbortSignal,
+  ) =>
+    get<UserEventPage>(
+      `/invocations/user-events${query({
+        invocation_id: invocationId,
+        before_sequence: beforeSequence,
+        limit,
+      })}`,
+      signal,
+    ),
+  state: (
+    invocationId: string,
+    signal?: AbortSignal,
+    throughTraceSequence?: number,
+  ) =>
     get<InvocationStateResponse>(
-      `/invocations/state${query({ invocation_id: invocationId })}`,
+      `/invocations/state${query({
+        invocation_id: invocationId,
+        through_trace_sequence: throughTraceSequence,
+      })}`,
       signal,
     ),
   traceStream: (invocationId: string, cursor: string | null) =>
     new EventSource(
       `${API}/invocations/stream${query({ invocation_id: invocationId, cursor })}`,
+    ),
+  userEventStream: (invocationId: string, cursor: string | null) =>
+    new EventSource(
+      `${API}/invocations/user-events/stream${query({
+        invocation_id: invocationId,
+        cursor,
+      })}`,
     ),
 };

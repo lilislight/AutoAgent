@@ -1,14 +1,15 @@
 import { GitBranch, Layers3, Radio } from "lucide-react";
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { graphGeometry, layoutGraph } from "../graph.js";
-import type { TraceEvent, WorkflowSnapshot } from "../types.js";
+import type { RuntimeProjection } from "../runtimeProjection.js";
+import type { WorkflowSnapshot } from "../types.js";
 
 interface Props {
   workflow: WorkflowSnapshot | null;
-  events: TraceEvent[];
+  projection: RuntimeProjection;
 }
 
-export function WorkflowGraph({ workflow, events }: Props) {
+export const WorkflowGraph = memo(function WorkflowGraph({ workflow, projection }: Props) {
   const layout = useMemo(
     () =>
       workflow
@@ -16,15 +17,6 @@ export function WorkflowGraph({ workflow, events }: Props) {
         : null,
     [workflow],
   );
-  const nodeState = useMemo(() => {
-    const states = new Map<string, string>();
-    for (const event of events) {
-      const node = event.subject_ids.node_id;
-      if (node) states.set(node, event.status ?? event.kind.split(".").at(-1) ?? "seen");
-    }
-    return states;
-  }, [events]);
-
   if (!layout || !workflow) {
     return <Empty icon={<GitBranch size={18} />} text="Select a Workflow to inspect its graph." />;
   }
@@ -58,15 +50,37 @@ export function WorkflowGraph({ workflow, events }: Props) {
           const ty = target.y + nodeHeight / 2;
           const bend = Math.max(34, Math.abs(tx - sx) / 2);
           const path = `M${sx},${sy} C${sx + bend},${sy} ${tx - bend},${ty} ${tx},${ty}`;
+          const runtime = edge.id ? projection.edges.get(edge.id) : undefined;
+          const runtimeClass = runtime
+            ? runtime.selectedCount > 0 && runtime.skippedCount > 0
+              ? "edge-mixed"
+              : runtime.latestSelected
+                ? "edge-selected"
+                : "edge-skipped"
+            : "";
+          const edgeLabel = [
+            edge.on === "error" ? "error" : null,
+            runtime
+              ? `✓${runtime.selectedCount} · –${runtime.skippedCount}`
+              : null,
+          ].filter(Boolean).join(" · ");
           return (
-            <g key={edge.id ?? `${edge.source}-${edge.target}-${index}`} className={`edge edge-${edge.on ?? "complete"}`}>
+            <g
+              key={edge.id ?? `${edge.source}-${edge.target}-${index}`}
+              className={`edge edge-${edge.on ?? "complete"} ${runtimeClass}`}
+            >
               <path d={path} markerEnd="url(#arrow)" />
-              {edge.on === "error" && <text x={(sx + tx) / 2} y={(sy + ty) / 2 - 8}>error</text>}
+              {edgeLabel && (
+                <text x={(sx + tx) / 2} y={(sy + ty) / 2 - 8}>
+                  {edgeLabel}
+                </text>
+              )}
             </g>
           );
         })}
         {layout.nodes.map((node) => {
-          const state = nodeState.get(node.id);
+          const runtime = projection.nodes.get(node.id);
+          const state = runtime?.latestStatus;
           const kind = executableLabel(node.executable);
           const roles = [entries.has(node.id) ? "entry" : null, exits.has(node.id) ? "exit" : null].filter(Boolean);
           return (
@@ -80,6 +94,11 @@ export function WorkflowGraph({ workflow, events }: Props) {
               <text className="node-subtitle" x="16" y="51">{kind}</text>
               {roles.length > 0 && <text className="node-role" x={nodeWidth - 12} y="16" textAnchor="end">{roles.join(" · ")}</text>}
               {state && <circle cx={nodeWidth - 17} cy="18" r="5" />}
+              {runtime && runtime.occurrenceCount > 1 && (
+                <text className="node-count" x={nodeWidth - 12} y={nodeHeight - 9} textAnchor="end">
+                  ×{runtime.occurrenceCount}
+                </text>
+              )}
             </g>
           );
         })}
@@ -88,10 +107,16 @@ export function WorkflowGraph({ workflow, events }: Props) {
         <span><Layers3 size={13} /> {layout.nodes.length} nodes</span>
         <span><GitBranch size={13} /> {layout.edges.length} edges</span>
         <span><Radio size={13} /> {(workflow.definition.loops ?? []).length} loops</span>
-        <span><Radio size={13} /> {events.length ? "observed" : "definition"}</span>
+        <span><Radio size={13} /> {projectionLabel(projection.source)}</span>
       </div>
     </div>
   );
+});
+
+function projectionLabel(source: RuntimeProjection["source"]): string {
+  if (source === "state") return "State projection";
+  if (source === "trace") return "Trace fallback";
+  return "definition";
 }
 
 function executableLabel(value: unknown): string {

@@ -29,6 +29,7 @@ AUTOAGENT_ENV_KEYS = frozenset(
         "AUTOAGENT_RUNTIME_EVENT_SINK",
         "AUTOAGENT_SQLITE_PATH",
         "AUTOAGENT_HTTP_SINK_URL",
+        "AUTOAGENT_HTTP_USER_EVENT_SINK_URL",
         "AUTOAGENT_HTTP_SINK_TOKEN",
         "AUTOAGENT_HTTP_SINK_TIMEOUT_SECONDS",
         "AUTOAGENT_TRACE_HOST",
@@ -55,6 +56,7 @@ class HostSettings(BaseModel):
     runtime_event_sink: Literal["sqlite", "http", "none"] = "sqlite"
     sqlite_path: Path = Path(".autoagent/runtime.db")
     http_sink_url: str | None = None
+    http_user_event_sink_url: str | None = None
     http_sink_token: str | None = Field(default=None, repr=False)
     http_sink_timeout_seconds: float = 10.0
     trace_host: str = "127.0.0.1"
@@ -62,9 +64,9 @@ class HostSettings(BaseModel):
     trace_ui_directory: Path | None = None
     trace_refresh_seconds: float = 0.5
 
-    @field_validator("http_sink_url")
+    @field_validator("http_sink_url", "http_user_event_sink_url")
     @classmethod
-    def validate_http_sink_url(cls, value: str | None) -> str | None:
+    def validate_http_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
         resolved = value.strip()
@@ -72,7 +74,7 @@ class HostSettings(BaseModel):
             return None
         if not _valid_http_url(resolved):
             raise ValueError(
-                "http_sink_url must be an absolute HTTP(S) URL without "
+                "HTTP sink URLs must be absolute HTTP(S) URLs without "
                 "embedded credentials"
             )
         return resolved
@@ -107,6 +109,21 @@ class HostSettings(BaseModel):
             raise ValueError(
                 "http_sink_url is required when runtime_event_sink is 'http'"
             )
+        if (
+            self.runtime_event_sink == "http"
+            and self.http_user_event_sink_url is None
+        ):
+            raise ValueError(
+                "http_user_event_sink_url is required when "
+                "runtime_event_sink is 'http'"
+            )
+        if (
+            self.http_sink_url is not None
+            and self.http_user_event_sink_url == self.http_sink_url
+        ):
+            raise ValueError(
+                "http_user_event_sink_url must differ from http_sink_url"
+            )
         return self
 
 
@@ -114,6 +131,7 @@ def load_host_settings(
     project_root: str | Path,
     *,
     env_file: str | Path | None = None,
+    use_env_file: bool = True,
     environ: Mapping[str, str] | None = None,
 ) -> HostSettings:
     """Resolve project environment values into one strict settings object."""
@@ -122,8 +140,37 @@ def load_host_settings(
     environment = load_project_environment(
         root,
         env_file=env_file,
+        use_env_file=use_env_file,
         environ=environ,
     )
+    return _host_settings_from_environment(root, environment)
+
+
+def _host_settings_from_environment(
+    project_root: str | Path,
+    environment: Mapping[str, str],
+) -> HostSettings:
+    """Parse one already-resolved environment snapshot without reading files."""
+
+    root = Path(project_root).expanduser().resolve()
+    invalid = next(
+        (
+            (key, value)
+            for key, value in environment.items()
+            if not isinstance(key, str) or not isinstance(value, str)
+        ),
+        None,
+    )
+    if invalid is not None:
+        raise HostSettingsError(
+            [
+                HostDiagnostic(
+                    code="ENVIRONMENT_VALUE_INVALID",
+                    message="Environment keys and values must be strings.",
+                    field=str(invalid[0]),
+                )
+            ]
+        )
     diagnostics: list[HostDiagnostic] = []
 
     def integer(key: str, default: int) -> int:
@@ -229,6 +276,32 @@ def load_host_settings(
             )
         )
 
+    user_event_url = _optional(
+        environment.get("AUTOAGENT_HTTP_USER_EVENT_SINK_URL")
+    )
+    if user_event_url is not None and not _valid_http_url(user_event_url):
+        diagnostics.append(
+            _invalid_environment(
+                "AUTOAGENT_HTTP_USER_EVENT_SINK_URL",
+                "must be an absolute HTTP(S) URL without embedded credentials",
+            )
+        )
+        user_event_url = None
+    if sink == "http" and user_event_url is None:
+        diagnostics.append(
+            _invalid_environment(
+                "AUTOAGENT_HTTP_USER_EVENT_SINK_URL",
+                "is required when AUTOAGENT_RUNTIME_EVENT_SINK=http",
+            )
+        )
+    if user_event_url is not None and user_event_url == url:
+        diagnostics.append(
+            _invalid_environment(
+                "AUTOAGENT_HTTP_USER_EVENT_SINK_URL",
+                "must differ from AUTOAGENT_HTTP_SINK_URL",
+            )
+        )
+
     if diagnostics:
         raise HostSettingsError(diagnostics)
 
@@ -240,6 +313,7 @@ def load_host_settings(
         "runtime_event_sink": sink,
         "sqlite_path": sqlite_path,
         "http_sink_url": url,
+        "http_user_event_sink_url": user_event_url,
         "http_sink_token": _optional(
             environment.get("AUTOAGENT_HTTP_SINK_TOKEN")
         ),

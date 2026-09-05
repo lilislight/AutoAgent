@@ -29,7 +29,7 @@ autoagent/core/
 │   ├── node_executor.py
 │   └── future.py
 ├── hosting/
-│   └── runtime_events.py  # RuntimeEventSink
+│   └── runtime_events.py  # RuntimeEventSink / UserEventSink
 ├── operators/             # Operator、契约、Registry、StreamReducer
 ├── runtime/
 │   ├── events.py          # StateTransition、RuntimeLog、RuntimeEvent
@@ -55,6 +55,9 @@ AutoAgentApp
 
 StateTransition -> Journal -> StateReducer -> RuntimeState
                          └──> RuntimeEvent -> Host sink
+
+Stream/User mapping -> UserEvent -> SDK channel
+                               └──> optional Host observation sink
 ```
 
 Runtime、Scheduler 和 Workflow 不反向依赖 App；NodeExecutor 不读取 Journal 或
@@ -120,7 +123,10 @@ StateOperation 或完整业务值。它用于 SDK 观察，不用于恢复。
 ### UserEvent
 
 来自 Stream Chunk 或 Node 的 `UserEventMapping`，有独立顺序，不修改 RuntimeState，
-映射失败也不会回滚已经完成的业务状态。
+映射失败也不会回滚已经完成的业务状态。可选 `UserEventSink` 在事件交给 SDK 前按
+Invocation 顺序接纳观察记录；它与 canonical `RuntimeEventSink` 是两条独立通道。
+某个 Invocation 的观察写入首次失败后，App 记录该失败并停止继续写入该 Invocation，
+避免后续记录掩盖序列缺口；其他 Invocation 不受影响，Workflow 状态也不回滚。
 
 ### RuntimeEvent
 

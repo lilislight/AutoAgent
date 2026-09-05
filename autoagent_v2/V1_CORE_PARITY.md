@@ -1,4 +1,4 @@
-# V1 Core 能力基线
+# V1 到 V2 功能对齐审查
 
 本表用于核对能力，不承诺 V1 API 或数据模型兼容。V2 以当前源码和测试为准。
 
@@ -27,10 +27,25 @@
 | 并发限制 | App 级同步/异步 Operator 全局上限 + Map 局部上限 | phase8、phase9 |
 | Retry/Fallback/Timeout/Backoff | 当前不保留，等待独立语义设计 | `TODO.md` |
 | Standard/Minimal 捕获 | 待做等价 capture profile，不复制 Runtime 实现 | `TODO.md` |
-| 数据库、历史 Event、Server | 移出 Core；已实现 Host SQLite/HTTP Sink 与本地只读 Tracing | Host/Tracing tests |
+| Workflow Preview | Portable Snapshot 与本地 Graph 投影替代旧 Preview 模型 | compiler、Tracing/UI tests |
+| 数据库与历史 RuntimeEvent | 移出 Core；Host SQLite/HTTP Sink 已实现 | Host tests |
+| 独立 UserEvent 历史 | SQLite/HTTP Sink、分页、Tail 和 SSE 已实现，不进入 RuntimeState | Host/Tracing tests |
 | Mailbox、Signal、父子消息、远程 Task | 后续 Command/Task Runtime 原语 | `TODO.md` |
 | 历史 Trace/UI | 已实现本地只读 Trace、State、SSE、Graph/Timeline/Inspector | Tracing tests、`ui/` |
 | Replay/Fork/Debug | 尚未实现，保留为中心化平台能力 | `TODO.md` |
+| Artifact、Retention、Rerun | 不属于当前执行 Core；分别归入 Host 存储和 Debug/平台 | `TODO.md` |
+| Project Loader、Environment、Host | 已重写；Manifest、环境快照、App/Sink 生命周期闭合 | Host/CLI tests |
+| 基础 CLI | compile、invoke、resume、recover、trace 已实现 | CLI tests |
+
+## 本轮明确排除
+
+- Skill、Skill authoring/debugging 及完整 debug/evaluation CLI；
+- AI Provider、LLM/Tool 等 Agent SDK；
+- Evaluation、Rerun、Replay、Fork 和中心化平台控制面；
+- 尚未确定组合语义的 Operator Policy；
+- PostgreSQL、远程接收端、Artifact Store、Command/Mailbox 和远程执行。
+
+这些是独立产品层或待设计扩展，不通过把 V1 抽象复制进 V2 来制造“接口对齐”。
 
 V2 不恢复旧 Policy、旧单 Session Checkpoint、结果内 canonical Event、历史游标或
 事件前缀恢复兼容接口。对外恢复路径是 Checkpoint；Server 的历史恢复路径是 Host 保存
@@ -38,6 +53,7 @@ canonical RuntimeEvent、用 Reducer 重建 State，再形成可由 App 加载�
 
 ## V1 验证说明
 
-2026-08-16 在仓库根目录运行 V1 全量 `unittest`，120 秒内未结束，因此没有把 V1
-套件记作通过或失败。V2 的能力核对来自 V1 源码、有效测试场景迁移和上表逐项验收；
-V1 本身未被修改。
+2026-08-25 按当前范围分组运行 V1 的 Compiler、Operator、Runtime/Scheduler/Executor、
+Project、Persistence 与 Server 测试，共通过 353 个测试，跳过 1 个；Skill、AI、
+Evaluation、Debug/Rerun 和完整 CLI 测试未纳入本轮基线。V1 本身未被修改，V2 不承诺
+API 或持久化 Schema 兼容，只对齐上表中的可观察能力与失败边界。

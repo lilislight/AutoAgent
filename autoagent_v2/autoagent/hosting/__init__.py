@@ -9,11 +9,12 @@ from .errors import (
     RuntimeSessionNotRootError,
 )
 from .http import HttpRuntimeEventSink
-from .models import Page
+from .models import Page, ResumablePage
 from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
 
 __all__ = [
     "Page",
+    "ResumablePage",
     "HttpRuntimeEventSink",
     "RuntimeEventConflictError",
     "RuntimeEventQueryError",

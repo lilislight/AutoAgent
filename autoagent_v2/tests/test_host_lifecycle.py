@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 import textwrap
@@ -12,12 +13,16 @@ from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
+from typing_extensions import TypedDict
+
 from autoagent import (
     AppCheckpoint,
     CheckpointLoadResult,
     InvocationRef,
     InvocationResult,
+    Node,
     RuntimeTransitionError,
+    Workflow,
 )
 from autoagent.host import (
     AutoAgentHost,
@@ -25,8 +30,17 @@ from autoagent.host import (
     HostSettings,
     ProjectLoader,
     create_runtime_event_sink,
+    load_project_environment,
 )
 from autoagent.hosting import HttpRuntimeEventSink, SQLiteRuntimeStore
+
+
+class RegistrationValue(TypedDict):
+    value: int
+
+
+def registration_identity(value: RegistrationValue) -> RegistrationValue:
+    return value
 
 
 class HostLifecycleTests(unittest.TestCase):
@@ -50,6 +64,9 @@ class HostLifecycleTests(unittest.TestCase):
             HostSettings(
                 runtime_event_sink="http",
                 http_sink_url="https://events.example.test/v1",
+                http_user_event_sink_url=(
+                    "https://events.example.test/v1/user-events"
+                ),
             )
         )
         self.assertIsInstance(http, HttpRuntimeEventSink)
@@ -125,6 +142,240 @@ class HostLifecycleTests(unittest.TestCase):
                 host.close()
         sys.modules.pop(module, None)
 
+    def test_project_environment_is_loaded_once_and_scoped_to_imports(self) -> None:
+        """Keep one immutable environment snapshot without applying it at runtime."""
+
+        module = "host_lifecycle_environment"
+        with self.project(
+            module,
+            """
+            import os
+            from typing_extensions import TypedDict
+            from autoagent import Node, Workflow
+
+            class Value(TypedDict):
+                value: str
+
+            IMPORT_VALUE = os.environ.get("PROJECT_IMPORT_VALUE")
+
+            def observe_runtime_environment(value: Value) -> Value:
+                return {
+                    "value": os.environ.get(
+                        "PROJECT_IMPORT_VALUE",
+                        "runtime-missing",
+                    )
+                }
+
+            workflow = Workflow(
+                "environment-host",
+                nodes=[Node("work", observe_runtime_environment)],
+            )
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                "AUTOAGENT_RUNTIME_EVENT_SINK=none\n"
+                "PROJECT_IMPORT_VALUE=import-only\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"ORIGINAL_VALUE": "preserved"},
+                clear=True,
+            ), patch(
+                "autoagent.host.host.load_project_environment",
+                wraps=load_project_environment,
+            ) as load_environment:
+                host = AutoAgentHost.from_project(root)
+                try:
+                    self.assertEqual(load_environment.call_count, 1)
+                    self.assertEqual(
+                        host.environment["PROJECT_IMPORT_VALUE"],
+                        "import-only",
+                    )
+                    with self.assertRaises(TypeError):
+                        host.environment["PROJECT_IMPORT_VALUE"] = (  # type: ignore[index]
+                            "changed"
+                        )
+                    self.assertEqual(
+                        sys.modules[module].IMPORT_VALUE,
+                        "import-only",
+                    )
+                    result = host.invoke(
+                        "environment-host",
+                        {"value": "input"},
+                    )
+                    self.assertEqual(result.output, {"value": "runtime-missing"})
+                    self.assertEqual(
+                        dict(os.environ),
+                        {"ORIGINAL_VALUE": "preserved"},
+                    )
+                finally:
+                    host.close()
+        sys.modules.pop(module, None)
+
+    def test_project_factory_can_disable_environment_file_loading(self) -> None:
+        """Keep dotenv values out of imports and Host state when disabled."""
+
+        module = "host_lifecycle_environment_disabled"
+        with self.project(
+            module,
+            """
+            from typing_extensions import TypedDict
+            from autoagent import Node, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            def identity(value: Value) -> Value:
+                return value
+
+            workflow = Workflow(
+                "environment-disabled",
+                nodes=[Node("work", identity)],
+            )
+            """,
+        ) as root:
+            (root / ".env").write_text(
+                "FILE_ONLY=must-not-load\n",
+                encoding="utf-8",
+            )
+            host = AutoAgentHost.from_project(
+                root,
+                use_env_file=False,
+                environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            )
+            try:
+                self.assertNotIn("FILE_ONLY", host.environment)
+                self.assertEqual(
+                    host.invoke("environment-disabled", {"value": 1}).output,
+                    {"value": 1},
+                )
+            finally:
+                host.close()
+        sys.modules.pop(module, None)
+
+    def test_dynamic_registration_publishes_root_and_child_definitions(self) -> None:
+        """Persist a dynamic Workflow closure before invoking its new root."""
+
+        module = "host_lifecycle_dynamic_registration"
+        with self.project(
+            module,
+            """
+            from typing_extensions import TypedDict
+            from autoagent import Node, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            def identity(value: Value) -> Value:
+                return value
+
+            workflow = Workflow("registration-base", nodes=[Node("work", identity)])
+            """,
+        ) as root:
+            database = root / "events.db"
+            host = AutoAgentHost.from_project(
+                root,
+                environ={"AUTOAGENT_SQLITE_PATH": str(database)},
+            )
+            child = Workflow(
+                "registration-child",
+                nodes=[Node("work", registration_identity)],
+            )
+            dynamic = Workflow(
+                "registration-root",
+                nodes=[Node("child", child)],
+            )
+            asynchronous = Workflow(
+                "registration-async",
+                nodes=[Node("work", registration_identity)],
+            )
+            try:
+                registered = host.register_workflow(dynamic)
+                async_registered = asyncio.run(
+                    host.aregister_workflow(asynchronous)
+                )
+                self.assertEqual(registered.workflow_id, "registration-root")
+                self.assertEqual(
+                    async_registered.workflow_id,
+                    "registration-async",
+                )
+                store = host.runtime_store
+                assert store is not None
+                definitions = asyncio.run(store.list_workflows())
+                self.assertEqual(
+                    {item["workflow_id"] for item in definitions.items},
+                    {
+                        "registration-base",
+                        "registration-child",
+                        "registration-root",
+                        "registration-async",
+                    },
+                )
+                result = host.invoke("registration-root", {"value": 7})
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(result.output, {"value": 7})
+            finally:
+                host.close()
+        sys.modules.pop(module, None)
+
+    def test_failed_definition_publication_does_not_register_workflow(self) -> None:
+        """Keep a Workflow unavailable when its definition sink rejects it."""
+
+        class FailingDefinitionSink:
+            async def append(self, _event) -> None:
+                return None
+
+            def save_workflow(self, _snapshot) -> None:
+                raise RuntimeError("definition unavailable")
+
+            def close(self) -> None:
+                return None
+
+        module = "host_lifecycle_dynamic_failure"
+        with self.project(
+            module,
+            """
+            from typing_extensions import TypedDict
+            from autoagent import Node, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            def identity(value: Value) -> Value:
+                return value
+
+            workflow = Workflow(
+                "registration-existing",
+                nodes=[Node("work", identity)],
+            )
+            """,
+        ) as root:
+            host = AutoAgentHost.from_project(
+                root,
+                environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+            )
+            host.event_sink = FailingDefinitionSink()  # type: ignore[assignment]
+            rejected = Workflow(
+                "registration-rejected",
+                nodes=[Node("work", registration_identity)],
+            )
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "definition unavailable",
+                ):
+                    host.register_workflow(rejected)
+                with self.assertRaises(RuntimeTransitionError) as captured:
+                    host.invoke("registration-rejected", {"value": 1})
+                self.assertEqual(
+                    captured.exception.code,
+                    "WORKFLOW_NOT_REGISTERED",
+                )
+            finally:
+                host.close()
+        sys.modules.pop(module, None)
+
     def test_sync_invoke_submit_and_stream_delegate_to_core(self) -> None:
         """Verify synchronous Host execution preserves Core result contracts."""
 
@@ -161,6 +412,174 @@ class HostLifecycleTests(unittest.TestCase):
                 self.assertEqual(completed.output, {"value": 2})
                 self.assertIsInstance(streamed[-1], InvocationResult)
                 self.assertEqual(streamed[-1].output, {"value": 3})
+            finally:
+                host.close()
+        sys.modules.pop(module, None)
+
+    def test_host_stream_persists_user_events_in_the_sqlite_store(self) -> None:
+        """Query every streamed chunk from the Host-owned SQLite User Event sink."""
+
+        module = "host_lifecycle_sqlite_user_events"
+        with self.project(
+            module,
+            """
+            from collections.abc import Iterator
+            from typing_extensions import TypedDict
+            from autoagent import Node, Stream, StreamContext, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            class Total(TypedDict):
+                total: int
+
+            def chunks(value: Value) -> Iterator[Value]:
+                for item in range(value["value"]):
+                    yield {"value": item}
+
+            class SumReducer:
+                def initial(self, _context: StreamContext) -> Total:
+                    return {"total": 0}
+
+                def add(
+                    self,
+                    _context: StreamContext,
+                    state: Total,
+                    chunk: Value,
+                ) -> Total:
+                    return {"total": state["total"] + chunk["value"]}
+
+                def finish(
+                    self,
+                    _context: StreamContext,
+                    state: Total,
+                ) -> Total:
+                    return state
+
+            workflow = Workflow(
+                "sqlite-user-events",
+                nodes=[Node("stream", chunks, stream=Stream(SumReducer()))],
+            )
+            """,
+        ) as root:
+            host = AutoAgentHost.from_project(
+                root,
+                environ={
+                    "AUTOAGENT_SQLITE_PATH": str(root / "events.db"),
+                },
+            )
+            try:
+                streamed = list(
+                    host.stream(
+                        "sqlite-user-events",
+                        {"value": 3},
+                        session_id="sqlite-user-event-session",
+                    )
+                )
+                result = streamed[-1]
+                self.assertIsInstance(result, InvocationResult)
+                assert isinstance(result, InvocationResult)
+                self.assertEqual(result.output, {"total": 3})
+                store = host.runtime_store
+                assert store is not None
+                persisted = asyncio.run(
+                    store.list_user_events(result.invocation_id)
+                )
+                self.assertEqual(
+                    [event.payload for event in persisted],
+                    [{"value": 0}, {"value": 1}, {"value": 2}],
+                )
+                self.assertEqual(
+                    [event.sequence for event in persisted],
+                    [1, 2, 3],
+                )
+            finally:
+                host.close()
+        sys.modules.pop(module, None)
+
+    def test_user_event_sink_failure_does_not_rollback_host_execution(self) -> None:
+        """Complete canonical work and expose observation failures per Invocation."""
+
+        class FailingUserEventSink:
+            def __init__(self) -> None:
+                self.runtime_events: list[object] = []
+
+            async def append(self, event) -> None:
+                self.runtime_events.append(event)
+
+            async def append_user_event(self, _event) -> None:
+                raise RuntimeError("user event unavailable")
+
+            def save_workflow(self, _snapshot) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        module = "host_lifecycle_user_event_failure"
+        with self.project(
+            module,
+            """
+            from collections.abc import Iterator
+            from typing_extensions import TypedDict
+            from autoagent import Node, Stream, StreamContext, Workflow
+
+            class Value(TypedDict):
+                value: int
+
+            def chunks(value: Value) -> Iterator[Value]:
+                yield value
+
+            class LastReducer:
+                def initial(self, _context: StreamContext) -> Value:
+                    return {"value": 0}
+
+                def add(
+                    self,
+                    _context: StreamContext,
+                    _state: Value,
+                    chunk: Value,
+                ) -> Value:
+                    return chunk
+
+                def finish(
+                    self,
+                    _context: StreamContext,
+                    state: Value,
+                ) -> Value:
+                    return state
+
+            workflow = Workflow(
+                "user-event-failure",
+                nodes=[Node("stream", chunks, stream=Stream(LastReducer()))],
+            )
+            """,
+        ) as root:
+            sink = FailingUserEventSink()
+            with patch(
+                "autoagent.host.host.create_runtime_event_sink",
+                return_value=sink,
+            ):
+                host = AutoAgentHost.from_project(
+                    root,
+                    environ={"AUTOAGENT_RUNTIME_EVENT_SINK": "none"},
+                )
+            try:
+                with self.assertWarnsRegex(RuntimeWarning, "User Event sink"):
+                    result = host.invoke(
+                        "user-event-failure",
+                        {"value": 9},
+                    )
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(result.output, {"value": 9})
+                errors = host.user_event_sink_errors
+                self.assertEqual(set(errors), {result.invocation_id})
+                self.assertIsInstance(errors[result.invocation_id], RuntimeError)
+                self.assertEqual(
+                    host.app.user_event_sink_errors,
+                    errors,
+                )
+                self.assertGreater(len(sink.runtime_events), 0)
             finally:
                 host.close()
         sys.modules.pop(module, None)
@@ -324,9 +743,9 @@ class HostLifecycleTests(unittest.TestCase):
         observed: list[str] = []
 
         class ContextLoader(ProjectLoader):
-            def load(self, path=None):
+            def load(self, path=None, *, environment=None):
                 observed.append(request_context.get())
-                return super().load(path)
+                return super().load(path, environment=environment)
 
         module = "host_lifecycle_async_contextvars"
         with self.project(

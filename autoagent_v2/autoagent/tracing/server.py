@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 from typing import Any, Protocol, TypeVar
 
-from autoagent.core.runtime import RuntimeState, TraceEvent
+from autoagent.core.runtime import RuntimeState, TraceEvent, UserEvent
 from autoagent.hosting import Page, RuntimeEventStoreError
 
 from .dto import (
@@ -29,6 +29,8 @@ from .dto import (
     TRACING_API_VERSION,
     TraceEventResponse,
     TracePageResponse,
+    UserEventPageResponse,
+    UserEventResponse,
     WorkflowDefinitionResponse,
     WorkflowPageResponse,
     tracing_record,
@@ -66,6 +68,7 @@ _MAX_LIST_LIMIT = 200
 _MAX_TRACE_LIMIT = 500
 _STREAM_BATCH_SIZE = 200
 _TRACE_CURSOR_VERSION = 2
+_USER_EVENT_CURSOR_VERSION = 1
 _T = TypeVar("_T")
 _DisconnectProbe = Callable[[], Awaitable[bool]]
 _HASHED_ASSET = re.compile(r".+-[A-Za-z0-9_-]{8,}\.[^.]+$")
@@ -191,6 +194,22 @@ class TracingStore(Protocol):
         before_sequence: int | None = None,
     ) -> tuple[TraceEvent, ...]: ...
 
+    async def list_user_events(
+        self,
+        invocation_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> tuple[UserEvent, ...]: ...
+
+    async def tail_user_events(
+        self,
+        invocation_id: str,
+        *,
+        limit: int = 200,
+        before_sequence: int | None = None,
+    ) -> tuple[UserEvent, ...]: ...
+
     async def rebuild_state(
         self, session_id: str, *, through_sequence: int | None = None
     ) -> RuntimeState: ...
@@ -202,7 +221,15 @@ class TracingStore(Protocol):
         through_sequence: int | None = None,
     ) -> RuntimeState: ...
 
+    async def runtime_event_sequence_for_trace(
+        self,
+        invocation_id: str,
+        trace_sequence: int,
+    ) -> int: ...
+
     async def latest_trace_sequence(self, invocation_id: str) -> int: ...
+
+    async def latest_user_event_sequence(self, invocation_id: str) -> int: ...
 
     async def terminal_trace_status(
         self,
@@ -212,6 +239,14 @@ class TracingStore(Protocol):
     ) -> tuple[str, int] | None: ...
 
     async def wait_for_trace(
+        self,
+        invocation_id: str,
+        *,
+        after_sequence: int,
+        timeout: float = 15.0,
+    ) -> bool: ...
+
+    async def wait_for_user_event(
         self,
         invocation_id: str,
         *,
@@ -468,14 +503,55 @@ def create_tracing_app(
         ).to_record()
 
     @app.get(
+        "/api/v1/invocations/user-events",
+        response_model=UserEventPageResponse,
+    )
+    async def list_invocation_user_events(
+        invocation_id: str = _Query(min_length=1),
+        limit: int = _Query(default=200, ge=1, le=_MAX_TRACE_LIMIT),
+        cursor: str | None = _Query(default=None, min_length=1, max_length=512),
+        after_sequence: int | None = _Query(default=None, ge=0),
+        tail_limit: int | None = _Query(
+            default=None, ge=1, le=_MAX_TRACE_LIMIT
+        ),
+        before_sequence: int | None = _Query(default=None, ge=1),
+    ) -> object:
+        await _get_invocation(store, invocation_id)
+        return (
+            await _user_event_page(
+                store,
+                invocation_id,
+                limit=limit,
+                cursor=cursor,
+                after_sequence=after_sequence,
+                tail_limit=tail_limit,
+                before_sequence=before_sequence,
+            )
+        ).to_record()
+
+    @app.get(
         "/api/v1/invocations/state",
         response_model=InvocationStateResponse,
     )
     async def get_invocation_state(
         invocation_id: str = _Query(min_length=1),
         through_sequence: int | None = _Query(default=None, ge=1),
+        through_trace_sequence: int | None = _Query(default=None, ge=1),
     ) -> object:
         invocation = await _get_invocation(store, invocation_id)
+        if through_sequence is not None and through_trace_sequence is not None:
+            raise _bad_request(
+                "through_sequence and through_trace_sequence are mutually exclusive."
+            )
+        if through_trace_sequence is not None:
+            through_sequence = await _query_store(
+                store.runtime_event_sequence_for_trace(
+                    invocation_id,
+                    through_trace_sequence,
+                ),
+                resource="Trace Event",
+                identity=f"{invocation_id}:{through_trace_sequence}",
+            )
         state = await _query_store(
             store.rebuild_invocation_state(
                 invocation_id,
@@ -529,6 +605,54 @@ def create_tracing_app(
             position = _trace_position(cursor, after_sequence, invocation_id)
         await _ensure_trace_position(store, invocation_id, position)
         stream = _iter_trace_stream(
+            store,
+            invocation_id,
+            after_sequence=position,
+            heartbeat_seconds=heartbeat_seconds,
+            disconnected=request.is_disconnected,
+        )
+        return _StreamingResponse(
+            stream,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get(
+        "/api/v1/invocations/user-events/stream",
+        response_class=_StreamingResponse,
+        response_model=None,
+    )
+    async def stream_invocation_user_events(
+        request: _Request,
+        invocation_id: str = _Query(min_length=1),
+        cursor: str | None = _Query(default=None, min_length=1, max_length=512),
+        after_sequence: int | None = _Query(default=None, ge=0),
+        last_event_id: str | None = _Header(
+            default=None,
+            alias="Last-Event-ID",
+            min_length=1,
+            max_length=512,
+        ),
+    ) -> object:
+        await _get_invocation(store, invocation_id)
+        if last_event_id is not None:
+            position = _decode_user_event_cursor(last_event_id, invocation_id)
+        else:
+            position = _user_event_position(
+                cursor,
+                after_sequence,
+                invocation_id,
+            )
+        latest = await _query_store(
+            store.latest_user_event_sequence(invocation_id)
+        )
+        if position > latest:
+            raise _bad_request("cursor points beyond the latest User Event.")
+        stream = _iter_user_event_stream(
             store,
             invocation_id,
             after_sequence=position,
@@ -607,6 +731,106 @@ async def _query_store(
         raise _store_unavailable() from error
 
 
+async def _user_event_page(
+    store: TracingStore,
+    invocation_id: str,
+    *,
+    limit: int,
+    cursor: str | None,
+    after_sequence: int | None,
+    tail_limit: int | None,
+    before_sequence: int | None,
+) -> UserEventPageResponse:
+    if before_sequence is not None:
+        if cursor is not None or after_sequence is not None or tail_limit is not None:
+            raise _bad_request(
+                "before_sequence cannot be combined with cursor, "
+                "after_sequence, or tail_limit."
+            )
+        values = await _query_store(
+            store.tail_user_events(
+                invocation_id,
+                limit=limit + 1,
+                before_sequence=before_sequence,
+            )
+        )
+        has_earlier = len(values) > limit
+        visible = values[-limit:]
+        return _user_event_page_response(
+            invocation_id,
+            visible,
+            has_more=False,
+            has_earlier=has_earlier,
+            fallback_sequence=0,
+        )
+    if tail_limit is not None:
+        if cursor is not None or after_sequence is not None:
+            raise _bad_request(
+                "tail_limit cannot be combined with cursor or after_sequence."
+            )
+        values = await _query_store(
+            store.tail_user_events(invocation_id, limit=tail_limit + 1)
+        )
+        has_earlier = len(values) > tail_limit
+        visible = values[-tail_limit:]
+        return _user_event_page_response(
+            invocation_id,
+            visible,
+            has_more=False,
+            has_earlier=has_earlier,
+            fallback_sequence=0,
+        )
+
+    position = _user_event_position(cursor, after_sequence, invocation_id)
+    latest = await _query_store(store.latest_user_event_sequence(invocation_id))
+    if position > latest:
+        raise _bad_request("cursor points beyond the latest User Event.")
+    values = await _query_store(
+        store.list_user_events(
+            invocation_id,
+            after_sequence=position,
+            limit=limit + 1,
+        )
+    )
+    visible = values[:limit]
+    return _user_event_page_response(
+        invocation_id,
+        visible,
+        has_more=len(values) > limit,
+        has_earlier=False,
+        fallback_sequence=position,
+    )
+
+
+def _user_event_page_response(
+    invocation_id: str,
+    events: Sequence[UserEvent],
+    *,
+    has_more: bool,
+    has_earlier: bool,
+    fallback_sequence: int,
+) -> UserEventPageResponse:
+    sequence = events[-1].sequence if events else fallback_sequence
+    cursor = (
+        _encode_user_event_cursor(invocation_id, sequence)
+        if sequence > 0
+        else None
+    )
+    return UserEventPageResponse(
+        items=[
+            UserEventResponse.model_validate(
+                tracing_record(event.to_record())
+            )
+            for event in events
+        ],
+        next_cursor=cursor if has_more else None,
+        resume_cursor=cursor,
+        resume_sequence=sequence,
+        has_more=has_more,
+        has_earlier=has_earlier,
+    )
+
+
 async def _iter_trace_stream(
     store: TracingStore,
     invocation_id: str,
@@ -659,6 +883,59 @@ async def _iter_trace_stream(
         return
 
 
+async def _iter_user_event_stream(
+    store: TracingStore,
+    invocation_id: str,
+    *,
+    after_sequence: int,
+    heartbeat_seconds: float,
+    disconnected: _DisconnectProbe | None = None,
+) -> AsyncIterator[bytes]:
+    """Yield independent observations without coupling them to State replay."""
+
+    try:
+        while True:
+            if disconnected is not None and await disconnected():
+                return
+            events = await store.list_user_events(
+                invocation_id,
+                after_sequence=after_sequence,
+                limit=_STREAM_BATCH_SIZE,
+            )
+            if events:
+                for event in events:
+                    after_sequence = event.sequence
+                    yield _user_event_sse_frame(event)
+                if len(events) == _STREAM_BATCH_SIZE:
+                    continue
+
+            trace_sequence = await store.latest_trace_sequence(invocation_id)
+            terminal = await store.terminal_trace_status(
+                invocation_id,
+                through_sequence=trace_sequence,
+            )
+            if terminal is not None:
+                status, _latest_trace = terminal
+                yield _user_stream_end_sse_frame(
+                    invocation_id,
+                    status,
+                    after_sequence,
+                )
+                return
+            changed = await store.wait_for_user_event(
+                invocation_id,
+                after_sequence=after_sequence,
+                timeout=heartbeat_seconds,
+            )
+            if not changed:
+                if disconnected is not None and await disconnected():
+                    return
+                yield b": heartbeat\n\n"
+    except RuntimeEventStoreError:
+        yield _stream_error_sse_frame(invocation_id)
+        return
+
+
 def _trace_sse_frame(trace: TraceEvent) -> bytes:
     cursor = _encode_trace_cursor(trace.invocation_id or "", trace.trace_sequence)
     data = json.dumps(
@@ -670,6 +947,46 @@ def _trace_sse_frame(trace: TraceEvent) -> bytes:
         ensure_ascii=True,
     )
     return f"id: {cursor}\nevent: trace\ndata: {data}\n\n".encode("utf-8")
+
+
+def _user_event_sse_frame(event: UserEvent) -> bytes:
+    cursor = _encode_user_event_cursor(event.invocation_id, event.sequence)
+    data = json.dumps(
+        UserEventResponse.model_validate(
+            tracing_record(event.to_record())
+        ).to_record(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return f"id: {cursor}\nevent: user_event\ndata: {data}\n\n".encode(
+        "utf-8"
+    )
+
+
+def _user_stream_end_sse_frame(
+    invocation_id: str,
+    status: str,
+    resume_sequence: int,
+) -> bytes:
+    resume_cursor = (
+        _encode_user_event_cursor(invocation_id, resume_sequence)
+        if resume_sequence > 0
+        else None
+    )
+    data = json.dumps(
+        StreamEndResponse(
+            invocation_id=invocation_id,
+            status=status,
+            resume_cursor=resume_cursor,
+            resume_sequence=resume_sequence,
+        ).to_record(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    identifier = f"id: {resume_cursor}\n" if resume_cursor is not None else ""
+    return f"{identifier}event: stream_end\ndata: {data}\n\n".encode("utf-8")
 
 
 def _stream_end_sse_frame(
@@ -722,6 +1039,21 @@ def _encode_trace_cursor(invocation_id: str, sequence: int) -> str:
     return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
 
 
+def _encode_user_event_cursor(invocation_id: str, sequence: int) -> str:
+    record = {
+        "invocation_digest": _invocation_digest(invocation_id),
+        "sequence": sequence,
+        "version": _USER_EVENT_CURSOR_VERSION,
+    }
+    encoded = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
 def _decode_trace_cursor(value: str | None, invocation_id: str) -> int:
     if value is None:
         return 0
@@ -748,6 +1080,32 @@ def _decode_trace_cursor(value: str | None, invocation_id: str) -> int:
     return int(record["sequence"])
 
 
+def _decode_user_event_cursor(value: str | None, invocation_id: str) -> int:
+    if value is None:
+        return 0
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        decoded = base64.b64decode(
+            padded.encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        record = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, UnicodeError, ValueError) as error:
+        raise _bad_request("cursor is invalid.") from error
+    if (
+        not isinstance(record, dict)
+        or set(record) != {"invocation_digest", "sequence", "version"}
+        or record.get("version") != _USER_EVENT_CURSOR_VERSION
+        or record.get("invocation_digest") != _invocation_digest(invocation_id)
+        or not isinstance(record.get("sequence"), int)
+        or isinstance(record.get("sequence"), bool)
+        or record["sequence"] < 1
+    ):
+        raise _bad_request("cursor is invalid for this Invocation.")
+    return int(record["sequence"])
+
+
 def _invocation_digest(invocation_id: str) -> str:
     return hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()
 
@@ -761,6 +1119,18 @@ def _trace_position(
         raise _bad_request("cursor and after_sequence cannot be combined.")
     if cursor is not None:
         return _decode_trace_cursor(cursor, invocation_id)
+    return after_sequence or 0
+
+
+def _user_event_position(
+    cursor: str | None,
+    after_sequence: int | None,
+    invocation_id: str,
+) -> int:
+    if cursor is not None and after_sequence is not None:
+        raise _bad_request("cursor and after_sequence are mutually exclusive.")
+    if cursor is not None:
+        return _decode_user_event_cursor(cursor, invocation_id)
     return after_sequence or 0
 
 

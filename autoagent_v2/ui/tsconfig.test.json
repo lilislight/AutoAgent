@@ -9,5 +9,5 @@
     "outDir": ".test-dist",
     "rootDir": "."
   },
-  "include": ["src/api.ts", "src/bootstrap.ts", "src/childEvents.ts", "src/coalescedRefresh.ts", "src/graph.ts", "src/navigation.ts", "src/requestGate.ts", "src/types.ts", "src/components/WorkflowGraph.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
+  "include": ["src/api.ts", "src/bootstrap.ts", "src/childEvents.ts", "src/coalescedRefresh.ts", "src/graph.ts", "src/liveState.ts", "src/navigation.ts", "src/requestGate.ts", "src/runtimeProjection.ts", "src/types.ts", "src/components/RuntimeSpans.tsx", "src/components/UserEventTimeline.tsx", "src/components/WorkflowGraph.tsx", "tests/**/*.ts", "tests/**/*.tsx"]
 }

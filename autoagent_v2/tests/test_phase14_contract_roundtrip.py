@@ -3,9 +3,18 @@ from __future__ import annotations
 import unittest
 from enum import Enum
 
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Edge, Node, Wait, Workflow
+from autoagent import (
+    AutoAgentApp,
+    Edge,
+    InputMappingContext,
+    Map,
+    Node,
+    Wait,
+    Workflow,
+)
 from autoagent.core import ValueContract
 
 
@@ -19,8 +28,22 @@ class RichValue(TypedDict):
     coordinates: tuple[int, int]
 
 
+class FloatValue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: float
+
+
 def identity(value: RichValue) -> RichValue:
     return value
+
+
+def nonfinite_output(_value: FloatValue) -> FloatValue:
+    return FloatValue(value=float("nan"))
+
+
+def map_float_items(context: InputMappingContext) -> list[FloatValue]:
+    return context.invocation_input["items"]  # type: ignore[index,return-value]
 
 
 def _value(mode: Mode = Mode.FIRST) -> RichValue:
@@ -32,6 +55,81 @@ def _record(mode: str = "first") -> dict[str, object]:
 
 
 class DurableContractRoundTripTests(unittest.TestCase):
+    def test_contract_rejects_nonfinite_json_output_record(self) -> None:
+        """Verify durable output records reject JSON non-finite floats."""
+
+        contract = ValueContract.create(FloatValue, location="non-finite")
+        with self.assertRaisesRegex(TypeError, "floats must be finite"):
+            contract.to_record(FloatValue(value=float("nan")))
+
+    def test_output_record_failure_closes_operator_and_occurrence_as_failed(
+        self,
+    ) -> None:
+        """Verify output serialization failure preserves a valid failed lifecycle."""
+
+        app = AutoAgentApp()
+        try:
+            result = app.invoke(
+                Workflow(
+                    "non-finite-output",
+                    nodes=[Node("node", nonfinite_output)],
+                ),
+                {"value": 1.0},
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.error.type, "TypeError")
+            self.assertIn("floats must be finite", result.error.message)
+
+            state = result.checkpoint.state(result.ref.session_id)
+            invocation = state.invocation
+            self.assertIsNotNone(invocation)
+            assert invocation is not None
+            self.assertEqual(
+                {item.status for item in invocation.scheduler.occurrences.values()},
+                {"failed"},
+            )
+            self.assertEqual(
+                {item.status for item in invocation.scheduler.operator_calls.values()},
+                {"failed"},
+            )
+        finally:
+            app.close()
+
+    def test_map_output_record_failure_settles_every_started_call(self) -> None:
+        """Verify a mapped serialization failure leaves no live Operator Call."""
+
+        app = AutoAgentApp()
+        try:
+            result = app.invoke(
+                Workflow(
+                    "non-finite-map-output",
+                    nodes=[
+                        Node(
+                            "node",
+                            nonfinite_output,
+                            input_mapping=map_float_items,
+                            map=Map(max_parallelism=2),
+                        )
+                    ],
+                ),
+                {"items": [{"value": 1.0}, {"value": 2.0}]},
+            )
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.error.type, "TypeError")
+            self.assertIn("floats must be finite", result.error.message)
+
+            state = result.checkpoint.state(result.ref.session_id)
+            invocation = state.invocation
+            self.assertIsNotNone(invocation)
+            assert invocation is not None
+            calls = tuple(invocation.scheduler.operator_calls.values())
+            self.assertTrue(calls)
+            self.assertTrue(all(item.status == "failed" for item in calls))
+            occurrence = next(iter(invocation.scheduler.occurrences.values()))
+            self.assertEqual(occurrence.status, "failed")
+        finally:
+            app.close()
+
     def test_contract_distinguishes_domain_validation_from_record_restore(self) -> None:
         """Verify Enum/tuple domain values round-trip through canonical JSON records."""
 

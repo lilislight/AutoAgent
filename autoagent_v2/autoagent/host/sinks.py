@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from autoagent.core.compiler import WorkflowDefinitionSnapshot
-from autoagent.core.runtime import RuntimeCheckpointBundle, RuntimeEvent
+from autoagent.core.runtime import RuntimeCheckpointBundle, RuntimeEvent, UserEvent
 from autoagent.hosting import HttpRuntimeEventSink, SQLiteRuntimeStore
 
 from .settings import HostSettings
@@ -13,9 +13,11 @@ from .settings import HostSettings
 
 @runtime_checkable
 class HostRuntimeEventSink(Protocol):
-    """Durable sink owned and closed by one Host."""
+    """Durable Runtime and User Event sink owned and closed by one Host."""
 
     async def append(self, event: RuntimeEvent) -> None: ...
+
+    async def append_user_event(self, event: UserEvent) -> None: ...
 
     def close(self) -> None: ...
 
@@ -47,8 +49,10 @@ def create_runtime_event_sink(
         return None
     if settings.runtime_event_sink == "http":
         assert settings.http_sink_url is not None
+        assert settings.http_user_event_sink_url is not None
         return HttpRuntimeEventSink(
             settings.http_sink_url,
+            user_event_url=settings.http_user_event_sink_url,
             token=settings.http_sink_token,
             timeout_seconds=settings.http_sink_timeout_seconds,
         )

@@ -2,7 +2,8 @@
 
 本文只记录当前实现之外仍有价值的工作。当前 Core 已完成静态 Workflow、受控 Loop、
 Map、StreamReducer、Wait/Resume、Child await/spawn + Map、唯一 StateReducer、Host
-RuntimeEvent sink 协议、公开 Trace/User Event、Checkpoint Bundle 和同步/异步 App API。
+RuntimeEvent/UserEvent sink 协议、公开 Trace/User Event、Checkpoint Bundle 和同步/异步
+App API。
 以下项目是 Host/Harness、可选捕获模式或工程工具，不是当前 Full Core 的未闭合语义。
 
 ## P1：中心化 Host 与 Harness 原语
@@ -31,7 +32,7 @@ RuntimeEvent sink 协议、公开 Trace/User Event、Checkpoint Bundle 和同步
 ### 中心化 Server
 
 - 本地只读 Tracing Server/UI 已实现，不持有 App，也不提供执行命令；
-- 远程 RuntimeEvent 接收、独立 UserEvent Store、Artifact Store 与 Outbox；
+- 远程 RuntimeEvent/UserEvent 接收、Artifact Store 与 Outbox；
 - Invoke/Submit/Wait/Resume/Cancel/Recover/Stream 服务接口；
 - Session admission/lease、鉴权、多租户、幂等、限流和优雅关闭；
 - 历史 Trace、任意 state version 查询、Replay、Fork 与 UI。
@@ -63,6 +64,9 @@ Recovery 等价性验收。
 
 工程层可补充 Ruff 与 Pyright/Mypy 配置、Port 静态类型验收和持续 import graph 检查；
 这些不改变 Core 运行契约。
+
+Compiler 后续可以在先确定 Workflow authoring 对象的可变性边界后增加按定义摘要复用的
+编译缓存；错误 phase/code 的更细分类也应作为一次统一诊断契约设计，不能零散增加别名。
 
 ### Live transition 的长期扩展性
 

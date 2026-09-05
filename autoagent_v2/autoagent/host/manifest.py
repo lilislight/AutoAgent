@@ -112,12 +112,38 @@ class ProjectManifest(BaseModel):
 
 
 def resolve_manifest_path(path: str | Path | None = None) -> Path:
-    """Resolve a project directory or the standard manifest filename."""
+    """Find the nearest manifest or validate one explicit manifest file."""
 
     candidate = Path.cwd() if path is None else Path(path)
     candidate = candidate.expanduser().resolve()
     if candidate.is_dir():
-        return candidate / MANIFEST_FILENAME
+        for directory in (candidate, *candidate.parents):
+            manifest = directory / MANIFEST_FILENAME
+            if manifest.is_file():
+                return manifest
+        raise ProjectLoadError(
+            [
+                HostDiagnostic(
+                    code="PROJECT_MANIFEST_NOT_FOUND",
+                    message=(
+                        f"Could not find {MANIFEST_FILENAME} from {candidate} "
+                        "or any parent directory."
+                    ),
+                    path=str(candidate),
+                    hint=f"Create {MANIFEST_FILENAME} at the project root.",
+                )
+            ]
+        )
+    if not candidate.exists() and candidate.name != MANIFEST_FILENAME:
+        raise ProjectLoadError(
+            [
+                HostDiagnostic(
+                    code="PROJECT_MANIFEST_NOT_FOUND",
+                    message=f"Project path does not exist: {candidate}",
+                    path=str(candidate),
+                )
+            ]
+        )
     if candidate.name != MANIFEST_FILENAME:
         raise ProjectLoadError(
             [

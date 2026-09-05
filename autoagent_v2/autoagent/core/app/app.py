@@ -6,6 +6,7 @@ import asyncio
 import math
 import threading
 import time
+import warnings
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import CancelledError as FutureCancelledError, Future
 from dataclasses import replace
@@ -15,7 +16,7 @@ from uuid import uuid4
 from ..compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
 from ..executor import CapabilityResolver, NodeExecutor, WorkflowExecutor
-from ..hosting import RuntimeEventSink
+from ..hosting import RuntimeEventSink, UserEventSink
 from ..operators import Operator, OperatorRegistry, Wait
 from ..runtime import (
     ChildAwaitReady,
@@ -109,6 +110,7 @@ class AutoAgentApp:
         capability_resolver: CapabilityResolver | None = None,
         runtime_journal: RuntimeJournalPort | None = None,
         runtime_event_sink: RuntimeEventSink | None = None,
+        user_event_sink: UserEventSink | None = None,
         user_event_journal: UserEventJournalPort | None = None,
         scheduler: SchedulerPort | None = None,
         node_executor: NodeExecutorPort | None = None,
@@ -128,6 +130,8 @@ class AutoAgentApp:
         self._latest_workflow_revision: dict[str, str] = {}
         self._journal = runtime_journal or InMemoryEventJournal()
         self._runtime_event_sink = runtime_event_sink
+        self._user_event_sink = user_event_sink
+        self._user_event_sink_errors: dict[str, BaseException] = {}
         self._user_event_journal = user_event_journal or InMemoryUserEventJournal()
         self._scheduler = scheduler or Scheduler()
         if (
@@ -215,6 +219,18 @@ class AutoAgentApp:
     @property
     def operator_registry(self) -> OperatorRegistryPort:
         return self._operator_registry
+
+    @property
+    def user_event_sink_error(self) -> BaseException | None:
+        """Return the first independent observation delivery failure, if any."""
+
+        return next(iter(self._user_event_sink_errors.values()), None)
+
+    @property
+    def user_event_sink_errors(self) -> Mapping[str, BaseException]:
+        """Return failed observation streams keyed by Invocation id."""
+
+        return dict(self._user_event_sink_errors)
 
     def register_capability(self, capability: Capability) -> Capability:
         with self._close_lock:
@@ -1877,6 +1893,28 @@ class AutoAgentApp:
                 occurrence_id=occurrence_id,
                 occurred_at_ns=self._clock_ns(),
             )
+            sink = self._user_event_sink
+            if (
+                sink is not None
+                and invocation_id not in self._user_event_sink_errors
+            ):
+                try:
+                    await sink.append_user_event(created)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as error:
+                    # User Events are observations, not canonical transitions.
+                    # Keep Workflow progress valid, but stop the stream at the
+                    # first rejected sequence so later persistence cannot mask
+                    # an observation gap.
+                    self._user_event_sink_errors[invocation_id] = error
+                    warnings.warn(
+                        "User Event sink rejected an observation; canonical "
+                        "Workflow execution continues but persisted User Events "
+                        "are incomplete.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
             self._user_event_journal.drain(invocation_id)
             if channel is None or not channel.attached:
                 self._observations.setdefault(root, []).append(created)

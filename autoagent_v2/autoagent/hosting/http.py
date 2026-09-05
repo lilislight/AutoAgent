@@ -6,9 +6,10 @@ import math
 import threading
 from concurrent.futures import Future as ThreadFuture
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 from autoagent.core.compiler import WorkflowDefinitionSnapshot
-from autoagent.core.runtime import RuntimeEvent
+from autoagent.core.runtime import RuntimeEvent, UserEvent
 
 from .errors import RuntimeEventStoreClosedError, RuntimeEventStoreError
 from ._worker import ConcurrentWorker, run_in_daemon
@@ -43,12 +44,20 @@ class HttpRuntimeEventSink:
         self,
         url: str,
         *,
+        user_event_url: str | None = None,
         token: str | None = None,
         timeout_seconds: float = 10.0,
         client: _HttpClient | None = None,
         max_concurrency: int = 8,
     ) -> None:
         self.url = _non_empty(url, "url")
+        self.user_event_url = (
+            _user_event_url(self.url)
+            if user_event_url is None
+            else _non_empty(user_event_url, "user_event_url")
+        )
+        if self.user_event_url == self.url:
+            raise ValueError("user_event_url must differ from url.")
         if token is not None:
             token = _non_empty(token, "token")
         try:
@@ -88,6 +97,16 @@ class HttpRuntimeEventSink:
         with self._lock:
             self._ensure_open_locked()
             completion = self._worker.call_async(self._append, event)
+        await completion
+
+    async def append_user_event(self, event: UserEvent) -> None:
+        """Send one independently ordered User Event to its own endpoint."""
+
+        if not isinstance(event, UserEvent):
+            raise TypeError("event must be a UserEvent.")
+        with self._lock:
+            self._ensure_open_locked()
+            completion = self._worker.call_async(self._append_user_event, event)
         await completion
 
     def save_workflow(self, snapshot: WorkflowDefinitionSnapshot) -> None:
@@ -144,10 +163,19 @@ class HttpRuntimeEventSink:
             "X-AutoAgent-Event-Sequence": str(event.sequence),
             "X-AutoAgent-Record-Type": "runtime_event",
         }
-        self._post(event.to_record(), headers)
+        self._post(self.url, event.to_record(), headers)
+
+    def _append_user_event(self, event: UserEvent) -> None:
+        headers = {
+            "Idempotency-Key": event.id,
+            "X-AutoAgent-User-Event-Sequence": str(event.sequence),
+            "X-AutoAgent-Record-Type": "user_event",
+        }
+        self._post(self.user_event_url, event.to_record(), headers)
 
     def _save_workflow(self, snapshot: WorkflowDefinitionSnapshot) -> None:
         self._post(
+            self.url,
             snapshot.to_record(),
             {
                 "Idempotency-Key": snapshot.workflow_revision_id,
@@ -155,7 +183,12 @@ class HttpRuntimeEventSink:
             },
         )
 
-    def _post(self, record: object, headers: dict[str, str]) -> None:
+    def _post(
+        self,
+        url: str,
+        record: object,
+        headers: dict[str, str],
+    ) -> None:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -166,7 +199,7 @@ class HttpRuntimeEventSink:
         try:
             client = self._http_client()
             response = client.post(
-                self.url,
+                url,
                 json=record,
                 headers=headers,
             )
@@ -179,23 +212,20 @@ class HttpRuntimeEventSink:
                 raise RuntimeEventStoreError(
                     "Remote Runtime Event sink returned an invalid HTTP status."
                 )
-            response_text = response.text
-            if not isinstance(response_text, str):
+            if not 200 <= status_code < 300:
+                raise RuntimeEventStoreError(
+                    f"Remote Runtime Event sink returned {status_code}."
+                )
+            if not isinstance(response.text, str):
                 raise RuntimeEventStoreError(
                     "Remote Runtime Event sink returned an invalid HTTP response body."
                 )
-            detail = response_text.strip()[:500]
         except RuntimeEventStoreError:
             raise
         except Exception as error:
             raise RuntimeEventStoreError(
                 "Remote Runtime Event sink request failed."
             ) from error
-        if not 200 <= status_code < 300:
-            suffix = f": {detail}" if detail else ""
-            raise RuntimeEventStoreError(
-                f"Remote Runtime Event sink returned {status_code}{suffix}"
-            )
 
     def _http_client(self) -> _HttpClient:
         with self._lock:
@@ -227,6 +257,19 @@ def _non_empty(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} cannot be empty.")
     return value.strip()
+
+
+def _user_event_url(runtime_event_url: str) -> str:
+    """Derive the conventional sibling endpoint for direct SDK construction."""
+
+    parsed = urlsplit(runtime_event_url)
+    segments = parsed.path.rstrip("/").split("/")
+    if not segments or segments[-1] != "runtime-events":
+        raise ValueError(
+            "user_event_url is required unless url ends with '/runtime-events'."
+        )
+    segments[-1] = "user-events"
+    return urlunsplit(parsed._replace(path="/".join(segments)))
 
 
 __all__ = ["HttpRuntimeEventSink"]

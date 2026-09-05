@@ -23,6 +23,7 @@ test("switching Workflow clears Session and Invocation ownership", () => {
     invocation: null,
   });
   assert.ok(transition?.invalidatedScopes.includes("sse"));
+  assert.ok(transition?.invalidatedScopes.includes("user-event-sse"));
   assert.ok(transition?.invalidatedScopes.includes("more-sessions"));
 });
 
@@ -51,6 +52,8 @@ test("switching Invocation invalidates its bootstrap, stream, and child page", (
   assert.ok(transition?.invalidatedScopes.includes("sse"));
   assert.ok(transition?.invalidatedScopes.includes("more-children"));
   assert.ok(transition?.invalidatedScopes.includes("earlier-trace"));
+  assert.ok(transition?.invalidatedScopes.includes("earlier-user-events"));
+  assert.ok(transition?.invalidatedScopes.includes("historical-state"));
 });
 
 test("selecting the current identity is a no-op", () => {

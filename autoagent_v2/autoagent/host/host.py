@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from concurrent.futures import Future as ThreadFuture
 from contextlib import contextmanager
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterator, TypeVar, cast
 
 from autoagent.core.app import (
@@ -23,17 +24,23 @@ from autoagent.core.app import (
     InvocationSubmission,
     StreamItem,
 )
-from autoagent.core.compiler import WorkflowDefinitionSnapshot
+from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from autoagent.core.operators import Operator
 from autoagent.core.runtime import RuntimeCheckpointBundle
-from autoagent.core.workflow import Capability, ChildInvocationHandle, WorkflowIR
+from autoagent.core.workflow import (
+    Capability,
+    ChildInvocationHandle,
+    Workflow,
+    WorkflowIR,
+)
 from autoagent.hosting import RuntimeSessionNotRootError, SQLiteRuntimeStore
-from autoagent.hosting._worker import await_thread_future
+from autoagent.hosting._worker import await_thread_future, run_in_daemon
 
+from .environment import load_project_environment
 from .errors import HostOperationError
 from .loader import LoadedProject, ProjectLoader
 from .manifest import resolve_manifest_path
-from .settings import HostSettings, load_host_settings
+from .settings import HostSettings, _host_settings_from_environment
 from .sinks import (
     HostRuntimeEventSink,
     RecoverySource,
@@ -60,12 +67,17 @@ class AutoAgentHost:
         settings: HostSettings,
         app: AutoAgentApp,
         event_sink: HostRuntimeEventSink | None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.project = project
         self.settings = settings
         self.app = app
         self.event_sink = event_sink
+        self.environment: Mapping[str, str] = MappingProxyType(
+            dict(environment or {})
+        )
         self._lifecycle = threading.Lock()
+        self._definition_lock = threading.Lock()
         self._closing = False
         self._closed = False
         self._active_restores = 0
@@ -79,6 +91,7 @@ class AutoAgentHost:
         path: str | Path | None = None,
         *,
         env_file: str | Path | None = None,
+        use_env_file: bool = True,
         environ: Mapping[str, str] | None = None,
         loader: ProjectLoader | None = None,
     ) -> AutoAgentHost:
@@ -92,12 +105,20 @@ class AutoAgentHost:
             )
 
         manifest_path = resolve_manifest_path(path)
-        settings = load_host_settings(
+        environment = load_project_environment(
             manifest_path.parent,
             env_file=env_file,
+            use_env_file=use_env_file,
             environ=environ,
         )
-        project = (loader or ProjectLoader()).load(manifest_path)
+        settings = _host_settings_from_environment(
+            manifest_path.parent,
+            environment,
+        )
+        project = (loader or ProjectLoader()).load(
+            manifest_path,
+            environment=environment,
+        )
         sink = create_runtime_event_sink(settings)
         app: AutoAgentApp | None = None
         try:
@@ -107,6 +128,7 @@ class AutoAgentHost:
                     settings.max_node_executions_per_invocation
                 ),
                 runtime_event_sink=sink,
+                user_event_sink=sink,
             )
             workflows = _register_project_workflows(app, project)
             if isinstance(sink, WorkflowDefinitionSink):
@@ -122,6 +144,7 @@ class AutoAgentHost:
             settings=settings,
             app=app,
             event_sink=sink,
+            environment=environment,
         )
 
     @classmethod
@@ -130,6 +153,7 @@ class AutoAgentHost:
         path: str | Path | None = None,
         *,
         env_file: str | Path | None = None,
+        use_env_file: bool = True,
         environ: Mapping[str, str] | None = None,
         loader: ProjectLoader | None = None,
     ) -> AutoAgentHost:
@@ -149,6 +173,7 @@ class AutoAgentHost:
                 host = cls.from_project(
                     path,
                     env_file=env_file,
+                    use_env_file=use_env_file,
                     environ=environ,
                     loader=loader,
                 )
@@ -196,6 +221,32 @@ class AutoAgentHost:
 
         self._ensure_open()
         return self.app.workflow_definition_snapshot(workflow_id_or_revision_id)
+
+    @property
+    def user_event_sink_errors(self) -> Mapping[str, BaseException]:
+        """Return independent User Event delivery failures by Invocation id."""
+
+        self._ensure_open()
+        return self.app.user_event_sink_errors
+
+    def register_workflow(self, workflow: Workflow) -> WorkflowIR:
+        """Compile, publish, and register one additional Workflow closure."""
+
+        if _in_async_context():
+            raise HostOperationError(
+                "HOST_SYNC_API_IN_ASYNC_CONTEXT",
+                "Use await host.aregister_workflow(...) from an asynchronous "
+                "context.",
+            )
+        return self._register_workflow(workflow)
+
+    async def aregister_workflow(self, workflow: Workflow) -> WorkflowIR:
+        """Register a Workflow without blocking the caller's event loop."""
+
+        return await run_in_daemon(
+            lambda: self._register_workflow(workflow),
+            name="autoagent-host-register-workflow",
+        )
 
     def register_capability(self, capability: Capability) -> Capability:
         """Bind one additional Capability contract to the Host App."""
@@ -621,6 +672,35 @@ class AutoAgentHost:
         self._ensure_open()
         _identity(workflow_id)
 
+    def _register_workflow(self, workflow: Workflow) -> WorkflowIR:
+        if not isinstance(workflow, Workflow):
+            raise TypeError("workflow must be a Workflow.")
+        with self._definition_lock:
+            self._ensure_open()
+            compiled = WorkflowCompiler().compile(workflow).require_workflow_ir()
+            closure = _workflow_ir_closure(compiled)
+            sink = self.event_sink
+            if isinstance(sink, WorkflowDefinitionSink):
+                for revision_id in sorted(closure):
+                    sink.save_workflow(
+                        WorkflowDefinitionSnapshot.from_workflow_ir(
+                            closure[revision_id]
+                        )
+                    )
+            # Publishing may block.  Recheck lifecycle before exposing the
+            # executable closure to the App.
+            self._ensure_open()
+            registered = self.app.register_workflow(workflow)
+            if (
+                registered.workflow_revision_id != compiled.workflow_revision_id
+                or registered.definition_hash != compiled.definition_hash
+            ):
+                raise HostOperationError(
+                    "HOST_WORKFLOW_CHANGED_DURING_REGISTRATION",
+                    "Workflow definition changed while it was being registered.",
+                )
+            return registered
+
     def _ensure_open(self) -> None:
         with self._lifecycle:
             if self._closed:
@@ -804,19 +884,32 @@ def _register_project_workflows(
     registered: dict[str, WorkflowIR] = {}
     for loaded in project.workflows:
         root = app.register_workflow(loaded.workflow)
-        pending = [root]
-        while pending:
-            current = pending.pop()
-            existing = registered.get(current.workflow_revision_id)
-            if existing is not None:
-                continue
-            registered[current.workflow_revision_id] = current
-            pending.extend(
-                cast(WorkflowIR, node.executable)
-                for node in reversed(current.nodes)
-                if isinstance(node.executable, WorkflowIR)
-            )
+        registered.update(_workflow_ir_closure(root))
     return registered
+
+
+def _workflow_ir_closure(root: WorkflowIR) -> dict[str, WorkflowIR]:
+    """Collect one compiled root and every independently executable Child IR."""
+
+    workflows: dict[str, WorkflowIR] = {}
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        existing = workflows.get(current.workflow_revision_id)
+        if existing is not None:
+            if existing.definition_hash != current.definition_hash:
+                raise HostOperationError(
+                    "HOST_WORKFLOW_REVISION_CONFLICT",
+                    f"Workflow Revision {current.workflow_revision_id!r} was reused.",
+                )
+            continue
+        workflows[current.workflow_revision_id] = current
+        pending.extend(
+            cast(WorkflowIR, node.executable)
+            for node in reversed(current.nodes)
+            if isinstance(node.executable, WorkflowIR)
+        )
+    return workflows
 
 
 def _cleanup_failed_startup(

@@ -117,7 +117,11 @@ class WorkflowCompiler:
     def compile(self, workflow: Workflow) -> CompileResult:
         """Compile without throwing for an invalid Workflow definition."""
 
-        workflow_id = workflow.id if isinstance(workflow, Workflow) else None
+        workflow_id = (
+            workflow.id
+            if isinstance(workflow, Workflow) and isinstance(workflow.id, str)
+            else None
+        )
         try:
             # The successful path compiles exactly once. A diagnostic recovery
             # pass is only needed after compilation has already failed.
@@ -174,6 +178,7 @@ class WorkflowCompiler:
                 ),
             )
         collected: list[Diagnostic] = []
+        workflow_id = workflow.id if isinstance(workflow.id, str) else None
 
         def add(error: Exception, *, object_type=None, object_id=None) -> None:
             if isinstance(error, WorkflowCompileError):
@@ -182,7 +187,7 @@ class WorkflowCompiler:
                         code=error.code or "COMPILE_FAILED",
                         severity="error",
                         message=error.message,
-                        workflow_id=workflow.id,
+                        workflow_id=workflow_id,
                         object_type=error.object_type or object_type,
                         object_id=error.object_id or object_id,
                         field=error.field,
@@ -195,14 +200,30 @@ class WorkflowCompiler:
                         code="DEFINITION_INVALID",
                         severity="error",
                         message=str(error),
-                        workflow_id=workflow.id,
+                        workflow_id=workflow_id,
                         object_type=object_type,
                         object_id=object_id,
                     )
                 )
 
-        if not isinstance(workflow.id, str) or not workflow.id.strip():
-            add(_error("WORKFLOW_ID_EMPTY", "Workflow id cannot be empty."))
+        if not isinstance(workflow.id, str):
+            add(
+                _error(
+                    "WORKFLOW_ID_INVALID",
+                    "Workflow id must be a non-empty string.",
+                    object_type="workflow",
+                    field="id",
+                )
+            )
+        elif not workflow.id.strip():
+            add(
+                _error(
+                    "WORKFLOW_ID_EMPTY",
+                    "Workflow id cannot be empty.",
+                    object_type="workflow",
+                    field="id",
+                )
+            )
         else:
             try:
                 _validate_runtime_identifier(

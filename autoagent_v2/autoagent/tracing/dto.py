@@ -160,6 +160,7 @@ class ChildSessionSummaryResponse(_ResponseModel):
     planned_workflow_revision_id: str
     planned_invocation_id: str
     planned_event_sequence: int
+    change_event_sequence: int
     phase: Literal["planned", "opened", "accepted", "terminal"]
     current_invocation_id: str | None
     invocation_count: int
@@ -185,6 +186,19 @@ class TraceEventResponse(_ResponseModel):
     error: dict[str, object] | None
     metrics: Any
     attributes: dict[str, object]
+
+
+class UserEventResponse(_ResponseModel):
+    """One independently persisted user-facing observation."""
+
+    id: str
+    session_id: str
+    invocation_id: str
+    sequence: int
+    kind: str
+    payload: Any
+    occurrence_id: str | None
+    occurred_at_ns: str
 
 
 _ItemModel = TypeVar("_ItemModel", bound=_ResponseModel)
@@ -264,6 +278,17 @@ class TracePageResponse(_ResponseModel):
     has_earlier: bool
 
 
+class UserEventPageResponse(_ResponseModel):
+    """Forward page or bounded tail of independent User Events."""
+
+    items: list[UserEventResponse]
+    next_cursor: str | None
+    resume_cursor: str | None
+    resume_sequence: int
+    has_more: bool
+    has_earlier: bool
+
+
 class StreamEndResponse(_ResponseModel):
     """Terminal SSE marker after all Trace Events are delivered."""
 
@@ -293,6 +318,8 @@ __all__ = [
     "StreamErrorResponse",
     "TRACING_API_VERSION",
     "TracePageResponse",
+    "UserEventPageResponse",
+    "UserEventResponse",
     "WorkflowDefinitionResponse",
     "WorkflowPageResponse",
     "tracing_record",

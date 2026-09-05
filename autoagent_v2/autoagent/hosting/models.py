@@ -28,4 +28,25 @@ class Page(Generic[T]):
         }
 
 
-__all__ = ["Page"]
+@dataclass(frozen=True, slots=True)
+class ResumablePage(Generic[T]):
+    """One keyset page whose last consumed position is always resumable."""
+
+    items: tuple[T, ...]
+    next_cursor: str | None = None
+    resume_cursor: str | None = None
+
+    @property
+    def has_more(self) -> bool:
+        return self.next_cursor is not None
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "items": list(self.items),
+            "next_cursor": self.next_cursor,
+            "resume_cursor": self.resume_cursor,
+            "has_more": self.has_more,
+        }
+
+
+__all__ = ["Page", "ResumablePage"]

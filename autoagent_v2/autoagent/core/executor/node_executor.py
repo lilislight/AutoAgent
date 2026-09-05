@@ -412,6 +412,7 @@ class NodeExecutor:
 
         try:
             output, contract = await invoke_and_validate()
+            output_record = contract.to_record(output)
         except _RuntimeEmitFailure as failure:
             raise failure.error from failure
         except UserCallableCancelledError:
@@ -434,7 +435,7 @@ class NodeExecutor:
             error = RuntimeErrorInfo(type(exc).__name__, str(exc) or type(exc).__name__)
             await on_call_event(OperatorCallFailed(call_id, error))
             raise
-        await on_call_event(OperatorCallCompleted(call_id, contract.to_record(output)))
+        await on_call_event(OperatorCallCompleted(call_id, output_record))
         return output
 
     async def _reduce_stream(

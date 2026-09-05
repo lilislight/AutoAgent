@@ -16,7 +16,7 @@ V2 是独立的 Workflow Runtime，当前包含 Core、Host、本地持久化和
 - 标准 `autoagent.toml`、环境配置和 `AutoAgentHost` 生命周期；
 - SQLite canonical RuntimeEvent Store、HTTP RuntimeEvent Sink 和父子 Checkpoint 重建；
 - 本地只读 Tracing API、可恢复 SSE、Workflow 图、Timeline 与 State Inspector；
-- `compile`、`invoke`、`trace` 基础 CLI。
+- `compile`、`invoke`、`resume`、`recover`、`trace` 基础 CLI。
 
 Core 只执行 Workflow 并维护每个 Session 当前的 Runtime State。数据库、Event Store、
 Server 和 UI 位于独立的 Host/Tracing 层，不反向进入 Core。
@@ -38,6 +38,8 @@ entrypoint = "workflows.research:workflow"
 ```bash
 autoagent compile
 autoagent invoke research --input '{"topic":"agents"}'
+autoagent resume SESSION_ID WAIT_ID --response '{"approved":true}'
+autoagent recover SESSION_ID
 autoagent trace
 ```
 

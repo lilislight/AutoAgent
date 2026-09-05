@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Iterator
 
 from autoagent.core.workflow import Workflow
 
+from .environment import project_environment_scope
 from .errors import HostDiagnostic, ProjectLoadError
 from .manifest import (
     ProjectManifest,
@@ -52,7 +54,14 @@ class LoadedProject:
 class ProjectLoader:
     """Resolve one ``autoagent.toml`` without compiling or running Workflows."""
 
-    def load(self, path: str | Path | None = None) -> LoadedProject:
+    def load(
+        self,
+        path: str | Path | None = None,
+        *,
+        environment: Mapping[str, str] | None = None,
+    ) -> LoadedProject:
+        """Load definitions while temporarily applying an environment snapshot."""
+
         manifest_path = resolve_manifest_path(path)
         manifest = load_project_manifest(manifest_path)
         root = manifest_path.parent
@@ -60,7 +69,7 @@ class ProjectLoader:
         diagnostics: list[HostDiagnostic] = []
 
         module_names = tuple(item.module_name for item in manifest.workflows)
-        with _project_import_path(root):
+        with _project_import_path(root, environment=environment):
             _guard_project_module_namespaces(
                 root,
                 module_names,
@@ -198,17 +207,22 @@ def _duplicate_workflow_ids(loaded: list[LoadedWorkflow]) -> tuple[str, ...]:
 
 
 @contextmanager
-def _project_import_path(root: Path) -> Iterator[None]:
-    """Expose the project root only while its definitions are imported."""
+def _project_import_path(
+    root: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> Iterator[None]:
+    """Expose the project root and optional environment only during imports."""
 
     root_text = str(root)
-    with _IMPORT_LOCK:
-        original = list(sys.path)
-        sys.path.insert(0, root_text)
-        try:
-            yield
-        finally:
-            sys.path[:] = original
+    with project_environment_scope(environment):
+        with _IMPORT_LOCK:
+            original_path = list(sys.path)
+            try:
+                sys.path.insert(0, root_text)
+                yield
+            finally:
+                sys.path[:] = original_path
 
 
 def _guard_project_module_namespaces(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 import importlib.util
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ import unittest
 
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Node, Workflow
+from autoagent import AutoAgentApp, Node, Stream, StreamContext, Workflow
 from autoagent.core.runtime import RuntimeEvent
 from autoagent.hosting import RuntimeEventStoreError, SQLiteRuntimeStore
 from autoagent.tracing import (
@@ -46,12 +47,41 @@ class PrecisionValue(TypedDict):
     enabled: bool
 
 
+class Chunk(TypedDict):
+    value: int
+
+
+class Total(TypedDict):
+    total: int
+
+
 def identity(value: Value) -> Value:
     return value
 
 
 def preserve_precision(value: PrecisionValue) -> PrecisionValue:
     return value
+
+
+def chunks(value: Value) -> Iterator[Chunk]:
+    for index in range(value["value"]):
+        yield {"value": index}
+
+
+class SumReducer:
+    def initial(self, _context: StreamContext) -> Total:
+        return {"total": 0}
+
+    def add(
+        self,
+        _context: StreamContext,
+        state: Total,
+        chunk: Chunk,
+    ) -> Total:
+        return {"total": state["total"] + chunk["value"]}
+
+    def finish(self, _context: StreamContext, state: Total) -> Total:
+        return state
 
 
 class _Collector:
@@ -98,6 +128,82 @@ def _sse_events(body: str) -> list[dict[str, object]]:
 
 @unittest.skipUnless(_SERVER_AVAILABLE, "Tracing Server extras are not installed.")
 class TracingServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_events_page_and_sse_are_independent_from_runtime_trace(
+        self,
+    ) -> None:
+        """Persist stream chunks and expose resumable User Event queries and SSE."""
+
+        assert httpx is not None
+        with TemporaryDirectory() as directory:
+            store = SQLiteRuntimeStore(Path(directory) / "runtime.db")
+            core = AutoAgentApp(
+                runtime_event_sink=store,
+                user_event_sink=store,
+            )
+            try:
+                result = await core.ainvoke(
+                    Workflow(
+                        "user-event-trace",
+                        nodes=[
+                            Node(
+                                "stream",
+                                chunks,
+                                stream=Stream(SumReducer()),
+                            )
+                        ],
+                    ),
+                    {"value": 3},
+                    session_id="user-event-trace-session",
+                )
+                app = create_tracing_app(store)
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="http://tracing.test",
+                ) as client:
+                    first = await client.get(
+                        "/api/v1/invocations/user-events",
+                        params={
+                            "invocation_id": result.invocation_id,
+                            "limit": 2,
+                        },
+                    )
+                    self.assertEqual(first.status_code, 200)
+                    page = first.json()
+                    self.assertEqual(
+                        [item["payload"] for item in page["items"]],
+                        [{"value": 0}, {"value": 1}],
+                    )
+                    self.assertTrue(page["has_more"])
+                    second = await client.get(
+                        "/api/v1/invocations/user-events",
+                        params={
+                            "invocation_id": result.invocation_id,
+                            "cursor": page["next_cursor"],
+                        },
+                    )
+                    self.assertEqual(
+                        [item["payload"] for item in second.json()["items"]],
+                        [{"value": 2}],
+                    )
+                    stream = await client.get(
+                        "/api/v1/invocations/user-events/stream",
+                        params={
+                            "invocation_id": result.invocation_id,
+                            "cursor": page["next_cursor"],
+                        },
+                    )
+                frames = _sse_events(stream.text)
+                self.assertEqual(
+                    [frame["event"] for frame in frames],
+                    ["user_event", "stream_end"],
+                )
+                self.assertEqual(frames[0]["data"]["payload"], {"value": 2})
+                self.assertEqual(frames[-1]["data"]["status"], "completed")
+            finally:
+                await core.aclose()
+                await store.aclose()
+
     async def test_heartbeat_rejects_nonfinite_and_oversized_values(self) -> None:
         """Validate heartbeat numbers before the ASGI application is created."""
 
@@ -571,6 +677,31 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                         historical_record["state"]["invocation"]["status"],
                         "created",
                     )
+                    by_trace = await client.get(
+                        "/api/v1/invocations/state",
+                        params={
+                            "invocation_id": result.invocation_id,
+                            "through_trace_sequence": first_page["items"][-1][
+                                "trace_sequence"
+                            ],
+                        },
+                    )
+                    self.assertEqual(by_trace.status_code, 200)
+                    self.assertGreaterEqual(
+                        by_trace.json()["through_sequence"],
+                        detail["first_event_sequence"],
+                    )
+                    ambiguous = await client.get(
+                        "/api/v1/invocations/state",
+                        params={
+                            "invocation_id": result.invocation_id,
+                            "through_sequence": detail["first_event_sequence"],
+                            "through_trace_sequence": first_page["items"][-1][
+                                "trace_sequence"
+                            ],
+                        },
+                    )
+                    self.assertEqual(ambiguous.status_code, 400)
                     latest = await client.get(
                         "/api/v1/invocations/state",
                         params={"invocation_id": result.invocation_id},

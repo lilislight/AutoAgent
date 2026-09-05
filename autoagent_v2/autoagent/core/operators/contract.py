@@ -168,12 +168,14 @@ class ValueContract:
         if validated is None:
             return None
         assert self._adapter is not None
-        return self._adapter.dump_python(
+        record = self._adapter.dump_python(
             validated,
             mode="json",
             round_trip=True,
             by_alias=True,
         )
+        _validate_json_record(record)
+        return record
 
     def restore(self, value: object) -> object:
         if self.annotation is None:

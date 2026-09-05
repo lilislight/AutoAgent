@@ -13,10 +13,14 @@ import { loadInvocationBootstrap } from "./bootstrap";
 import { applyChildTrace } from "./childEvents";
 import { createCoalescedRefresh } from "./coalescedRefresh";
 import { JsonInspector } from "./components/JsonInspector";
+import { RuntimeSpans } from "./components/RuntimeSpans";
 import { TraceTimeline } from "./components/TraceTimeline";
+import { UserEventTimeline } from "./components/UserEventTimeline";
 import { WorkflowGraph } from "./components/WorkflowGraph";
+import { shouldRefreshRuntimeState } from "./liveState";
 import { switchInvocation, switchSession, switchWorkflow } from "./navigation";
 import { RequestGate } from "./requestGate";
+import { projectRuntime } from "./runtimeProjection";
 import { handleTraceStreamError } from "./traceStream";
 import type {
   ChildSessionSummary,
@@ -24,11 +28,14 @@ import type {
   RuntimeStateRecord,
   SessionSummary,
   TraceEvent,
+  UserEvent,
   WorkflowSnapshot,
   WorkflowSummary,
 } from "./types";
 
 const MAX_VISIBLE_EVENTS = 2_000;
+const MAX_VISIBLE_USER_EVENTS = 1_000;
+const NO_TRACE_EVENTS: readonly TraceEvent[] = [];
 const INVOCATION_BOUNDARY_KINDS = new Set([
   "invocation.waiting",
   "invocation.completed",
@@ -39,7 +46,12 @@ const CHILD_BOUNDARY_KINDS = new Set([
   "child_invocation.planned",
   "child_invocation.phase_changed",
 ]);
-const LIVE_STATE_REFRESH_DELAY_MS = 250;
+
+interface HistoricalStateSelection {
+  eventId: string;
+  traceSequence: number;
+  state: RuntimeStateRecord;
+}
 
 export default function App() {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -56,18 +68,26 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot | null>(null);
   const [invocation, setInvocation] = useState<InvocationSummary | null>(null);
   const [events, setEvents] = useState<TraceEvent[]>([]);
+  const [userEvents, setUserEvents] = useState<UserEvent[]>([]);
   const [resumeCursor, setResumeCursor] = useState<string | null>(null);
+  const [userEventResumeCursor, setUserEventResumeCursor] = useState<string | null>(null);
   const [hasEarlierEvents, setHasEarlierEvents] = useState(false);
+  const [hasEarlierUserEvents, setHasEarlierUserEvents] = useState(false);
   const [state, setState] = useState<RuntimeStateRecord | null>(null);
+  const [historicalState, setHistoricalState] =
+    useState<HistoricalStateSelection | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TraceEvent | null>(null);
+  const [loadingHistoricalState, setLoadingHistoricalState] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMoreWorkflows, setLoadingMoreWorkflows] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [loadingMoreInvocations, setLoadingMoreInvocations] = useState(false);
   const [loadingMoreChildren, setLoadingMoreChildren] = useState(false);
   const [loadingEarlierTrace, setLoadingEarlierTrace] = useState(false);
+  const [loadingEarlierUserEvents, setLoadingEarlierUserEvents] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [userEventsLive, setUserEventsLive] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const requestsRef = useRef<RequestGate | null>(null);
   if (requestsRef.current === null) requestsRef.current = new RequestGate();
@@ -78,6 +98,7 @@ export default function App() {
     invocation: null as string | null,
   });
   const historyExpandedRef = useRef(false);
+  const userHistoryExpandedRef = useRef(false);
   const childrenRef = useRef<ChildSessionSummary[]>([]);
 
   useEffect(() => {
@@ -92,17 +113,25 @@ export default function App() {
   const clearInvocationView = useCallback(() => {
     setInvocation(null);
     setEvents([]);
+    setUserEvents([]);
     setResumeCursor(null);
+    setUserEventResumeCursor(null);
     setHasEarlierEvents(false);
+    setHasEarlierUserEvents(false);
     setState(null);
+    setHistoricalState(null);
     setSelectedEvent(null);
+    setLoadingHistoricalState(false);
     childrenRef.current = [];
     setChildren([]);
     setChildCursor(null);
     setLoadingMoreChildren(false);
     setLoadingEarlierTrace(false);
+    setLoadingEarlierUserEvents(false);
     historyExpandedRef.current = false;
+    userHistoryExpandedRef.current = false;
     setLive(false);
+    setUserEventsLive(false);
   }, []);
 
   const selectInvocation = useCallback((invocationId: string | null) => {
@@ -253,6 +282,7 @@ export default function App() {
 
   useEffect(() => {
     requests.invalidate("sse");
+    requests.invalidate("user-event-sse");
     clearInvocationView();
     if (!selectedInvocation) {
       requests.invalidate("invocation-bootstrap");
@@ -270,15 +300,20 @@ export default function App() {
           selectionRef.current.invocation === invocationId,
       );
       if (bootstrap === null) return;
-      const { childPage, history, summary } = bootstrap;
+      const { childPage, history, summary, userHistory } = bootstrap;
       setEvents(dedupe(history.items).slice(-MAX_VISIBLE_EVENTS));
       setResumeCursor(history.resume_cursor);
       setHasEarlierEvents(history.has_earlier);
+      setUserEvents(
+        dedupeUserEvents(userHistory.items).slice(-MAX_VISIBLE_USER_EVENTS),
+      );
+      setUserEventResumeCursor(userHistory.resume_cursor);
+      setHasEarlierUserEvents(userHistory.has_earlier);
       childrenRef.current = childPage.items;
       setChildren(childPage.items);
       setChildCursor(childPage.next_cursor);
-      // Invocation enables the SSE effect, so publish it only after the
-      // resumable tail cursor and initial projections have been staged.
+      // Invocation enables both SSE effects, so publish it only after the
+      // independent Trace/UserEvent cursors and initial projections are staged.
       setInvocation(summary);
       setError(null);
       const stateToken = requests.start("boundary-state");
@@ -302,6 +337,44 @@ export default function App() {
   }, [selectedInvocation, refreshKey, report, requests, clearInvocationView]);
 
   useEffect(() => {
+    if (!selectedInvocation || !selectedEvent) {
+      requests.invalidate("historical-state");
+      setHistoricalState(null);
+      setLoadingHistoricalState(false);
+      return;
+    }
+    const controller = new AbortController();
+    const token = requests.start("historical-state");
+    const invocationId = selectedInvocation;
+    const event = selectedEvent;
+    setHistoricalState(null);
+    setLoadingHistoricalState(true);
+    api.state(invocationId, controller.signal, event.trace_sequence)
+      .then((response) => {
+        if (
+          !requests.isCurrent(token) ||
+          selectionRef.current.invocation !== invocationId
+        ) return;
+        setHistoricalState({
+          eventId: event.id,
+          traceSequence: event.trace_sequence,
+          state: response.state,
+        });
+        setError(null);
+      })
+      .catch((reason) => {
+        if (requests.isCurrent(token)) report(reason);
+      })
+      .finally(() => {
+        if (requests.finish(token)) setLoadingHistoricalState(false);
+      });
+    return () => {
+      controller.abort();
+      if (requests.isCurrent(token)) requests.invalidate(token.scope);
+    };
+  }, [selectedEvent, selectedInvocation, report, requests]);
+
+  useEffect(() => {
     if (
       !selectedInvocation ||
       !invocation ||
@@ -322,7 +395,7 @@ export default function App() {
         requests.isCurrent(stateToken) &&
         selectionRef.current.invocation === invocationId
       ) setState(response.state);
-    }, report, LIVE_STATE_REFRESH_DELAY_MS);
+    }, report);
     const childRefresh = createCoalescedRefresh(async () => {
       if (!current()) return;
       const summaryToken = requests.start("boundary-summary");
@@ -373,9 +446,9 @@ export default function App() {
           return merged;
         });
         setLive(true);
-        // State reconstruction is more expensive than Trace delivery. Keep it
-        // live for every semantic event, but serialize and coalesce bursts.
-        stateRefresh.request();
+        // Trace stays fully live, while complete State reconstruction happens
+        // only at durable boundaries and at stream_end.
+        if (shouldRefreshRuntimeState(event.kind)) stateRefresh.request();
         if (INVOCATION_BOUNDARY_KINDS.has(event.kind)) {
           const summaryToken = requests.start("boundary-summary");
           api.invocation(invocationId)
@@ -405,6 +478,7 @@ export default function App() {
       if (!current()) return;
       setLive(false);
       source.close();
+      stateRefresh.request();
       void Promise.all([childRefresh.flush(), stateRefresh.flush()]).finally(
         () => {
           childRefresh.dispose();
@@ -443,6 +517,80 @@ export default function App() {
     };
     // Reconnect only when selection/history bootstrap changes. New events are
     // delivered by this EventSource and do not need to recreate it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedInvocation, invocation?.invocation_id, report, requests]);
+
+  useEffect(() => {
+    if (
+      !selectedInvocation ||
+      !invocation ||
+      invocation.invocation_id !== selectedInvocation
+    ) return;
+    const invocationId = selectedInvocation;
+    const token = requests.start("user-event-sse");
+    const source = api.userEventStream(invocationId, userEventResumeCursor);
+    const current = () =>
+      requests.isCurrent(token) &&
+      selectionRef.current.invocation === invocationId;
+    const receive = (message: MessageEvent<string>) => {
+      if (!current()) return;
+      try {
+        const event = JSON.parse(message.data) as UserEvent;
+        if (
+          !event.id ||
+          !event.kind ||
+          event.invocation_id !== invocationId ||
+          !Number.isSafeInteger(event.sequence) ||
+          event.sequence < 1
+        ) return;
+        if (message.lastEventId) setUserEventResumeCursor(message.lastEventId);
+        setUserEvents((currentEvents) => {
+          const merged = dedupeUserEvents([...currentEvents, event]);
+          if (
+            merged.length > MAX_VISIBLE_USER_EVENTS &&
+            !userHistoryExpandedRef.current
+          ) {
+            setHasEarlierUserEvents(true);
+            return merged.slice(-MAX_VISIBLE_USER_EVENTS);
+          }
+          return merged;
+        });
+        setUserEventsLive(true);
+      } catch (reason) {
+        report(reason);
+      }
+    };
+    const finish = () => {
+      if (!current()) return;
+      setUserEventsLive(false);
+      source.close();
+      if (requests.isCurrent(token)) requests.invalidate(token.scope);
+    };
+    const fail = (message: MessageEvent<string>) => {
+      if (!current()) return;
+      handleTraceStreamError(message.data, invocationId, {
+        closeSource: () => source.close(),
+        stopRefresh: () => {
+          setUserEventsLive(false);
+          if (requests.isCurrent(token)) requests.invalidate(token.scope);
+        },
+        showError: (text) => report(new Error(text)),
+      });
+    };
+    source.onopen = () => {
+      if (current()) setUserEventsLive(true);
+    };
+    source.addEventListener("user_event", receive as EventListener);
+    source.addEventListener("stream_end", finish);
+    source.addEventListener("stream_error", fail as EventListener);
+    source.onerror = () => {
+      if (current()) setUserEventsLive(false);
+    };
+    return () => {
+      source.close();
+      if (requests.isCurrent(token)) requests.invalidate(token.scope);
+    };
+    // The independent UserEvent cursor is staged by the invocation bootstrap.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedInvocation, invocation?.invocation_id, report, requests]);
 
@@ -589,6 +737,43 @@ export default function App() {
       });
   }, [events, selectedInvocation, hasEarlierEvents, report, requests]);
 
+  const loadEarlierUserEvents = useCallback(() => {
+    const firstSequence = userEvents[0]?.sequence;
+    if (
+      !selectedInvocation ||
+      !hasEarlierUserEvents ||
+      firstSequence === undefined
+    ) return;
+    const invocationId = selectedInvocation;
+    const token = requests.tryStartExclusive("earlier-user-events");
+    if (!token) return;
+    setLoadingEarlierUserEvents(true);
+    api.userEventsBefore(invocationId, firstSequence)
+      .then((page) => {
+        if (
+          !requests.isCurrent(token) ||
+          selectionRef.current.invocation !== invocationId
+        ) return;
+        userHistoryExpandedRef.current = true;
+        setUserEvents((current) =>
+          dedupeUserEvents([...page.items, ...current]),
+        );
+        setHasEarlierUserEvents(page.has_earlier);
+      })
+      .catch((reason) => {
+        if (requests.isCurrent(token)) report(reason);
+      })
+      .finally(() => {
+        if (requests.finish(token)) setLoadingEarlierUserEvents(false);
+      });
+  }, [
+    userEvents,
+    selectedInvocation,
+    hasEarlierUserEvents,
+    report,
+    requests,
+  ]);
+
   const refresh = useCallback(() => {
     for (const scope of [
       "workflows",
@@ -596,14 +781,17 @@ export default function App() {
       "invocation-list",
       "invocation-bootstrap",
       "sse",
+      "user-event-sse",
       "boundary-summary",
       "boundary-state",
+      "historical-state",
       "boundary-children",
       "more-workflows",
       "more-sessions",
       "more-invocations",
       "more-children",
       "earlier-trace",
+      "earlier-user-events",
       "navigate",
     ]) requests.invalidate(scope);
     setLoadingMoreWorkflows(false);
@@ -611,6 +799,7 @@ export default function App() {
     setLoadingMoreInvocations(false);
     setLoadingMoreChildren(false);
     setLoadingEarlierTrace(false);
+    setLoadingEarlierUserEvents(false);
     clearInvocationView();
     setRefreshKey((value) => value + 1);
   }, [clearInvocationView, requests]);
@@ -619,7 +808,35 @@ export default function App() {
   const hiddenCount = hasEarlierEvents
     ? Math.max(1, (visibleEvents[0]?.trace_sequence ?? 1) - 1)
     : 0;
+  const hiddenUserEventCount = hasEarlierUserEvents
+    ? Math.max(1, (userEvents[0]?.sequence ?? 1) - 1)
+    : 0;
   const selection = selectedEvent ?? visibleEvents.at(-1) ?? null;
+  const historicalStateReady =
+    selectedEvent !== null && historicalState?.eventId === selectedEvent.id;
+  const displayedState = selectedEvent
+    ? historicalStateReady
+      ? historicalState.state
+      : null
+    : state;
+  const projectionTraceFallback = useMemo(() => {
+    if (displayedState !== null) return NO_TRACE_EVENTS;
+    return selectedEvent
+      ? visibleEvents.filter(
+          (event) => event.trace_sequence <= selectedEvent.trace_sequence,
+        )
+      : visibleEvents;
+  }, [displayedState, selectedEvent, visibleEvents]);
+  const runtimeProjection = useMemo(
+    () => projectRuntime(displayedState, projectionTraceFallback, snapshot),
+    [displayedState, projectionTraceFallback, snapshot],
+  );
+  const showLatestState = useCallback(() => {
+    requests.invalidate("historical-state");
+    setSelectedEvent(null);
+    setHistoricalState(null);
+    setLoadingHistoricalState(false);
+  }, [requests]);
 
   return (
     <main className="app-shell">
@@ -682,6 +899,11 @@ export default function App() {
             <h1>{invocation ? `Invocation ${shortId(invocation.invocation_id)}` : "Runtime overview"}</h1>
           </div>
           {invocation && <div className="invocation-meta">
+            {selectedEvent && (
+              <button type="button" className="relation-button" onClick={showLatestState}>
+                Back to latest
+              </button>
+            )}
             {invocation.parent_invocation_id && (
               <button type="button" className="relation-button" onClick={() => navigateToInvocation(invocation.parent_invocation_id!)}>
                 parent {shortId(invocation.parent_invocation_id)}
@@ -690,9 +912,40 @@ export default function App() {
             <Status value={invocation.status} /><span>{invocation.entry_node_id}</span>
           </div>}
         </div>
-        <section className="panel graph-panel"><PanelHeading title="Workflow graph" subtitle={snapshot?.workflow_revision_id ?? "Portable definition"} /><WorkflowGraph workflow={snapshot} events={visibleEvents} /></section>
+        {selectedEvent && (
+          <div className="state-mode-banner">
+            {loadingHistoricalState
+              ? `Loading State at Trace #${selectedEvent.trace_sequence}…`
+              : historicalStateReady
+                ? `Viewing State at Trace #${selectedEvent.trace_sequence}`
+                : `Trace fallback at #${selectedEvent.trace_sequence}`}
+          </div>
+        )}
+        <section className="panel graph-panel"><PanelHeading title="Workflow graph" subtitle={snapshot?.workflow_revision_id ?? "Portable definition"} /><WorkflowGraph workflow={snapshot} projection={runtimeProjection} /></section>
+        <section className="panel runtime-spans-panel">
+          <PanelHeading title="Runtime spans" subtitle={`${runtimeProjection.spans.length.toLocaleString()} NodeOccurrence / OperatorCall spans`} />
+          <RuntimeSpans spans={runtimeProjection.spans} />
+        </section>
+        <section className="panel user-events-panel">
+          <PanelHeading title="User Events" subtitle={`${userEvents.length.toLocaleString()} independent observations`} />
+          {hasEarlierUserEvents && (
+            <button
+              type="button"
+              className="load-more timeline-load-more"
+              disabled={loadingEarlierUserEvents}
+              onClick={loadEarlierUserEvents}
+            >
+              {loadingEarlierUserEvents ? "Loading…" : "Load earlier User Events"}
+            </button>
+          )}
+          <UserEventTimeline
+            events={userEvents}
+            hiddenCount={hiddenUserEventCount}
+            live={userEventsLive}
+          />
+        </section>
         <section className="panel timeline-panel">
-          <PanelHeading title="Runtime timeline" subtitle={`${events.length.toLocaleString()} safe trace events`} />
+          <PanelHeading title="Trace events" subtitle={`${events.length.toLocaleString()} safe trace events`} />
           {hasEarlierEvents && (
             <button
               type="button"
@@ -710,7 +963,11 @@ export default function App() {
       <aside className="inspector">
         <div className="inspector-heading"><Braces size={15} /><strong>Inspector</strong></div>
         <JsonInspector title="Selected event" value={selection} placeholder="Select a trace event." />
-        <JsonInspector title="Latest runtime state" value={state} placeholder="No Runtime State available." />
+        <JsonInspector
+          title={selectedEvent ? `Runtime state at Trace #${selectedEvent.trace_sequence}` : "Latest runtime state"}
+          value={displayedState}
+          placeholder={loadingHistoricalState ? "Loading historical Runtime State…" : "No Runtime State available."}
+        />
       </aside>
     </main>
   );
@@ -720,6 +977,14 @@ function dedupe(values: TraceEvent[]): TraceEvent[] {
   const byId = new Map<string, TraceEvent>();
   for (const value of values) byId.set(value.id, value);
   return [...byId.values()].sort((left, right) => left.trace_sequence - right.trace_sequence);
+}
+
+function dedupeUserEvents(values: UserEvent[]): UserEvent[] {
+  const byId = new Map<string, UserEvent>();
+  for (const value of values) byId.set(value.id, value);
+  return [...byId.values()].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
 }
 
 function mergeBy<T extends Record<K, string>, K extends keyof T>(

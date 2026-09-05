@@ -18,6 +18,10 @@ test("bootstrap establishes the tail cursor before lightweight projection reads"
       calls.push("tail");
       return tail.promise;
     },
+    userEventTail: async () => {
+      calls.push("user-tail");
+      return {} as any;
+    },
     invocation: async () => {
       calls.push("summary");
       return {} as any;
@@ -33,10 +37,10 @@ test("bootstrap establishes the tail cursor before lightweight projection reads"
     () => true,
     client,
   );
-  assert.deepEqual(calls, ["tail"]);
+  assert.deepEqual(calls, ["tail", "user-tail"]);
   tail.resolve({} as any);
   await loading;
-  assert.deepEqual(calls, ["tail", "summary", "children"]);
+  assert.deepEqual(calls, ["tail", "user-tail", "summary", "children"]);
 });
 
 test("stale bootstrap stops before issuing projection reads", async () => {
@@ -50,6 +54,10 @@ test("stale bootstrap stops before issuing projection reads", async () => {
         calls.push("tail");
         return {} as any;
       },
+      userEventTail: async () => {
+        calls.push("user-tail");
+        return {} as any;
+      },
       invocation: async () => {
         calls.push("summary");
         return {} as any;
@@ -61,5 +69,5 @@ test("stale bootstrap stops before issuing projection reads", async () => {
     },
   );
   assert.equal(result, null);
-  assert.deepEqual(calls, ["tail"]);
+  assert.deepEqual(calls, ["tail", "user-tail"]);
 });

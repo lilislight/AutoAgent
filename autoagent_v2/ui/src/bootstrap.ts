@@ -4,6 +4,7 @@ import type {
   InvocationSummary,
   Page,
   TracePage,
+  UserEventPage,
 } from "./types";
 
 export interface InvocationBootstrapClient {
@@ -12,6 +13,11 @@ export interface InvocationBootstrapClient {
     tailLimit: number,
     signal?: AbortSignal,
   ): Promise<TracePage>;
+  userEventTail(
+    invocationId: string,
+    tailLimit: number,
+    signal?: AbortSignal,
+  ): Promise<UserEventPage>;
   invocation(
     invocationId: string,
     signal?: AbortSignal,
@@ -25,6 +31,7 @@ export interface InvocationBootstrapClient {
 
 export interface InvocationBootstrap {
   history: TracePage;
+  userHistory: UserEventPage;
   summary: InvocationSummary;
   childPage: Page<ChildSessionSummary>;
 }
@@ -35,12 +42,15 @@ export async function loadInvocationBootstrap(
   isCurrent: () => boolean,
   client: InvocationBootstrapClient = api,
 ): Promise<InvocationBootstrap | null> {
-  const history = await client.traceTail(invocationId, 500, signal);
+  const [history, userHistory] = await Promise.all([
+    client.traceTail(invocationId, 500, signal),
+    client.userEventTail(invocationId, 500, signal),
+  ]);
   if (!isCurrent()) return null;
   const [summary, childPage] = await Promise.all([
     client.invocation(invocationId, signal),
     client.children(invocationId, null, signal),
   ]);
   if (!isCurrent()) return null;
-  return { childPage, history, summary };
+  return { childPage, history, summary, userHistory };
 }

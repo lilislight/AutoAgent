@@ -128,6 +128,26 @@ export interface TracePage {
   has_earlier: boolean;
 }
 
+export interface UserEvent {
+  id: string;
+  session_id: string;
+  invocation_id: string;
+  sequence: number;
+  kind: string;
+  payload: unknown;
+  occurrence_id: string | null;
+  occurred_at_ns: string;
+}
+
+export interface UserEventPage {
+  items: UserEvent[];
+  next_cursor: string | null;
+  resume_cursor: string | null;
+  resume_sequence: number;
+  has_more: boolean;
+  has_earlier: boolean;
+}
+
 export type RuntimeStateRecord = Record<string, unknown>;
 
 export interface InvocationStateResponse {

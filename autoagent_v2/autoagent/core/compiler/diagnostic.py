@@ -17,7 +17,7 @@ class Diagnostic:
     severity: Literal["error", "warning", "info"]
     message: str
     workflow_id: str | None = None
-    object_type: Literal["workflow", "node", "edge"] | None = None
+    object_type: Literal["workflow", "sub_workflow", "node", "edge"] | None = None
     object_id: str | None = None
     field: str | None = None
     hint: str | None = None

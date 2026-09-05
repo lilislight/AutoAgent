@@ -15,35 +15,44 @@ const DOWNSTREAM_OF_WORKFLOW = [
   "invocation-list",
   "invocation-bootstrap",
   "sse",
+  "user-event-sse",
   "boundary-summary",
   "boundary-state",
+  "historical-state",
   "boundary-children",
   "more-sessions",
   "more-invocations",
   "more-children",
   "earlier-trace",
+  "earlier-user-events",
 ] as const;
 
 const DOWNSTREAM_OF_SESSION = [
   "invocation-list",
   "invocation-bootstrap",
   "sse",
+  "user-event-sse",
   "boundary-summary",
   "boundary-state",
+  "historical-state",
   "boundary-children",
   "more-invocations",
   "more-children",
   "earlier-trace",
+  "earlier-user-events",
 ] as const;
 
 const DOWNSTREAM_OF_INVOCATION = [
   "invocation-bootstrap",
   "sse",
+  "user-event-sse",
   "boundary-summary",
   "boundary-state",
+  "historical-state",
   "boundary-children",
   "more-children",
   "earlier-trace",
+  "earlier-user-events",
 ] as const;
 
 export function switchWorkflow(

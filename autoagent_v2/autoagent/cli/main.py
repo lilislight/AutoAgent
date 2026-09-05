@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -19,6 +19,7 @@ from typing import Iterator, TextIO
 
 from pydantic import BaseModel
 
+from autoagent.core.app import CheckpointLoadResult, InvocationRef, InvocationResult
 from autoagent.core.errors import AutoAgentError
 from autoagent.core.compiler import WorkflowCompiler
 from autoagent.host import (
@@ -26,7 +27,10 @@ from autoagent.host import (
     HostConfigurationError,
     HostOperationError,
     ProjectLoader,
+    load_project_environment,
     load_host_settings,
+    project_environment_scope,
+    resolve_manifest_path,
 )
 from autoagent.hosting import RuntimeEventStoreError, SQLiteRuntimeStore
 
@@ -85,6 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     compile_command.add_argument(
         "--project", default=".", help="Project directory or autoagent.toml."
     )
+    _add_environment_arguments(compile_command)
     compile_command.set_defaults(handler=_compile)
 
     invoke_command = commands.add_parser(
@@ -99,7 +104,32 @@ def _parser() -> argparse.ArgumentParser:
     )
     invoke_command.add_argument("--session-id")
     invoke_command.add_argument("--entry", dest="entry_node_id")
+    _add_environment_arguments(invoke_command)
     invoke_command.set_defaults(handler=_invoke)
+
+    resume_command = commands.add_parser(
+        "resume", help="Restore one Root Session and answer a durable Wait."
+    )
+    resume_command.add_argument("session_id")
+    resume_command.add_argument("wait_id")
+    resume_command.add_argument(
+        "--response", required=True, help="A JSON value or @path to a JSON file."
+    )
+    resume_command.add_argument(
+        "--project", default=".", help="Project directory or autoagent.toml."
+    )
+    _add_environment_arguments(resume_command)
+    resume_command.set_defaults(handler=_resume)
+
+    recover_command = commands.add_parser(
+        "recover", help="Restore and recover one unfinished Root Session."
+    )
+    recover_command.add_argument("session_id")
+    recover_command.add_argument(
+        "--project", default=".", help="Project directory or autoagent.toml."
+    )
+    _add_environment_arguments(recover_command)
+    recover_command.set_defaults(handler=_recover)
 
     trace_command = commands.add_parser(
         "trace", help="Serve a read-only local tracing database and UI."
@@ -116,13 +146,31 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly expose full local traces on a non-loopback address.",
     )
+    _add_environment_arguments(trace_command)
     trace_command.set_defaults(handler=_trace)
     return parser
 
 
+def _add_environment_arguments(command: argparse.ArgumentParser) -> None:
+    group = command.add_mutually_exclusive_group()
+    group.add_argument(
+        "--env-file",
+        help="Load this environment file relative to the Project root.",
+    )
+    group.add_argument(
+        "--no-env-file",
+        action="store_true",
+        help="Do not load the Project .env file.",
+    )
+
+
 def _compile(arguments: argparse.Namespace) -> int:
-    with _redirect_user_stdout():
-        project = ProjectLoader().load(arguments.project)
+    manifest_path, environment = _workflow_command_environment(arguments)
+    with project_environment_scope(environment), _redirect_user_stdout():
+        project = ProjectLoader().load(
+            manifest_path,
+            environment=environment,
+        )
         compiler = WorkflowCompiler()
         workflows: list[dict[str, object]] = []
         ok = True
@@ -147,25 +195,106 @@ def _compile(arguments: argparse.Namespace) -> int:
 def _invoke(arguments: argparse.Namespace) -> int:
     value = _read_json_argument(arguments.input)
     with _redirect_user_stdout():
-        host = AutoAgentHost.from_project(arguments.project)
-        try:
-            result = host.invoke(
-                arguments.workflow_id,
-                value,
-                session_id=arguments.session_id,
-                entry_node_id=arguments.entry_node_id,
-            )
-        except BaseException as error:
-            _close_after_failure(host, error)
-            raise
-        else:
-            host.close()
+        host = AutoAgentHost.from_project(
+            arguments.project,
+            env_file=arguments.env_file,
+            use_env_file=not arguments.no_env_file,
+        )
+        with project_environment_scope(getattr(host, "environment", None)):
+            try:
+                result = host.invoke(
+                    arguments.workflow_id,
+                    value,
+                    session_id=arguments.session_id,
+                    entry_node_id=arguments.entry_node_id,
+                )
+            except BaseException as error:
+                _close_after_failure(host, error)
+                raise
+            else:
+                host.close()
     _write_json(_invocation_result_record(result))
     return 0 if result.status in {"completed", "waiting"} else 1
 
 
+def _resume(arguments: argparse.Namespace) -> int:
+    response = _read_json_argument(arguments.response)
+    result = _run_restored_command(
+        arguments,
+        lambda host, ref: host.resume(ref, arguments.wait_id, response),
+    )
+    _write_json(_invocation_result_record(result))
+    return 0 if result.status in {"completed", "waiting"} else 1
+
+
+def _recover(arguments: argparse.Namespace) -> int:
+    result = _run_restored_command(
+        arguments,
+        lambda host, ref: host.recover(ref),
+    )
+    _write_json(_invocation_result_record(result))
+    return 0 if result.status in {"completed", "waiting"} else 1
+
+
+def _run_restored_command(
+    arguments: argparse.Namespace,
+    operation: Callable[[AutoAgentHost, InvocationRef], InvocationResult],
+) -> InvocationResult:
+    with _redirect_user_stdout():
+        host = AutoAgentHost.from_project(
+            arguments.project,
+            env_file=arguments.env_file,
+            use_env_file=not arguments.no_env_file,
+        )
+        with project_environment_scope(getattr(host, "environment", None)):
+            try:
+                loaded = host.restore_session(arguments.session_id)
+                ref = _restored_root_ref(loaded, arguments.session_id)
+                result = operation(host, ref)
+            except BaseException as error:
+                _close_after_failure(host, error)
+                raise
+            else:
+                host.close()
+    return result
+
+
+def _restored_root_ref(
+    loaded: CheckpointLoadResult,
+    session_id: str,
+) -> InvocationRef:
+    matches = tuple(
+        ref for ref in loaded.roots if ref.session_id == session_id
+    )
+    if len(matches) != 1:
+        raise _CliError(
+            "HOST_SESSION_NOT_CURRENT",
+            f"Session {session_id!r} is not the current restored Root Session.",
+        )
+    return matches[0]
+
+
 def _trace(arguments: argparse.Namespace) -> int:
-    settings = load_host_settings(_project_root(arguments.project))
+    project_root = _project_root(arguments.project)
+    environment = load_project_environment(
+        project_root,
+        env_file=arguments.env_file,
+        use_env_file=not arguments.no_env_file,
+    )
+    with project_environment_scope(environment):
+        return _trace_with_environment(arguments, project_root, environment)
+
+
+def _trace_with_environment(
+    arguments: argparse.Namespace,
+    project_root: Path,
+    environment: Mapping[str, str],
+) -> int:
+    settings = load_host_settings(
+        project_root,
+        use_env_file=False,
+        environ=environment,
+    )
     database = (
         Path(arguments.database).expanduser().resolve()
         if arguments.database is not None
@@ -234,6 +363,18 @@ def _trace(arguments: argparse.Namespace) -> int:
     else:
         store.close()
     return 0
+
+
+def _workflow_command_environment(
+    arguments: argparse.Namespace,
+) -> tuple[Path, dict[str, str]]:
+    manifest_path = resolve_manifest_path(arguments.project)
+    environment = load_project_environment(
+        manifest_path.parent,
+        env_file=arguments.env_file,
+        use_env_file=not arguments.no_env_file,
+    )
+    return manifest_path, environment
 
 
 def _project_root(project: str | Path) -> Path:

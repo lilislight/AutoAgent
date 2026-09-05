@@ -1,6 +1,6 @@
 """Project configuration and Workflow loading for the V2 Host layer."""
 
-from .environment import load_project_environment
+from .environment import load_project_environment, project_environment_scope
 from .errors import (
     HostConfigurationError,
     HostDiagnostic,
@@ -49,5 +49,6 @@ __all__ = [
     "load_host_settings",
     "load_project_environment",
     "load_project_manifest",
+    "project_environment_scope",
     "resolve_manifest_path",
 ]

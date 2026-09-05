@@ -112,7 +112,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
         """Verify malformed authoring objects fail through Compiler diagnostics."""
         compiler = WorkflowCompiler()
         cases = (
-            (Workflow(1, nodes=[Node("node", identity)]), "WORKFLOW_ID_EMPTY"),
+            (Workflow(1, nodes=[Node("node", identity)]), "WORKFLOW_ID_INVALID"),
             (Workflow("node-id", nodes=[Node(1, identity)]), "NODE_ID_INVALID"),
             (Workflow("node-object", nodes=[object()]), "NODE_DEFINITION_INVALID"),
             (
@@ -156,6 +156,41 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 result = compiler.compile(workflow)  # type: ignore[arg-type]
                 self.assertFalse(result.ok)
                 self.assertIn(code, {item.code for item in result.diagnostics})
+
+    def test_diagnostics_preserve_their_declared_identifier_types(self) -> None:
+        """Verify malformed definitions still produce type-safe diagnostic records."""
+
+        compiler = WorkflowCompiler()
+        invalid_id = compiler.compile(
+            Workflow(1, nodes=[Node("node", identity)])  # type: ignore[arg-type]
+        )
+        self.assertIsNone(invalid_id.workflow_id)
+        diagnostic = next(
+            item
+            for item in invalid_id.diagnostics
+            if item.code == "WORKFLOW_ID_INVALID"
+        )
+        self.assertIsNone(diagnostic.workflow_id)
+        self.assertEqual(diagnostic.object_type, "workflow")
+        self.assertEqual(diagnostic.field, "id")
+
+        invalid_inline = compiler.compile(
+            Workflow(
+                "parent",
+                sub_workflows=[
+                    SubWorkflow(
+                        "part:invalid",
+                        Workflow("child", nodes=[Node("node", identity)]),
+                    )
+                ],
+            )
+        )
+        inline_diagnostic = next(
+            item
+            for item in invalid_inline.diagnostics
+            if item.code == "SUBWORKFLOW_ID_RESERVED"
+        )
+        self.assertEqual(inline_diagnostic.object_type, "sub_workflow")
 
     def test_numeric_runtime_limits_reject_bool_values(self) -> None:
         """Verify confirmed numeric limits reject bool aliases."""

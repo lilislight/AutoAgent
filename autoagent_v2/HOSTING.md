@@ -251,16 +251,28 @@ Session 摘要。
 ## 七、CLI
 
 ```text
-autoagent compile [--project PATH]
+autoagent compile [--project PATH] [--env-file PATH | --no-env-file]
 autoagent invoke WORKFLOW_ID --input JSON [--session-id ID] [--entry NODE]
+                 [--env-file PATH | --no-env-file]
+autoagent resume SESSION_ID WAIT_ID --response JSON [--project PATH]
+                 [--env-file PATH | --no-env-file]
+autoagent recover SESSION_ID [--project PATH]
+                  [--env-file PATH | --no-env-file]
 autoagent trace [--database PATH] [--host HOST] [--port PORT]
                 [--allow-remote-without-auth]
+                [--env-file PATH | --no-env-file]
 ```
 
 - `compile`：加载全部 Workflow，执行 Compiler 检查并打印 revision；不创建数据库。
 - `invoke`：创建 Host，执行到 completed/failed/cancelled/waiting 边界并输出 JSON。
+- `resume`：从 SQLite 恢复一个 Root Session，回答指定 Wait 并执行到下一个稳定边界。
+- `recover`：从 SQLite 恢复一个未完成的 Root Session，并执行崩溃恢复。
 - `trace`：启动只读本地 Tracing Server 和 UI；非 loopback 必须显式确认无认证暴露；
   uvicorn 启动失败返回结构化 `TRACING_SERVER_FAILED` 且始终关闭只读 Store。
+
+所有命令使用同一套环境规则：默认读取 Project `.env`，`--env-file` 选择其他文件，
+`--no-env-file` 禁用文件；进程环境始终优先。Workflow 导入、Operator 执行、恢复和 Host
+关闭期间使用同一份不可变快照，命令退出或失败后恢复原 `os.environ`。
 
 所有用户 Python、原生 fd 和子进程输出都与 stdout 机器通道隔离；诊断写 stderr，机器结果
 只写一条 JSON 到 stdout。成功退出码为 0，项目/编译/执行错误为 1，

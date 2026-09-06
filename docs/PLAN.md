@@ -32,7 +32,8 @@ plan/handle、崩溃后 lost call 协调，以及 `Recovery(mode="never" | "repl
 
 ## 阶段 6：App 与公开边界
 
-已实现同步/异步 invoke、submit、wait、resume、cancel、recover、stream、Child 控制、
+已实现同步/异步 invoke、submit、status、join、resume、cancel、recover、stream、
+stream resume、Child Handle 查询、
 Checkpoint 加载和关闭。一个 Session 同时最多一个活动 Invocation；控制操作使用精确
 InvocationRef。
 

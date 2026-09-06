@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import TypedDict
 
 from autoagent import (
+    AppCheckpoint,
     AutoAgentApp,
     Capability,
     ConditionContext,
@@ -18,11 +19,12 @@ from autoagent import (
     ContextPatch,
     Edge,
     InputMappingContext,
+    InvocationUpdate,
     Map,
     Node,
     Operator,
     OutputBindingContext,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeTransitionError,
     Stream,
     StreamContext,
@@ -188,7 +190,7 @@ class QualityTests(unittest.TestCase):
             time.sleep(0.03)
             self.assertEqual(peak, 2)
             release.set()
-            results = [app.wait(item.ref, 2) for item in submitted]
+            results = [app.join(item.ref, 2) for item in submitted]
             self.assertTrue(all(item.status == "completed" for item in results))
             self.assertEqual(peak, 2)
         finally:
@@ -271,7 +273,7 @@ class QualityTests(unittest.TestCase):
             time.sleep(0.03)
             self.assertFalse(async_started.is_set())
             release_sync.set()
-            self.assertEqual(app.wait(second.ref, 2).status, "completed")
+            self.assertEqual(app.join(second.ref, 2).status, "completed")
             self.assertTrue(async_started.is_set())
         finally:
             release_sync.set()
@@ -282,7 +284,7 @@ class QualityTests(unittest.TestCase):
         journal = InMemoryEventJournal()
         app = AutoAgentApp(runtime_journal=journal)
         try:
-            result = app.invoke(
+            items = list(app.stream(
                 Workflow(
                     "mapped-user-event",
                     nodes=[
@@ -296,9 +298,11 @@ class QualityTests(unittest.TestCase):
                     ],
                 ),
                 {"value": 4},
-            )
+            ))
+            result = items[-1]
+            events = [item.event for item in items if isinstance(item, InvocationUpdate)]
             self.assertEqual(
-                [(event.kind, event.payload) for event in result.user_events],
+                [(event.kind, event.payload) for event in events],
                 [("node.output", {"value": 4})],
             )
         finally:
@@ -385,23 +389,22 @@ class QualityTests(unittest.TestCase):
         """Verify stream chunks are separate ordered user events."""
         app = AutoAgentApp()
         try:
-            result = app.invoke(
+            items = list(app.stream(
                 Workflow(
                     "user-events",
                     nodes=[Node("stream", chunks, stream=Stream(SumReducer()))],
                 ),
                 {"value": 3},
-            )
+            ))
+            result = items[-1]
+            events = [item.event for item in items if isinstance(item, InvocationUpdate)]
             self.assertEqual(result.output, {"total": 3})
             self.assertEqual(
-                [event.payload for event in result.user_events],
+                [event.payload for event in events],
                 [{"value": 0}, {"value": 1}, {"value": 2}],
             )
-            self.assertEqual([event.sequence for event in result.user_events], [1, 2, 3])
-            self.assertFalse(
-                any(event.kind == "stream.chunk" for event in result.trace_events)
-            )
-            for event in result.user_events:
+            self.assertEqual([event.sequence for event in events], [1, 2, 3])
+            for event in events:
                 self.assertEqual(UserEvent.from_record(event.to_record()), event)
         finally:
             app.close()
@@ -415,7 +418,7 @@ class QualityTests(unittest.TestCase):
                 {"value": 1},
             )
             self.assertEqual(result.output, {"value": 2})
-            json.dumps([event.to_record() for event in result.trace_events])
+            json.dumps(result.output)
         finally:
             app.close()
 
@@ -604,39 +607,6 @@ class QualityTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_small_patch_event_does_not_duplicate_large_context(self) -> None:
-        """Verify small patch event does not duplicate large context."""
-        def binding(_context: OutputBindingContext):
-            from autoagent import ContextOperation, ContextPatch
-
-            return ContextPatch(invocation=(ContextOperation.set("small", 1),))
-
-        # Keep resolvable annotations on a module-level function contract.
-        binding.__annotations__ = {
-            "_context": OutputBindingContext,
-            "return": __import__("autoagent").ContextPatch,
-        }
-        app = AutoAgentApp()
-        try:
-            workflow = Workflow(
-                "large-context",
-                nodes=[Node("node", identity, output_binding=binding)],
-            )
-            result = app.invoke(
-                workflow,
-                {"value": 1},
-                session_context={"large": "x" * 100_000},
-            )
-            completed = next(
-                event
-                for event in result.trace_events
-                if event.kind == "node_occurrence.completed"
-            )
-            encoded = json.dumps(completed.to_record())
-            self.assertLess(len(encoded), 5_000)
-            self.assertNotIn("x" * 100, encoded)
-        finally:
-            app.close()
 
     def test_app_close_returns_recoverable_state_without_business_cancel(self) -> None:
         """Verify clean close quiesces tasks and returns current checkpoint state."""
@@ -655,7 +625,7 @@ class QualityTests(unittest.TestCase):
         )
         self.assertTrue(started.wait(1))
         checkpoint = app.close()
-        state = checkpoint.roots[0].state(submitted.session_id)
+        state = checkpoint.sessions[0].state
         self.assertEqual(state.invocation.status, "running")
         self.assertFalse(
             any(
@@ -747,18 +717,23 @@ class QualityTests(unittest.TestCase):
         first_app = AutoAgentApp()
         result = first_app.invoke(parent, {"value": 1})
         handle = result.output
-        child_result = first_app.wait_child(handle)
-        checkpoint = child_result.checkpoint
+        child_result = first_app.join(handle)
+        checkpoint = AppCheckpoint(
+            (
+                first_app.unload_session(child_result.ref),
+                first_app.unload_session(result.ref),
+            )
+        )
         first_app.close()
 
         second_app = AutoAgentApp()
         try:
             second_app.register_workflow(parent)
             second_app.load_checkpoint(checkpoint)
-            status = second_app.child_status(handle)
+            status = second_app.status(handle)
             self.assertEqual(status.status, "completed")
             self.assertEqual(
-                second_app.child_handles(result.ref),
+                second_app.child_invocations(result.ref),
                 (handle,),
             )
         finally:
@@ -859,34 +834,39 @@ class QualityTests(unittest.TestCase):
                     session_id="cursor-session",
                     session_context={"version": 2},
                 )
-            incremental = app.wait(first.ref)
-            self.assertEqual(incremental.trace_events, ())
-            self.assertEqual(incremental.user_events, ())
+            incremental = app.join(first.ref)
+            self.assertFalse(hasattr(incremental, "trace_events"))
+            self.assertFalse(hasattr(incremental, "user_events"))
         finally:
             app.close()
 
-    def test_result_exposes_trace_and_checkpoint_not_state_operations(self) -> None:
-        """Verify SDK results separate safe Trace from recoverable Checkpoint State."""
+    def test_result_omits_events_and_checkpoint(self) -> None:
+        """Keep events and checkpoint capture out of Invocation results."""
         app = AutoAgentApp()
         try:
             workflow = Workflow("event-batch", nodes=[Node("node", identity)])
             first = app.invoke(
                 workflow, {"value": 1}, session_id="event-batch-session"
             )
-            self.assertEqual(first.trace_events[0].kind, "session.opened")
             self.assertFalse(hasattr(first, "events"))
-            rebuilt = RuntimeCheckpointBundle.from_record(
-                first.checkpoint.to_record()
+            self.assertFalse(hasattr(first, "trace_events"))
+            self.assertFalse(hasattr(first, "user_events"))
+            self.assertFalse(hasattr(first, "checkpoint"))
+            self.assertFalse(hasattr(app, "checkpoint"))
+            self.assertFalse(hasattr(app, "acheckpoint"))
+            checkpoint = app.unload_session(first.ref)
+            rebuilt = SessionCheckpoint.from_record(
+                checkpoint.to_record()
             )
             self.assertEqual(
-                rebuilt.state(first.session_id).invocation.output,
+            rebuilt.state.invocation.output,
                 {"value": 1},
             )
             recovered_app = AutoAgentApp()
             try:
                 recovered_app.register_workflow(workflow)
-                loaded = recovered_app.load_checkpoint(first.checkpoint)
-                recovered = recovered_app.wait(loaded.roots[0])
+                loaded = recovered_app.load_checkpoint(checkpoint)
+                recovered = recovered_app.join(loaded.invocations[0])
                 self.assertEqual(recovered.output, {"value": 1})
             finally:
                 recovered_app.close()
@@ -894,11 +874,7 @@ class QualityTests(unittest.TestCase):
             second = app.invoke(
                 workflow, {"value": 2}, session_id=first.session_id
             )
-            self.assertTrue(second.trace_events)
-            self.assertEqual(second.trace_events[0].kind, "invocation.opened")
-            self.assertNotIn(
-                "session.opened", {event.kind for event in second.trace_events}
-            )
+            self.assertEqual(second.output, {"value": 2})
         finally:
             app.close()
 
@@ -916,7 +892,7 @@ class QualityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeTransitionError, "INVOCATION_REF_STALE"
             ):
-                app.wait(first.ref)
+                app.join(first.ref)
         finally:
             app.close()
 

@@ -1,4 +1,4 @@
-"""Normative V2 graph and Loop analysis from ``workflow.md``."""
+"""Normative V2 graph and Loop analysis from ``docs/workflow.md``."""
 
 from __future__ import annotations
 

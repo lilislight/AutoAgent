@@ -28,7 +28,7 @@ from autoagent import (
     Node,
     OutputBindingContext,
     Recovery,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     SubWorkflow,
     UserEventMapping,
     Wait,
@@ -36,7 +36,8 @@ from autoagent import (
 )
 
 
-CHECKPOINT_PATH = Path("core_workflow_checkpoint.json")
+PARENT_CHECKPOINT_PATH = Path("core_workflow_checkpoint.json")
+CHILD_CHECKPOINT_PATH = Path("core_workflow_child_checkpoint.json")
 
 
 # Core requires durable Operator boundaries. TypedDict and strict Pydantic models
@@ -314,30 +315,19 @@ def print_result(label: str, result: InvocationResult) -> None:
     print(f"output={result.output}")
     print(f"error={result.error}")
     print(f"waits={result.waits}")
-    print("trace kinds:", [event.kind for event in result.trace_events])
-    print(
-        "user events:",
-        [(event.kind, event.payload) for event in result.user_events],
-    )
-    print(
-        "checkpoint:",
-        result.checkpoint.id,
-        "sessions=",
-        tuple(result.checkpoint.states),
-    )
 
 
-def save_checkpoint(checkpoint: RuntimeCheckpointBundle) -> None:
-    CHECKPOINT_PATH.write_text(
+def save_checkpoint(path: Path, checkpoint: SessionCheckpoint) -> None:
+    path.write_text(
         json.dumps(checkpoint.to_record(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"\nsaved checkpoint to {CHECKPOINT_PATH.resolve()}")
+    print(f"\nsaved checkpoint to {path.resolve()}")
 
 
-def load_checkpoint() -> RuntimeCheckpointBundle:
-    record = json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
-    return RuntimeCheckpointBundle.from_record(record)
+def load_checkpoint(path: Path) -> SessionCheckpoint:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    return SessionCheckpoint.from_record(record)
 
 
 def main() -> None:
@@ -346,8 +336,8 @@ def main() -> None:
     compiled = source.register_workflow(workflow)
     print("registered revision:", compiled.workflow_revision_id)
 
-    # stream() invokes the Workflow and exposes backpressured observations. Some
-    # updates also carry a checkpoint when Core has reached a safe boundary.
+    # stream() invokes the Workflow and yields only explicit User Events, then
+    # one final InvocationResult. It does not build checkpoints implicitly.
     waiting: InvocationResult | None = None
     with source.stream(
         workflow.id,
@@ -359,28 +349,27 @@ def main() -> None:
                 print(
                     "stream update:",
                     item.event.kind,
-                    "safe checkpoint=",
-                    item.checkpoint is not None,
+                    item.event.payload,
                 )
             else:
                 waiting = item
     assert waiting is not None
-    # Attached stream observations are delivered once as InvocationUpdate; the
-    # final Result does not duplicate them in trace_events/user_events.
+    # Streamed User Events are delivered once as InvocationUpdate. The final
+    # Result contains only the Invocation boundary data.
     print_result("source reached Wait", waiting)
 
-    # The checkpoint is a self-contained Runtime State graph. Core does not
-    # choose storage, so this example persists its canonical record as JSON.
-    save_checkpoint(waiting.checkpoint)
+    # unload_session() transfers one quiescent Session out of Core memory and
+    # returns its checkpoint. invoke/stream never build checkpoints implicitly.
+    save_checkpoint(PARENT_CHECKPOINT_PATH, source.unload_session(waiting.ref))
     source.close()
 
-    # Simulate a new process: construct a fresh Core App and register the exact
-    # Workflow revision before installing its checkpoint.
+    # Simulate a new process. Loading restores State without requiring Workflow
+    # code; the exact revision is required only when recover() executes it.
     recovered = AutoAgentApp(max_operator_concurrency=4)
+    loaded = recovered.load_checkpoint(load_checkpoint(PARENT_CHECKPOINT_PATH))
+    root_ref = loaded.invocations[0]
     recovered_workflow = build_workflow()
     recovered.register_workflow(recovered_workflow)
-    loaded = recovered.load_checkpoint(load_checkpoint())
-    root_ref = loaded.roots[0]
     print("\nloaded root:", root_ref)
 
     # recover() validates recovery policy and drives runnable work. A Wait stays
@@ -388,23 +377,30 @@ def main() -> None:
     restored_wait = recovered.recover(root_ref)
     print_result("recovered Wait", restored_wait)
 
-    completed = recovered.resume(
+    completed: InvocationResult | None = None
+    with recovered.stream_resume(
         root_ref,
         restored_wait.waits[0].id,
         {"approved": True},
-    )
+    ) as updates:
+        for item in updates:
+            if isinstance(item, InvocationUpdate):
+                print("resume update:", item.event.kind)
+            else:
+                completed = item
+    assert completed is not None
     print_result("parent completed", completed)
 
-    # The approved path returns after spawning the audit Child. Observe and wait
-    # for it through the parent's durable ChildInvocationHandle.
-    child_handle = recovered.child_handles(completed.ref)[0]
-    print("\nspawned child handle:", child_handle)
-    child = recovered.wait_child(child_handle, timeout=2.0)
+    # The approved path returns after spawning the audit Child. Observe and join
+    # for it through the parent's durable InvocationRef.
+    child_ref = recovered.child_invocations(completed.ref)[0]
+    print("\nspawned child ref:", child_ref)
+    child = recovered.join(child_ref, timeout=2.0)
     print_result("spawned audit child", child)
 
-    # Any stable result boundary carries a fresh checkpoint. This one includes
-    # the root plus the spawned Child Runtime State.
-    save_checkpoint(child.checkpoint)
+    # checkpoint(handle) lets callers persist a Child independently at any
+    # stable point while it remains present in this App.
+    save_checkpoint(CHILD_CHECKPOINT_PATH, recovered.unload_session(child_ref))
     recovered.close()
 
 

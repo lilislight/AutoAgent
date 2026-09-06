@@ -264,7 +264,7 @@ def _restored_root_ref(
     session_id: str,
 ) -> InvocationRef:
     matches = tuple(
-        ref for ref in loaded.roots if ref.session_id == session_id
+        ref for ref in loaded.invocations if ref.session_id == session_id
     )
     if len(matches) != 1:
         raise _CliError(
@@ -498,12 +498,6 @@ def _invocation_result_record(result: object) -> dict[str, object]:
             {"id": wait.id, "request": _json_value(wait.request)}
             for wait in result.waits
         ],
-        "checkpoint": {
-            "id": result.checkpoint.id,
-            "root_session_id": result.checkpoint.root_session_id,
-            "captured_at_ns": str(result.checkpoint.captured_at_ns),
-            "digest": result.checkpoint.digest,
-        },
     }
 
 

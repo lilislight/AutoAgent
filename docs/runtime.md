@@ -95,16 +95,17 @@ migration。
 | --- | --- |
 | `invoke/ainvoke` | completed、failed、cancelled 或 waiting 返回点 |
 | `submit_invoke/asubmit_invoke` | Invocation 已初始化并可靠接纳 |
-| `wait/await_result` | 当前可观察返回点 |
+| `join/ajoin` | 当前可观察返回点 |
 | `resume/aresume` | Resume 后的下一终态或 waiting 边界 |
 | `submit_resume/asubmit_resume` | Resume 被可靠接纳 |
+| `stream_resume/astream_resume` | Resume 后每个流式安全边界，最后为 Result |
 | `cancel/acancel` | 父子图取消收敛后 |
 | `recover/arecover` | 恢复驱动后的下一终态或 waiting 边界 |
 | `close/aclose` | 进程内任务停止后，每个独立 Root 一个 Bundle |
 
-### stream/astream
+### stream/astream 与 stream_resume/astream_resume
 
-`stream/astream` 是零 backlog、caller-driven 的严格背压流：Runtime 只有收到下一次
+这些 API 是零 backlog、caller-driven 的严格背压流：Runtime 只有收到下一次
 迭代请求才创建并提交下一条更新，上一条必须先由调用方确认消费。每个
 `InvocationUpdate` 都有 Trace/User Event，但 `checkpoint` 仅在安全恢复边界非空：
 

@@ -80,7 +80,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 )
 
         self.assertTrue(
-            {"AutoAgentApp", "Workflow", "RuntimeCheckpointBundle", "TraceEvent"}
+            {"AutoAgentApp", "Workflow", "SessionCheckpoint", "UserEvent"}
             <= set(sdk_api.__all__)
         )
         self.assertFalse(
@@ -361,7 +361,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 ),
                 {"value": 2},
             )
-            waiting = app.wait(waiting.ref, timeout=1)
+            waiting = app.join(waiting.ref, timeout=1)
             resumed = app.resume(
                 waiting.ref, waiting.waits[0].id, {"value": 3}
             )
@@ -381,8 +381,8 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 ),
                 {"value": 4},
             )
-            handle = app.child_handles(spawned.ref)[0]
-            app.wait_child(handle, timeout=1)
+            handle = app.child_invocations(spawned.ref)[0]
+            app.join(handle, timeout=1)
 
             events = tuple(collector.events)
             names = {event.event_name for event in events}
@@ -460,12 +460,12 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
         try:
             waiting = Workflow("async-wait", nodes=[Node("wait", Wait(Value, Value))])
             submitted = await app.asubmit_invoke(waiting, {"value": 1})
-            boundary = await app.await_result(submitted.ref, timeout=1)
+            boundary = await app.ajoin(submitted.ref, timeout=1)
             self.assertEqual(boundary.status, "waiting")
             resumed = await app.asubmit_resume(
                 submitted.ref, boundary.waits[0].id, {"value": 2}
             )
-            completed = await app.await_result(resumed.ref, timeout=1)
+            completed = await app.ajoin(resumed.ref, timeout=1)
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.output, {"value": 2})
 
@@ -479,15 +479,12 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 nodes=[Node("spawn", child_workflow, execution_mode="spawn")],
             )
             parent_result = await app.ainvoke(parent, {"value": 3})
-            handles = await app.achild_handles(parent_result.ref)
+            handles = await app.achild_invocations(parent_result.ref)
             self.assertEqual(len(handles), 1)
-            status = await app.achild_status(handles[0])
+            status = await app.astatus(handles[0])
             self.assertIn(status.status, {"running", "completed"})
-            child_result = await app.await_child(handles[0], timeout=1)
+            child_result = await app.ajoin(handles[0], timeout=1)
             self.assertEqual(child_result.output, {"value": 3})
-            self.assertTrue(
-                json.dumps([event.to_record() for event in parent_result.trace_events])
-            )
 
             async def blocked_child(value: Value) -> Value:
                 await asyncio.sleep(10)
@@ -508,9 +505,9 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
             )
             blocked_result = await app.ainvoke(blocked_parent, {"value": 4})
             blocked_handle = (
-                await app.achild_handles(blocked_result.ref)
+                await app.achild_invocations(blocked_result.ref)
             )[0]
-            cancelled = await app.acancel_child(blocked_handle, "test cancel")
+            cancelled = await app.acancel(blocked_handle, "test cancel")
             self.assertEqual(cancelled.status, "cancelled")
         finally:
             await app.aclose()

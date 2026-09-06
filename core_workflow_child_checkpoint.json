@@ -1,0 +1,96 @@
+{
+  "captured_at_ns": 1788630587994529650,
+  "digest": "54ea5c59d64137603f5ec0a3369b5ff18f17ac832754ebb2ec9503ee72e2e765",
+  "id": "26575f0c-bb47-4d7d-a540-ae1db25ebf31",
+  "schema_version": 1,
+  "session_id": "df7a2b4b-3c40-418a-927e-08ed99ec1e1f",
+  "state": {
+    "invocation": {
+      "cancel_reason": null,
+      "child_plans": {},
+      "completed_at_ns": 1788630587992266988,
+      "context": {},
+      "context_path_revisions": {},
+      "created_at_ns": 1788630587884969327,
+      "entry_node_id": "write",
+      "error": null,
+      "id": "88fc247b-3a32-4eba-97b3-d6a6d2d2a843",
+      "input": {
+        "order_id": "order-42",
+        "summary": "risk=True, inventory=True"
+      },
+      "output": {
+        "order_id": "order-42",
+        "stored": true
+      },
+      "scheduler": {
+        "boundary_resolutions": {},
+        "initialized": true,
+        "occurrences": {
+          "write@root": {
+            "activations": [],
+            "completed_at_ns": 1788630587989186861,
+            "error": null,
+            "id": "write@root",
+            "metrics": {
+              "call_count": 1,
+              "duration_ns": 102238883,
+              "peak_parallelism": 1
+            },
+            "node_id": "write",
+            "output": {
+              "order_id": "order-42",
+              "stored": true
+            },
+            "recovery_attempts": 0,
+            "scope": [],
+            "started_at_ns": 1788630587886384328,
+            "started_state_version": 5,
+            "status": "completed"
+          }
+        },
+        "operator_calls": {
+          "3562a85d-9fd8-4e5c-aca2-09e1390b05ba": {
+            "completed_at_ns": 1788630587987774666,
+            "error": null,
+            "id": "3562a85d-9fd8-4e5c-aca2-09e1390b05ba",
+            "input": {
+              "order_id": "order-42",
+              "summary": "risk=True, inventory=True"
+            },
+            "occurrence_id": "write@root",
+            "operator_id": "write_audit_record",
+            "output": {
+              "order_id": "order-42",
+              "stored": true
+            },
+            "started_at_ns": 1788630587886645871,
+            "status": "completed",
+            "unit_index": 0
+          }
+        },
+        "ready": [],
+        "resolutions": {},
+        "waits": {}
+      },
+      "started_at_ns": 1788630587885104203,
+      "status": "completed",
+      "workflow_id": "audit-order",
+      "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad"
+    },
+    "last_event_digest": "ee5a10d3f17d9f9ec34fa2a171b4c9a877480c26f6854213962cda5b9cc9e4dc",
+    "last_event_id": "fe2910f7-e419-464f-b30d-aef2c83af0fb",
+    "last_event_semantic_digest": "1eb0baf08f8d5ef25dcc6dbe47356be70100718b7719d896a00200e737c744b0",
+    "schema_version": 3,
+    "sequence": 6,
+    "session": {
+      "context": {},
+      "context_path_revisions": {},
+      "created_at_ns": 1788630587884872082,
+      "id": "df7a2b4b-3c40-418a-927e-08ed99ec1e1f",
+      "latest_invocation_id": "88fc247b-3a32-4eba-97b3-d6a6d2d2a843",
+      "updated_at_ns": 1788630587992266988
+    },
+    "state_version": 9
+  }
+}

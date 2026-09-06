@@ -14,7 +14,8 @@ from pathlib import Path
 import re
 from typing import Any, Protocol, TypeVar
 
-from autoagent.core.runtime import RuntimeState, TraceEvent, UserEvent
+from autoagent.core.runtime import RuntimeState, UserEvent
+from autoagent.hosting.trace import TraceEvent
 from autoagent.hosting import Page, RuntimeEventStoreError
 
 from .dto import (

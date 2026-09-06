@@ -59,16 +59,15 @@ def _measure(
             len(json.dumps(event.to_record(), separators=(",", ":")))
             for event in collector.events
         )
+        checkpoint = app.unload_session(result.ref)
         checkpoint_bytes = len(
-            json.dumps(result.checkpoint.to_record(), separators=(",", ":"))
+            json.dumps(checkpoint.to_record(), separators=(",", ":"))
         )
         return {
             "duration_ns": duration,
             "peak_bytes": peak,
             "runtime_event_count": len(collector.events),
             "runtime_event_bytes": runtime_event_bytes,
-            "trace_event_count": len(result.trace_events),
-            "user_event_count": len(result.user_events),
             "checkpoint_bytes": checkpoint_bytes,
         }, tuple(collector.events)
     finally:
@@ -122,7 +121,6 @@ def _measure_live_chain_scaling() -> dict[str, dict[str, int]]:
             ],
         )
         samples: list[int] = []
-        trace_event_count = 0
         for _ in range(3):
             app = AutoAgentApp(max_operator_concurrency=32)
             app.register_workflow(workflow)
@@ -130,12 +128,10 @@ def _measure_live_chain_scaling() -> dict[str, dict[str, int]]:
             try:
                 result = app.invoke(workflow_id, {"value": 1})
                 samples.append(time.perf_counter_ns() - started)
-                trace_event_count = len(result.trace_events)
             finally:
                 app.close()
         report[str(node_count)] = {
             "median_duration_ns": int(statistics.median(samples)),
-            "trace_event_count": trace_event_count,
         }
     return report
 

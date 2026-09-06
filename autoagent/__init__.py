@@ -27,11 +27,10 @@ from .core.errors import (
     WorkflowCompileError,
 )
 from .core.operators import Operator, StreamReducer, ValueContract, Wait
-from .core.runtime import RuntimeCheckpointBundle, RuntimeErrorInfo, TraceEvent, UserEvent
+from .core.runtime import SessionCheckpoint, RuntimeErrorInfo, UserEvent
 from .core.workflow import (
     AggregationContext,
     Capability,
-    ChildInvocationHandle,
     ConditionContext,
     Context,
     Edge,
@@ -55,7 +54,6 @@ __all__ = [
     "AutoAgentApp",
     "AutoAgentError",
     "Capability",
-    "ChildInvocationHandle",
     "CheckpointLoadResult",
     "CompileResult",
     "ConditionContext",
@@ -79,7 +77,7 @@ __all__ = [
     "Operator",
     "OutputBindingContext",
     "Recovery",
-    "RuntimeCheckpointBundle",
+    "SessionCheckpoint",
     "RuntimeErrorInfo",
     "RuntimeInfrastructureError",
     "RuntimeTransitionError",
@@ -87,7 +85,6 @@ __all__ = [
     "StreamContext",
     "StreamReducer",
     "SubWorkflow",
-    "TraceEvent",
     "UserEvent",
     "UserEventMapping",
     "ValueContract",

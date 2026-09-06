@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "autoagent"
 version = "2.0.0a1"
 description = "AutoAgent V2 Workflow Core, Host, and local tracing tools"
-readme = "README.md"
+readme = "docs/README.md"
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.11,<3",

@@ -11,6 +11,7 @@ from .errors import (
 from .http import HttpRuntimeEventSink
 from .models import Page, ResumablePage
 from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+from .trace import TraceEvent, project_trace_event, project_trace_events
 
 __all__ = [
     "Page",
@@ -24,4 +25,7 @@ __all__ = [
     "RuntimeSessionNotRootError",
     "SQLITE_STORE_SCHEMA_VERSION",
     "SQLiteRuntimeStore",
+    "TraceEvent",
+    "project_trace_event",
+    "project_trace_events",
 ]

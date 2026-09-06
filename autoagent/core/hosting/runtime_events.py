@@ -25,7 +25,7 @@ class RuntimeEventSink(Protocol):
 
 
 class UserEventSink(Protocol):
-    """Persist or forward an observation outside canonical Runtime State.
+    """Persist or forward a User Event outside canonical Runtime State.
 
     User Events have their own Invocation-local sequence and idempotency key.
     A delivery failure must never roll back or rewrite canonical Workflow

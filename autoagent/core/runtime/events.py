@@ -406,7 +406,7 @@ class StateTransition:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeLog:
-    """One semantic observation inside a Runtime Event envelope."""
+    """One semantic transition record inside a Runtime Event envelope."""
 
     payload: RuntimeEventPayload
     invocation_id: str | None

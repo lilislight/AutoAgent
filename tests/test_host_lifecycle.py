@@ -128,9 +128,9 @@ class HostLifecycleTests(unittest.TestCase):
                     session_id="nested-session",
                 )
                 self.assertEqual(result.status, "completed")
-                handles = host.child_handles(result.ref)
+                handles = host.child_invocations(result.ref)
                 self.assertEqual(len(handles), 1)
-                self.assertEqual(host.child_status(handles[0]).status, "completed")
+                self.assertEqual(host.status(handles[0]).status, "completed")
                 store = host.runtime_store
                 assert store is not None
                 workflows = asyncio.run(store.list_workflows())
@@ -404,7 +404,7 @@ class HostLifecycleTests(unittest.TestCase):
                 submitted = host.submit_invoke(
                     "sync", {"value": 2}, session_id="submit"
                 )
-                completed = host.wait(submitted.ref, timeout=1)
+                completed = host.join(submitted.ref, timeout=1)
                 streamed = list(
                     host.stream("sync", {"value": 3}, session_id="stream")
                 )
@@ -615,7 +615,7 @@ class HostLifecycleTests(unittest.TestCase):
                 submitted = await host.asubmit_invoke(
                     "async", {"value": 5}, session_id="asubmit"
                 )
-                completed = await host.await_result(submitted.ref, timeout=1)
+                completed = await host.ajoin(submitted.ref, timeout=1)
                 streamed = [
                     item
                     async for item in host.astream(
@@ -907,7 +907,7 @@ class HostLifecycleTests(unittest.TestCase):
             restored = AutoAgentHost.from_project(root, environ=environment)
             try:
                 loaded = restored.restore_session(result.session_id)
-                recovered = restored.recover(loaded.roots[0])
+                recovered = restored.recover(loaded.invocations[0])
                 self.assertEqual(recovered.status, "completed")
                 self.assertEqual(recovered.output, {"value": 7})
                 self.assertEqual(sys.modules[module].CALLS, 1)
@@ -915,8 +915,8 @@ class HostLifecycleTests(unittest.TestCase):
                 restored.close()
         sys.modules.pop(module, None)
 
-    def test_restore_rebuilds_child_closure_and_rejects_child_as_root(self) -> None:
-        """Verify restore owns the full Child graph and accepts only its Root id."""
+    def test_restore_loads_parent_and_child_sessions_independently(self) -> None:
+        """Verify Host rebuilds related Runtime Sessions one at a time."""
 
         module = "host_lifecycle_restore_child"
         with self.project(
@@ -942,19 +942,16 @@ class HostLifecycleTests(unittest.TestCase):
                 {"value": 11},
                 session_id="restore-parent-session",
             )
-            child_session_id = first.child_handles(result.ref)[0]["session_id"]
+            child_session_id = first.child_invocations(result.ref)[0].session_id
             first.close()
 
             restored = AutoAgentHost.from_project(root, environ=environment)
             try:
-                with self.assertRaises(HostOperationError) as captured:
-                    restored.restore_session(child_session_id)
-                self.assertEqual(captured.exception.code, "HOST_SESSION_NOT_ROOT")
-
-                loaded = restored.restore_session(result.session_id)
-                self.assertEqual(len(loaded.roots), 1)
-                self.assertEqual(len(loaded.invocations), 2)
-                recovered = restored.recover(loaded.roots[0])
+                child_loaded = restored.restore_session(child_session_id)
+                self.assertEqual(len(child_loaded.invocations), 1)
+                parent_loaded = restored.restore_session(result.session_id)
+                self.assertEqual(len(parent_loaded.invocations), 1)
+                recovered = restored.recover(parent_loaded.invocations[0])
                 self.assertEqual(recovered.status, "completed")
             finally:
                 restored.close()
@@ -1005,8 +1002,9 @@ class HostLifecycleTests(unittest.TestCase):
             )
             second = AutoAgentHost.from_project(root, environ=environment)
             try:
+                loaded = second.restore_session(result.session_id)
                 with self.assertRaises(RuntimeTransitionError):
-                    second.restore_session(result.session_id)
+                    second.recover(loaded.invocations[0])
             finally:
                 second.close()
         sys.modules.pop(second_module, None)
@@ -1039,7 +1037,7 @@ class HostLifecycleTests(unittest.TestCase):
             restored = AutoAgentHost.from_project(root, environ=environment)
             try:
                 loaded = restored.restore_session(waiting.session_id)
-                recovered = restored.recover(loaded.roots[0])
+                recovered = restored.recover(loaded.invocations[0])
                 self.assertEqual(recovered.status, "waiting")
                 with self.assertRaises(RuntimeTransitionError):
                     restored.invoke(
@@ -1224,7 +1222,12 @@ class HostLifecycleTests(unittest.TestCase):
         """Verify Store closure cannot race checkpoint rebuild and Core loading."""
 
         events: list[str] = []
-        ref = InvocationRef("root", "invocation")
+        ref = InvocationRef(
+            session_id="root",
+            invocation_id="invocation",
+            workflow_id="workflow",
+            workflow_revision_id="revision",
+        )
 
         class SlowStore(SQLiteRuntimeStore):
             def __init__(self):
@@ -1242,7 +1245,7 @@ class HostLifecycleTests(unittest.TestCase):
         class FakeApp:
             async def aload_checkpoint(self, _checkpoint):
                 events.append("load")
-                return CheckpointLoadResult((ref,), (ref,))
+                return CheckpointLoadResult((ref,))
 
             def close(self, timeout=30.0):
                 events.append("app")
@@ -1269,7 +1272,7 @@ class HostLifecycleTests(unittest.TestCase):
             finally:
                 store.release.set()
             loaded = await asyncio.wait_for(restore, 1)
-            self.assertEqual(loaded.roots, (ref,))
+            self.assertEqual(loaded.invocations, (ref,))
             await asyncio.wait_for(closing, 1)
 
         asyncio.run(run())

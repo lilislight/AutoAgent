@@ -1,4 +1,4 @@
-"""Safe user-facing projections independent from Runtime Event capture."""
+"""Host-owned Trace projections derived from canonical Runtime Events."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
-from .events import (
+from ..core.runtime.events import (
     ChildInvocationPhaseChanged,
     ChildInvocationPlanned,
     ChildAwaitReady,
@@ -33,7 +33,7 @@ from .events import (
     SessionOpened,
     WaitResumed,
 )
-from .values import DurableValue, freeze, thaw
+from ..core.runtime.values import DurableValue, freeze, thaw
 
 
 TRACE_EVENT_SCHEMA_VERSION = 2

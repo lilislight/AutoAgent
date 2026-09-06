@@ -10,7 +10,7 @@ import warnings
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import CancelledError as FutureCancelledError, Future
 from dataclasses import replace
-from typing import cast
+from typing import cast, get_args
 from uuid import uuid4
 
 from ..compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
@@ -30,13 +30,14 @@ from ..runtime import (
     InvocationFailed,
     InvocationOpened,
     InvocationRecoveryRequested,
+    InvocationState,
     InvocationStarted,
     InvocationWaiting,
     NodeOccurrenceCompleted,
     NodeOccurrenceFailed,
     NodeOccurrenceStarted,
     NodeOccurrenceWaiting,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeErrorInfo,
     RuntimeEvent,
     RuntimeState,
@@ -44,25 +45,21 @@ from ..runtime import (
     SessionOpened,
     StateTransition,
     TaskRuntime,
-    TraceEvent,
     UserEvent,
     WaitResumed,
-    project_trace_event,
     thaw,
 )
 from ..scheduler import Scheduler
-from ..workflow import Capability, ChildInvocationHandle, Workflow, WorkflowIR
+from ..workflow import Capability, InvocationRef, Workflow, WorkflowIR
 from .models import (
     AppCheckpoint,
     CheckpointLoadResult,
-    InvocationRef,
     InvocationResult,
     InvocationStatus,
     InvocationSubmission,
     InvocationUpdate,
     InvocationWait,
     StreamItem,
-    _validate_graph_claims,
 )
 from .ports import (
     Clock,
@@ -74,29 +71,6 @@ from .ports import (
 )
 from .runtime_loop import RuntimeLoop
 from .stream import AttachedStream, InvocationStream, is_stream_end
-
-
-_CHECKPOINT_PAYLOADS = (
-    SchedulerInitialized,
-    # Node start is the write-ahead recovery boundary for every user hook and
-    # Operator side effect that follows it.  Per-unit Operator Call events do
-    # not create additional checkpoints because Map is one atomic occurrence:
-    # recovery replays the complete Node according to recovery_mode.
-    NodeOccurrenceStarted,
-    NodeOccurrenceWaiting,
-    WaitResumed,
-    InvocationRecoveryRequested,
-    ChildInvocationPlanned,
-    ChildInvocationPhaseChanged,
-    ChildAwaitSuspended,
-    ChildAwaitReady,
-    NodeOccurrenceCompleted,
-    NodeOccurrenceFailed,
-    InvocationWaiting,
-    InvocationCompleted,
-    InvocationFailed,
-    InvocationCancelled,
-)
 
 
 class AutoAgentApp:
@@ -166,8 +140,6 @@ class AutoAgentApp:
         self._runtime_loop = RuntimeLoop()
         self._attached_streams: dict[str, AttachedStream] = {}
         self._attached_stream_tasks: dict[str, asyncio.Task[None]] = {}
-        self._observations: dict[str, list[TraceEvent | UserEvent]] = {}
-        self._trace_sequences: dict[str, int] = {}
         self._last_transition_ids: dict[str, str] = {}
         self._runtime_locks: dict[str, asyncio.Lock] = {}
         self._child_capacities: dict[tuple[str, str], asyncio.Semaphore] = {}
@@ -222,13 +194,13 @@ class AutoAgentApp:
 
     @property
     def user_event_sink_error(self) -> BaseException | None:
-        """Return the first independent observation delivery failure, if any."""
+        """Return the first independent User Event delivery failure, if any."""
 
         return next(iter(self._user_event_sink_errors.values()), None)
 
     @property
     def user_event_sink_errors(self) -> Mapping[str, BaseException]:
-        """Return failed observation streams keyed by Invocation id."""
+        """Return failed User Event streams keyed by Invocation id."""
 
         return dict(self._user_event_sink_errors)
 
@@ -421,23 +393,104 @@ class AutoAgentApp:
         finally:
             await self._aclose_attached_stream(session, channel)
 
-    def wait(self, ref: InvocationRef, timeout: float | None = None) -> InvocationResult:
-        return self._run(self._wait(ref, timeout))
+    def stream_resume(
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
+    ) -> InvocationStream[StreamItem]:
+        root, channel = self._run(
+            self._start_attached_resume_stream(ref, wait_id, response)
+        )
 
-    async def await_result(
-        self, ref: InvocationRef, timeout: float | None = None
+        def close() -> None:
+            self._close_attached_stream(root, channel)
+
+        def receive() -> object:
+            if self._closed or self._closing:
+                raise StopIteration
+            try:
+                return self._run(channel.receive())
+            except RuntimeError:
+                if self._closed or self._closing:
+                    raise StopIteration from None
+                raise
+
+        return InvocationStream(receive=receive, close=close)
+
+    async def astream_resume(
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
+    ) -> AsyncIterator[StreamItem]:
+        root, channel = await self._await(
+            self._submit(self._start_attached_resume_stream(ref, wait_id, response))
+        )
+        try:
+            while True:
+                try:
+                    item = await self._await(self._submit(channel.receive()))
+                except RuntimeError:
+                    if self._closed or self._closing:
+                        return
+                    raise
+                if is_stream_end(item):
+                    return
+                yield cast(StreamItem, item)
+        finally:
+            await self._aclose_attached_stream(root, channel)
+
+    def status(
+        self, ref: InvocationRef
     ) -> InvocationResult:
-        return await self._await(self._submit(self._wait(ref, timeout)))
+        """Read the current state of an exact Invocation without waiting."""
+
+        return self._run(self._status(ref))
+
+    async def astatus(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
+        """Asynchronously read an exact Invocation without waiting."""
+
+        return await self._await(self._submit(self._status(ref)))
+
+    def join(
+        self,
+        ref: InvocationRef,
+        timeout: float | None = None,
+    ) -> InvocationResult:
+        """Join a submitted Invocation at its next stable boundary.
+
+        A timeout raises ``TimeoutError`` without cancelling the Invocation.
+        """
+
+        return self._run(self._join(ref, timeout))
+
+    async def ajoin(
+        self,
+        ref: InvocationRef,
+        timeout: float | None = None,
+    ) -> InvocationResult:
+        """Asynchronously join without cancelling the Invocation on timeout."""
+
+        return await self._await(self._submit(self._join(ref, timeout)))
 
     def resume(
-        self, ref: InvocationRef, wait_id: str, response: object
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
     ) -> InvocationResult:
         return self._run(
             self._resume(ref, wait_id, response, wait_for_boundary=True)
         )
 
     async def aresume(
-        self, ref: InvocationRef, wait_id: str, response: object
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
     ) -> InvocationResult:
         return await self._await(
             self._submit(
@@ -446,14 +499,20 @@ class AutoAgentApp:
         )
 
     def submit_resume(
-        self, ref: InvocationRef, wait_id: str, response: object
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
     ) -> InvocationSubmission:
         return self._run(
             self._resume(ref, wait_id, response, wait_for_boundary=False)
         )
 
     async def asubmit_resume(
-        self, ref: InvocationRef, wait_id: str, response: object
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
     ) -> InvocationSubmission:
         return await self._await(
             self._submit(
@@ -462,75 +521,71 @@ class AutoAgentApp:
         )
 
     def cancel(
-        self, ref: InvocationRef, reason: str | None = None
+        self,
+        ref: InvocationRef,
+        reason: str | None = None,
     ) -> InvocationResult:
         return self._run(self._cancel(ref, reason))
 
     async def acancel(
-        self, ref: InvocationRef, reason: str | None = None
+        self,
+        ref: InvocationRef,
+        reason: str | None = None,
     ) -> InvocationResult:
         return await self._await(self._submit(self._cancel(ref, reason)))
 
-    def recover(self, ref: InvocationRef) -> InvocationResult:
+    def recover(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
         return self._run(self._recover(ref))
 
-    async def arecover(self, ref: InvocationRef) -> InvocationResult:
+    async def arecover(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
         return await self._await(self._submit(self._recover(ref)))
 
     # ------------------------------------------------------------------
-    # Checkpoint loading and Child observation
+    # Checkpoints and Child relationships
 
     def load_checkpoint(
-        self, checkpoint: RuntimeCheckpointBundle | AppCheckpoint
+        self, checkpoint: SessionCheckpoint | AppCheckpoint
     ) -> CheckpointLoadResult:
         return self._run(self._load_checkpoint(checkpoint))
 
     async def aload_checkpoint(
-        self, checkpoint: RuntimeCheckpointBundle | AppCheckpoint
+        self, checkpoint: SessionCheckpoint | AppCheckpoint
     ) -> CheckpointLoadResult:
         return await self._await(self._submit(self._load_checkpoint(checkpoint)))
 
-    def child_handles(
+    def child_invocations(
         self, parent: InvocationRef
-    ) -> tuple[ChildInvocationHandle, ...]:
-        return self._run(self._list_child_handles(parent))
+    ) -> tuple[InvocationRef, ...]:
+        return self._run(self._list_child_invocations(parent))
 
-    async def achild_handles(
+    async def achild_invocations(
         self, parent: InvocationRef
-    ) -> tuple[ChildInvocationHandle, ...]:
-        return await self._await(self._submit(self._list_child_handles(parent)))
+    ) -> tuple[InvocationRef, ...]:
+        return await self._await(self._submit(self._list_child_invocations(parent)))
 
-    def child_status(self, handle: ChildInvocationHandle) -> InvocationResult:
-        return self._run(self._child_status(handle))
+    def resident_invocations(self) -> tuple[InvocationRef, ...]:
+        """Return a stable snapshot of Invocations currently resident in Core."""
 
-    async def achild_status(
-        self, handle: ChildInvocationHandle
-    ) -> InvocationResult:
-        return await self._await(self._submit(self._child_status(handle)))
+        return self._run(self._resident_invocations())
 
-    def wait_child(
-        self, handle: ChildInvocationHandle, timeout: float | None = None
-    ) -> InvocationResult:
-        return self._run(self._wait_child(handle, timeout))
+    async def aresident_invocations(self) -> tuple[InvocationRef, ...]:
+        """Asynchronously return Invocations currently resident in Core."""
 
-    async def await_child(
-        self, handle: ChildInvocationHandle, timeout: float | None = None
-    ) -> InvocationResult:
-        return await self._await(
-            self._submit(self._wait_child(handle, timeout))
-        )
+        return await self._await(self._submit(self._resident_invocations()))
 
-    def cancel_child(
-        self, handle: ChildInvocationHandle, reason: str | None = None
-    ) -> InvocationResult:
-        return self._run(self._cancel_child(handle, reason))
+    def unload_session(self, ref: InvocationRef) -> SessionCheckpoint:
+        """Checkpoint and release exactly one quiescent Runtime Session."""
 
-    async def acancel_child(
-        self, handle: ChildInvocationHandle, reason: str | None = None
-    ) -> InvocationResult:
-        return await self._await(
-            self._submit(self._cancel_child(handle, reason))
-        )
+        return self._run(self._unload_session(ref))
+
+    async def aunload_session(self, ref: InvocationRef) -> SessionCheckpoint:
+        """Asynchronously checkpoint and release one Runtime Session."""
+
+        return await self._await(self._submit(self._unload_session(ref)))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -656,6 +711,47 @@ class AutoAgentApp:
         self._attached_stream_tasks[session] = task
         return session, channel
 
+    async def _start_attached_resume_stream(
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
+    ) -> tuple[str, AttachedStream]:
+        ref = self._control_ref(ref)
+        session_id = ref.session_id
+        if session_id in self._attached_streams:
+            raise RuntimeTransitionError(
+                "INVOCATION_STREAM_ATTACHED",
+                "Invocation already has an attached stream.",
+            )
+        channel = AttachedStream()
+        self._attached_streams[session_id] = channel
+
+        async def run() -> None:
+            error: BaseException | None = None
+            try:
+                result = await self._resume(
+                    ref,
+                    wait_id,
+                    response,
+                    wait_for_boundary=True,
+                    attached_channel=channel,
+                )
+                await channel.publish_terminal(result)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as caught:
+                error = caught
+            finally:
+                await channel.finish(error)
+                if self._attached_streams.get(session_id) is channel:
+                    self._attached_streams.pop(session_id, None)
+                self._attached_stream_tasks.pop(session_id, None)
+
+        task = asyncio.create_task(run())
+        self._attached_stream_tasks[session_id] = task
+        return session_id, channel
+
     async def _abandon_attached_stream(
         self, session_id: str, channel: AttachedStream
     ) -> None:
@@ -689,7 +785,7 @@ class AutoAgentApp:
         if self._parent_plan(session_id) is not None:
             raise RuntimeTransitionError(
                 "SESSION_OWNED_BY_CHILD",
-                "A Child Session can only be controlled through its parent Handle.",
+                "A Child Session cannot be replaced through root invocation admission.",
             )
         entry = entry_node_id or _single_entry(compiled)
         if entry not in compiled.entry_node_ids:
@@ -786,7 +882,6 @@ class AutoAgentApp:
                         "A Session cannot replace its Invocation before every "
                         "Child plan reaches its terminal phase.",
                     )
-            self._reset_observations(session_id)
             if state.session is None:
                 self._journal.begin_event_group(session_id)
                 await self._emit(session_id, None, SessionOpened(session_context or {}))
@@ -825,12 +920,15 @@ class AutoAgentApp:
                 self._scheduler.initialize(compiled, self._journal.state(session_id)),
                 started.id,
             )
-            ref = InvocationRef(session_id, invocation_id)
+            ref = InvocationRef(
+                session_id=session_id,
+                invocation_id=invocation_id,
+                workflow_id=compiled.workflow_id,
+                workflow_revision_id=compiled.workflow_revision_id,
+            )
             task = self._start_drive(compiled, session_id, invocation_id, None, None)
             if not wait_for_boundary:
-                checkpoint = await self._capture_checkpoint(session_id)
-                traces, users = self._drain_observations(session_id)
-                return InvocationSubmission(ref, checkpoint, traces, users)
+                return InvocationSubmission(ref)
             await task
             return await self._result(ref)
         except asyncio.CancelledError:
@@ -848,7 +946,12 @@ class AutoAgentApp:
                 # return the stable terminal boundary (and let an attached
                 # stream publish its mandatory final Result).
                 return await self._result(
-                    InvocationRef(session_id, invocation_id)
+                    InvocationRef(
+                        session_id=session_id,
+                        invocation_id=invocation_id,
+                        workflow_id=current.workflow_id,
+                        workflow_revision_id=current.workflow_revision_id,
+                    )
                 )
             if not self._closing:
                 if (
@@ -858,7 +961,12 @@ class AutoAgentApp:
                     and not current.terminal
                 ):
                     await self._cancel_graph(
-                        InvocationRef(session_id, invocation_id),
+                        InvocationRef(
+                            session_id=session_id,
+                            invocation_id=invocation_id,
+                            workflow_id=current.workflow_id,
+                            workflow_revision_id=current.workflow_revision_id,
+                        ),
                         "Invocation caller cancelled.",
                     )
                 elif current is None:
@@ -879,10 +987,19 @@ class AutoAgentApp:
         response: object,
         *,
         wait_for_boundary: bool,
+        attached_channel: AttachedStream | None = None,
     ) -> InvocationResult | InvocationSubmission:
+        ref = self._control_ref(ref)
         state = self._state_for_ref(ref, active=True)
         root = self._root_session_id(ref.session_id)
-        self._ensure_attached_result_boundary_delivered(root)
+        current_channel = self._attached_streams.get(ref.session_id)
+        if attached_channel is None:
+            self._ensure_attached_result_boundary_delivered(ref.session_id)
+        elif current_channel is not attached_channel:
+            raise RuntimeTransitionError(
+                "INVOCATION_STREAM_ATTACHED",
+                "Runtime graph already has an attached Invocation stream.",
+            )
         self._acquire_result_lease(root)
         try:
             invocation = state.invocation
@@ -911,9 +1028,7 @@ class AutoAgentApp:
             else:
                 self._task_runtime.wake(ref.session_id)
             if not wait_for_boundary:
-                checkpoint = await self._capture_checkpoint(root)
-                traces, users = self._drain_observations(root)
-                return InvocationSubmission(ref, checkpoint, traces, users)
+                return InvocationSubmission(ref)
             await task
             return await self._result(ref)
         except asyncio.CancelledError:
@@ -925,9 +1040,24 @@ class AutoAgentApp:
         finally:
             self._release_result_lease(root)
 
-    async def _wait(
-        self, ref: InvocationRef, timeout: float | None
+    async def _status(
+        self, ref: InvocationRef
     ) -> InvocationResult:
+        ref = self._control_ref(ref)
+        self._state_for_ref(ref)
+        root = self._root_session_id(ref.session_id)
+        self._acquire_result_lease(root)
+        try:
+            return await self._result(ref)
+        finally:
+            self._release_result_lease(root)
+
+    async def _join(
+        self,
+        ref: InvocationRef,
+        timeout: float | None,
+    ) -> InvocationResult:
+        ref = self._control_ref(ref)
         self._state_for_ref(ref)
         root = self._root_session_id(ref.session_id)
         self._acquire_result_lease(root)
@@ -956,8 +1086,11 @@ class AutoAgentApp:
             self._release_result_lease(root)
 
     async def _cancel(
-        self, ref: InvocationRef, reason: str | None
+        self,
+        ref: InvocationRef,
+        reason: str | None,
     ) -> InvocationResult:
+        ref = self._control_ref(ref)
         self._state_for_ref(ref, active=True)
         root = self._root_session_id(ref.session_id)
         self._acquire_result_lease(root)
@@ -1008,7 +1141,10 @@ class AutoAgentApp:
         if target_invocation is not None and target_invocation.terminal:
             await self._settle_child(target, target_invocation.id)
 
-    async def _recover(self, ref: InvocationRef) -> InvocationResult:
+    async def _recover(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
+        ref = self._control_ref(ref)
         self._state_for_ref(ref)
         root = self._root_session_id(ref.session_id)
         target_path = {ref.session_id}
@@ -1268,259 +1404,183 @@ class AutoAgentApp:
                 )
         return None
 
+    async def _resident_invocations(self) -> tuple[InvocationRef, ...]:
+        refs: list[InvocationRef] = []
+        for session_id in sorted(self._journal.session_ids()):
+            invocation = self._journal.state(session_id).invocation
+            if invocation is not None:
+                refs.append(self._ref_for_invocation(session_id, invocation))
+        return tuple(refs)
+
+    async def _unload_session(self, ref: InvocationRef) -> SessionCheckpoint:
+        ref = self._control_ref(ref)
+        state = self._state_for_ref(ref)
+        root = self._root_session_id(ref.session_id)
+        async with self._runtime_lock(root):
+            state = self._state_for_ref(ref)
+            related = self._resident_related_sessions(ref.session_id)
+            allowed = {"waiting", "completed", "failed", "cancelled"}
+            for session_id in related:
+                invocation = self._journal.state(session_id).invocation
+                if (
+                    invocation is None
+                    or invocation.status not in allowed
+                    or self._task_runtime.is_live(session_id)
+                ):
+                    raise RuntimeTransitionError(
+                        "RELATED_INVOCATION_NOT_UNLOADABLE",
+                        "Every resident parent and Child Invocation must be "
+                        "waiting or terminal before one Session can unload.",
+                    )
+            related_roots = {
+                self._root_session_id(session_id) for session_id in related
+            }
+            if any(session_id in self._attached_streams for session_id in related) or any(
+                self._result_leases.get(root_id, 0) for root_id in related_roots
+            ):
+                raise RuntimeTransitionError(
+                    "INVOCATION_RESULT_PENDING",
+                    "An attached stream or active result reader must finish before "
+                    "unloading a Session.",
+                )
+            checkpoint = await self._capture_checkpoint_locked(ref.session_id)
+            invocation = state.invocation
+            assert invocation is not None
+            self._journal.discard_states((ref.session_id,))
+            self._task_runtime.release_wake_event(ref.session_id)
+            self._last_transition_ids.pop(ref.session_id, None)
+            self._runtime_locks.pop(ref.session_id, None)
+            self._result_leases.pop(ref.session_id, None)
+            self._user_event_journal.discard(invocation.id)
+            self._user_event_sink_errors.pop(invocation.id, None)
+            self._child_capacities = {
+                key: value
+                for key, value in self._child_capacities.items()
+                if key[0] != ref.session_id
+            }
+            resident = set(self._journal.session_ids())
+            self._child_owners = {
+                child: owner
+                for child, owner in self._child_owners.items()
+                if child in resident or owner[0] in resident
+            }
+            return checkpoint
+
     async def _load_checkpoint(
-        self, checkpoint: RuntimeCheckpointBundle | AppCheckpoint
+        self, checkpoint: SessionCheckpoint | AppCheckpoint
     ) -> CheckpointLoadResult:
-        bundles = (
-            checkpoint.roots
+        checkpoints = (
+            checkpoint.sessions
             if isinstance(checkpoint, AppCheckpoint)
             else (checkpoint,)
-            if isinstance(checkpoint, RuntimeCheckpointBundle)
+            if isinstance(checkpoint, SessionCheckpoint)
             else None
         )
-        if bundles is None:
-            raise TypeError("checkpoint must be RuntimeCheckpointBundle or AppCheckpoint.")
-        if not bundles:
-            return CheckpointLoadResult((), ())
-        all_states: dict[str, RuntimeState] = {}
-        for bundle in bundles:
-            overlap = set(all_states).intersection(bundle.states)
-            if overlap:
-                raise RuntimeTransitionError(
-                    "CHECKPOINT_GRAPH_OVERLAP",
-                    "Checkpoint Runtime graphs overlap.",
-                )
-            all_states.update(bundle.states)
-        existing_graphs: dict[str, dict[str, RuntimeState]] = {}
-        for session_id in self._journal.session_ids():
-            root_session_id = self._root_session_id(session_id)
-            existing_graphs.setdefault(root_session_id, {})[session_id] = (
-                self._journal.state(session_id)
-            )
-        try:
-            _validate_graph_claims(
-                (
-                    *(
-                        (root_session_id, states)
-                        for root_session_id, states in existing_graphs.items()
-                    ),
-                    *((bundle.root_session_id, bundle.states) for bundle in bundles),
-                )
-            )
-        except ValueError as error:
+        if checkpoints is None:
+            raise TypeError("checkpoint must be SessionCheckpoint or AppCheckpoint.")
+        if not checkpoints:
+            return CheckpointLoadResult(())
+        all_states = {item.session_id: item.state for item in checkpoints}
+        if len(all_states) != len(checkpoints):
             raise RuntimeTransitionError(
-                "CHECKPOINT_GRAPH_CONFLICT",
-                str(error),
-            ) from error
-        for state in all_states.values():
-            invocation = state.invocation
-            if invocation is None:
+                "CHECKPOINT_SESSION_DUPLICATE",
+                "A Session can appear only once in one checkpoint load.",
+            )
+        existing_ids = set(self._journal.session_ids())
+        for session_id, state in all_states.items():
+            if session_id in existing_ids and self._journal.state(session_id) != state:
                 raise RuntimeTransitionError(
-                    "CHECKPOINT_INVOCATION_MISSING",
-                    "Every checkpoint State must contain an Invocation.",
+                    "CHECKPOINT_SESSION_CONFLICT",
+                    "Checkpoint conflicts with the current Runtime Session.",
                 )
-            workflow = self._workflows.get(invocation.workflow_revision_id)
-            if workflow is None or workflow.workflow_id != invocation.workflow_id:
-                raise RuntimeTransitionError(
-                    "WORKFLOW_NOT_REGISTERED",
-                    "Every checkpoint Workflow Revision must be registered exactly.",
-                )
-        self._validate_checkpoint_child_semantics(bundles)
-        self._validate_checkpoint_ownership(bundles)
+        combined = {
+            session_id: self._journal.state(session_id)
+            for session_id in existing_ids
+        }
+        combined.update(all_states)
+        self._validate_checkpoint_relationships(combined)
+        affected_roots = {
+            self._root_session_id(session_id)
+            if session_id in existing_ids or session_id in self._child_owners
+            else session_id
+            for session_id in all_states
+        }
         if any(
             self._task_runtime.is_live(session_id)
             or session_id in self._attached_streams
             for session_id in all_states
-        ) or any(
-            self._result_leases.get(bundle.root_session_id, 0)
-            for bundle in bundles
-        ):
+        ) or any(self._result_leases.get(root, 0) for root in affected_roots):
             raise RuntimeTransitionError(
                 "CHECKPOINT_SESSION_LIVE",
-                "Checkpoint loading cannot replace a live Runtime graph.",
+                "Checkpoint loading cannot replace a live Runtime Session.",
             )
         self._journal.install_states(all_states)
         self._rebuild_child_owners()
-        for bundle in bundles:
-            self._reset_observations(bundle.root_session_id)
         for session_id, state in all_states.items():
             if state.last_event_id is not None:
                 self._last_transition_ids[session_id] = state.last_event_id
         refs = tuple(
-            InvocationRef(session_id, state.invocation.id)  # type: ignore[union-attr]
+            InvocationRef(
+                session_id=session_id,
+                invocation_id=state.invocation.id,
+                workflow_id=state.invocation.workflow_id,
+                workflow_revision_id=state.invocation.workflow_revision_id,
+            )
             for session_id, state in sorted(all_states.items())
         )
-        roots = tuple(
-            InvocationRef(
-                bundle.root_session_id,
-                bundle.states[bundle.root_session_id].invocation.id,  # type: ignore[union-attr]
-            )
-            for bundle in bundles
-        )
-        return CheckpointLoadResult(roots, refs)
+        return CheckpointLoadResult(refs)
 
-    def _validate_checkpoint_child_semantics(
-        self, bundles: tuple[RuntimeCheckpointBundle, ...]
+    @staticmethod
+    def _validate_checkpoint_relationships(
+        states: Mapping[str, RuntimeState],
     ) -> None:
-        """Validate every cross-Session Child claim against its parent IR.
+        """Validate durable parent claims without requiring Workflow code."""
 
-        RuntimeCheckpointBundle validates a self-contained ownership graph, but
-        only the App has the registered Workflow definitions needed to prove
-        that each plan belongs to the referenced parent Node.  This check runs
-        before any State is installed, so an invalid graph cannot execute a
-        Child while its parent relationship is still untrusted.
-        """
-
-        for bundle in bundles:
-            for parent_state in bundle.states.values():
-                parent = parent_state.invocation
-                assert parent is not None
-                workflow = self._workflows[parent.workflow_revision_id]
-                planned_occurrences: set[str] = set()
-                for plan in parent.child_plans.values():
-                    if plan.parent_occurrence_id in planned_occurrences:
-                        raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "A parent Node Occurrence cannot own multiple Child plans.",
-                        )
-                    planned_occurrences.add(plan.parent_occurrence_id)
-                    occurrence = parent.scheduler.occurrences.get(
-                        plan.parent_occurrence_id
+        claims: dict[str, tuple[str, str, int, str, str, str]] = {}
+        for parent_session_id, state in states.items():
+            parent = state.invocation
+            if parent is None:
+                continue
+            for creation_id, plan in parent.child_plans.items():
+                for unit in plan.units:
+                    claim = (
+                        parent_session_id,
+                        creation_id,
+                        unit.unit_index,
+                        unit.invocation_id,
+                        plan.workflow_id,
+                        plan.workflow_revision_id,
                     )
-                    if occurrence is None:
+                    previous = claims.get(unit.session_id)
+                    if previous is not None and previous != claim:
                         raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "Child plan references an unknown parent Node Occurrence.",
+                            "CHECKPOINT_CHILD_OWNERSHIP_CONFLICT",
+                            "One Child Session is claimed by multiple parents.",
                         )
-                    try:
-                        node = workflow.node(occurrence.node_id)
-                    except KeyError as error:
-                        raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "Child plan references a Node outside its parent Workflow.",
-                        ) from error
-                    child = node.executable
-                    if not isinstance(child, WorkflowIR):
-                        raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "Child plan parent is not a Child Workflow Node.",
-                        )
-                    if (
-                        plan.mode != node.execution_mode
-                        or plan.workflow_id != child.workflow_id
-                        or plan.workflow_revision_id != child.workflow_revision_id
+                    claims[unit.session_id] = claim
+                    child_state = states.get(unit.session_id)
+                    child = (
+                        child_state.invocation if child_state is not None else None
+                    )
+                    if child is not None and (
+                        child.id != unit.invocation_id
+                        or child.workflow_id != plan.workflow_id
+                        or child.workflow_revision_id != plan.workflow_revision_id
+                        or child.input != unit.input
                     ):
                         raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "Child plan does not match its parent Node definition.",
+                            "CHECKPOINT_CHILD_IDENTITY_MISMATCH",
+                            "Child Session checkpoint does not match its parent plan.",
                         )
-                    if node.map is None and len(plan.units) != 1:
-                        raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "A non-Map Child Workflow Node requires exactly one unit.",
-                        )
-                    if occurrence.status in {"ready", "skipped"}:
-                        raise RuntimeTransitionError(
-                            "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                            "A Child plan cannot precede its parent Node execution.",
-                        )
-                    if occurrence.status == "completed":
-                        allowed_completed_phases = (
-                            {"terminal"}
-                            if plan.mode == "await"
-                            else {"opened", "accepted", "terminal"}
-                        )
-                        if any(
-                            unit.phase not in allowed_completed_phases
-                            for unit in plan.units
-                        ):
-                            raise RuntimeTransitionError(
-                                "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                                "A completed Child Workflow Node has an open plan phase.",
-                            )
-                    for unit in plan.units:
-                        child_state = bundle.states.get(unit.session_id)
-                        if child_state is None:
-                            # Planning is a durable write-ahead boundary.  The
-                            # Child Session may not exist while its parent Node
-                            # is still running, or after that unfinished Node
-                            # was abandoned by failure/cancellation.  A
-                            # completed parent/occurrence cannot legitimately
-                            # retain a Handle to a missing Child State.
-                            if unit.phase == "planned" and (
-                                (
-                                    parent.status == "running"
-                                    and occurrence.status == "running"
-                                )
-                                or (
-                                    parent.status in {"failed", "cancelled"}
-                                    and occurrence.status in {"failed", "cancelled"}
-                                )
-                            ):
-                                continue
-                            raise RuntimeTransitionError(
-                                "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                                "Child Runtime State is missing outside its planning boundary.",
-                            )
-                        child_invocation = child_state.invocation
-                        assert child_invocation is not None
-                        if child_invocation.input != unit.input:
-                            raise RuntimeTransitionError(
-                                "CHECKPOINT_CHILD_SEMANTICS_INVALID",
-                                "Child Invocation input does not match its parent plan.",
-                            )
 
-    def _validate_checkpoint_ownership(
-        self, bundles: tuple[RuntimeCheckpointBundle, ...]
-    ) -> None:
-        """Reject partial overlap with any graph already owned by this App.
-
-        Reinstalling one identical complete Root graph is idempotent.  Sharing
-        even an equal Child State between two different Roots is not: parent
-        lookup and clean-shutdown checkpoint construction require exclusive
-        graph ownership.
-        """
-
-        existing_ids = set(self._journal.session_ids())
-        for bundle in bundles:
-            incoming_ids = set(bundle.states)
-            overlap = existing_ids.intersection(incoming_ids)
-            if not overlap:
-                continue
-            if bundle.root_session_id not in existing_ids:
-                raise RuntimeTransitionError(
-                    "CHECKPOINT_GRAPH_CONFLICT",
-                    "Checkpoint graph partially overlaps an existing Runtime graph.",
-                )
-            current_root = self._root_session_id(bundle.root_session_id)
-            current_ids = {
-                current_root,
-                *(
-                    session_id
-                    for session_id in self._descendant_sessions(current_root)
-                    if session_id in existing_ids
-                ),
-            }
-            if (
-                current_root != bundle.root_session_id
-                or current_ids != incoming_ids
-                or any(
-                    self._journal.state(session_id) != bundle.states[session_id]
-                    for session_id in incoming_ids
-                )
-            ):
-                raise RuntimeTransitionError(
-                    "CHECKPOINT_GRAPH_CONFLICT",
-                    "Checkpoint graph conflicts with existing Runtime ownership.",
-                )
-
-    async def _list_child_handles(
+    async def _list_child_invocations(
         self, parent: InvocationRef
-    ) -> tuple[ChildInvocationHandle, ...]:
+    ) -> tuple[InvocationRef, ...]:
+        parent = self._control_ref(parent)
         parent_state = self._state_for_ref(parent)
         invocation = parent_state.invocation
         assert invocation is not None
-        handles: list[ChildInvocationHandle] = []
+        handles: list[InvocationRef] = []
         for unit in (
             unit
             for plan in invocation.child_plans.values()
@@ -1529,49 +1589,21 @@ class AutoAgentApp:
             if self._journal.event_group_active(unit.session_id):
                 # Admission traces are observable one transition at a time,
                 # while their canonical Event and checkpoint membership are
-                # all-or-nothing.  Do not publish a Handle whose own Result
+                # all-or-nothing.  Do not publish a ref whose own Result
                 # could not yet carry a self-contained recovery checkpoint.
                 continue
             child = self._journal.state(unit.session_id).invocation
             if child is None or child.id != unit.invocation_id:
                 continue
             handles.append(
-                cast(
-                    ChildInvocationHandle,
-                    {
-                        "session_id": unit.session_id,
-                        "invocation_id": unit.invocation_id,
-                        "workflow_id": child.workflow_id,
-                        "workflow_revision_id": child.workflow_revision_id,
-                    },
+                InvocationRef(
+                    session_id=unit.session_id,
+                    invocation_id=unit.invocation_id,
+                    workflow_id=child.workflow_id,
+                    workflow_revision_id=child.workflow_revision_id,
                 )
             )
         return tuple(handles)
-
-    async def _child_status(
-        self, handle: ChildInvocationHandle
-    ) -> InvocationResult:
-        ref = self._child_ref(handle)
-        root = self._root_session_id(ref.session_id)
-        self._acquire_result_lease(root)
-        try:
-            return await self._result(ref)
-        finally:
-            self._release_result_lease(root)
-
-    async def _wait_child(
-        self,
-        handle: ChildInvocationHandle,
-        timeout: float | None,
-    ) -> InvocationResult:
-        return await self._wait(self._child_ref(handle), timeout)
-
-    async def _cancel_child(
-        self,
-        handle: ChildInvocationHandle,
-        reason: str | None,
-    ) -> InvocationResult:
-        return await self._cancel(self._child_ref(handle), reason)
 
     async def _close(self) -> AppCheckpoint:
         return await self._close_operation()
@@ -1591,9 +1623,9 @@ class AutoAgentApp:
             await asyncio.gather(*stream_tasks, return_exceptions=True)
         await self._task_runtime.cancel_all()
         await self._discard_incomplete_sessions()
-        roots = self._root_session_ids()
+        session_ids = self._journal.session_ids()
         checkpoints = tuple(
-            [await self._capture_checkpoint(root) for root in roots]
+            [await self._capture_checkpoint(session_id) for session_id in session_ids]
         )
         return AppCheckpoint(checkpoints)
 
@@ -1774,74 +1806,41 @@ class AutoAgentApp:
         causation_id: str | None = None,
     ) -> StateTransition:
         root = self._root_session_id(session_id)
-        channel = self._attached_streams.get(root)
-        created: StateTransition | None = None
-
-        async def commit() -> InvocationUpdate:
-            nonlocal created
-            async with self._runtime_lock(root):
-                transition = StateTransition(
-                    session_id=session_id,
-                    invocation_id=invocation_id,
-                    payload=payload,  # type: ignore[arg-type]
-                    causation_id=(
-                        causation_id
-                        if causation_id is not None
-                        else self._last_transition_ids.get(session_id)
-                    ),
-                    occurred_at_ns=self._clock_ns(),
+        async with self._runtime_lock(root):
+            transition = StateTransition(
+                session_id=session_id,
+                invocation_id=invocation_id,
+                payload=payload,  # type: ignore[arg-type]
+                causation_id=(
+                    causation_id
+                    if causation_id is not None
+                    else self._last_transition_ids.get(session_id)
+                ),
+                occurred_at_ns=self._clock_ns(),
+            )
+            self._journal.apply_transition(transition)
+            if self._journal.event_group_active(session_id) and (
+                isinstance(payload, SchedulerInitialized)
+                or (
+                    isinstance(payload, InvocationOpened)
+                    and self._parent_plan(session_id) is None
                 )
-                self._journal.apply_transition(transition)
-                if self._journal.event_group_active(session_id) and (
-                    isinstance(payload, SchedulerInitialized)
-                    or (
-                        isinstance(payload, InvocationOpened)
-                        and self._parent_plan(session_id) is None
-                    )
-                ):
-                    # A new Root atomically opens Session + Invocation; a Child
-                    # atomically opens through Scheduler initialization.  The
-                    # transitions remain individually observable as Trace, but
-                    # a Host can never acknowledge an unrecoverable prefix.
-                    self._journal.commit_event_group(session_id)
-                if isinstance(payload, ChildInvocationPlanned):
-                    for unit in payload.units:
-                        self._child_owners[unit.child_session_id] = (
-                            session_id,
-                            payload.creation_id,
-                            unit.unit_index,
-                            unit.child_invocation_id,
-                        )
-                created = transition
-                self._last_transition_ids[session_id] = transition.id
-                live = self._journal.state(session_id)
-                trace = replace(
-                    project_trace_event(
+            ):
+                # A new Root atomically opens Session + Invocation; a Child
+                # atomically opens through Scheduler initialization so a Host
+                # can never acknowledge an unrecoverable prefix.
+                self._journal.commit_event_group(session_id)
+            if isinstance(payload, ChildInvocationPlanned):
+                for unit in payload.units:
+                    self._child_owners[unit.child_session_id] = (
                         session_id,
-                        self._next_trace_sequence(root),
-                        transition,
-                    ),
-                    state_version=live.state_version,
-                )
-                await self._export_runtime_events((session_id,))
-                checkpoint = (
-                    await self._capture_checkpoint_locked(root)
-                    if channel is not None
-                    and isinstance(payload, _CHECKPOINT_PAYLOADS)
-                    and self._checkpoint_boundary_safe(root)
-                    else None
-                )
-                update = InvocationUpdate(trace, checkpoint)
-                if channel is None or not channel.attached:
-                    self._observations.setdefault(root, []).append(trace)
-                return update
-
-        if channel is None:
-            await commit()
-        else:
-            await channel.publish_async_created(commit)
-        assert created is not None
-        return created
+                        payload.creation_id,
+                        unit.unit_index,
+                        unit.child_invocation_id,
+                    )
+            self._last_transition_ids[session_id] = transition.id
+            await self._export_runtime_events((session_id,))
+            return transition
 
     def _begin_child_admission(self, session_id: str) -> None:
         self._journal.begin_event_group(session_id)
@@ -1879,8 +1878,7 @@ class AutoAgentApp:
         payload: object,
         occurrence_id: str | None = None,
     ) -> UserEvent:
-        root = self._root_session_id(session_id)
-        channel = self._attached_streams.get(root)
+        channel = self._attached_streams.get(session_id)
         created: UserEvent | None = None
 
         async def commit() -> InvocationUpdate:
@@ -1903,21 +1901,19 @@ class AutoAgentApp:
                 except asyncio.CancelledError:
                     raise
                 except BaseException as error:
-                    # User Events are observations, not canonical transitions.
+                    # User Events do not change canonical Runtime State.
                     # Keep Workflow progress valid, but stop the stream at the
                     # first rejected sequence so later persistence cannot mask
-                    # an observation gap.
+                    # a User Event sequence gap.
                     self._user_event_sink_errors[invocation_id] = error
                     warnings.warn(
-                        "User Event sink rejected an observation; canonical "
+                        "User Event sink rejected delivery; canonical "
                         "Workflow execution continues but persisted User Events "
                         "are incomplete.",
                         RuntimeWarning,
                         stacklevel=2,
                     )
             self._user_event_journal.drain(invocation_id)
-            if channel is None or not channel.attached:
-                self._observations.setdefault(root, []).append(created)
             return InvocationUpdate(created)
 
         if channel is None:
@@ -1928,18 +1924,19 @@ class AutoAgentApp:
         return created
 
     async def _capture_checkpoint(
-        self, root_session_id: str
-    ) -> RuntimeCheckpointBundle:
-        async with self._runtime_lock(root_session_id):
-            return await self._capture_checkpoint_locked(root_session_id)
+        self, session_id: str
+    ) -> SessionCheckpoint:
+        root = self._root_session_id(session_id)
+        async with self._runtime_lock(root):
+            return await self._capture_checkpoint_locked(session_id)
 
     async def _capture_checkpoint_locked(
-        self, root_session_id: str
-    ) -> RuntimeCheckpointBundle:
+        self, session_id: str
+    ) -> SessionCheckpoint:
         checkpoint = self._journal.capture_checkpoint(
-            root_session_id, captured_at_ns=self._clock_ns()
+            session_id, captured_at_ns=self._clock_ns()
         )
-        await self._export_runtime_events(tuple(checkpoint.states))
+        await self._export_runtime_events((checkpoint.session_id,))
         return checkpoint
 
     def _runtime_lock(self, root_session_id: str) -> asyncio.Lock:
@@ -2005,29 +2002,35 @@ class AutoAgentApp:
     async def _result(self, ref: InvocationRef) -> InvocationResult:
         root = self._root_session_id(ref.session_id)
         async with self._runtime_lock(root):
-            # Result data, observation ownership and its recovery boundary are
-            # one point-in-time projection.  Reading State before joining this
-            # lock can pair an old Invocation with a newer Checkpoint when
-            # multiple Event publishers are already queued ahead of Result.
+            # Reading State under the Runtime lock keeps the returned boundary
+            # ordered behind every already-queued publisher.
             state = self._state_for_ref(ref)
             invocation = state.invocation
             assert invocation is not None
-            checkpoint = await self._capture_checkpoint_locked(root)
-            traces, users = self._drain_observations(root)
             waits = tuple(
                 InvocationWait(item.id, thaw(item.request))
                 for item in invocation.scheduler.waits.values()
                 if item.status == "waiting"
             )
+            output = thaw(invocation.output)
+            workflow = self._workflows.get(invocation.workflow_revision_id)
+            if (
+                invocation.status == "completed"
+                and workflow is not None
+                and len(workflow.exit_node_ids) == 1
+            ):
+                contract = workflow.node(workflow.exit_node_ids[0]).output_contract
+                if (
+                    contract is not None
+                    and _contains_invocation_ref(contract.annotation)
+                ):
+                    output = contract.restore(output)
             return InvocationResult(
                 ref=ref,
                 status=cast(InvocationStatus, invocation.status),
-                checkpoint=checkpoint,
-                output=thaw(invocation.output),
+                output=output,
                 error=invocation.error,
                 waits=waits,
-                trace_events=traces,
-                user_events=users,
             )
 
     # ------------------------------------------------------------------
@@ -2056,14 +2059,31 @@ class AutoAgentApp:
         for invocation_id in invocation_ids:
             self._user_event_journal.discard(invocation_id)
 
+    def _control_ref(
+        self, ref: InvocationRef
+    ) -> InvocationRef:
+        if not isinstance(ref, InvocationRef):
+            raise TypeError("Control operations require an InvocationRef.")
+        return ref
+
     def _state_for_ref(
         self, ref: InvocationRef, *, active: bool = False
     ) -> RuntimeState:
         if not isinstance(ref, InvocationRef):
             raise TypeError("Control operations require an InvocationRef.")
+        if self._journal.event_group_active(ref.session_id):
+            raise RuntimeTransitionError(
+                "CHILD_ADMISSION_INCOMPLETE",
+                "Invocation admission has not reached its recoverable boundary.",
+            )
         state = self._journal.state(ref.session_id)
         invocation = state.invocation
-        if invocation is None or invocation.id != ref.invocation_id:
+        if (
+            invocation is None
+            or invocation.id != ref.invocation_id
+            or invocation.workflow_id != ref.workflow_id
+            or invocation.workflow_revision_id != ref.workflow_revision_id
+        ):
             raise RuntimeTransitionError(
                 "INVOCATION_REF_STALE",
                 "InvocationRef does not identify the Session's current Invocation.",
@@ -2073,6 +2093,39 @@ class AutoAgentApp:
                 "INVOCATION_NOT_RUNNING", "Invocation is not running."
             )
         return state
+
+    @staticmethod
+    def _ref_for_invocation(
+        session_id: str, invocation: InvocationState
+    ) -> InvocationRef:
+        return InvocationRef(
+            session_id=session_id,
+            invocation_id=invocation.id,
+            workflow_id=invocation.workflow_id,
+            workflow_revision_id=invocation.workflow_revision_id,
+        )
+
+    def _resident_related_sessions(self, session_id: str) -> tuple[str, ...]:
+        """Return the resident component connected by durable Child ownership."""
+
+        resident = set(self._journal.session_ids())
+        adjacency: dict[str, set[str]] = {}
+        for child_session_id, owner in self._child_owners.items():
+            parent_session_id = owner[0]
+            adjacency.setdefault(parent_session_id, set()).add(child_session_id)
+            adjacency.setdefault(child_session_id, set()).add(parent_session_id)
+        found: list[str] = []
+        pending = [session_id]
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current in resident:
+                found.append(current)
+            pending.extend(adjacency.get(current, ()))
+        return tuple(sorted(found))
 
     def _parent_plan(
         self, child_session_id: str, child_invocation_id: str | None = None
@@ -2214,54 +2267,6 @@ class AutoAgentApp:
         self._child_owners.pop(session_id, None)
         self._last_transition_ids.pop(session_id, None)
         self._runtime_locks.pop(session_id, None)
-        self._observations.pop(session_id, None)
-        self._trace_sequences.pop(session_id, None)
-
-    def _checkpoint_boundary_safe(self, root_session_id: str) -> bool:
-        root = self._journal.state(root_session_id).invocation
-        if root is None or root.status not in {"failed", "cancelled"}:
-            return True
-        return all(
-            (invocation := self._journal.state(session_id).invocation) is not None
-            and invocation.terminal
-            for session_id in self._descendant_sessions(root_session_id)
-        )
-
-    def _child_ref(self, handle: ChildInvocationHandle) -> InvocationRef:
-        if not isinstance(handle, Mapping):
-            raise TypeError("Child Invocation Handle must be a mapping.")
-        required = {
-            "session_id",
-            "invocation_id",
-            "workflow_id",
-            "workflow_revision_id",
-        }
-        if set(handle) != required or any(
-            not isinstance(handle.get(key), str) or not handle[key]
-            for key in required
-        ):
-            raise RuntimeTransitionError(
-                "CHILD_HANDLE_INVALID", "Child Invocation Handle is incomplete."
-            )
-        ref = InvocationRef(handle["session_id"], handle["invocation_id"])
-        if self._journal.event_group_active(ref.session_id):
-            raise RuntimeTransitionError(
-                "CHILD_ADMISSION_INCOMPLETE",
-                "Child Invocation admission has not reached its recoverable boundary.",
-            )
-        state = self._state_for_ref(ref)
-        invocation = state.invocation
-        assert invocation is not None
-        if (
-            self._parent_plan(ref.session_id, ref.invocation_id) is None
-            or invocation.workflow_id != handle["workflow_id"]
-            or invocation.workflow_revision_id != handle["workflow_revision_id"]
-        ):
-            raise RuntimeTransitionError(
-                "CHILD_HANDLE_UNKNOWN",
-                "Child Invocation Handle is not owned by the current Runtime graph.",
-            )
-        return ref
 
     def _workflow_for_state(self, state: RuntimeState) -> WorkflowIR:
         invocation = state.invocation
@@ -2352,25 +2357,6 @@ class AutoAgentApp:
             )
         return workflow
 
-    def _next_trace_sequence(self, root_session_id: str) -> int:
-        sequence = self._trace_sequences.get(root_session_id, 0) + 1
-        self._trace_sequences[root_session_id] = sequence
-        return sequence
-
-    def _reset_observations(self, root_session_id: str) -> None:
-        self._observations[root_session_id] = []
-        self._trace_sequences[root_session_id] = 0
-
-    def _drain_observations(
-        self, root_session_id: str
-    ) -> tuple[tuple[TraceEvent, ...], tuple[UserEvent, ...]]:
-        values = tuple(self._observations.get(root_session_id, ()))
-        self._observations[root_session_id] = []
-        return (
-            tuple(item for item in values if isinstance(item, TraceEvent)),
-            tuple(item for item in values if isinstance(item, UserEvent)),
-        )
-
     def _submit(self, coroutine):
         try:
             # Admission and the transition to ``closing`` are one linearized
@@ -2436,6 +2422,12 @@ def _single_entry(workflow: WorkflowIR) -> str:
 def _positive_integer(value: object, name: str) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError(f"{name} must be positive.")
+
+
+def _contains_invocation_ref(annotation: object) -> bool:
+    if annotation is InvocationRef:
+        return True
+    return any(_contains_invocation_ref(item) for item in get_args(annotation))
 
 
 def _close_timeout(value: float | None) -> None:

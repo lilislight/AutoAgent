@@ -10,7 +10,8 @@ target.
 - `tests/` contains the V2 Python test suite.
 - `ui/` contains the V2 tracing UI.
 - `examples/` contains V2 runnable examples.
-- Root Markdown and packaging files describe and build V2.
+- `docs/` contains V2 design notes, plans, testing notes, and the package README.
+- Root packaging files build V2; `AGENTS.md` is the repository instruction file.
 - `.agents/` and `.codex/` are workspace metadata, not product source trees.
 - `v1/` contains the complete archived V1 project, including its source, tests,
   UI, examples, documentation, Skills, Skill Evals, build scripts, and packaging
@@ -36,8 +37,11 @@ run it with `cwd=v1` so its same-named `autoagent` package cannot shadow V2.
 ## Sources of Truth
 
 Treat current V2 source, configuration, tests, and run paths as authoritative.
-`Refactor.md` records the V2 target architecture. Files below `v1/` are
-historical evidence and are not current product documentation.
+Files in `docs/` are reference snapshots and may be stale. Routine source,
+behavior, API, test, build, or structure changes do not require corresponding
+documentation updates. Update files in `docs/` only when the user explicitly
+asks for documentation work. Files below `v1/` are historical evidence and are
+not current product documentation.
 
 Keep V2 changes within the root V2 trees. Do not add compatibility layers for
 the V1 API or data model. Reuse a V1 algorithm only after verifying that its

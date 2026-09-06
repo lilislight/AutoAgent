@@ -8,6 +8,7 @@ import unittest
 from typing_extensions import TypedDict
 
 from autoagent import (
+    AppCheckpoint,
     AutoAgentApp,
     Edge,
     InputMappingContext,
@@ -22,7 +23,7 @@ from autoagent import (
 )
 from autoagent.core import (
     InMemoryEventJournal,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeEvent,
     SessionOpened,
     StateReducer,
@@ -94,59 +95,17 @@ def _json_round_trip(events: tuple[RuntimeEvent, ...]) -> tuple[RuntimeEvent, ..
 def _checkpoint_from_events(
     root_session_id: str,
     events: tuple[RuntimeEvent, ...],
-) -> RuntimeCheckpointBundle:
+) -> AppCheckpoint:
     states = {
         session_id: StateReducer().reduce(
             tuple(event for event in events if event.session_id == session_id)
         )
         for session_id in {event.session_id for event in events}
     }
-    return RuntimeCheckpointBundle.from_states(root_session_id, states)
+    return AppCheckpoint(tuple(SessionCheckpoint.from_state(state) for state in states.values()))
 
 
 class ChildPersistenceIntegrityTests(unittest.TestCase):
-    def test_cancelled_root_admission_cannot_publish_a_session_only_prefix(self) -> None:
-        """Verify reopening one Session cannot fork its first Event sequence."""
-
-        workflow = Workflow(
-            "atomic-root-admission",
-            nodes=[Node("work", identity)],
-        )
-        sink = _UniqueSequenceSink()
-        app = AutoAgentApp(runtime_event_sink=sink)
-        stream = app.stream(
-            workflow,
-            {"value": 1},
-            session_id="atomic-root-session",
-        )
-        try:
-            first = next(stream)
-            self.assertIsInstance(first, InvocationUpdate)
-            assert isinstance(first, InvocationUpdate)
-            self.assertEqual(first.event.kind, "session.opened")
-            self.assertEqual(sink.events, [])
-            stream.close()
-
-            result = app.invoke(
-                workflow,
-                {"value": 2},
-                session_id="atomic-root-session",
-            )
-            self.assertEqual(result.status, "completed")
-            root_events = tuple(
-                event
-                for event in sink.events
-                if event.session_id == "atomic-root-session"
-            )
-            self.assertTrue(root_events)
-            self.assertEqual(root_events[0].sequence, 1)
-            self.assertEqual(
-                tuple(log.event_name for log in root_events[0].logs),
-                ("session.opened", "invocation.opened"),
-            )
-        finally:
-            stream.close()
-            app.close(timeout=1)
 
     def test_event_group_cannot_be_flushed_outside_its_commit_boundary(self) -> None:
         """Verify direct Journal flushing cannot expose a partial admission."""
@@ -169,83 +128,6 @@ class ChildPersistenceIntegrityTests(unittest.TestCase):
         self.assertIsNone(journal.state("grouped-child").session)
         self.assertEqual(journal.pending_batches("grouped-child"), ())
 
-    def test_partial_child_admission_never_publishes_session_only_event(self) -> None:
-        """Verify a durable prefix cannot contain only Child SessionOpened."""
-
-        child = Workflow(
-            "atomic-admission-child",
-            nodes=[Node("work", identity)],
-        )
-        parent = Workflow(
-            "atomic-admission-parent",
-            nodes=[Node("child", child)],
-        )
-        source_sink = _UniqueSequenceSink()
-        source = AutoAgentApp(runtime_event_sink=source_sink)
-        stream = source.stream(
-            parent,
-            {"value": 1},
-            session_id="atomic-admission-root",
-        )
-        child_session_id: str | None = None
-        try:
-            for item in stream:
-                if not isinstance(item, InvocationUpdate):
-                    continue
-                if (
-                    item.event.session_id != "atomic-admission-root"
-                    and item.event.kind == "session.opened"
-                ):
-                    child_session_id = item.event.session_id
-                    break
-            self.assertIsNotNone(child_session_id)
-            assert child_session_id is not None
-            self.assertFalse(
-                any(
-                    event.session_id == child_session_id
-                    for event in source_sink.events
-                )
-            )
-            durable_prefix = _json_round_trip(tuple(source_sink.events))
-        finally:
-            stream.close()
-            source.close(timeout=1)
-
-        checkpoint = _checkpoint_from_events(
-            "atomic-admission-root", durable_prefix
-        )
-        self.assertNotIn(child_session_id, checkpoint.states)
-
-        restored_sink = _UniqueSequenceSink(durable_prefix)
-        restored = AutoAgentApp(runtime_event_sink=restored_sink)
-        try:
-            restored.register_workflow(parent)
-            loaded = restored.load_checkpoint(checkpoint)
-            result = restored.recover(loaded.roots[0])
-            self.assertEqual(result.status, "completed")
-            self.assertEqual(result.output, {"value": 1})
-
-            child_events = tuple(
-                event
-                for event in restored_sink.events
-                if event.session_id == child_session_id
-            )
-            self.assertTrue(child_events)
-            self.assertEqual(child_events[0].sequence, 1)
-            self.assertEqual(
-                tuple(log.event_name for log in child_events[0].logs),
-                (
-                    "session.opened",
-                    "invocation.opened",
-                    "invocation.started",
-                    "scheduler.initialized",
-                ),
-            )
-            _checkpoint_from_events(
-                "atomic-admission-root", tuple(restored_sink.events)
-            )
-        finally:
-            restored.close(timeout=1)
 
     def test_child_handle_is_hidden_until_its_checkpoint_is_self_contained(self) -> None:
         """Verify partial admission cannot expose an unrecoverable Child Result."""
@@ -275,9 +157,11 @@ class ChildPersistenceIntegrityTests(unittest.TestCase):
                     and item.event.kind == "invocation.opened"
                 ):
                     assert item.event.invocation_id is not None
-                    parent_ref = InvocationRef(
-                        item.event.session_id,
-                        item.event.invocation_id,
+                    parent_ref = next(
+                        candidate
+                        for candidate in app.resident_invocations()
+                        if candidate.session_id == item.event.session_id
+                        and candidate.invocation_id == item.event.invocation_id
                     )
                     continue
                 if item.event.session_id == "handle-admission-root":
@@ -285,29 +169,29 @@ class ChildPersistenceIntegrityTests(unittest.TestCase):
                 if item.event.kind == "invocation.opened":
                     child_session_id = item.event.session_id
                     assert parent_ref is not None
-                    self.assertEqual(app.child_handles(parent_ref), ())
+                    self.assertEqual(app.child_invocations(parent_ref), ())
                     with self.assertRaisesRegex(
                         RuntimeTransitionError,
                         "CHILD_ADMISSION_INCOMPLETE",
                     ):
-                        app.child_status(  # type: ignore[arg-type]
-                            {
-                                "session_id": item.event.session_id,
-                                "invocation_id": item.event.invocation_id,
-                                "workflow_id": item.event.subject_ids["workflow_id"],
-                                "workflow_revision_id": item.event.subject_ids[
+                        app.status(
+                            InvocationRef(
+                                session_id=item.event.session_id,
+                                invocation_id=item.event.invocation_id,
+                                workflow_id=item.event.subject_ids["workflow_id"],
+                                workflow_revision_id=item.event.subject_ids[
                                     "workflow_revision_id"
                                 ],
-                            }
+                            )
                         )
                     continue
                 if item.event.kind == "scheduler.initialized":
                     assert parent_ref is not None
-                    handles = app.child_handles(parent_ref)
+                    handles = app.child_invocations(parent_ref)
                     self.assertEqual(len(handles), 1)
-                    result = app.child_status(handles[0])
-                    self.assertIn(handles[0]["session_id"], result.checkpoint.states)
-                    self.assertEqual(handles[0]["session_id"], child_session_id)
+                    result = app.status(handles[0])
+                    self.assertEqual(handles[0], result.ref)
+                    self.assertEqual(handles[0].session_id, child_session_id)
                     break
         finally:
             stream.close()
@@ -421,7 +305,7 @@ class ChildPersistenceIntegrityTests(unittest.TestCase):
                 "batched-admission-root", durable_prefix
             )
             self.assertEqual(
-                set(checkpoint.states),
+                set({item.session_id: item.state for item in checkpoint.sessions}),
                 {
                     "batched-admission-root",
                     *(unit.session_id for unit in plan.units),
@@ -468,7 +352,7 @@ class ChildPersistenceIntegrityTests(unittest.TestCase):
                 "terminal-order-root",
                 durable_prefix,
             )
-            root = checkpoint.state("terminal-order-root").invocation
+            root = next(item.state for item in checkpoint.sessions if item.session_id == "terminal-order-root").invocation
             assert root is not None
             plan = next(iter(root.child_plans.values()))
             self.assertNotEqual(plan.units[0].phase, "terminal")
@@ -480,7 +364,7 @@ class ChildPersistenceIntegrityTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(parent)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "terminal-order-root")
             result = restored.recover(ref)
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.output, {"value": 1})

@@ -17,7 +17,7 @@ from autoagent.core.runtime import (
     NodeOccurrenceCompleted,
     NodeOccurrenceState,
     OperatorCallState,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeEvent,
     RuntimeState,
     SchedulerDelta,
@@ -749,27 +749,15 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 ),
             )
 
-    def test_trusted_checkpoint_validates_without_serializing_states(self) -> None:
-        """Verify shallow Journal checkpoints still validate numeric and reference invariants."""
+    def test_trusted_checkpoint_reuses_the_reducer_owned_state(self) -> None:
+        """Capture an already-validated Journal State without copying or rescanning it."""
 
         state = self._valid_state()
-        broken_ready = replace(
-            state,
-            invocation=replace(
-                state.invocation,
-                scheduler=replace(
-                    state.invocation.scheduler,
-                    ready=("missing",),
-                ),
-            ),
-        )
         with patch.object(RuntimeState, "to_record", side_effect=AssertionError):
-            for invalid in (replace(state, state_version=-1), broken_ready):
-                with self.subTest(invalid=invalid):
-                    with self.assertRaises((TypeError, ValueError)):
-                        RuntimeCheckpointBundle._from_runtime_states(
-                            "session", {"session": invalid}, captured_at_ns=1
-                        )
+            checkpoint = SessionCheckpoint._from_runtime_state(
+                "session", state, captured_at_ns=1
+            )
+        self.assertIs(checkpoint.state, state)
 
     def test_reducer_rejects_an_invalid_live_candidate_before_install(self) -> None:
         """Verify staged execution cannot hold State that only fails at checkpoint time."""

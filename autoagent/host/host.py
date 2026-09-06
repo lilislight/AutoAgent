@@ -26,14 +26,13 @@ from autoagent.core.app import (
 )
 from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from autoagent.core.operators import Operator
-from autoagent.core.runtime import RuntimeCheckpointBundle
+from autoagent.core.runtime import SessionCheckpoint
 from autoagent.core.workflow import (
     Capability,
-    ChildInvocationHandle,
     Workflow,
     WorkflowIR,
 )
-from autoagent.hosting import RuntimeSessionNotRootError, SQLiteRuntimeStore
+from autoagent.hosting import SQLiteRuntimeStore
 from autoagent.hosting._worker import await_thread_future, run_in_daemon
 
 from .environment import load_project_environment
@@ -403,25 +402,64 @@ class AutoAgentHost:
         ):
             yield item
 
-    def wait(
+    def stream_resume(
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
+    ) -> InvocationStream[StreamItem]:
+        """Resume a durable Wait and stream Core observations."""
+
+        self._ensure_open()
+        return self.app.stream_resume(ref, wait_id, response)
+
+    async def astream_resume(
+        self,
+        ref: InvocationRef,
+        wait_id: str,
+        response: object,
+    ) -> AsyncIterator[StreamItem]:
+        """Asynchronously resume a Wait and stream Core observations."""
+
+        self._ensure_open()
+        async for item in self.app.astream_resume(ref, wait_id, response):
+            yield item
+
+    def status(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
+        """Read one exact Invocation without waiting."""
+
+        self._ensure_open()
+        return self.app.status(ref)
+
+    async def astatus(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
+        """Asynchronously read one exact Invocation without waiting."""
+
+        self._ensure_open()
+        return await self.app.astatus(ref)
+
+    def join(
         self,
         ref: InvocationRef,
         timeout: float | None = None,
     ) -> InvocationResult:
-        """Wait for one submitted Invocation to reach a stable boundary."""
+        """Join one submitted Invocation at its next stable boundary."""
 
         self._ensure_open()
-        return self.app.wait(ref, timeout)
+        return self.app.join(ref, timeout)
 
-    async def await_result(
+    async def ajoin(
         self,
         ref: InvocationRef,
         timeout: float | None = None,
     ) -> InvocationResult:
-        """Asynchronously wait for one submitted Invocation."""
+        """Asynchronously join one submitted Invocation."""
 
         self._ensure_open()
-        return await self.app.await_result(ref, timeout)
+        return await self.app.ajoin(ref, timeout)
 
     def resume(
         self,
@@ -489,123 +527,72 @@ class AutoAgentHost:
 
     def load_checkpoint(
         self,
-        checkpoint: RuntimeCheckpointBundle | AppCheckpoint,
+        checkpoint: SessionCheckpoint | AppCheckpoint,
     ) -> CheckpointLoadResult:
-        """Load one caller-supplied complete Runtime checkpoint graph."""
+        """Load caller-supplied Runtime Session checkpoints."""
 
         self._ensure_open()
         return self.app.load_checkpoint(checkpoint)
 
     async def aload_checkpoint(
         self,
-        checkpoint: RuntimeCheckpointBundle | AppCheckpoint,
+        checkpoint: SessionCheckpoint | AppCheckpoint,
     ) -> CheckpointLoadResult:
-        """Asynchronously load one complete Runtime checkpoint graph."""
+        """Asynchronously load Runtime Session checkpoints."""
 
         self._ensure_open()
         return await self.app.aload_checkpoint(checkpoint)
 
-    def child_handles(
+    def child_invocations(
         self,
         parent: InvocationRef,
-    ) -> tuple[ChildInvocationHandle, ...]:
-        """Return every durable Child handle owned by a parent Invocation."""
+    ) -> tuple[InvocationRef, ...]:
+        """Return every durable Child InvocationRef owned by a parent."""
 
         self._ensure_open()
-        return self.app.child_handles(parent)
+        return self.app.child_invocations(parent)
 
-    async def achild_handles(
+    async def achild_invocations(
         self,
         parent: InvocationRef,
-    ) -> tuple[ChildInvocationHandle, ...]:
-        """Asynchronously return a parent's durable Child handles."""
+    ) -> tuple[InvocationRef, ...]:
+        """Asynchronously return a parent's durable Child InvocationRefs."""
 
         self._ensure_open()
-        return await self.app.achild_handles(parent)
+        return await self.app.achild_invocations(parent)
 
-    def child_status(self, handle: ChildInvocationHandle) -> InvocationResult:
-        """Read one Child Invocation's current stable state."""
-
-        self._ensure_open()
-        return self.app.child_status(handle)
-
-    async def achild_status(
-        self,
-        handle: ChildInvocationHandle,
-    ) -> InvocationResult:
-        """Asynchronously read one Child Invocation state."""
-
-        self._ensure_open()
-        return await self.app.achild_status(handle)
-
-    def wait_child(
-        self,
-        handle: ChildInvocationHandle,
-        timeout: float | None = None,
-    ) -> InvocationResult:
-        """Wait for one Child Invocation to reach a stable boundary."""
-
-        self._ensure_open()
-        return self.app.wait_child(handle, timeout)
-
-    async def await_child(
-        self,
-        handle: ChildInvocationHandle,
-        timeout: float | None = None,
-    ) -> InvocationResult:
-        """Asynchronously wait for one Child Invocation."""
-
-        self._ensure_open()
-        return await self.app.await_child(handle, timeout)
-
-    def cancel_child(
-        self,
-        handle: ChildInvocationHandle,
-        reason: str | None = None,
-    ) -> InvocationResult:
-        """Cancel one Child Invocation through its durable handle."""
-
-        self._ensure_open()
-        return self.app.cancel_child(handle, reason)
-
-    async def acancel_child(
-        self,
-        handle: ChildInvocationHandle,
-        reason: str | None = None,
-    ) -> InvocationResult:
-        """Asynchronously cancel one Child Invocation."""
-
-        self._ensure_open()
-        return await self.app.acancel_child(handle, reason)
-
-    def restore_session(self, root_session_id: str) -> CheckpointLoadResult:
-        """Rebuild one SQLite Root graph and atomically load it into Core."""
+    def restore_session(self, session_id: str) -> CheckpointLoadResult:
+        """Rebuild one SQLite Runtime Session and load it into Core."""
 
         with self._restore_lease():
             store = self._restore_store()
             checkpoint = _run_store_call(
-                lambda: _rebuild_root_checkpoint(store, root_session_id),
+                lambda: _rebuild_session_checkpoint(store, session_id),
                 async_method="arestore_session",
             )
             return self.app.load_checkpoint(checkpoint)
 
     async def arestore_session(
-        self, root_session_id: str
+        self, session_id: str
     ) -> CheckpointLoadResult:
-        """Asynchronously rebuild and load one SQLite Root Runtime graph."""
+        """Asynchronously rebuild and load one SQLite Runtime Session."""
 
         with self._restore_lease():
             store = self._restore_store()
-            checkpoint = await _rebuild_root_checkpoint(store, root_session_id)
+            checkpoint = await _rebuild_session_checkpoint(store, session_id)
             return await self.app.aload_checkpoint(checkpoint)
 
-    def recover(self, ref: InvocationRef) -> InvocationResult:
+    def recover(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
         """Recover one exact Invocation already loaded into this Host."""
 
         self._ensure_open()
         return self.app.recover(ref)
 
-    async def arecover(self, ref: InvocationRef) -> InvocationResult:
+    async def arecover(
+        self, ref: InvocationRef
+    ) -> InvocationResult:
         """Asynchronously recover one exact loaded Invocation."""
 
         self._ensure_open()
@@ -929,18 +916,13 @@ def _cleanup_failed_startup(
             original.add_note(f"{label} cleanup failed: {cleanup_error}")
 
 
-async def _rebuild_root_checkpoint(
+async def _rebuild_session_checkpoint(
     store: RecoverySource,
-    root_session_id: str,
-) -> RuntimeCheckpointBundle:
-    session_id = _identity(root_session_id)
+    session_id: str,
+) -> SessionCheckpoint:
+    session_id = _identity(session_id)
     try:
         return await store.rebuild_checkpoint(session_id)
-    except RuntimeSessionNotRootError as error:
-        raise HostOperationError(
-            "HOST_SESSION_NOT_ROOT",
-            str(error),
-        ) from error
     except KeyError as error:
         raise HostOperationError(
             "HOST_SESSION_NOT_FOUND",

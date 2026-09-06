@@ -97,7 +97,7 @@ async with await AutoAgentHost.afrom_project("./autoagent.toml") as host:
 3. 按环境创建一个 `AutoAgentApp`；
 4. 原子注册全部 Workflow，并把 portable `WorkflowDefinitionSnapshot` 写入可查询 Store；
 5. 代理 Workflow Snapshot、Capability Operator 注册，以及 invoke/submit/stream、
-   wait/resume/cancel、Checkpoint 加载、Child 控制和 recover；
+   status/join/resume/cancel、Checkpoint 加载、Child Handle 查询和 recover；
 6. 关闭时先让 App 收敛并导出 Event，再关闭 Sink。
 
 同步和异步 context manager 都会关闭完整 Host。若业务代码与关闭同时失败，业务异常保持为

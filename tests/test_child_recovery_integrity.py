@@ -21,7 +21,7 @@ from autoagent import (
     Wait,
     Workflow,
 )
-from autoagent.core import RuntimeCheckpointBundle, RuntimeEvent, StateReducer
+from autoagent.core import AppCheckpoint, SessionCheckpoint, RuntimeEvent, StateReducer
 
 
 class Value(TypedDict):
@@ -62,14 +62,18 @@ class _CommitThenFailSink:
 
 def _checkpoint_from_prefix(
     events: tuple[RuntimeEvent, ...],
-) -> RuntimeCheckpointBundle:
+) -> AppCheckpoint:
     states = {
         session_id: StateReducer().reduce(
             tuple(event for event in events if event.session_id == session_id)
         )
         for session_id in {event.session_id for event in events}
     }
-    return RuntimeCheckpointBundle.from_states("root", states)
+    return AppCheckpoint(tuple(SessionCheckpoint.from_state(state) for state in states.values()))
+
+
+def _state(checkpoint: AppCheckpoint, session_id: str):
+    return next(item.state for item in checkpoint.sessions if item.session_id == session_id)
 
 
 class ChildRecoveryIntegrityTests(unittest.TestCase):
@@ -92,7 +96,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             source.close(timeout=1)
 
         checkpoint = _checkpoint_from_prefix(prefix)
-        invocation = checkpoint.state("root").invocation
+        invocation = _state(checkpoint, "root").invocation
         assert invocation is not None
         self.assertEqual(invocation.status, "created")
         self.assertFalse(invocation.scheduler.initialized)
@@ -100,7 +104,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(workflow)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             result = restored.recover(ref)
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.output, {"value": 1})
@@ -145,23 +149,23 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             source.close(timeout=1)
 
         checkpoint = _checkpoint_from_prefix(prefix)
-        root = checkpoint.state("root").invocation
+        root = _state(checkpoint, "root").invocation
         assert root is not None
         child_session_id = next(iter(root.child_plans.values())).units[0].session_id
         self.assertEqual(root.status, "cancelled")
         self.assertEqual(
-            checkpoint.state(child_session_id).invocation.status,  # type: ignore[union-attr]
+            _state(checkpoint, child_session_id).invocation.status,  # type: ignore[union-attr]
             "running",
         )
 
         restored = AutoAgentApp()
         try:
             restored.register_workflow(parent)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             result = restored.recover(ref)
-            handle = restored.child_handles(ref)[0]
+            handle = restored.child_invocations(ref)[0]
             self.assertEqual(result.status, "cancelled")
-            self.assertEqual(restored.child_status(handle).status, "cancelled")
+            self.assertEqual(restored.status(handle).status, "cancelled")
             self.assertEqual(child_calls, 1)
         finally:
             restored.close(timeout=1)
@@ -215,23 +219,23 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             source.close(timeout=1)
 
         checkpoint = _checkpoint_from_prefix(prefix)
-        root = checkpoint.state("root").invocation
+        root = _state(checkpoint, "root").invocation
         assert root is not None
         child_session_id = next(iter(root.child_plans.values())).units[0].session_id
         self.assertEqual(root.status, "failed")
         self.assertEqual(
-            checkpoint.state(child_session_id).invocation.status,  # type: ignore[union-attr]
+            _state(checkpoint, child_session_id).invocation.status,  # type: ignore[union-attr]
             "running",
         )
 
         restored = AutoAgentApp()
         try:
             restored.register_workflow(parent)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             result = restored.recover(ref)
-            handle = restored.child_handles(ref)[0]
+            handle = restored.child_invocations(ref)[0]
             self.assertEqual(result.status, "failed")
-            self.assertEqual(restored.child_status(handle).status, "cancelled")
+            self.assertEqual(restored.status(handle).status, "cancelled")
             self.assertEqual(child_calls, 1)
         finally:
             restored.close(timeout=1)
@@ -285,7 +289,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             source.close(timeout=1)
 
         checkpoint = _checkpoint_from_prefix(prefix)
-        root = checkpoint.state("root").invocation
+        root = _state(checkpoint, "root").invocation
         assert root is not None
         self.assertEqual(root.status, "running")
         self.assertTrue(
@@ -295,11 +299,11 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(parent)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             result = restored.recover(ref)
             self.assertEqual(result.status, "failed")
-            handle = restored.child_handles(ref)[0]
-            self.assertEqual(restored.child_status(handle).status, "cancelled")
+            handle = restored.child_invocations(ref)[0]
+            self.assertEqual(restored.status(handle).status, "cancelled")
             self.assertEqual(child_calls, 1)
         finally:
             restored.close(timeout=1)
@@ -329,13 +333,13 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(parent)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             result = restored.recover(ref)
-            handle = restored.child_handles(ref)[0]
-            child_result = restored.child_status(handle)
+            handle = restored.child_invocations(ref)[0]
+            child_result = restored.status(handle)
             self.assertEqual(result.status, "cancelled")
             self.assertEqual(child_result.status, "cancelled")
-            root = child_result.checkpoint.state("root").invocation
+            root = restored._journal.state(result.session_id).invocation
             assert root is not None
             plan = next(iter(root.child_plans.values()))
             self.assertEqual(plan.units[0].phase, "terminal")
@@ -409,7 +413,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         try:
             source.submit_invoke(parent, {"value": 1}, session_id="root")
             self.assertTrue(entered.wait(1))
-            checkpoint = source.close(timeout=1).roots[0]
+            checkpoint = source.close(timeout=1)
         finally:
             if not source._closed:
                 source.close(timeout=1)
@@ -417,15 +421,15 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(parent)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             result = restored.recover(ref)
             self.assertEqual(result.status, "failed")
             self.assertEqual(
                 result.error.type,  # type: ignore[union-attr]
                 "RecoveryNotAllowed",
             )
-            handle = restored.child_handles(ref)[0]
-            self.assertEqual(restored.child_status(handle).status, "cancelled")
+            handle = restored.child_invocations(ref)[0]
+            self.assertEqual(restored.status(handle).status, "cancelled")
             self.assertEqual(child_calls, 1)
         finally:
             restored.close(timeout=1)
@@ -486,23 +490,23 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         workflow: Workflow,
         value: object,
         entered: threading.Event,
-    ) -> RuntimeCheckpointBundle:
+    ) -> AppCheckpoint:
         source = AutoAgentApp()
         try:
             source.submit_invoke(workflow, value, session_id="root")
             self.assertTrue(entered.wait(1))
-            return source.close(timeout=1).roots[0]
+            return source.close(timeout=1)
         finally:
             if not source._closed:
                 source.close(timeout=1)
 
     def _recover(
-        self, workflow: Workflow, checkpoint: RuntimeCheckpointBundle
+        self, workflow: Workflow, checkpoint: AppCheckpoint
     ):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(workflow)
-            ref = restored.load_checkpoint(checkpoint).roots[0]
+            ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == "root")
             return restored.recover(ref)
         finally:
             restored.close(timeout=1)

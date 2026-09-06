@@ -15,7 +15,7 @@ from ..runtime import (
     NodeOccurrenceCompleted,
     NodeOccurrenceFailed,
     NodeOccurrenceStarted,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeEvent,
     RuntimeState,
     SchedulerInitialized,
@@ -81,14 +81,14 @@ class RuntimeJournalPort(Protocol):
     def install_states(self, states: Mapping[str, RuntimeState]) -> None: ...
 
     def capture_checkpoint(
-        self, root_session_id: str, *, captured_at_ns: int | None = None
-    ) -> RuntimeCheckpointBundle:
-        """Capture the recoverable graph, omitting active groups in Child-first order."""
+        self, session_id: str, *, captured_at_ns: int | None = None
+    ) -> SessionCheckpoint:
+        """Capture one recoverable Runtime Session."""
         ...
 
 
 class UserEventJournalPort(Protocol):
-    """Independent ordered journal for non-canonical user observations."""
+    """Independent ordered journal for non-canonical User Events."""
 
     def emit(
         self,

@@ -839,8 +839,8 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                     {"value": 8},
                     session_id="traced-parent-session",
                 )
-                handle = core.child_handles(result.ref)[0]
-                core.wait_child(handle, timeout=1)
+                handle = core.child_invocations(result.ref)[0]
+                core.join(handle, timeout=1)
                 app = create_tracing_app(store)
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(
@@ -856,17 +856,17 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(item["parent_invocation_id"], result.invocation_id)
                     self.assertEqual(item["planned_workflow_id"], "traced-child")
                     self.assertEqual(
-                        item["planned_invocation_id"], handle["invocation_id"]
+                        item["planned_invocation_id"], handle.invocation_id
                     )
                     self.assertEqual(
-                        item["current_invocation_id"], handle["invocation_id"]
+                        item["current_invocation_id"], handle.invocation_id
                     )
                     self.assertEqual(item["mode"], "spawn")
                     self.assertEqual(item["phase"], "terminal")
 
                     detail = await client.get(
                         "/api/v1/invocations/detail",
-                        params={"invocation_id": handle["invocation_id"]},
+                        params={"invocation_id": handle.invocation_id},
                     )
                     self.assertEqual(
                         detail.json()["parent_invocation_id"],
@@ -1191,7 +1191,7 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result.status, "completed")
                 await asyncio.wait_for(entered.wait(), timeout=1)
-                handle = (await core.achild_handles(result.ref))[0]
+                handle = (await core.achild_invocations(result.ref))[0]
                 position = await store.latest_trace_sequence(result.invocation_id)
                 self.assertIsNone(
                     await store.terminal_trace_status(
@@ -1210,7 +1210,7 @@ class TracingServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(pending.done())
 
                 release.set()
-                child_result = await core.await_child(handle, timeout=1)
+                child_result = await core.ajoin(handle, timeout=1)
                 self.assertEqual(child_result.status, "completed")
                 terminal_phase = await asyncio.wait_for(pending, timeout=1)
                 self.assertIn(b'"kind":"child_invocation.phase_changed"', terminal_phase)

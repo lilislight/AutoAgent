@@ -1,12 +1,4 @@
 include .env.example
-include CORE_DESIGN.md
-include HOSTING.md
-include PLAN.md
-include README.md
-include TESTING.md
-include TODO.md
-include V1_CORE_PARITY.md
-include runtime.md
-include workflow.md
+recursive-include docs *.md
 include autoagent/py.typed
 recursive-include autoagent/tracing/ui *

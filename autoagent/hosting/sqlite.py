@@ -34,16 +34,15 @@ from autoagent.core.runtime import (
     InvocationRecoveryRequested,
     InvocationStarted,
     InvocationWaiting,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeEvent,
     RuntimeState,
     SessionOpened,
     StateReducer,
-    TraceEvent,
     UserEvent,
     WaitResumed,
-    project_trace_events,
 )
+from .trace import TraceEvent, project_trace_events
 
 from .errors import (
     RuntimeEventConflictError,
@@ -51,7 +50,6 @@ from .errors import (
     RuntimeEventSequenceError,
     RuntimeEventStoreClosedError,
     RuntimeEventStoreError,
-    RuntimeSessionNotRootError,
 )
 from .models import Page, ResumablePage
 from ._worker import ConcurrentWorker, SerialWorker, run_in_daemon
@@ -817,13 +815,13 @@ class SQLiteRuntimeStore:
         )
 
     async def rebuild_checkpoint(
-        self, root_session_id: str
-    ) -> RuntimeCheckpointBundle:
-        """Rebuild the latest recoverable Root/Child Runtime graph."""
+        self, session_id: str
+    ) -> SessionCheckpoint:
+        """Rebuild the latest recoverable State for one Runtime Session."""
 
         return await self._read_async(
             self._rebuild_checkpoint,
-            _identity(root_session_id),
+            _identity(session_id),
         )
 
     async def latest_trace_sequence(self, invocation_id: str) -> int:
@@ -4482,21 +4480,11 @@ class SQLiteRuntimeStore:
             finally:
                 connection.rollback()
 
-    def _rebuild_checkpoint(self, root_session_id: str) -> RuntimeCheckpointBundle:
+    def _rebuild_checkpoint(self, session_id: str) -> SessionCheckpoint:
         with closing(self._reader()) as connection:
             connection.execute("BEGIN")
-            states: dict[str, RuntimeState] = {}
-            visiting: set[str] = set()
             ownership_cache: _ReadOwnershipCache = {}
-
-            def visit(session_id: str) -> None:
-                if session_id in states:
-                    return
-                if session_id in visiting:
-                    raise RuntimeEventStoreError(
-                        "Stored Child Runtime graph contains a cycle."
-                    )
-                visiting.add(session_id)
+            try:
                 state = self._rebuild_state_with_connection(
                     connection, session_id, None
                 )
@@ -4509,60 +4497,9 @@ class SQLiteRuntimeStore:
                     state,
                     ownership_cache=ownership_cache,
                 )
-                states[session_id] = state
-                for plan in state.invocation.child_plans.values():
-                    for unit in plan.units:
-                        child_tail = self._validated_session_tail(
-                            connection,
-                            unit.session_id,
-                        )
-                        if child_tail is not None:
-                            visit(unit.session_id)
-                visiting.remove(session_id)
-
-            try:
-                self._validate_checkpoint_root_projection(
-                    connection,
-                    root_session_id,
-                )
-                visit(root_session_id)
-                return RuntimeCheckpointBundle.from_states(
-                    root_session_id,
-                    states,
-                )
+                return SessionCheckpoint.from_state(state)
             finally:
                 connection.rollback()
-
-    def _validate_checkpoint_root_projection(
-        self,
-        connection: sqlite3.Connection,
-        session_id: str,
-    ) -> None:
-        """Reject a Child as recovery Root using its canonical parent plan."""
-
-        ownership = connection.execute(
-            "SELECT 1 FROM session_ownership WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        if ownership is None:
-            evidence = connection.execute(
-                "SELECT 1 FROM runtime_events WHERE session_id = ? LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            if evidence is None:
-                raise KeyError(session_id)
-            raise RuntimeEventStoreError(
-                "Canonical Session has no ownership projection."
-            )
-        canonical_root = self._validated_ownership_root(
-            connection,
-            session_id,
-        )
-        if canonical_root == session_id:
-            return
-        raise RuntimeSessionNotRootError(
-            f"Session {session_id!r} belongs to Root {canonical_root!r}."
-        )
 
     @staticmethod
     def _rebuild_state_with_connection(

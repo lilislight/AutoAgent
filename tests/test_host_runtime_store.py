@@ -2084,8 +2084,8 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 {"items": [{"value": index} for index in range(4)]},
                 session_id="cache-parent-session",
             )
-            for handle in app.child_handles(result.ref):
-                app.wait_child(handle, timeout=2)
+            for handle in app.child_invocations(result.ref):
+                app.join(handle, timeout=2)
         finally:
             app.close()
         parent_events = tuple(
@@ -2177,8 +2177,8 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                     {"value": 1},
                     session_id="phase-parent-session",
                 )
-                for handle in app.child_handles(result.ref):
-                    app.wait_child(handle, timeout=2)
+                for handle in app.child_invocations(result.ref):
+                    app.join(handle, timeout=2)
             finally:
                 app.close()
                 store.close()
@@ -2462,8 +2462,8 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
             finally:
                 version_store.close()
 
-    def test_store_rebuilds_parent_child_checkpoint(self) -> None:
-        """Reconstruct a complete Root and Child Runtime graph from Events."""
+    def test_store_rebuilds_one_session_checkpoint(self) -> None:
+        """Reconstruct one Runtime Session checkpoint from its Events."""
 
         with TemporaryDirectory() as directory:
             store = SQLiteRuntimeStore(Path(directory) / "runtime.db")
@@ -2481,17 +2481,16 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 rebuilt = asyncio.run(
                     store.rebuild_checkpoint("stored-parent-session")
                 )
-                self.assertEqual(rebuilt.root_session_id, result.session_id)
-                self.assertEqual(len(rebuilt.states), 2)
+                self.assertEqual(rebuilt.session_id, result.session_id)
                 self.assertEqual(
-                    rebuilt.state(result.session_id).invocation.output,
+                    rebuilt.state.invocation.output,
                     {"value": 7},
                 )
             finally:
                 app.close()
                 store.close()
 
-    def test_checkpoint_rejects_a_child_head_whose_event_tail_was_deleted(
+    def test_child_checkpoint_rejects_a_head_whose_event_tail_was_deleted(
         self,
     ) -> None:
         """Do not mistake an opened but corrupt Child for an unopened plan."""
@@ -2540,7 +2539,7 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 for event in parent_prefix:
                     asyncio.run(unopened.append(event))
                 checkpoint = asyncio.run(unopened.rebuild_checkpoint("orphan-root"))
-                self.assertEqual(set(checkpoint.states), {"orphan-root"})
+                self.assertEqual(checkpoint.session_id, "orphan-root")
             finally:
                 unopened.close()
 
@@ -2566,12 +2565,12 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                     RuntimeEventStoreError,
                     "Session head",
                 ):
-                    asyncio.run(reader.rebuild_checkpoint("orphan-root"))
+                    asyncio.run(reader.rebuild_checkpoint(child_session_id))
             finally:
                 reader.close()
 
-    def test_checkpoint_rebuild_uses_one_parent_child_database_snapshot(self) -> None:
-        """Never combine parent and Child States from different WAL moments."""
+    def test_checkpoint_rebuild_reads_only_the_requested_session(self) -> None:
+        """Do not combine another Session's later Event into one checkpoint."""
 
         collector = _Collector()
         app = AutoAgentApp(runtime_event_sink=collector)
@@ -2637,10 +2636,7 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                 self.assertEqual(errors, [])
                 self.assertEqual(len(result), 1)
                 checkpoint = result[0]
-                self.assertEqual(
-                    checkpoint.state(child_session_id).sequence,  # type: ignore[union-attr]
-                    child_events[0].sequence,
-                )
+                self.assertEqual(checkpoint.session_id, "snapshot-root")  # type: ignore[union-attr]
             finally:
                 release.set()
                 store.close()
@@ -2677,10 +2673,10 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                     {"items": [{"value": 4}]},
                     session_id="second-parent",
                 )
-                first_handles = app.child_handles(first.ref)
-                second_handles = app.child_handles(second.ref)
+                first_handles = app.child_invocations(first.ref)
+                second_handles = app.child_invocations(second.ref)
                 for handle in (*first_handles, *second_handles):
-                    app.wait_child(handle, timeout=1)
+                    app.join(handle, timeout=1)
 
                 with patch.object(
                     store,
@@ -2728,8 +2724,8 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                     rebuilt = asyncio.run(
                         store.rebuild_checkpoint(first.session_id)
                     )
-                self.assertEqual(len(rebuilt.states), 4)
-                self.assertEqual(checkpoint_scan.call_count, 1)
+                self.assertEqual(rebuilt.session_id, first.session_id)
+                self.assertEqual(checkpoint_scan.call_count, 0)
 
                 with self.assertRaises(ValueError):
                     asyncio.run(
@@ -2767,9 +2763,9 @@ class SQLiteRuntimeStoreTests(unittest.TestCase):
                     {"value": 1},
                     session_id="missing-parent-session",
                 )
-                handle = app.child_handles(result.ref)[0]
-                app.wait_child(handle, timeout=1)
-                child_session_id = handle["session_id"]
+                handle = app.child_invocations(result.ref)[0]
+                app.join(handle, timeout=1)
+                child_session_id = handle.session_id
             finally:
                 app.close()
                 store.close()

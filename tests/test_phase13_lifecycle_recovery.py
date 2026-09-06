@@ -12,7 +12,6 @@ from typing_extensions import TypedDict
 from autoagent import (
     AppCheckpoint,
     AutoAgentApp,
-    ChildInvocationHandle,
     Edge,
     InvocationRef,
     InvocationResult,
@@ -22,7 +21,6 @@ from autoagent import (
     Recovery,
     RuntimeInfrastructureError,
     RuntimeTransitionError,
-    TraceEvent,
     Wait,
     Workflow,
 )
@@ -30,7 +28,7 @@ from autoagent.core import (
     InMemoryEventJournal,
     InvocationCancelled,
     InvocationRecoveryRequested,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeEvent,
 )
 from autoagent.core.app.stream import AttachedStream
@@ -48,54 +46,25 @@ def identity(value: Value) -> Value:
 def _cross_root_checkpoint_pair() -> tuple[
     Workflow,
     Workflow,
-    RuntimeCheckpointBundle,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
+    SessionCheckpoint,
     str,
 ]:
     child = Workflow("cross-root-child", nodes=[Node("work", identity)])
     parent = Workflow("cross-root-parent", nodes=[Node("child", child)])
     source = AutoAgentApp()
-    planned: RuntimeCheckpointBundle | None = None
-    stream = source.stream(parent, {"value": 1}, session_id="cross-root-parent")
     try:
-        for item in stream:
-            if (
-                isinstance(item, InvocationUpdate)
-                and item.event.kind == "child_invocation.planned"
-            ):
-                planned = item.checkpoint
-                break
+        parent_result = source.invoke(
+            parent, {"value": 1}, session_id="cross-root-parent"
+        )
+        child_ref = source.child_invocations(parent_result.ref)[0]
+        child_bundle = source.unload_session(child_ref)
+        planned = source.unload_session(parent_result.ref)
     finally:
-        stream.close()
         source.close()
-    assert planned is not None
-    parent_state = planned.state("cross-root-parent")
+    parent_state = planned.state
     assert parent_state.invocation is not None
     unit = next(iter(parent_state.invocation.child_plans.values())).units[0]
-
-    child_source = AutoAgentApp()
-    try:
-        child_result = child_source.invoke(
-            child,
-            {"value": 2},
-            session_id=unit.session_id,
-        )
-        child_state = child_result.checkpoint.state(unit.session_id)
-    finally:
-        child_source.close()
-    assert child_state.session is not None and child_state.invocation is not None
-    matching_state = replace(
-        child_state,
-        session=replace(
-            child_state.session,
-            latest_invocation_id=unit.invocation_id,
-        ),
-        invocation=replace(child_state.invocation, id=unit.invocation_id),
-    )
-    child_bundle = RuntimeCheckpointBundle.from_states(
-        unit.session_id,
-        {unit.session_id: matching_state},
-    )
     return child, parent, planned, child_bundle, unit.session_id
 
 
@@ -279,15 +248,15 @@ class _QueuedResultApp(AutoAgentApp):
 
 
 class _ChildRefThreadApp(AutoAgentApp):
-    """Record which thread validates each public Child Handle."""
+    """Record which thread validates each public InvocationRef."""
 
     def __init__(self) -> None:
         super().__init__()
         self.child_ref_threads: list[int] = []
 
-    def _child_ref(self, handle: ChildInvocationHandle) -> InvocationRef:
+    def _control_ref(self, handle: InvocationRef) -> InvocationRef:
         self.child_ref_threads.append(threading.get_ident())
-        return super()._child_ref(handle)
+        return super()._control_ref(handle)
 
 
 class _CloseAttemptApp(AutoAgentApp):
@@ -410,31 +379,27 @@ class LifecycleRecoveryTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(order, ["snapshot", "close"])
 
-    def test_every_child_control_validates_handle_on_runtime_loop(self) -> None:
-        """Verify sync and async Child APIs never read Runtime State off-loop."""
+    def test_every_control_validates_invocation_ref_on_runtime_loop(self) -> None:
+        """Verify generic controls validate InvocationRefs on the Runtime loop."""
 
         app = _ChildRefThreadApp()
-        invalid = cast(ChildInvocationHandle, {})
+        invalid = cast(InvocationRef, {})
         try:
             for operation in (
-                lambda: app.child_status(invalid),
-                lambda: app.wait_child(invalid),
-                lambda: app.cancel_child(invalid),
+                lambda: app.status(invalid),
+                lambda: app.join(invalid),
+                lambda: app.cancel(invalid),
             ):
-                with self.assertRaisesRegex(
-                    RuntimeTransitionError, "CHILD_HANDLE_INVALID"
-                ):
+                with self.assertRaisesRegex(TypeError, "InvocationRef"):
                     operation()
 
             async def exercise_async() -> None:
                 for operation in (
-                    lambda: app.achild_status(invalid),
-                    lambda: app.await_child(invalid),
-                    lambda: app.acancel_child(invalid),
+                    lambda: app.astatus(invalid),
+                    lambda: app.ajoin(invalid),
+                    lambda: app.acancel(invalid),
                 ):
-                    with self.assertRaisesRegex(
-                        RuntimeTransitionError, "CHILD_HANDLE_INVALID"
-                    ):
+                    with self.assertRaisesRegex(TypeError, "InvocationRef"):
                         await operation()
 
             asyncio.run(exercise_async())
@@ -557,14 +522,14 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             result = items[-1]
             self.assertEqual(result.status, "completed")
-            child_result = app.wait_child(result.output, timeout=1.0)
+            child_result = app.join(result.output, timeout=1.0)
             self.assertEqual(child_result.status, "completed")
             self.assertEqual(child_result.output, {"value": 1})
         finally:
             app.close()
 
-    def test_final_stream_result_detaches_spawn_child_before_close(self) -> None:
-        """Verify final Result itself releases detached Child publishers."""
+    def test_final_stream_result_detaches_spawn_child_without_late_observations(self) -> None:
+        """Let a spawned Child finish without retaining updates after Root delivery."""
 
         child_started = _ThreadSignal()
         release_child = _RuntimeGate()
@@ -598,13 +563,11 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertTrue(child_started.wait(1))
 
             _release_runtime_gate_sync(app._runtime_loop, release_child)
-            child_result = app.wait_child(result.output, timeout=1)  # type: ignore[union-attr]
+            child_result = app.join(result.output, timeout=1)  # type: ignore[union-attr]
             self.assertEqual(child_result.status, "completed")
             self.assertEqual(child_result.output, {"value": 1})
-            self.assertIn(
-                "invocation.completed",
-                {event.kind for event in child_result.trace_events},
-            )
+            self.assertFalse(hasattr(child_result, "trace_events"))
+            self.assertFalse(hasattr(child_result, "user_events"))
             stream.close()
         finally:
             stream.close()
@@ -668,7 +631,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             if isinstance(result_box[0], BaseException):
                 raise result_box[0]
             result = result_box[0]
-            checkpoint_invocation = result.checkpoint.state(result.session_id).invocation
+            checkpoint_invocation = app._journal.state(result.session_id).invocation
             self.assertIsNotNone(checkpoint_invocation)
             self.assertEqual(result.status, "cancelled")
             self.assertEqual(result.status, checkpoint_invocation.status)
@@ -723,7 +686,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             handle = parent_result.output
             self.assertTrue(first_started.wait(1))
-            checkpoint = source.close(timeout=1).roots[0]
+            checkpoint = source.close(timeout=1)
         finally:
             _release_runtime_gate_sync(source._runtime_loop, first_gate)
             if not source._closed:
@@ -739,7 +702,11 @@ class LifecycleRecoveryTests(unittest.TestCase):
 
             def recover_root() -> None:
                 try:
-                    result_box.append(recovered.recover(loaded.roots[0]))
+                    root_ref = next(
+                        ref for ref in loaded.invocations
+                        if ref.session_id == "recover-spawn-root"
+                    )
+                    result_box.append(recovered.recover(root_ref))
                 except BaseException as error:
                     result_box.append(error)
                 finally:
@@ -755,12 +722,12 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 raise result_box[0]
             recovered_root = result_box[0]
             self.assertEqual(recovered_root.status, "completed")
-            running_child = recovered.child_status(handle)
+            running_child = recovered.status(handle)
             self.assertEqual(running_child.status, "running")
-            self.assertTrue(recovered._task_runtime.is_live(handle["session_id"]))
+            self.assertTrue(recovered._task_runtime.is_live(handle.session_id))
 
             _release_runtime_gate_sync(recovered._runtime_loop, replay_gate)
-            completed_child = recovered.wait_child(handle, timeout=1)
+            completed_child = recovered.join(handle, timeout=1)
             self.assertEqual(completed_child.status, "completed")
             self.assertEqual(completed_child.output, {"value": 1})
         finally:
@@ -788,9 +755,9 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id="recover-spawn-wait-root",
             )
             handle = parent_result.output
-            waiting = source.wait_child(handle, timeout=1)
+            waiting = source.join(handle, timeout=1)
             self.assertEqual(waiting.status, "waiting")
-            checkpoint = source.close(timeout=1).roots[0]
+            checkpoint = source.close(timeout=1)
         finally:
             if not source._closed:
                 source.close(timeout=1)
@@ -799,11 +766,15 @@ class LifecycleRecoveryTests(unittest.TestCase):
         try:
             recovered.register_workflow(parent)
             loaded = recovered.load_checkpoint(checkpoint)
-            recovered_root = recovered.recover(loaded.roots[0])
+            root_ref = next(
+                ref for ref in loaded.invocations
+                if ref.session_id == "recover-spawn-wait-root"
+            )
+            recovered_root = recovered.recover(root_ref)
             self.assertEqual(recovered_root.status, "completed")
-            waiting = recovered.child_status(handle)
+            waiting = recovered.status(handle)
             self.assertEqual(waiting.status, "waiting")
-            self.assertFalse(recovered._task_runtime.is_live(handle["session_id"]))
+            self.assertFalse(recovered._task_runtime.is_live(handle.session_id))
 
             completed = recovered.resume(
                 waiting.ref,
@@ -834,12 +805,13 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id="recover-opened-wait-root",
             )
             handle = parent_result.output
-            waiting = source.wait_child(handle, timeout=1)
-            checkpoint = waiting.checkpoint
+            waiting = source.join(handle, timeout=1)
+            child_checkpoint = source.unload_session(waiting.ref)
+            parent_checkpoint = source.unload_session(parent_result.ref)
         finally:
             source.close(timeout=1)
 
-        root_state = checkpoint.state("recover-opened-wait-root")
+        root_state = parent_checkpoint.state
         assert root_state.invocation is not None
         creation_id, plan = next(iter(root_state.invocation.child_plans.items()))
         opened_plan = replace(
@@ -853,26 +825,27 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 child_plans={creation_id: opened_plan},
             ),
         )
-        opened_checkpoint = RuntimeCheckpointBundle.from_states(
-            checkpoint.root_session_id,
-            {**checkpoint.states, checkpoint.root_session_id: opened_root},
-        )
+        opened_checkpoint = SessionCheckpoint.from_state(opened_root)
 
         recovered = AutoAgentApp()
         try:
             recovered.register_workflow(parent)
-            loaded = recovered.load_checkpoint(opened_checkpoint)
-            root_result = recovered.recover(loaded.roots[0])
-            self.assertEqual(root_result.status, "completed")
-            root_after_recovery = root_result.checkpoint.state(
-                root_result.session_id
+            loaded = recovered.load_checkpoint(
+                AppCheckpoint((opened_checkpoint, child_checkpoint))
             )
+            root_ref = next(
+                ref for ref in loaded.invocations
+                if ref.session_id == "recover-opened-wait-root"
+            )
+            root_result = recovered.recover(root_ref)
+            self.assertEqual(root_result.status, "completed")
+            root_after_recovery = recovered._journal.state(root_result.session_id)
             recovered_plan = next(
                 iter(root_after_recovery.invocation.child_plans.values())
             )
             self.assertEqual(recovered_plan.units[0].phase, "accepted")
 
-            child_waiting = recovered.child_status(handle)
+            child_waiting = recovered.status(handle)
             self.assertEqual(child_waiting.status, "waiting")
             completed = recovered.resume(
                 child_waiting.ref,
@@ -880,9 +853,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 {"value": 2},
             )
             self.assertEqual(completed.status, "completed")
-            root_after_completion = completed.checkpoint.state(
-                root_result.session_id
-            )
+            root_after_completion = recovered._journal.state(root_result.session_id)
             completed_plan = next(
                 iter(root_after_completion.invocation.child_plans.values())
             )
@@ -933,7 +904,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             handle = parent_result.output
             self.assertTrue(first_started.wait(1))
-            checkpoint = source.close(timeout=1).roots[0]
+            checkpoint = source.close(timeout=1)
         finally:
             _release_runtime_gate_sync(source._runtime_loop, first_gate)
             if not source._closed:
@@ -950,11 +921,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             def recover_child() -> None:
                 try:
                     result_box.append(
-                        recovered.recover(
-                            InvocationRef(
-                                handle["session_id"], handle["invocation_id"]
-                            )
-                        )
+                        recovered.recover(handle)
                     )
                 except BaseException as error:
                     result_box.append(error)
@@ -980,46 +947,6 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 recovery_thread.join(1)
             recovered.close(timeout=1)
 
-    def test_stream_close_converges_every_admission_stage(self) -> None:
-        """Verify early stream close never leaves an admitted Invocation orphaned."""
-
-        for boundary in (
-            "session.opened",
-            "invocation.opened",
-            "invocation.started",
-            "scheduler.initialized",
-        ):
-            with self.subTest(boundary=boundary):
-                journal = InMemoryEventJournal()
-                app = AutoAgentApp(runtime_journal=journal)
-                session_id = f"stream-close-{boundary}"
-                stream = app.stream(
-                    Workflow(
-                        f"stream-close-workflow-{boundary}",
-                        nodes=[Node("node", identity)],
-                    ),
-                    {"value": 1},
-                    session_id=session_id,
-                )
-                try:
-                    for item in stream:
-                        if (
-                            isinstance(item, InvocationUpdate)
-                            and isinstance(item.event, TraceEvent)
-                            and item.event.kind == boundary
-                        ):
-                            break
-                    stream.close()
-                    state = journal.state(session_id)
-                    if boundary == "session.opened":
-                        self.assertIsNone(state.session)
-                    else:
-                        self.assertIsNotNone(state.invocation)
-                        self.assertEqual(state.invocation.status, "cancelled")
-                    self.assertFalse(app._task_runtime.is_live(session_id))
-                finally:
-                    stream.close()
-                    app.close(timeout=1.0)
 
     def test_cancelled_aresume_does_not_leave_running_state_without_task(self) -> None:
         """Verify caller cancellation cannot orphan resumed physical work."""
@@ -1094,22 +1021,22 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id="cancel-recover-session",
             )
             self.assertTrue(await first_started.wait_async())
-            source_checkpoint = (await source.aclose(timeout=1.0)).roots[0]
+            source_checkpoint = (await source.aclose(timeout=1.0)).sessions[0]
 
             recovered = AutoAgentApp()
             try:
                 recovered.register_workflow(workflow)
                 loaded = await recovered.aload_checkpoint(source_checkpoint)
-                recovery = asyncio.create_task(recovered.arecover(loaded.roots[0]))
+                recovery = asyncio.create_task(recovered.arecover(loaded.invocations[0]))
                 self.assertTrue(await replay_started.wait_async())
                 recovery.cancel()
                 await asyncio.gather(recovery, return_exceptions=True)
 
-                state = recovered._journal.state(loaded.roots[0].session_id)
+                state = recovered._journal.state(loaded.invocations[0].session_id)
                 self.assertIsNotNone(state.invocation)
                 orphaned = (
                     state.invocation.status == "running"
-                    and not recovered._task_runtime.is_live(loaded.roots[0].session_id)
+                    and not recovered._task_runtime.is_live(loaded.invocations[0].session_id)
                 )
                 self.assertFalse(orphaned)
             finally:
@@ -1135,8 +1062,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     child_cancelled.set()
 
             async def parent_block(
-                handle: ChildInvocationHandle,
-            ) -> ChildInvocationHandle:
+                handle: InvocationRef,
+            ) -> InvocationRef:
                 parent_started.set()
                 try:
                     await asyncio.Event().wait()
@@ -1163,7 +1090,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 )
                 self.assertTrue(await child_started.wait_async())
                 self.assertTrue(await parent_started.wait_async())
-                handles = await app.achild_handles(submitted.ref)
+                handles = await app.achild_invocations(submitted.ref)
                 self.assertEqual(len(handles), 1)
 
                 sink.target_session_id = submitted.session_id
@@ -1179,7 +1106,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
 
                 self.assertTrue(await child_cancelled.wait_async())
                 self.assertTrue(await parent_cancelled.wait_async())
-                child_state = app._journal.state(handles[0]["session_id"])
+                child_state = app._journal.state(handles[0].session_id)
                 self.assertIsNotNone(child_state.invocation)
                 self.assertEqual(child_state.invocation.status, "cancelled")
             finally:
@@ -1188,193 +1115,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_cancelled_astream_receive_has_no_terminal_sentinel_deadlock(self) -> None:
-        """Verify one cancelled receive cannot enqueue two terminal sentinels."""
 
-        async def run() -> None:
-            sink = _BlockingSink()
-            sink.enabled = True
-            sink.target_kind = "session.opened"
-            app = AutoAgentApp(runtime_event_sink=sink)
-            stream = app.astream(
-                Workflow("cancel-astream", nodes=[Node("node", identity)]),
-                {"value": 1},
-                session_id="cancel-astream-session",
-            )
-            first = await anext(stream)
-            self.assertIsInstance(first, InvocationUpdate)
-            assert isinstance(first, InvocationUpdate)
-            self.assertEqual(first.event.kind, "session.opened")
-            # Root SessionOpened is not persisted until InvocationOpened makes
-            # admission recoverable, so block and cancel the second receive.
-            consumer = asyncio.create_task(anext(stream))
-            try:
-                self.assertTrue(await sink.entered.wait_async())
-                consumer.cancel()
-                await _release_runtime_gate(app._runtime_loop, sink.release)
-                done, _pending = await asyncio.wait({consumer}, timeout=0.2)
-                completed_without_deadlock = consumer in done
-                if not completed_without_deadlock:
-                    async def unblock_terminal_queue() -> None:
-                        for channel in tuple(app._attached_streams.values()):
-                            while not channel._queue.empty():
-                                channel._queue.get_nowait()
 
-                    await app._runtime_loop.wait(
-                        app._runtime_loop.submit(unblock_terminal_queue())
-                    )
-                    await asyncio.wait({consumer}, timeout=0.5)
-                self.assertTrue(completed_without_deadlock)
-                self.assertFalse(app._attached_streams)
-                self.assertFalse(app._attached_stream_tasks)
-            finally:
-                await _release_runtime_gate(app._runtime_loop, sink.release)
-                if not consumer.done():
-                    consumer.cancel()
-                await asyncio.gather(consumer, return_exceptions=True)
-                close_stream = asyncio.create_task(stream.aclose())
-                done, _pending = await asyncio.wait({close_stream}, timeout=1)
-                if close_stream not in done:
-                    close_stream.cancel()
-                await asyncio.gather(close_stream, return_exceptions=True)
-                await app.aclose(timeout=1.0)
-
-        asyncio.run(run())
-
-    def test_external_cancelled_astream_ends_with_cancelled_result(self) -> None:
-        """Verify external cancellation still delivers the stream's final Result."""
-
-        async def run() -> None:
-            started = _ThreadSignal()
-
-            async def block(value: Value) -> Value:
-                started.set()
-                await asyncio.Event().wait()
-                return value
-
-            app = AutoAgentApp()
-            stream = app.astream(
-                Workflow("external-cancel-stream", nodes=[Node("work", block)]),
-                {"value": 1},
-                session_id="external-cancel-stream-session",
-            )
-            try:
-                ref = None
-                while True:
-                    item = await anext(stream)
-                    if (
-                        isinstance(item, InvocationUpdate)
-                        and isinstance(item.event, TraceEvent)
-                        and item.event.kind == "operator_call.started"
-                    ):
-                        ref = InvocationRef(
-                            item.event.session_id, item.event.invocation_id
-                        )
-                        break
-                cancelled_update = asyncio.create_task(anext(stream))
-                self.assertTrue(await started.wait_async())
-                assert ref is not None
-                cancellation = asyncio.create_task(app.acancel(ref, "external"))
-                update = await cancelled_update
-                self.assertIsInstance(update, InvocationUpdate)
-                self.assertEqual(update.event.kind, "invocation.cancelled")
-                self.assertIsNotNone(update.checkpoint)
-
-                final_pull = asyncio.create_task(anext(stream))
-                cancelled, final = await asyncio.gather(cancellation, final_pull)
-                self.assertEqual(cancelled.status, "cancelled")
-                self.assertIsInstance(final, InvocationResult)
-                self.assertEqual(final.status, "cancelled")
-                self.assertEqual(
-                    final.checkpoint.state(ref.session_id).invocation.status,
-                    "cancelled",
-                )
-                with self.assertRaises(StopAsyncIteration):
-                    await anext(stream)
-            finally:
-                await stream.aclose()
-                await app.aclose(timeout=1)
-
-        asyncio.run(run())
-
-    def test_external_cancelled_sync_stream_ends_with_cancelled_result(self) -> None:
-        """Verify sync stream cancellation has the same final Result contract."""
-
-        started = threading.Event()
-
-        async def block(value: Value) -> Value:
-            started.set()
-            await asyncio.Event().wait()
-            return value
-
-        app = AutoAgentApp()
-        stream = app.stream(
-            Workflow("external-cancel-sync-stream", nodes=[Node("work", block)]),
-            {"value": 1},
-            session_id="external-cancel-sync-stream-session",
-        )
-        next_values: list[object] = []
-        next_errors: list[BaseException] = []
-        cancel_values: list[InvocationResult] = []
-        cancel_errors: list[BaseException] = []
-
-        def pull_cancel_update() -> None:
-            try:
-                next_values.append(next(stream))
-            except BaseException as error:
-                next_errors.append(error)
-
-        def cancel_invocation(ref: InvocationRef) -> None:
-            try:
-                cancel_values.append(app.cancel(ref, "external"))
-            except BaseException as error:
-                cancel_errors.append(error)
-
-        update_thread: threading.Thread | None = None
-        cancel_thread: threading.Thread | None = None
-        try:
-            ref = None
-            for item in stream:
-                if (
-                    isinstance(item, InvocationUpdate)
-                    and isinstance(item.event, TraceEvent)
-                    and item.event.kind == "operator_call.started"
-                ):
-                    ref = InvocationRef(
-                        item.event.session_id, item.event.invocation_id
-                    )
-                    break
-            assert ref is not None
-            update_thread = threading.Thread(target=pull_cancel_update)
-            update_thread.start()
-            self.assertTrue(started.wait(1))
-            cancel_thread = threading.Thread(target=cancel_invocation, args=(ref,))
-            cancel_thread.start()
-            update_thread.join(1)
-            self.assertFalse(update_thread.is_alive())
-            self.assertEqual(next_errors, [])
-            self.assertEqual(len(next_values), 1)
-            update = next_values[0]
-            self.assertIsInstance(update, InvocationUpdate)
-            self.assertEqual(update.event.kind, "invocation.cancelled")
-
-            final = next(stream)
-            cancel_thread.join(1)
-            self.assertFalse(cancel_thread.is_alive())
-            self.assertEqual(cancel_errors, [])
-            self.assertEqual(len(cancel_values), 1)
-            self.assertEqual(cancel_values[0].status, "cancelled")
-            self.assertIsInstance(final, InvocationResult)
-            self.assertEqual(final.status, "cancelled")
-            with self.assertRaises(StopIteration):
-                next(stream)
-        finally:
-            stream.close()
-            if update_thread is not None:
-                update_thread.join(1)
-            if cancel_thread is not None:
-                cancel_thread.join(1)
-            app.close(timeout=1)
 
     def test_concurrent_aclose_calls_share_one_result(self) -> None:
         """Verify concurrent asynchronous close calls are one idempotent operation."""
@@ -1514,37 +1256,37 @@ class LifecycleRecoveryTests(unittest.TestCase):
             session_id="preloaded-close-root",
         )
         checkpoint = source.close()
-        self.assertEqual(len(checkpoint.roots), 1)
-        self.assertEqual(len(checkpoint.roots[0].states), 2)
+        self.assertEqual(len(checkpoint.sessions), 2)
 
         journal = InMemoryEventJournal()
-        journal.install_states(checkpoint.roots[0].states)
+        journal.install_states(
+            {item.session_id: item.state for item in checkpoint.sessions}
+        )
         restored = AutoAgentApp(runtime_journal=journal)
         captured = restored.close()
 
-        self.assertEqual(len(captured.roots), 1)
+        self.assertEqual(len(captured.sessions), 2)
         self.assertEqual(
-            captured.roots[0].root_session_id,
-            checkpoint.roots[0].root_session_id,
+            {item.session_id: item.state for item in captured.sessions},
+            {item.session_id: item.state for item in checkpoint.sessions},
         )
-        self.assertEqual(captured.roots[0].states, checkpoint.roots[0].states)
 
     def test_public_invocation_status_includes_child_creation(self) -> None:
         """Verify Child admission's created phase is represented by the SDK type."""
 
         self.assertIn("created", get_args(InvocationStatus))
 
-    def test_app_checkpoint_rejects_cross_root_planned_child_claim(self) -> None:
-        """Verify one planned Child cannot also be another checkpoint Root."""
+    def test_app_checkpoint_keeps_related_sessions_as_separate_entries(self) -> None:
+        """Verify Parent and Child snapshots coexist without graph aggregation."""
 
         _child, _parent, planned, child_bundle, _child_session_id = (
             _cross_root_checkpoint_pair()
         )
-        with self.assertRaisesRegex(ValueError, "independent Checkpoint Root"):
-            AppCheckpoint((planned, child_bundle))
+        checkpoint = AppCheckpoint((planned, child_bundle))
+        self.assertEqual(len(checkpoint.sessions), 2)
 
-    def test_checkpoint_load_cannot_claim_an_existing_root_as_child(self) -> None:
-        """Verify a planned Child claim cannot hijack an installed independent Root."""
+    def test_checkpoint_load_can_attach_a_preloaded_child_to_its_parent(self) -> None:
+        """Verify related Session checkpoints may be loaded in either order."""
 
         _child, parent, planned, child_bundle, child_session_id = (
             _cross_root_checkpoint_pair()
@@ -1553,18 +1295,14 @@ class LifecycleRecoveryTests(unittest.TestCase):
         try:
             target.register_workflow(parent)
             loaded_child = target.load_checkpoint(child_bundle)
-            child_ref = loaded_child.roots[0]
+            child_ref = loaded_child.invocations[0]
             state_before = target._journal.state(child_session_id)
 
-            with self.assertRaisesRegex(
-                RuntimeTransitionError,
-                "CHECKPOINT_GRAPH_CONFLICT",
-            ):
-                target.load_checkpoint(planned)
+            target.load_checkpoint(planned)
 
-            self.assertEqual(target._journal.session_ids(), (child_session_id,))
+            self.assertEqual(set(target._journal.session_ids()), {child_session_id, "cross-root-parent"})
             self.assertEqual(target._journal.state(child_session_id), state_before)
-            self.assertEqual(target._root_session_id(child_session_id), child_session_id)
+            self.assertEqual(target._root_session_id(child_session_id), "cross-root-parent")
             self.assertIsNotNone(state_before.invocation)
             self.assertEqual(state_before.invocation.id, child_ref.invocation_id)
         finally:
@@ -1604,8 +1342,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 {"value": 1},
                 session_id="replacement-sink-root",
             )
-            handle = app.child_handles(first.ref)[0]
-            self.assertEqual(app.wait_child(handle, timeout=1).status, "completed")
+            handle = app.child_invocations(first.ref)[0]
+            self.assertEqual(app.join(handle, timeout=1).status, "completed")
 
             sink.enabled = True
             with self.assertRaises(RuntimeInfrastructureError):
@@ -1629,8 +1367,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
 
             closed = app.close(timeout=1)
-            self.assertEqual(len(closed.roots), 1)
-            self.assertEqual(closed.roots[0].root_session_id, "replacement-sink-root")
+            self.assertEqual(len(closed.sessions), 1)
+            self.assertEqual(closed.sessions[0].session_id, "replacement-sink-root")
         finally:
             sink.enabled = False
             if not app._closed:
@@ -1687,7 +1425,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(first.status, "completed")
             self.assertTrue(child_started.wait(1))
-            handle = app.child_handles(first.ref)[0]
+            handle = app.child_invocations(first.ref)[0]
             _release_runtime_gate_sync(app._runtime_loop, release_child)
             self.assertTrue(sink.rejected.wait(1))
 
@@ -1702,8 +1440,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 journal.state("child-event-retirement-root").invocation.id,
                 first.invocation_id,
             )
-            self.assertIn(handle["session_id"], journal.session_ids())
-            self.assertTrue(journal.events(handle["session_id"]))
+            self.assertIn(handle.session_id, journal.session_ids())
+            self.assertTrue(journal.events(handle.session_id))
             self.assertNotIn(sink.rejected_event_id, sink.accepted_event_ids)
 
             sink.enabled = False
@@ -1714,13 +1452,13 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(second.status, "completed")
             self.assertIn(sink.rejected_event_id, sink.accepted_event_ids)
-            self.assertNotIn(handle["session_id"], journal.session_ids())
+            self.assertNotIn(handle.session_id, journal.session_ids())
 
             closed = app.close(timeout=1)
-            self.assertEqual(len(closed.roots), 1)
-            self.assertEqual(
-                closed.roots[0].root_session_id,
+            self.assertEqual(len(closed.sessions), 2)
+            self.assertIn(
                 "child-event-retirement-root",
+                {item.session_id for item in closed.sessions},
             )
         finally:
             sink.enabled = False
@@ -1800,11 +1538,11 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(first.status, "completed")
             self.assertTrue(child_started.wait(1))
-            handle = app.child_handles(first.ref)[0]
+            handle = app.child_invocations(first.ref)[0]
 
             _release_runtime_gate_sync(app._runtime_loop, child_release)
             self.assertTrue(sink.entered.wait(1))
-            child_state = journal.state(handle["session_id"]).invocation
+            child_state = journal.state(handle.session_id).invocation
             parent_state = journal.state(root_session_id).invocation
             self.assertIsNotNone(child_state)
             self.assertIsNotNone(parent_state)
@@ -1830,7 +1568,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
 
             _release_runtime_gate_sync(app._runtime_loop, sink.release)
-            settled = app.wait_child(handle, timeout=1)
+            settled = app.join(handle, timeout=1)
             self.assertEqual(settled.status, "completed")
             parent_state = journal.state(root_session_id).invocation
             assert parent_state is not None
@@ -1854,9 +1592,9 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id=root_session_id,
             )
             self.assertEqual(second.status, "completed")
-            second_handle = app.child_handles(second.ref)[0]
+            second_handle = app.child_invocations(second.ref)[0]
             self.assertEqual(
-                app.wait_child(second_handle, timeout=1).status,
+                app.join(second_handle, timeout=1).status,
                 "completed",
             )
         finally:
@@ -2003,15 +1741,16 @@ class LifecycleRecoveryTests(unittest.TestCase):
         workflow = Workflow("immutable-checkpoint", nodes=[Node("node", identity)])
         source = AutoAgentApp()
         try:
-            checkpoint = source.invoke(
+            result = source.invoke(
                 workflow,
                 {"value": 1},
                 session_id="immutable-checkpoint-session",
-            ).checkpoint
+            )
+            checkpoint = source.unload_session(result.ref)
         finally:
             source.close()
 
-        state = checkpoint.state("immutable-checkpoint-session")
+        state = checkpoint.state
         self.assertIsNotNone(state.invocation)
         mutable_context: dict[str, object] = {}
         external_state = replace(
@@ -2019,10 +1758,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             invocation=replace(state.invocation, context=mutable_context),
         )
         try:
-            external_bundle = RuntimeCheckpointBundle.from_states(
-                "immutable-checkpoint-session",
-                {"immutable-checkpoint-session": external_state},
-            )
+            external_bundle = SessionCheckpoint.from_state(external_state)
         except (TypeError, ValueError):
             return
 

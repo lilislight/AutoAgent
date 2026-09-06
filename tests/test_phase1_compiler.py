@@ -8,7 +8,7 @@ from typing_extensions import TypedDict
 from autoagent.core import (
     AggregationContext,
     Capability,
-    ChildInvocationHandle,
+    InvocationRef,
     CompileResult,
     ConditionContext,
     ContextPatch,
@@ -619,7 +619,7 @@ class CompilerTests(unittest.TestCase):
                 nodes=[Node("child", child, execution_mode="spawn")],
             )
         )
-        self.assertIs(ir.node("child").output_contract.annotation, ChildInvocationHandle)
+        self.assertIs(ir.node("child").output_contract.annotation, InvocationRef)
         with self.assertRaisesRegex(WorkflowCompileError, "EXECUTION_MODE_NOT_WORKFLOW"):
             self.compiler.compile_or_raise(
                 Workflow("bad-spawn", nodes=[Node("node", identity, execution_mode="spawn")])

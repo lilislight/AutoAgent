@@ -40,7 +40,7 @@ from ..runtime import (
 from ..workflow import (
     AggregationContext,
     Capability,
-    ChildInvocationHandle,
+    InvocationRef,
     ErrorInfo,
     NodeIR,
     OutputBindingContext,
@@ -429,7 +429,7 @@ class WorkflowExecutor:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # User Events are observations, not canonical Runtime State.
+                # User Events do not change canonical Runtime State.
                 return
 
         result = await self._node_executor.execute(
@@ -521,7 +521,7 @@ class WorkflowExecutor:
                 tasks.append(task)
 
         if node.execution_mode == "spawn":
-            handles = [self._child_handle(child, unit) for unit in plan.units]
+            handles = [self._invocation_ref(child, unit) for unit in plan.units]
             if node.map is None:
                 return handles[0], None
             return await self._aggregate_child_outputs(
@@ -877,15 +877,12 @@ class WorkflowExecutor:
             )
 
     @staticmethod
-    def _child_handle(child: WorkflowIR, unit) -> ChildInvocationHandle:
-        return cast(
-            ChildInvocationHandle,
-            {
-                "session_id": unit.session_id,
-                "invocation_id": unit.invocation_id,
-                "workflow_id": child.workflow_id,
-                "workflow_revision_id": child.workflow_revision_id,
-            },
+    def _invocation_ref(child: WorkflowIR, unit) -> InvocationRef:
+        return InvocationRef(
+            session_id=unit.session_id,
+            invocation_id=unit.invocation_id,
+            workflow_id=child.workflow_id,
+            workflow_revision_id=child.workflow_revision_id,
         )
 
     async def _resolve_executable(self, node: NodeIR, value: object) -> NodeIR:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from autoagent.core.compiler import WorkflowDefinitionSnapshot
-from autoagent.core.runtime import RuntimeCheckpointBundle, RuntimeEvent, UserEvent
+from autoagent.core.runtime import SessionCheckpoint, RuntimeEvent, UserEvent
 from autoagent.hosting import HttpRuntimeEventSink, SQLiteRuntimeStore
 
 from .settings import HostSettings
@@ -34,8 +34,8 @@ class RecoverySource(Protocol):
     """Optional sink capability used to reconstruct one Root Runtime graph."""
 
     async def rebuild_checkpoint(
-        self, root_session_id: str
-    ) -> RuntimeCheckpointBundle: ...
+        self, session_id: str
+    ) -> SessionCheckpoint: ...
 
 
 def create_runtime_event_sink(

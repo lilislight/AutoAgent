@@ -94,16 +94,21 @@ running Occurrence。Worker、Scheduler、RuntimeLoop 和等待桥接均不做�
 | --- | --- | --- | --- |
 | 执行并等待边界 | `invoke` | `ainvoke` | `InvocationResult` |
 | 可靠接纳后台执行 | `submit_invoke` | `asubmit_invoke` | `InvocationSubmission` |
-| 等待后台结果 | `wait` | `await_result` | `InvocationResult` |
+| 读取当前状态 | `status` | `astatus` | `InvocationResult` |
+| 等待后台结果 | `join` | `ajoin` | `InvocationResult` |
 | 恢复 Wait | `resume`/`submit_resume` | `aresume`/`asubmit_resume` | Result/Submission |
+| 流式恢复 Wait | `stream_resume` | `astream_resume` | Updates，最后为 Result |
 | 取消 | `cancel` | `acancel` | `InvocationResult` |
 | 崩溃恢复 | `recover` | `arecover` | `InvocationResult` |
 | 观察执行 | `stream` | `astream` | `InvocationUpdate`，最后为 Result |
 | 加载状态 | `load_checkpoint` | `aload_checkpoint` | `CheckpointLoadResult` |
 | 关闭 | `close` | `aclose` | `AppCheckpoint` |
 
-控制操作必须使用精确的 `InvocationRef(session_id, invocation_id)`，不能只凭 Session
-误操作后来的 Invocation。已有活动 Invocation 的 Session 拒绝再次执行；终态
+`join/ajoin` 只等待已经接纳的 Invocation，不创建新 Invocation。超时会抛出内置
+`TimeoutError`，但不会取消后台执行，调用方之后可以再次 join 或显式 cancel。
+
+控制操作必须使用精确的 `InvocationRef(session_id, invocation_id)` 或完整
+`ChildInvocationHandle`，不能只凭 Session 误操作后来的 Invocation。已有活动 Invocation 的 Session 拒绝再次执行；终态
 Invocation 可被同一 Session 的新 Invocation 替换，Core 不保留其完整历史。
 
 同步与异步入口都进入 App 私有 RuntimeLoop。取消异步调用会传递到 RuntimeLoop 内的
@@ -148,10 +153,10 @@ Invocation 的 Child `RuntimeState`。若 Child 只有 `SessionOpened` 而尚未
 所有公开返回点和流式中间点都复用同一套 Journal capture 方法：先 flush Root/Child
 图的 pending Batch，导出形成的 RuntimeEvent，再构造 Checkpoint。
 
-- `invoke/ainvoke`、`wait`、`resume`、`cancel`、`recover` 在返回边界携带 Checkpoint；
+- `invoke/ainvoke`、`join/ajoin`、`resume/aresume`、`cancel/acancel`、`recover/arecover` 在返回边界携带 Checkpoint；
 - submit 在可靠接纳后携带 Checkpoint；
 - `close/aclose` 在停止进程内任务后返回所有 Root 的 AppCheckpoint；
-- `stream/astream` 仅在可恢复转换后给 `InvocationUpdate.checkpoint` 赋值，最终
+- `stream/astream` 和 `stream_resume/astream_resume` 仅在可恢复转换后给 `InvocationUpdate.checkpoint` 赋值，最终
   `InvocationResult` 总有最新 Checkpoint。
 
 最终 `InvocationResult` 的交付本身就是流的正常终止握手；调用方无需再拉取 END。此后
@@ -185,10 +190,11 @@ Workflow 作为 Node executable 时创建独立 Child Invocation 和独立 Sessi
 
 Handle 包含 Child Session、Invocation、Workflow 和精确 Revision。父状态保存稳定的
 Child plan/creation id；Checkpoint 始终以整个父子图为单位。await Map 的任一 Child
-失败时先取消并收敛兄弟，再让父 Node 失败。App 提供 Child status、wait 和 cancel；
-父子消息与远程执行不在当前 Core。恢复整个图时，await Child 继续服从父 Node 的等待
+失败时先取消并收敛兄弟，再让父 Node 失败。App 只提供根据 Parent 查询 Handle 的
+`child_handles/achild_handles`；Handle 可直接传给通用的 status、join、resume、cancel、
+recover 和 stream_resume API。父子消息与远程执行不在当前 Core。恢复整个图时，await Child 继续服从父 Node 的等待
 边界；spawn Child 只需可靠重启其受管 drive，Root Result 不等待它到终态，之后仍可通过
-Handle 观察或等待。若精确恢复目标就是 spawn 子树中的 Child，则沿目标祖先路径等待该
+Handle 观察或 join。若精确恢复目标就是 spawn 子树中的 Child，则沿目标祖先路径等待该
 Child 的终态或 waiting 边界，其他 spawn 旁支仍保持 detached。
 恢复会把已经存在完整 Child Invocation 的 `opened` unit 先推进到 `accepted`，包括
 Child 已经 waiting 的情况；Child 终态随后仍能可靠推进父 plan 到 `terminal`。

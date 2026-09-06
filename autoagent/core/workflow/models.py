@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal, TypeAlias, Union
-from typing_extensions import TypedDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from ..operators import Operator, OperatorContract, StreamReducer, ValueContract, Wait
 from ..context import ContextOperation, ContextPatch
@@ -15,11 +15,24 @@ from ..context import ContextOperation, ContextPatch
 Executable: TypeAlias = Union[Callable[..., object], Operator, Wait, "Workflow"]
 
 
-class ChildInvocationHandle(TypedDict):
+class InvocationRef(BaseModel):
+    """Stable identity for any root or Child Workflow Invocation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
     session_id: str
     invocation_id: str
     workflow_id: str
     workflow_revision_id: str
+
+    @field_validator(
+        "session_id", "invocation_id", "workflow_id", "workflow_revision_id"
+    )
+    @classmethod
+    def _non_empty_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("InvocationRef identity fields cannot be empty.")
+        return value
 
 
 @dataclass(frozen=True, slots=True)

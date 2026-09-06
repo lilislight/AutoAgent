@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from ..errors import RuntimeTransitionError
 from .capture import RuntimeEventCapture
-from .checkpoint import RuntimeCheckpointBundle
+from .checkpoint import SessionCheckpoint
 from .events import RuntimeEvent, StateTransition
 from .reducer import StateReducer
 from .state import RuntimeState
@@ -350,58 +350,21 @@ class InMemoryEventJournal:
         self._state_store.install(states)
 
     def capture_checkpoint(
-        self, root_session_id: str, *, captured_at_ns: int | None = None
-    ) -> RuntimeCheckpointBundle:
-        """Flush and capture one immutable Root/Child State reference graph."""
+        self, session_id: str, *, captured_at_ns: int | None = None
+    ) -> SessionCheckpoint:
+        """Flush and capture one immutable Runtime Session State."""
 
-        if root_session_id not in self._states:
-            raise KeyError(f"Runtime Session {root_session_id!r} does not exist.")
-        reachable: list[str] = []
-        visited: set[str] = set()
-
-        def visit(session_id: str) -> None:
-            if session_id in visited:
-                return
-            visited.add(session_id)
-            if session_id in self._event_groups:
-                # Admission is an all-or-nothing durable boundary.  A Child's
-                # parent plan remains sufficient to recreate it until the
-                # complete grouped Event has been sealed and exported.
-                return
-            state = self._states.get(session_id)
-            if state is None:
-                return
-            if session_id != root_session_id and state.invocation is None:
-                # Child admission is intentionally multi-step.  A concurrent
-                # safe boundary may be captured after SessionOpened but before
-                # InvocationOpened.  The durable parent plan already contains
-                # everything required to recreate that Child, while a
-                # Session-only State is not itself a recoverable checkpoint
-                # member.  Treat it exactly like a not-yet-opened planned
-                # Child and leave its pending batches for the later complete
-                # admission boundary.
-                return
-            invocation = state.invocation
-            if invocation is not None:
-                for child_session_id in (
-                    unit.session_id
-                    for plan in invocation.child_plans.values()
-                    for unit in plan.units
-                    if unit.session_id in self._states
-                ):
-                    visit(child_session_id)
-            # Cross-Session references always point from Parent to Child.  A
-            # post-order makes every Child Event durable before any Parent
-            # Event that can claim its terminal phase or consume its output.
-            reachable.append(session_id)
-
-        visit(root_session_id)
-        for session_id in reachable:
-            self.flush(session_id)
-        states = {session_id: self._states[session_id] for session_id in reachable}
-        return RuntimeCheckpointBundle._from_runtime_states(
-            root_session_id,
-            states,
+        if session_id not in self._states:
+            raise KeyError(f"Runtime Session {session_id!r} does not exist.")
+        if session_id in self._event_groups:
+            raise RuntimeTransitionError(
+                "CHECKPOINT_BOUNDARY_INCOMPLETE",
+                "Session admission has not reached a recoverable boundary.",
+            )
+        self.flush(session_id)
+        return SessionCheckpoint._from_runtime_state(
+            session_id,
+            self._states[session_id],
             captured_at_ns=(time.time_ns() if captured_at_ns is None else captured_at_ns),
         )
 

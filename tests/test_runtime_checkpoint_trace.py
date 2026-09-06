@@ -19,7 +19,7 @@ from autoagent.core.runtime import (
     InvocationState,
     NodeOccurrenceState,
     OperatorCallStarted,
-    RuntimeCheckpointBundle,
+    SessionCheckpoint,
     RuntimeEvent,
     RuntimeState,
     SchedulerState,
@@ -27,10 +27,9 @@ from autoagent.core.runtime import (
     StateReducer,
     StateTransition,
     freeze,
-    project_trace_event,
-    project_trace_events,
 )
 from autoagent.core.workflow import Node, Workflow
+from autoagent.hosting.trace import project_trace_event, project_trace_events
 
 
 class Value(TypedDict):
@@ -331,13 +330,13 @@ class RuntimeCheckpointTraceTests(unittest.TestCase):
             ),
         )
         with patch.object(RuntimeState, "to_record", side_effect=AssertionError):
-            checkpoint = RuntimeCheckpointBundle._from_runtime_states(
-                "root", {"root": state}, captured_at_ns=1
+            checkpoint = SessionCheckpoint._from_runtime_state(
+                "root", state, captured_at_ns=1
             )
-        self.assertIs(checkpoint.states["root"], state)
+        self.assertIs(checkpoint.state, state)
 
-    def test_checkpoint_bundle_round_trips_a_complete_child_graph(self) -> None:
-        """Verify one Root checkpoint contains each linked Child Runtime State once."""
+    def test_session_checkpoints_round_trip_parent_and_child_independently(self) -> None:
+        """Verify Parent and Child Runtime Sessions produce independent checkpoints."""
 
         journal = InMemoryEventJournal()
         app = AutoAgentApp(runtime_journal=journal)
@@ -348,17 +347,18 @@ class RuntimeCheckpointTraceTests(unittest.TestCase):
                 nodes=[Node("spawn", child, execution_mode="spawn")],
             )
             result = app.invoke(parent, {"value": 1}, session_id="root-session")
-            app.wait_child(result.output, timeout=1)
+            app.join(result.output, timeout=1)
             checkpoint = journal.capture_checkpoint("root-session")
-            self.assertEqual(checkpoint.root_session_id, "root-session")
-            self.assertEqual(set(checkpoint.states), {"root-session", result.output["session_id"]})
+            child_checkpoint = journal.capture_checkpoint(result.output.session_id)
+            self.assertEqual(checkpoint.session_id, "root-session")
+            self.assertEqual(child_checkpoint.session_id, result.output.session_id)
             record = json.loads(json.dumps(checkpoint.to_record()))
-            self.assertEqual(RuntimeCheckpointBundle.from_record(record), checkpoint)
+            self.assertEqual(SessionCheckpoint.from_record(record), checkpoint)
         finally:
             app.close()
 
-    def test_checkpoint_bundle_rejects_missing_and_orphan_child_states(self) -> None:
-        """Verify checkpoint graph validation rejects missing and unreachable States."""
+    def test_parent_checkpoint_does_not_require_child_state(self) -> None:
+        """Verify one Parent checkpoint remains valid without its Child State."""
 
         journal = InMemoryEventJournal()
         app = AutoAgentApp(runtime_journal=journal)
@@ -369,19 +369,11 @@ class RuntimeCheckpointTraceTests(unittest.TestCase):
                 nodes=[Node("spawn", child, execution_mode="spawn")],
             )
             result = app.invoke(parent, {"value": 1}, session_id="graph-root")
-            app.wait_child(result.output, timeout=1)
+            app.join(result.output, timeout=1)
             checkpoint = journal.capture_checkpoint("graph-root")
-            with self.assertRaisesRegex(ValueError, "Child|child|missing"):
-                RuntimeCheckpointBundle.from_states(
-                    "graph-root",
-                    {"graph-root": checkpoint.states["graph-root"]},
-                )
-            child_session_id = result.output["session_id"]
-            with self.assertRaisesRegex(ValueError, "orphan|reachable|Root"):
-                RuntimeCheckpointBundle.from_states(
-                    child_session_id,
-                    checkpoint.states,
-                )
+            rebuilt = SessionCheckpoint.from_state(checkpoint.state)
+            self.assertEqual(rebuilt.session_id, "graph-root")
+            self.assertNotEqual(rebuilt.id, checkpoint.id)
         finally:
             app.close()
 
@@ -399,7 +391,8 @@ class RuntimeCheckpointTraceTests(unittest.TestCase):
         )
         state = source.state("source")
         target = InMemoryEventJournal()
-        target.install_states({"source": state})
+        with patch.object(RuntimeState, "to_record", side_effect=AssertionError):
+            target.install_states({"source": state})
         self.assertEqual(target.state("source"), state)
         target.install_states({"source": state})
         before = target.state("source")

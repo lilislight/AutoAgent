@@ -22,8 +22,8 @@
 | SDK Trace/User Event | 与 canonical RuntimeEvent 分离，结果不泄漏 StateOperation | phase9、checkpoint-trace |
 | Checkpoint 与关闭恢复 | 返回 Root/Child Bundle；支持 load + recover/resume | phase8、phase9、phase11 |
 | 运行 Operator 恢复 | 标记 lost；默认拒绝，显式 replay_safe 才按次数恢复 | phase7、phase8 |
-| 同步/异步 invoke、submit、wait | 保留并增加严格背压 stream/astream | phase8、phase11 |
-| Child Handle status/wait/cancel | 本地可操作，加载 Checkpoint 后仍有效 | phase8、phase9 |
+| 同步/异步 invoke、submit、status、join | 保留并增加严格背压 stream/astream 和 stream resume | phase8、phase11 |
+| Child Handle | 可由 Parent 查询并传给通用控制 API，加载 Checkpoint 后仍有效 | phase8、phase9 |
 | 执行次数保护 | App 级 Invocation Node 执行上限，不是 Node authoring 字段 | phase1、phase9 |
 | 并发限制 | App 级同步/异步 Operator 全局上限 + Map 局部上限 | phase8、phase9 |
 | Retry/Fallback/Timeout/Backoff | 当前不保留，等待独立语义设计 | `TODO.md` |

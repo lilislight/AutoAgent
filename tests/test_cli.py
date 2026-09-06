@@ -58,7 +58,7 @@ class CliTests(unittest.TestCase):
         sys.modules.pop(module, None)
 
     def test_invoke_prints_one_stable_machine_result(self) -> None:
-        """Invoke through Host and print JSON identity, status, output, and checkpoint."""
+        """Invoke through Host and print one stable execution result."""
 
         module = "cli_invoke_workflow"
         with self.project(module) as root:
@@ -84,7 +84,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(document["status"], "completed")
             self.assertEqual(document["session_id"], "cli-session")
             self.assertEqual(document["output"], {"value": 7})
-            self.assertEqual(document["checkpoint"]["root_session_id"], "cli-session")
+            self.assertNotIn("checkpoint", document)
         sys.modules.pop(module, None)
 
     def test_invalid_json_uses_stderr_and_a_nonzero_exit(self) -> None:
@@ -532,8 +532,8 @@ class CliTests(unittest.TestCase):
             )
         sys.modules.pop(module, None)
 
-    def test_recover_rejects_a_child_session_with_a_stable_code(self) -> None:
-        """Require callers to restore a persisted graph through its Root Session."""
+    def test_recover_accepts_an_independently_stored_child_session(self) -> None:
+        """Restore a Child Runtime Session through the same Session API."""
 
         module = "cli_child_recovery_workflow"
         with self.project(module) as root:
@@ -587,11 +587,8 @@ class CliTests(unittest.TestCase):
                         ["recover", child_session_id, "--project", str(root)]
                     )
             self.assertEqual(invoked_code, 0)
-            self.assertEqual(recovered_code, 1)
-            self.assertEqual(
-                json.loads(error.getvalue())["error"]["code"],
-                "HOST_SESSION_NOT_ROOT",
-            )
+            self.assertEqual(recovered_code, 0)
+            self.assertEqual(error.getvalue(), "")
         sys.modules.pop(module, None)
 
     def test_recover_rejects_a_noncurrent_restored_root(self) -> None:
@@ -602,8 +599,14 @@ class CliTests(unittest.TestCase):
 
             def restore_session(self, _session_id: str) -> CheckpointLoadResult:
                 return CheckpointLoadResult(
-                    roots=(InvocationRef("other-session", "invocation"),),
-                    invocations=(InvocationRef("other-session", "invocation"),),
+                    (
+                        InvocationRef(
+                            session_id="other-session",
+                            invocation_id="invocation",
+                            workflow_id="workflow",
+                            workflow_revision_id="revision",
+                        ),
+                    )
                 )
 
             def close(self) -> None:

@@ -15,7 +15,8 @@ V2 是独立的 Workflow Runtime，当前包含 Core、Host、本地持久化和
 - `StateTransition -> StateOperationBatch -> StateReducer -> RuntimeState` 的唯一状态路径；
 - 面向 SDK 的 `TraceEvent`/`UserEvent`，以及面向 Host 的 canonical `RuntimeEvent` sink；
 - `RuntimeCheckpointBundle`、`AppCheckpoint`、加载与崩溃恢复；
-- 同步/异步 invoke、submit、wait、resume、cancel、recover、stream API；
+- 同步/异步 invoke、submit、status、join、resume、cancel、recover、stream API，
+  包括 `stream_resume/astream_resume`；
 - App 级 Operator 全局并发限制和 `Map.max_parallelism` 局部限制。
 - 标准 `autoagent.toml`、环境配置和 `AutoAgentHost` 生命周期；
 - SQLite canonical RuntimeEvent Store、HTTP RuntimeEvent Sink 和父子 Checkpoint 重建；

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ..errors import RuntimeTransitionError
-from .state import RuntimeState
+from .state import RuntimeState, validate_runtime_state
 
 
 class RuntimeStateStore:
@@ -56,8 +56,7 @@ def _validated_states(states: Mapping[str, RuntimeState]) -> dict[str, RuntimeSt
             raise ValueError(
                 f"Checkpoint State {session_id!r} has another Session identity."
             )
-        if RuntimeState.from_record(state.to_record()) != state:
-            raise TypeError("Checkpoint installation requires canonical Runtime States.")
+        validate_runtime_state(state)
     return candidates
 
 

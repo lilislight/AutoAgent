@@ -29,13 +29,7 @@ from .events import (
     WaitResumed,
 )
 from .journal import InMemoryEventJournal
-from .checkpoint import RUNTIME_CHECKPOINT_SCHEMA_VERSION, RuntimeCheckpointBundle
-from .trace import (
-    TRACE_EVENT_SCHEMA_VERSION,
-    TraceEvent,
-    project_trace_event,
-    project_trace_events,
-)
+from .checkpoint import SESSION_CHECKPOINT_SCHEMA_VERSION, SessionCheckpoint
 from .capture import RuntimeEventCapture
 from .store import RuntimeStateStore
 from .operations import StateOperation, StateOperationBatch
@@ -76,12 +70,8 @@ __all__ = [
     "EdgeResolution",
     "ExecutionScope",
     "InMemoryEventJournal",
-    "RuntimeCheckpointBundle",
-    "RUNTIME_CHECKPOINT_SCHEMA_VERSION",
-    "TraceEvent",
-    "TRACE_EVENT_SCHEMA_VERSION",
-    "project_trace_events",
-    "project_trace_event",
+    "SessionCheckpoint",
+    "SESSION_CHECKPOINT_SCHEMA_VERSION",
     "RuntimeEventCapture",
     "RuntimeStateStore",
     "InMemoryUserEventJournal",

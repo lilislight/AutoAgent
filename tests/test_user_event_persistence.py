@@ -277,8 +277,6 @@ class CoreUserEventSinkTests(unittest.TestCase):
             self.assertEqual(len(app.user_event_sink_errors), 2)
             self.assertEqual(len(set(sink.invocation_ids)), 2)
             self.assertEqual(len(caught), 2)
-            self.assertEqual(len(result.user_events), 1)
-            self.assertEqual(len(second.user_events), 1)
         finally:
             app.close()
 

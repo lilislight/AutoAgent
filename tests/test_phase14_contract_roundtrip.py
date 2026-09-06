@@ -80,7 +80,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
             self.assertEqual(result.error.type, "TypeError")
             self.assertIn("floats must be finite", result.error.message)
 
-            state = result.checkpoint.state(result.ref.session_id)
+            state = app._journal.state(result.session_id)
             invocation = state.invocation
             self.assertIsNotNone(invocation)
             assert invocation is not None
@@ -118,7 +118,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
             self.assertEqual(result.error.type, "TypeError")
             self.assertIn("floats must be finite", result.error.message)
 
-            state = result.checkpoint.state(result.ref.session_id)
+            state = app._journal.state(result.session_id)
             invocation = state.invocation
             self.assertIsNotNone(invocation)
             assert invocation is not None
@@ -194,7 +194,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
             result = app.invoke(parent, _value())
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.output, _record())
-            self.assertEqual(len(result.checkpoint.states), 2)
+            self.assertIn(result.ref, app.resident_invocations())
         finally:
             app.close()
 
@@ -207,7 +207,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
         )
         source = AutoAgentApp()
         waiting = source.invoke(workflow, _value())
-        checkpoint = waiting.checkpoint
+        checkpoint = source.unload_session(waiting.ref)
         source.close()
 
         restored = AutoAgentApp()

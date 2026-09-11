@@ -281,7 +281,7 @@ class LoopSchedulerTests(unittest.TestCase):
             record = json.loads(json.dumps(event.to_record()))
             self.assertEqual(RuntimeEvent.from_record(record), event)
         for length in range(1, len(events) + 1):
-            replayed = harness.journal._reducer.reduce(events[:length])
+            replayed = harness.journal.reducer.reduce(events[:length])
             self.assertEqual(
                 replayed.to_record(),
                 StateReducer().reduce(events[:length]).to_record(),

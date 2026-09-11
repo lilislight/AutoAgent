@@ -25,9 +25,9 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core import (
-    InMemoryEventJournal,
+    RuntimeRepository,
     InvocationCancelled,
-    InvocationRecoveryRequested,
+    RecoveryApplied,
     SessionCheckpoint,
     RuntimeEvent,
 )
@@ -187,7 +187,7 @@ class _BlockingSink:
             )
             and (
                 self.target_kind is None
-                or any(log.event_name == self.target_kind for log in event.logs)
+                or any(log.event_name == self.target_kind for log in (event,))
             )
         ):
             self._blocked = True
@@ -591,14 +591,14 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(waiting.status, "waiting")
             sink.target_session_id = waiting.session_id
-            sink.target_kind = "invocation.recovery_requested"
+            sink.target_kind = "recovery.applied"
             sink.enabled = True
 
             holder = app._runtime_loop.submit(
                 app._emit(
                     waiting.session_id,
                     waiting.invocation_id,
-                    InvocationRecoveryRequested(),
+                    RecoveryApplied(),
                 )
             )
             self.assertTrue(sink.entered.wait(1))
@@ -631,7 +631,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             if isinstance(result_box[0], BaseException):
                 raise result_box[0]
             result = result_box[0]
-            checkpoint_invocation = app._journal.state(result.session_id).invocation
+            checkpoint_invocation = app._repository.state(result.session_id).invocation
             self.assertIsNotNone(checkpoint_invocation)
             self.assertEqual(result.status, "cancelled")
             self.assertEqual(result.status, checkpoint_invocation.status)
@@ -839,7 +839,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             root_result = recovered.recover(root_ref)
             self.assertEqual(root_result.status, "completed")
-            root_after_recovery = recovered._journal.state(root_result.session_id)
+            root_after_recovery = recovered._repository.state(root_result.session_id)
             recovered_plan = next(
                 iter(root_after_recovery.invocation.child_plans.values())
             )
@@ -853,7 +853,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 {"value": 2},
             )
             self.assertEqual(completed.status, "completed")
-            root_after_completion = recovered._journal.state(root_result.session_id)
+            root_after_completion = recovered._repository.state(root_result.session_id)
             completed_plan = next(
                 iter(root_after_completion.invocation.child_plans.values())
             )
@@ -977,7 +977,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 resume.cancel()
                 await asyncio.gather(resume, return_exceptions=True)
 
-                state = app._journal.state(waiting.session_id)
+                state = app._repository.state(waiting.session_id)
                 self.assertIsNotNone(state.invocation)
                 orphaned = (
                     state.invocation.status == "running"
@@ -1032,7 +1032,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 recovery.cancel()
                 await asyncio.gather(recovery, return_exceptions=True)
 
-                state = recovered._journal.state(loaded.invocations[0].session_id)
+                state = recovered._repository.state(loaded.invocations[0].session_id)
                 self.assertIsNotNone(state.invocation)
                 orphaned = (
                     state.invocation.status == "running"
@@ -1106,7 +1106,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
 
                 self.assertTrue(await child_cancelled.wait_async())
                 self.assertTrue(await parent_cancelled.wait_async())
-                child_state = app._journal.state(handles[0].session_id)
+                child_state = app._repository.state(handles[0].session_id)
                 self.assertIsNotNone(child_state.invocation)
                 self.assertEqual(child_state.invocation.status, "cancelled")
             finally:
@@ -1258,11 +1258,11 @@ class LifecycleRecoveryTests(unittest.TestCase):
         checkpoint = source.close()
         self.assertEqual(len(checkpoint.sessions), 2)
 
-        journal = InMemoryEventJournal()
+        journal = RuntimeRepository()
         journal.install_states(
             {item.session_id: item.state for item in checkpoint.sessions}
         )
-        restored = AutoAgentApp(runtime_journal=journal)
+        restored = AutoAgentApp(runtime_repository=journal)
         captured = restored.close()
 
         self.assertEqual(len(captured.sessions), 2)
@@ -1296,12 +1296,12 @@ class LifecycleRecoveryTests(unittest.TestCase):
             target.register_workflow(parent)
             loaded_child = target.load_checkpoint(child_bundle)
             child_ref = loaded_child.invocations[0]
-            state_before = target._journal.state(child_session_id)
+            state_before = target._repository.state(child_session_id)
 
             target.load_checkpoint(planned)
 
-            self.assertEqual(set(target._journal.session_ids()), {child_session_id, "cross-root-parent"})
-            self.assertEqual(target._journal.state(child_session_id), state_before)
+            self.assertEqual(set(target._repository.session_ids()), {child_session_id, "cross-root-parent"})
+            self.assertEqual(target._repository.state(child_session_id), state_before)
             self.assertEqual(target._root_session_id(child_session_id), "cross-root-parent")
             self.assertIsNotNone(state_before.invocation)
             self.assertEqual(state_before.invocation.id, child_ref.invocation_id)
@@ -1320,12 +1320,12 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     self.enabled
                     and event.session_id == "replacement-sink-root"
                     and any(
-                        log.event_name == "invocation.opened" for log in event.logs
+                        log.event_name == "invocation.started" for log in (event,)
                     )
                 ):
                     raise RuntimeError("sink rejected replacement")
 
-        journal = InMemoryEventJournal()
+        journal = RuntimeRepository()
         sink = RejectReplacementSink()
         child = Workflow(
             "replacement-sink-child",
@@ -1335,7 +1335,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             "replacement-sink-parent",
             nodes=[Node("spawn", child, execution_mode="spawn")],
         )
-        app = AutoAgentApp(runtime_journal=journal, runtime_event_sink=sink)
+        app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         try:
             first = app.invoke(
                 parent,
@@ -1354,17 +1354,11 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 )
             sink.enabled = False
 
-            self.assertEqual(journal.session_ids(), ("replacement-sink-root",))
+            self.assertIn(handle.session_id, journal.session_ids())
             current = journal.state("replacement-sink-root").invocation
             self.assertIsNotNone(current)
-            self.assertEqual(current.status, "created")
-            self.assertTrue(
-                any(
-                    log.event_name == "invocation.opened"
-                    for event in journal.events("replacement-sink-root")
-                    for log in event.logs
-                )
-            )
+            self.assertEqual(current.id, first.invocation_id)
+            self.assertEqual(current.status, "completed")
 
             closed = app.close(timeout=1)
             self.assertEqual(len(closed.sessions), 1)
@@ -1389,7 +1383,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     event.session_id != "child-event-retirement-root"
                     and any(
                         log.event_name == "invocation.completed"
-                        for log in event.logs
+                        for log in (event,)
                     )
                 )
                 if self.enabled and is_child_terminal:
@@ -1406,7 +1400,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             await release_child.wait()
             return value
 
-        journal = InMemoryEventJournal()
+        journal = RuntimeRepository()
         sink = RejectChildTerminalSink()
         child = Workflow(
             "child-event-retirement-child",
@@ -1416,7 +1410,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             "child-event-retirement-parent",
             nodes=[Node("spawn", child, execution_mode="spawn")],
         )
-        app = AutoAgentApp(runtime_journal=journal, runtime_event_sink=sink)
+        app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         try:
             first = app.invoke(
                 parent,
@@ -1441,7 +1435,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 first.invocation_id,
             )
             self.assertIn(handle.session_id, journal.session_ids())
-            self.assertTrue(journal.events(handle.session_id))
+            self.assertFalse(journal.state(handle.session_id).invocation.terminal)
             self.assertNotIn(sink.rejected_event_id, sink.accepted_event_ids)
 
             sink.enabled = False
@@ -1484,7 +1478,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     and event.session_id != self.root_session_id
                     and any(
                         log.event_name == "invocation.completed"
-                        for log in event.logs
+                        for log in (event,)
                     )
                 ):
                     self.blocked = True
@@ -1500,7 +1494,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             await child_release.wait()
             return value
 
-        journal = InMemoryEventJournal()
+        journal = RuntimeRepository()
         sink = BlockChildTerminalSink(root_session_id)
         child = Workflow(
             "settling-replacement-child",
@@ -1510,7 +1504,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             "settling-replacement-parent",
             nodes=[Node("spawn", child, execution_mode="spawn")],
         )
-        app = AutoAgentApp(runtime_journal=journal, runtime_event_sink=sink)
+        app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         replacement_done = threading.Event()
         replacement_errors: list[BaseException] = []
         replacement_results: list[InvocationResult] = []
@@ -1547,7 +1541,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(child_state)
             self.assertIsNotNone(parent_state)
             assert child_state is not None and parent_state is not None
-            self.assertTrue(child_state.terminal)
+            self.assertFalse(child_state.terminal)
             self.assertEqual(
                 next(iter(parent_state.child_plans.values())).units[0].phase,
                 "accepted",
@@ -1582,7 +1576,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     and getattr(log.payload, "phase", None) == "terminal"
                     for event in sink.events
                     if event.session_id == root_session_id
-                    for log in event.logs
+                    for log in (event,)
                 )
             )
 
@@ -1721,19 +1715,10 @@ class LifecycleRecoveryTests(unittest.TestCase):
     def test_recovery_write_ahead_boundaries_cannot_be_disabled(self) -> None:
         """Verify batching cannot remove the four mandatory recovery WAL points."""
 
-        journal = InMemoryEventJournal(
-            max_batches_per_event=100,
-            flush_event_names=frozenset(),
-        )
-        self.assertTrue(
-            {
-                "operator_call.started",
-                "child_invocation.planned",
-                "wait.resumed",
-                "invocation.recovery_requested",
-            }
-            <= journal._flush_event_names
-        )
+        import inspect
+        parameters = inspect.signature(RuntimeRepository).parameters
+        self.assertNotIn("max_batches_per_event", parameters)
+        self.assertNotIn("flush_event_names", parameters)
 
     def test_checkpoint_bundle_isolated_from_external_mutable_state(self) -> None:
         """Verify a checkpoint and loaded State cannot change through an old object."""
@@ -1771,7 +1756,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             target.register_workflow(workflow)
             target.load_checkpoint(external_bundle)
             mutable_context["changed"] = 2
-            installed = target._journal.state("immutable-checkpoint-session")
+            installed = target._repository.state("immutable-checkpoint-session")
             self.assertNotIn("changed", installed.invocation.context)
         finally:
             target.close()

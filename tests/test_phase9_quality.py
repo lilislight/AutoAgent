@@ -34,7 +34,7 @@ from autoagent import (
     WorkflowCompiler,
 )
 from autoagent.core import (
-    InMemoryEventJournal,
+    RuntimeRepository,
     InMemoryUserEventJournal,
     NodeExecutor,
     Scheduler,
@@ -281,8 +281,8 @@ class QualityTests(unittest.TestCase):
 
     def test_node_output_can_emit_non_canonical_user_event(self) -> None:
         """Verify node output can emit non canonical user event."""
-        journal = InMemoryEventJournal()
-        app = AutoAgentApp(runtime_journal=journal)
+        journal = RuntimeRepository()
+        app = AutoAgentApp(runtime_repository=journal)
         try:
             items = list(app.stream(
                 Workflow(
@@ -310,12 +310,12 @@ class QualityTests(unittest.TestCase):
 
     def test_app_uses_injected_core_ports(self) -> None:
         """Verify app uses injected core ports."""
-        class RuntimeJournal(InMemoryEventJournal):
+        class RuntimeJournal(RuntimeRepository):
             appended = 0
 
-            def append(self, event):
+            async def commit(self, **kwargs):
                 self.appended += 1
-                return super().append(event)
+                return await super().commit(**kwargs)
 
         class UserJournal(InMemoryUserEventJournal):
             emitted = 0
@@ -344,11 +344,11 @@ class QualityTests(unittest.TestCase):
         executor = ExecutingNodeExecutor()
         clock = itertools.count(1).__next__
         app = AutoAgentApp(
-            runtime_journal=runtime,
+            runtime_repository=runtime,
             user_event_journal=users,
             scheduler=scheduler,
             node_executor=executor,
-            clock_ns=clock,
+            clock_us=clock,
         )
         try:
             result = app.invoke(
@@ -368,8 +368,8 @@ class QualityTests(unittest.TestCase):
 
     def test_condition_sees_context_candidate_from_same_node_binding(self) -> None:
         """Verify condition sees context candidate from same node binding."""
-        journal = InMemoryEventJournal()
-        app = AutoAgentApp(runtime_journal=journal)
+        journal = RuntimeRepository()
+        app = AutoAgentApp(runtime_repository=journal)
         try:
             workflow = Workflow(
                 "binding-before-condition",
@@ -617,8 +617,8 @@ class QualityTests(unittest.TestCase):
             await asyncio.sleep(10)
             return value
 
-        journal = InMemoryEventJournal()
-        app = AutoAgentApp(runtime_journal=journal)
+        journal = RuntimeRepository()
+        app = AutoAgentApp(runtime_repository=journal)
         submitted = app.submit_invoke(
             Workflow("close-convergence", nodes=[Node("node", blocking)]),
             {"value": 1},
@@ -665,8 +665,8 @@ class QualityTests(unittest.TestCase):
             return value
 
         async def run() -> None:
-            journal = InMemoryEventJournal()
-            app = AutoAgentApp(runtime_journal=journal)
+            journal = RuntimeRepository()
+            app = AutoAgentApp(runtime_repository=journal)
             try:
                 task = asyncio.create_task(
                     app.ainvoke(

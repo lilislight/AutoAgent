@@ -1,15 +1,14 @@
 """Fine-grained, durable Runtime State changes.
 
-A State Operation is the smallest replayable mutation.  A batch is the atomic
+A State Operation is the smallest replayable mutation.  A Delta is the atomic
 commit boundary: either every operation is applied in order, or none is.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Literal, TypeAlias
-from uuid import uuid4
 
 from ..errors import RuntimeTransitionError
 from .values import DurableValue, freeze, thaw
@@ -67,70 +66,31 @@ class StateOperation:
 
 
 @dataclass(frozen=True, slots=True)
-class StateOperationBatch:
-    """One atomically applied group with an exact state-version interval."""
+class StateDelta:
+    """The ordered, atomic mutations of one Runtime Event."""
 
-    from_state_version: int
-    to_state_version: int
     operations: tuple[StateOperation, ...]
-    occurred_at_ns: int
-    id: str = field(default_factory=lambda: str(uuid4()))
 
     def __post_init__(self) -> None:
-        for name, value in (
-            ("from_state_version", self.from_state_version),
-            ("to_state_version", self.to_state_version),
-            ("occurred_at_ns", self.occurred_at_ns),
+        if not isinstance(self.operations, tuple) or not all(
+            isinstance(item, StateOperation) for item in self.operations
         ):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ValueError(f"State Operation Batch {name} must be non-negative.")
-        if self.to_state_version != self.from_state_version + 1:
-            raise ValueError("A State Operation Batch must advance exactly one version.")
-        if not self.operations:
-            raise ValueError("A State Operation Batch cannot be empty.")
-        if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("State Operation Batch id cannot be empty.")
+            raise TypeError("StateDelta operations must be a tuple of StateOperation.")
 
     def to_record(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "from_state_version": self.from_state_version,
-            "to_state_version": self.to_state_version,
-            "occurred_at_ns": self.occurred_at_ns,
-            "operations": [item.to_record() for item in self.operations],
-        }
+        return {"operations": [item.to_record() for item in self.operations]}
 
     @classmethod
-    def from_record(cls, record: dict[str, object]) -> "StateOperationBatch":
-        if not isinstance(record, dict):
-            raise TypeError("State Operation Batch record must be a mapping.")
-        operations = record.get("operations")
-        if not isinstance(operations, list):
-            raise TypeError("State Operation Batch operations must be a list.")
-        return cls(
-            from_state_version=_integer(record, "from_state_version"),
-            to_state_version=_integer(record, "to_state_version"),
-            operations=tuple(StateOperation.from_record(item) for item in operations),
-            occurred_at_ns=_integer(record, "occurred_at_ns"),
-            id=_string(record, "id"),
-        )
+    def from_record(cls, record: dict[str, object]) -> "StateDelta":
+        if not isinstance(record, dict) or set(record) != {"operations"}:
+            raise TypeError("Invalid StateDelta record.")
+        if not isinstance(record["operations"], list):
+            raise TypeError("StateDelta operations must be a list.")
+        return cls(tuple(StateOperation.from_record(item) for item in record["operations"]))
 
 
-def diff_runtime_states(before: object, after: object) -> tuple[StateOperation, ...]:
-    """Identity-aware diff for immutable typed Runtime State objects.
-
-    Runtime transitions preserve object identity for unchanged branches. This
-    avoids serializing and comparing the complete State on every hot-path
-    commit while still producing operations against the canonical record.
-    """
-
-    operations: list[StateOperation] = []
-    _diff_runtime_value(operations, (), before, after)
-    return tuple(operations)
-
-
-def apply_operation_batch(
-    record: Mapping[str, object], batch: StateOperationBatch
+def apply_state_delta(
+    record: Mapping[str, object], batch: StateDelta
 ) -> dict[str, object]:
     """Apply a batch with path copy-on-write.
 
@@ -148,117 +108,6 @@ def apply_operation_batch(
             "STATE_ROOT_INVALID", "Runtime State root must remain a mapping."
         )
     return candidate
-
-
-def _diff_runtime_value(
-    operations: list[StateOperation],
-    path: tuple[PathToken, ...],
-    before: object,
-    after: object,
-) -> None:
-    if before is after:
-        return
-    if (
-        before is None
-        or isinstance(before, (bool, int, float, str))
-    ) and before == after:
-        return
-    if type(before) is type(after) and is_dataclass(before):
-        # Optional RuntimeErrorInfo fields are omitted from its canonical
-        # record. Replacing the compact object avoids add/replace ambiguity.
-        if type(before).__name__ == "RuntimeErrorInfo":
-            operations.append(StateOperation("replace", path, _encode_runtime(after)))
-            return
-        for item in fields(before):
-            if not item.compare and item.name.startswith("_"):
-                continue
-            if not path and item.name in {
-                "state_version",
-                "sequence",
-                "last_event_id",
-                "last_event_digest",
-                "last_event_semantic_digest",
-            }:
-                continue
-            _diff_runtime_value(
-                operations,
-                (*path, item.name),
-                getattr(before, item.name),
-                getattr(after, item.name),
-            )
-        return
-    if isinstance(before, Mapping) and isinstance(after, Mapping):
-        before_items = _runtime_mapping(before)
-        after_items = _runtime_mapping(after)
-        before_keys = set(before_items)
-        after_keys = set(after_items)
-        for key in sorted(before_keys - after_keys):
-            operations.append(StateOperation("remove", (*path, key)))
-        for key in sorted(after_keys - before_keys):
-            operations.append(
-                StateOperation("add", (*path, key), _encode_runtime(after_items[key]))
-            )
-        for key in sorted(before_keys & after_keys):
-            _diff_runtime_value(
-                operations,
-                (*path, key),
-                before_items[key],
-                after_items[key],
-            )
-        return
-    if isinstance(before, (tuple, list)) and isinstance(after, (tuple, list)):
-        _diff_runtime_sequence(operations, path, before, after)
-        return
-    if before == after:
-        return
-    operations.append(StateOperation("replace", path, _encode_runtime(after)))
-
-
-def _diff_runtime_sequence(
-    operations: list[StateOperation],
-    path: tuple[PathToken, ...],
-    before: Sequence[object],
-    after: Sequence[object],
-) -> None:
-    """Describe tuple/list edits without replacing unchanged large collections."""
-
-    prefix = 0
-    limit = min(len(before), len(after))
-    while prefix < limit and (
-        before[prefix] is after[prefix] or before[prefix] == after[prefix]
-    ):
-        prefix += 1
-
-    suffix = 0
-    while (
-        suffix < len(before) - prefix
-        and suffix < len(after) - prefix
-        and (
-            before[len(before) - 1 - suffix]
-            is after[len(after) - 1 - suffix]
-            or before[len(before) - 1 - suffix]
-            == after[len(after) - 1 - suffix]
-        )
-    ):
-        suffix += 1
-
-    before_end = len(before) - suffix
-    after_end = len(after) - suffix
-    shared = min(before_end - prefix, after_end - prefix)
-    for offset in range(shared):
-        index = prefix + offset
-        _diff_runtime_value(
-            operations,
-            (*path, index),
-            before[index],
-            after[index],
-        )
-    for index in range(before_end - 1, prefix + shared - 1, -1):
-        operations.append(StateOperation("remove", (*path, index)))
-    for index in range(prefix + shared, after_end):
-        operations.append(
-            StateOperation("add", (*path, index), _encode_runtime(after[index]))
-        )
 
 
 def _runtime_mapping(value: Mapping[object, object]) -> dict[str, object]:
@@ -400,3 +249,84 @@ def _string(record: dict[str, object], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise TypeError(f"{key} must be a non-empty string.")
     return value
+
+
+def apply_runtime_delta(state, delta: StateDelta):
+    """Copy only the typed containers touched by explicit operations."""
+    from dataclasses import replace
+    from types import MappingProxyType
+    from . import state as model
+
+    decoders = {
+        ("session",): model._session_from_record,
+        ("invocation",): model._invocation_from_record,
+    }
+    collection_decoders = {
+        "occurrences": model._occurrence_from_record,
+        "operator_calls": model._call_from_record,
+        "waits": model._wait_from_record,
+        "resolutions": model._resolution_from_record,
+        "boundary_resolutions": model._boundary_from_record,
+        "child_plans": model._child_plan_from_record,
+    }
+    def decode(path, value):
+        record = thaw(value)
+        if path in decoders:
+            return decoders[path](record)
+        if len(path) >= 2 and path[-2] in collection_decoders:
+            return collection_decoders[path[-2]](record)
+        if path[-1] == "execution":
+            return model._execution_from_record(record)
+        if path[-1] == "error":
+            return model._error_from_record(record)
+        if path[-1] == "context_path_revisions":
+            return MappingProxyType({tuple(part.replace("~1", "/").replace("~0", "~") for part in key[1:].split("/")): revision for key, revision in record.items()})
+        return freeze(record)
+    def update(container, path, operation):
+        token = path[0]
+        if is_dataclass(container):
+            if not isinstance(token, str) or token not in {item.name for item in fields(container)}:
+                raise RuntimeTransitionError("STATE_PATH_INVALID", "Unknown Runtime State field.")
+            if len(path) == 1:
+                if operation.op != "replace":
+                    raise RuntimeTransitionError("STATE_PATH_INVALID", "Typed fields must be replaced.")
+                value = decode(operation.path, operation.value)
+            else:
+                value = update(getattr(container, token), path[1:], operation)
+            return replace(container, **{token: value})
+        if isinstance(container, Mapping):
+            if not isinstance(token, str):
+                raise RuntimeTransitionError("STATE_PATH_INVALID", "Mapping path requires a string.")
+            exists = token in container
+            if (len(path) > 1 or operation.op != "add") and not exists:
+                raise RuntimeTransitionError("STATE_PATH_MISSING", "State path is missing.")
+            if len(path) == 1 and operation.op == "add" and exists:
+                raise RuntimeTransitionError("STATE_PATH_EXISTS", "State path already exists.")
+            result = dict(container)
+            if len(path) > 1:
+                result[token] = update(container[token], path[1:], operation)
+            elif operation.op == "remove":
+                del result[token]
+            else:
+                result[token] = decode(operation.path, operation.value)
+            return MappingProxyType(result)
+        if isinstance(container, tuple) and isinstance(token, int):
+            result = list(container)
+            if len(path) > 1:
+                result[token] = update(container[token], path[1:], operation)
+            elif operation.op == "add":
+                if token > len(result):
+                    raise RuntimeTransitionError("STATE_PATH_MISSING", "Tuple index is missing.")
+                result.insert(token, decode(operation.path, operation.value))
+            elif operation.op == "remove":
+                del result[token]
+            else:
+                result[token] = decode(operation.path, operation.value)
+            return tuple(result)
+        raise RuntimeTransitionError("STATE_PATH_INVALID", "Path does not match Runtime State.")
+    candidate = state
+    for operation in delta.operations:
+        if operation.path[0] not in {"session", "invocation"}:
+            raise RuntimeTransitionError("STATE_EVENT_METADATA_MUTATION", "Delta cannot mutate Event metadata.")
+        candidate = update(candidate, operation.path, operation)
+    return candidate

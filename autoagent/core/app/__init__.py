@@ -15,7 +15,7 @@ from .ports import (
     Clock,
     NodeExecutorPort,
     OperatorRegistryPort,
-    RuntimeJournalPort,
+    RuntimeRepositoryPort,
     SchedulerPort,
     UserEventJournalPort,
 )
@@ -36,7 +36,7 @@ __all__ = [
     "InvocationWait",
     "NodeExecutorPort",
     "OperatorRegistryPort",
-    "RuntimeJournalPort",
+    "RuntimeRepositoryPort",
     "SchedulerPort",
     "StreamItem",
     "UserEventJournalPort",

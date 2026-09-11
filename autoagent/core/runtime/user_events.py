@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+from .clocks import unix_time_us
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -17,7 +17,7 @@ class UserEvent:
     kind: str
     payload: DurableValue
     occurrence_id: str | None = None
-    occurred_at_ns: int = field(default_factory=time.time_ns)
+    occurred_at_us: int = field(default_factory=unix_time_us)
     id: str = field(default_factory=lambda: str(uuid4()))
 
     def __post_init__(self) -> None:
@@ -41,9 +41,9 @@ class UserEvent:
         ):
             raise ValueError("User Event sequence must be positive.")
         if (
-            not isinstance(self.occurred_at_ns, int)
-            or isinstance(self.occurred_at_ns, bool)
-            or self.occurred_at_ns < 0
+            not isinstance(self.occurred_at_us, int)
+            or isinstance(self.occurred_at_us, bool)
+            or self.occurred_at_us < 0
         ):
             raise ValueError("User Event time cannot be negative.")
         object.__setattr__(self, "payload", freeze(self.payload))
@@ -57,7 +57,7 @@ class UserEvent:
             "kind": self.kind,
             "payload": thaw(self.payload),
             "occurrence_id": self.occurrence_id,
-            "occurred_at_ns": self.occurred_at_ns,
+            "occurred_at_us": self.occurred_at_us,
         }
 
     @classmethod
@@ -76,7 +76,7 @@ class UserEvent:
                 if value.get("occurrence_id") is not None
                 else None
             ),
-            occurred_at_ns=_integer(value, "occurred_at_ns"),
+            occurred_at_us=_integer(value, "occurred_at_us"),
         )
 
 
@@ -115,7 +115,7 @@ class InMemoryUserEventJournal:
         kind: str,
         payload: object,
         occurrence_id: str | None,
-        occurred_at_ns: int,
+        occurred_at_us: int,
     ) -> UserEvent:
         sequence = self._sequences.get(invocation_id, 0) + 1
         event = UserEvent(
@@ -125,7 +125,7 @@ class InMemoryUserEventJournal:
             kind=kind,
             payload=payload,  # type: ignore[arg-type]
             occurrence_id=occurrence_id,
-            occurred_at_ns=occurred_at_ns,
+            occurred_at_us=occurred_at_us,
         )
         self._events.setdefault(invocation_id, []).append(event)
         self._sequences[invocation_id] = sequence

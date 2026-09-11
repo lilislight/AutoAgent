@@ -53,6 +53,8 @@ def _measure(
     started = time.perf_counter_ns()
     try:
         result = app.invoke(workflow, value, **kwargs)  # type: ignore[arg-type]
+        if result.status != "completed":
+            raise AssertionError(f"Benchmark Workflow failed: {result.error}")
         duration = time.perf_counter_ns() - started
         _current, peak = tracemalloc.get_traced_memory()
         runtime_event_bytes = sum(
@@ -85,7 +87,7 @@ def _measure_replay_prefixes(
         prefix = events[:size]
         samples: list[int] = []
         decode_count = 0
-        state_version = 0
+        sequence = 0
         for _ in range(5):
             started = time.perf_counter_ns()
             with patch.object(
@@ -96,11 +98,11 @@ def _measure_replay_prefixes(
                 state = StateReducer().reduce(prefix)
             samples.append(time.perf_counter_ns() - started)
             decode_count = decode.call_count
-            state_version = state.state_version
+            sequence = state.sequence
         report[str(size)] = {
             "median_duration_ns": int(statistics.median(samples)),
             "runtime_event_count": len(prefix),
-            "state_version": state_version,
+            "sequence": sequence,
             "runtime_state_decode_count": decode_count,
         }
     return report

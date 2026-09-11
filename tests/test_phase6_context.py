@@ -146,15 +146,16 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         harness = Harness(
             Workflow(
                 "parallel-patch",
-                nodes=[Node(name, identity) for name in ("start", "left", "right")],
-                edges=[Edge("start", "left"), Edge("start", "right")],
+                nodes=[Node(name, identity) for name in ("start", "left", "right", "disjoint")],
+                edges=[Edge("start", "left"), Edge("start", "right"), Edge("start", "disjoint")],
             ),
             entry="start",
         )
         harness.start("start@root")
-        harness.complete("start@root", {"start->left", "start->right"})
+        harness.complete("start@root", {"start->left", "start->right", "start->disjoint"})
         harness.start("left@root")
         harness.start("right@root")
+        harness.start("disjoint@root")
 
         left = harness.scheduler.complete(
             harness.workflow, harness.state, "left@root", {"value": 1}
@@ -179,12 +180,15 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         before = harness.state.to_record()
         with self.assertRaisesRegex(RuntimeTransitionError, "CONTEXT_WRITE_CONFLICT"):
             harness.emit(conflict)
-        self.assertEqual(harness.state.to_record(), before)
+        self.assertEqual(harness.state.session.context, before["session"]["context"])
+        self.assertEqual(harness.state.invocation.context, before["invocation"]["context"])
+        self.assertEqual(harness.state.invocation.scheduler.occurrences["right@root"].status, "running")
 
-        disjoint = type(right)(
-            right.occurrence_id,
-            right.output,
-            right.delta,
+        planned = harness.scheduler.complete(harness.workflow, harness.state, "disjoint@root", {"value": 2})
+        disjoint = type(planned)(
+            planned.occurrence_id,
+            planned.output,
+            planned.delta,
             ContextPatch(invocation=(ContextOperation.set("other", 2),)),
         )
         harness.emit(disjoint)

@@ -22,7 +22,7 @@ from ..runtime.events import (
     OperatorCallStarted,
     RuntimeErrorInfo,
 )
-from ..runtime.values import freeze
+from ..runtime.values import freeze, thaw
 from ..workflow import (
     AggregationContext,
     Capability,
@@ -91,6 +91,29 @@ class NodeExecutor:
         if self._closed:
             raise RuntimeError("NodeExecutor is closed.")
         return await _invoke(self._pool, handler, *args)
+
+    async def timed(self, handler, *args, **kwargs):
+        """Measure an async execution stage with a monotonic clock."""
+        started = time.perf_counter_ns()
+        value = await handler(*args, **kwargs)
+        return value, time.perf_counter_ns() - started
+
+    async def evaluate_conditions(self, edges, **kwargs):
+        from ..runtime.events import EdgeConditionResult
+        context = ConditionContext(
+            invocation_context=_mapping(kwargs["invocation_context"]),
+            session_context=_mapping(kwargs["session_context"]),
+            source_node_id=kwargs["source_node_id"], output=freeze(kwargs["output"]), error=kwargs["error"],
+        )
+        async def evaluate(edge):
+            decision, duration = await self.timed(self.call_hook, edge.condition, context)
+            if type(decision) is not bool:
+                raise TypeError("Edge Condition must return bool.")
+            return EdgeConditionResult(edge.id, decision, duration)
+        started = time.perf_counter_ns()
+        conditions = tuple(await asyncio.gather(*(evaluate(edge) for edge in edges
+            if edge.on == kwargs["source_status"] and edge.condition is not None)))
+        return conditions, time.perf_counter_ns() - started
 
     async def map_input(
         self,
@@ -194,6 +217,8 @@ class NodeExecutor:
         session_context: object = None,
         on_call_event: CallEventHandler = _ignore_event,
         on_stream_chunk: StreamChunkHandler = _ignore_chunk,
+        completed_calls=None,
+        aggregate: bool = True,
     ) -> NodeExecutionResult:
         if self._closed:
             raise RuntimeError("NodeExecutor is closed.")
@@ -210,6 +235,10 @@ class NodeExecutor:
         lock = asyncio.Lock()
         async def run_unit(index: int, item: object) -> tuple[object, int]:
             nonlocal active, peak
+            if completed_calls is not None and index in completed_calls:
+                call = completed_calls[index]
+                contract = node.output_contract if node.stream is not None else node.executable.contract.output
+                return contract.restore(thaw(call.output)), 0
             async with lock:
                 active += 1
                 peak = max(peak, active)
@@ -271,7 +300,7 @@ class NodeExecutor:
         output: object
         if node.map is None:
             output = outputs[0]
-        elif node.map.aggregate is None:
+        elif node.map.aggregate is None or not aggregate:
             output = outputs
         else:
             context = AggregationContext(
@@ -328,7 +357,9 @@ class NodeExecutor:
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
     ) -> object:
+        queue_started = time.perf_counter_ns()
         await self._operator_capacity.acquire()
+        queue_duration_ns = time.perf_counter_ns() - queue_started
         lease = _OperatorCapacityLease(
             self._pool,
             self._operator_capacity,
@@ -347,6 +378,7 @@ class NodeExecutor:
                 on_call_event,
                 on_stream_chunk,
                 lease,
+                queue_duration_ns,
             )
         finally:
             lease.close()
@@ -363,6 +395,7 @@ class NodeExecutor:
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
         lease: "_OperatorCapacityLease",
+        queue_duration_ns: int,
     ) -> object:
         validated = (
             operator.contract.input.validate(value)
@@ -381,8 +414,10 @@ class NodeExecutor:
                     if operator.contract.accepts_input
                     else None
                 ),
+                queue_duration_ns=queue_duration_ns,
             )
         )
+        execution_started = time.perf_counter_ns()
 
         async def invoke_and_validate() -> tuple[object, ValueContract]:
             returned = await _invoke_handler(
@@ -419,23 +454,23 @@ class NodeExecutor:
             error = RuntimeErrorInfo(
                 "CancelledError", "User callable raised asyncio.CancelledError."
             )
-            await on_call_event(OperatorCallFailed(call_id, error))
+            await on_call_event(OperatorCallFailed(call_id, error, time.perf_counter_ns() - execution_started))
             raise
         except asyncio.CancelledError as cancelled:
             error = RuntimeErrorInfo("CancelledError", "Operator Call was cancelled.")
             if _task_is_cancelling():
-                await asyncio.shield(on_call_event(OperatorCallFailed(call_id, error)))
+                await asyncio.shield(on_call_event(OperatorCallFailed(call_id, error, time.perf_counter_ns() - execution_started)))
                 raise
             user_error = UserCallableCancelledError(
                 "User callable raised asyncio.CancelledError."
             )
-            await on_call_event(OperatorCallFailed(call_id, error))
+            await on_call_event(OperatorCallFailed(call_id, error, time.perf_counter_ns() - execution_started))
             raise user_error from cancelled
         except BaseException as exc:
             error = RuntimeErrorInfo(type(exc).__name__, str(exc) or type(exc).__name__)
-            await on_call_event(OperatorCallFailed(call_id, error))
+            await on_call_event(OperatorCallFailed(call_id, error, time.perf_counter_ns() - execution_started))
             raise
-        await on_call_event(OperatorCallCompleted(call_id, output_record))
+        await on_call_event(OperatorCallCompleted(call_id, output_record, time.perf_counter_ns() - execution_started))
         return output
 
     async def _reduce_stream(

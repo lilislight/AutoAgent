@@ -110,7 +110,6 @@ export interface TraceEvent {
   kind: string;
   occurred_at_ns: string;
   invocation_id: string | null;
-  causation_id: string | null;
   state_version: number | null;
   subject_ids: Record<string, string>;
   status: string | null;

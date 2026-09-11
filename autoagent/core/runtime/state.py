@@ -17,9 +17,11 @@ from .scheduling import (
     occurrence_key,
 )
 from .values import DurableValue, freeze, thaw
+from ..context import ContextPatch
+from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 3
+RUNTIME_STATE_SCHEMA_VERSION = 5
 InvocationStatus = Literal[
     "created", "running", "waiting", "completed", "failed", "cancelled"
 ]
@@ -38,8 +40,8 @@ class WaitState:
     status: Literal["waiting", "resumed", "cancelled"]
     request: DurableValue
     response: DurableValue = None
-    created_at_ns: int = 0
-    resumed_at_ns: int | None = None
+    created_at_us: int = 0
+    resumed_at_us: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +54,10 @@ class OperatorCallState:
     input: DurableValue
     output: DurableValue = None
     error: RuntimeErrorInfo | None = None
-    started_at_ns: int = 0
-    completed_at_ns: int | None = None
+    started_at_us: int = 0
+    completed_at_us: int | None = None
+    queue_duration_ns: int = 0
+    execution_duration_ns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +80,22 @@ class ChildInvocationPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeExecutionState:
+    """Materialized successful stages needed to continue without user recomputation."""
+
+    phase: str = "none"
+    completed_stages: tuple[str, ...] = ()
+    mapped_input: DurableValue = None
+    resolved_capability_id: str | None = None
+    resolved_operator_id: str | None = None
+    aggregate_output: DurableValue = None
+    pending_context_patch: ContextPatch = ContextPatch()
+    routing: tuple[EdgeConditionResult, ...] = ()
+    routing_source_status: str | None = None
+    fault: RuntimeErrorInfo | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NodeOccurrenceState:
     id: str
     node_id: str
@@ -83,9 +103,11 @@ class NodeOccurrenceState:
     status: NodeOccurrenceStatus
     output: DurableValue = None
     error: RuntimeErrorInfo | None = None
-    started_at_ns: int | None = None
-    completed_at_ns: int | None = None
-    started_state_version: int | None = None
+    started_at_us: int | None = None
+    completed_at_us: int | None = None
+    started_sequence: int | None = None
+    ready_at_us: int | None = None
+    execution: NodeExecutionState = field(default_factory=NodeExecutionState)
     activations: tuple[Activation, ...] = ()
     metrics: DurableValue = None
     recovery_attempts: int = 0
@@ -116,8 +138,8 @@ class SchedulerState:
 class SessionState:
     id: str
     context: DurableValue
-    created_at_ns: int
-    updated_at_ns: int
+    created_at_us: int
+    updated_at_us: int
     latest_invocation_id: str | None = None
     context_path_revisions: Mapping[tuple[str, ...], int] = field(
         default_factory=lambda: MappingProxyType({})
@@ -136,9 +158,9 @@ class InvocationState:
     output: DurableValue = None
     error: RuntimeErrorInfo | None = None
     cancel_reason: str | None = None
-    created_at_ns: int = 0
-    started_at_ns: int | None = None
-    completed_at_ns: int | None = None
+    created_at_us: int = 0
+    started_at_us: int | None = None
+    completed_at_us: int | None = None
     scheduler: SchedulerState = field(default_factory=SchedulerState)
     child_plans: Mapping[str, ChildInvocationPlan] = field(
         default_factory=lambda: MappingProxyType({})
@@ -158,21 +180,15 @@ class RuntimeState:
 
     session: SessionState | None = None
     invocation: InvocationState | None = None
-    state_version: int = 0
     sequence: int = 0
     last_event_id: str | None = None
-    last_event_digest: str | None = None
-    last_event_semantic_digest: str | None = None
     schema_version: int = RUNTIME_STATE_SCHEMA_VERSION
 
     def to_record(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "state_version": self.state_version,
             "sequence": self.sequence,
             "last_event_id": self.last_event_id,
-            "last_event_digest": self.last_event_digest,
-            "last_event_semantic_digest": self.last_event_semantic_digest,
             "session": _session_record(self.session),
             "invocation": _invocation_record(self.invocation),
         }
@@ -189,13 +205,8 @@ class RuntimeState:
         state = cls(
             session=_session_from_record(record.get("session")),
             invocation=_invocation_from_record(record.get("invocation")),
-            state_version=_integer(record, "state_version", default=0),
             sequence=_integer(record, "sequence"),
             last_event_id=_optional_string(record, "last_event_id"),
-            last_event_digest=_optional_string(record, "last_event_digest"),
-            last_event_semantic_digest=_optional_string(
-                record, "last_event_semantic_digest"
-            ),
             schema_version=schema_version,
         )
         validate_runtime_state(state)
@@ -213,23 +224,10 @@ def validate_runtime_state(state: RuntimeState) -> None:
         raise TypeError("Runtime State must be a RuntimeState instance.")
     if state.schema_version != RUNTIME_STATE_SCHEMA_VERSION:
         raise ValueError(f"Unsupported Runtime State schema {state.schema_version}.")
-    _non_negative(state.state_version, "Runtime State state_version")
     _non_negative(state.sequence, "Runtime State sequence")
-    event_metadata = (
-        state.last_event_id,
-        state.last_event_digest,
-        state.last_event_semantic_digest,
-    )
-    for value, label in zip(
-        event_metadata,
-        ("last_event_id", "last_event_digest", "last_event_semantic_digest"),
-        strict=True,
-    ):
-        _optional_non_empty_string(value, f"Runtime State {label}")
-    if state.sequence == 0 and any(value is not None for value in event_metadata):
-        raise ValueError("Runtime State without Events cannot carry Event metadata.")
-    if state.sequence > 0 and any(value is None for value in event_metadata):
-        raise ValueError("Runtime State Event metadata is incomplete.")
+    _optional_non_empty_string(state.last_event_id, "Runtime State last_event_id")
+    if (state.sequence == 0) != (state.last_event_id is None):
+        raise ValueError("Runtime State sequence and last Event identity disagree.")
 
     session = state.session
     invocation = state.invocation
@@ -241,16 +239,14 @@ def validate_runtime_state(state: RuntimeState) -> None:
     _non_empty_string_value(session.id, "Session id")
     if not isinstance(session.context, Mapping):
         raise TypeError("Session Context must be a mapping.")
-    _non_negative(session.created_at_ns, "Session created_at_ns")
-    _non_negative(session.updated_at_ns, "Session updated_at_ns")
-    if session.updated_at_ns < session.created_at_ns:
-        raise ValueError("Session updated_at_ns cannot precede created_at_ns.")
+    _non_negative(session.created_at_us, "Session created_at_us")
+    _non_negative(session.updated_at_us, "Session updated_at_us")
     _optional_non_empty_string(
         session.latest_invocation_id, "Session latest_invocation_id"
     )
     _validate_context_revision_map(
         session.context_path_revisions,
-        state.state_version,
+        state.sequence,
         "Session context_path_revisions",
     )
 
@@ -281,51 +277,35 @@ def validate_runtime_state(state: RuntimeState) -> None:
         raise ValueError(f"Unsupported Invocation status {invocation.status!r}.")
     if not isinstance(invocation.context, Mapping):
         raise TypeError("Invocation Context must be a mapping.")
-    _non_negative(invocation.created_at_ns, "Invocation created_at_ns")
-    _optional_non_negative(invocation.started_at_ns, "Invocation started_at_ns")
-    _optional_non_negative(invocation.completed_at_ns, "Invocation completed_at_ns")
+    _non_negative(invocation.created_at_us, "Invocation created_at_us")
+    _optional_non_negative(invocation.started_at_us, "Invocation started_at_us")
+    _optional_non_negative(invocation.completed_at_us, "Invocation completed_at_us")
     _timestamp_within_session(
-        invocation.created_at_ns,
+        invocation.created_at_us,
         session,
-        "Invocation created_at_ns",
+        "Invocation created_at_us",
     )
     _optional_timestamp_within_session(
-        invocation.started_at_ns,
+        invocation.started_at_us,
         session,
-        "Invocation started_at_ns",
+        "Invocation started_at_us",
     )
     _optional_timestamp_within_session(
-        invocation.completed_at_ns,
+        invocation.completed_at_us,
         session,
-        "Invocation completed_at_ns",
+        "Invocation completed_at_us",
     )
-    if (
-        invocation.started_at_ns is not None
-        and invocation.started_at_ns < invocation.created_at_ns
-    ):
-        raise ValueError("Invocation started_at_ns cannot precede created_at_ns.")
-    if (
-        invocation.completed_at_ns is not None
-        and invocation.completed_at_ns < invocation.created_at_ns
-    ):
-        raise ValueError("Invocation completed_at_ns cannot precede created_at_ns.")
-    if (
-        invocation.started_at_ns is not None
-        and invocation.completed_at_ns is not None
-        and invocation.completed_at_ns < invocation.started_at_ns
-    ):
-        raise ValueError("Invocation completed_at_ns cannot precede started_at_ns.")
     _validate_invocation_lifecycle(invocation)
     _optional_non_empty_string(invocation.cancel_reason, "Invocation cancel_reason")
     _validate_context_revision_map(
         invocation.context_path_revisions,
-        state.state_version,
+        state.sequence,
         "Invocation context_path_revisions",
     )
     _validate_scheduler(
         invocation.scheduler,
         invocation.child_plans,
-        state.state_version,
+        state.sequence,
         session,
     )
 
@@ -333,7 +313,7 @@ def validate_runtime_state(state: RuntimeState) -> None:
 def _validate_scheduler(
     scheduler: SchedulerState,
     child_plans: Mapping[str, ChildInvocationPlan],
-    state_version: int,
+    sequence: int,
     session: SessionState,
 ) -> None:
     if not isinstance(scheduler, SchedulerState):
@@ -369,40 +349,34 @@ def _validate_scheduler(
             raise ValueError(
                 f"Unsupported Node Occurrence status {occurrence.status!r}."
             )
+        _optional_non_negative(occurrence.ready_at_us, "Node Occurrence ready_at_us")
+        _validate_execution(occurrence.execution)
         _optional_non_negative(
-            occurrence.started_at_ns, "Node Occurrence started_at_ns"
+            occurrence.started_at_us, "Node Occurrence started_at_us"
         )
         _optional_non_negative(
-            occurrence.completed_at_ns, "Node Occurrence completed_at_ns"
+            occurrence.completed_at_us, "Node Occurrence completed_at_us"
         )
         _optional_timestamp_within_session(
-            occurrence.started_at_ns,
+            occurrence.started_at_us,
             session,
-            "Node Occurrence started_at_ns",
+            "Node Occurrence started_at_us",
         )
         _optional_timestamp_within_session(
-            occurrence.completed_at_ns,
+            occurrence.completed_at_us,
             session,
-            "Node Occurrence completed_at_ns",
+            "Node Occurrence completed_at_us",
         )
-        if (
-            occurrence.started_at_ns is not None
-            and occurrence.completed_at_ns is not None
-            and occurrence.completed_at_ns < occurrence.started_at_ns
-        ):
-            raise ValueError(
-                "Node Occurrence completed_at_ns cannot precede started_at_ns."
-            )
         _optional_non_negative(
-            occurrence.started_state_version,
-            "Node Occurrence started_state_version",
+            occurrence.started_sequence,
+            "Node Occurrence started_sequence",
         )
         if (
-            occurrence.started_state_version is not None
-            and occurrence.started_state_version > state_version
+            occurrence.started_sequence is not None
+            and occurrence.started_sequence > sequence
         ):
             raise ValueError(
-                "Node Occurrence started_state_version exceeds Runtime State version."
+                "Node Occurrence started_sequence exceeds Runtime State version."
             )
         _non_negative(
             occurrence.recovery_attempts, "Node Occurrence recovery_attempts"
@@ -539,25 +513,20 @@ def _validate_operator_calls(
         if occurrence is None:
             raise ValueError("Operator Call references an unknown Node Occurrence.")
         _non_negative(call.unit_index, "Operator Call unit_index")
-        _non_negative(call.started_at_ns, "Operator Call started_at_ns")
-        _optional_non_negative(call.completed_at_ns, "Operator Call completed_at_ns")
+        _non_negative(call.queue_duration_ns, "Operator Call queue_duration_ns")
+        _optional_non_negative(call.execution_duration_ns, "Operator Call execution_duration_ns")
+        _non_negative(call.started_at_us, "Operator Call started_at_us")
+        _optional_non_negative(call.completed_at_us, "Operator Call completed_at_us")
         _timestamp_within_session(
-            call.started_at_ns,
+            call.started_at_us,
             session,
-            "Operator Call started_at_ns",
+            "Operator Call started_at_us",
         )
         _optional_timestamp_within_session(
-            call.completed_at_ns,
+            call.completed_at_us,
             session,
-            "Operator Call completed_at_ns",
+            "Operator Call completed_at_us",
         )
-        if (
-            call.completed_at_ns is not None
-            and call.completed_at_ns < call.started_at_ns
-        ):
-            raise ValueError(
-                "Operator Call completed_at_ns cannot precede started_at_ns."
-            )
         if call.status not in {
             "running",
             "completed",
@@ -566,9 +535,9 @@ def _validate_operator_calls(
             "cancelled",
         }:
             raise ValueError(f"Unsupported Operator Call status {call.status!r}.")
-        if (call.status == "running") != (call.completed_at_ns is None):
+        if (call.status == "running") != (call.completed_at_us is None):
             raise ValueError(
-                "Only a running Operator Call may omit completed_at_ns."
+                "Only a running Operator Call may omit completed_at_us."
             )
         if call.status == "failed":
             if call.error is None:
@@ -582,11 +551,7 @@ def _validate_operator_calls(
                 raise ValueError(
                     "A running Operator Call requires a running Node Occurrence."
                 )
-            assert occurrence.started_at_ns is not None
-            if call.started_at_ns < occurrence.started_at_ns:
-                raise ValueError(
-                    "Operator Call cannot start before its Node Occurrence."
-                )
+            assert occurrence.started_at_us is not None
         if call.status == "cancelled" and occurrence.status != "cancelled":
             raise ValueError(
                 "A cancelled Operator Call requires a cancelled Node Occurrence."
@@ -612,26 +577,21 @@ def _validate_waits(
         occurrence = occurrences.get(wait.occurrence_id)
         if occurrence is None:
             raise ValueError("Wait references an unknown Node Occurrence.")
-        _non_negative(wait.created_at_ns, "Wait created_at_ns")
-        _optional_non_negative(wait.resumed_at_ns, "Wait resumed_at_ns")
-        _timestamp_within_session(wait.created_at_ns, session, "Wait created_at_ns")
+        _non_negative(wait.created_at_us, "Wait created_at_us")
+        _optional_non_negative(wait.resumed_at_us, "Wait resumed_at_us")
+        _timestamp_within_session(wait.created_at_us, session, "Wait created_at_us")
         _optional_timestamp_within_session(
-            wait.resumed_at_ns,
+            wait.resumed_at_us,
             session,
-            "Wait resumed_at_ns",
+            "Wait resumed_at_us",
         )
-        if (
-            wait.resumed_at_ns is not None
-            and wait.resumed_at_ns < wait.created_at_ns
-        ):
-            raise ValueError("Wait resumed_at_ns cannot precede created_at_ns.")
         if wait.status not in {"waiting", "resumed", "cancelled"}:
             raise ValueError(f"Unsupported Wait status {wait.status!r}.")
         if wait.status == "resumed":
-            if wait.resumed_at_ns is None:
-                raise ValueError("A resumed Wait requires resumed_at_ns.")
-        elif wait.resumed_at_ns is not None:
-            raise ValueError("Only a resumed Wait may carry resumed_at_ns.")
+            if wait.resumed_at_us is None:
+                raise ValueError("A resumed Wait requires resumed_at_us.")
+        elif wait.resumed_at_us is not None:
+            raise ValueError("Only a resumed Wait may carry resumed_at_us.")
         if wait.status in {"waiting", "cancelled"} and wait.response is not None:
             raise ValueError("A non-resumed Wait cannot carry a response.")
         if wait.status == "waiting":
@@ -733,17 +693,17 @@ def _validate_activation(
 
 def _validate_invocation_lifecycle(invocation: InvocationState) -> None:
     terminal = invocation.status in {"completed", "failed", "cancelled"}
-    if terminal != (invocation.completed_at_ns is not None):
+    if terminal != (invocation.completed_at_us is not None):
         raise ValueError(
-            "Invocation completed_at_ns must exist exactly for terminal status."
+            "Invocation completed_at_us must exist exactly for terminal status."
         )
     if invocation.status == "created":
-        if invocation.started_at_ns is not None:
-            raise ValueError("A created Invocation cannot have started_at_ns.")
+        if invocation.started_at_us is not None:
+            raise ValueError("A created Invocation cannot have started_at_us.")
     elif invocation.status in {"running", "waiting", "completed"}:
-        if invocation.started_at_ns is None:
+        if invocation.started_at_us is None:
             raise ValueError(
-                f"A {invocation.status} Invocation requires started_at_ns."
+                f"A {invocation.status} Invocation requires started_at_us."
             )
     if invocation.status == "failed":
         if invocation.error is None:
@@ -755,14 +715,14 @@ def _validate_invocation_lifecycle(invocation: InvocationState) -> None:
 
 
 def _validate_occurrence_lifecycle(occurrence: NodeOccurrenceState) -> None:
-    if (occurrence.started_at_ns is None) != (
-        occurrence.started_state_version is None
+    if (occurrence.started_at_us is None) != (
+        occurrence.started_sequence is None
     ):
         raise ValueError(
             "Node Occurrence start time and State version must appear together."
         )
     if occurrence.status in {"running", "waiting", "completed", "failed"}:
-        if occurrence.started_at_ns is None:
+        if occurrence.started_at_us is None:
             raise ValueError(
                 f"A {occurrence.status} Node Occurrence requires start information."
             )
@@ -772,9 +732,9 @@ def _validate_occurrence_lifecycle(occurrence: NodeOccurrenceState) -> None:
         "skipped",
         "cancelled",
     }
-    if terminal != (occurrence.completed_at_ns is not None):
+    if terminal != (occurrence.completed_at_us is not None):
         raise ValueError(
-            "Node Occurrence completed_at_ns must exist exactly for terminal status."
+            "Node Occurrence completed_at_us must exist exactly for terminal status."
         )
     if occurrence.status == "failed":
         if occurrence.error is None:
@@ -783,15 +743,9 @@ def _validate_occurrence_lifecycle(occurrence: NodeOccurrenceState) -> None:
         raise ValueError("Only a failed Node Occurrence may carry error details.")
 
 
-def _timestamp_within_session(
-    value: int,
-    session: SessionState,
-    label: str,
-) -> None:
-    if value < session.created_at_ns:
-        raise ValueError(f"{label} cannot precede Session created_at_ns.")
-    if value > session.updated_at_ns:
-        raise ValueError(f"{label} cannot exceed Session updated_at_ns.")
+def _timestamp_within_session(value: int, session: SessionState, label: str) -> None:
+    # Wall time may regress; only Event sequence establishes execution order.
+    _non_negative(value, label)
 
 
 def _optional_timestamp_within_session(
@@ -815,7 +769,7 @@ def _validate_scope(scope: ExecutionScope, label: str) -> None:
 
 def _validate_context_revision_map(
     revisions: Mapping[tuple[str, ...], int],
-    state_version: int,
+    sequence: int,
     label: str,
 ) -> None:
     if not isinstance(revisions, Mapping):
@@ -826,7 +780,7 @@ def _validate_context_revision_map(
         ):
             raise ValueError(f"{label} paths must be non-empty tuples of strings.")
         _non_negative(revision, f"{label} value")
-        if revision > state_version:
+        if revision > sequence:
             raise ValueError(f"{label} value exceeds Runtime State version.")
 
 
@@ -860,8 +814,8 @@ def _session_record(value: SessionState | None) -> dict[str, object] | None:
     return {
         "id": value.id,
         "context": thaw(value.context),
-        "created_at_ns": value.created_at_ns,
-        "updated_at_ns": value.updated_at_ns,
+        "created_at_us": value.created_at_us,
+        "updated_at_us": value.updated_at_us,
         "latest_invocation_id": value.latest_invocation_id,
         "context_path_revisions": {
             _context_path_key(path): revision
@@ -886,9 +840,9 @@ def _invocation_record(value: InvocationState | None) -> dict[str, object] | Non
         "output": thaw(value.output),
         "error": _error_record(value.error),
         "cancel_reason": value.cancel_reason,
-        "created_at_ns": value.created_at_ns,
-        "started_at_ns": value.started_at_ns,
-        "completed_at_ns": value.completed_at_ns,
+        "created_at_us": value.created_at_us,
+        "started_at_us": value.started_at_us,
+        "completed_at_us": value.completed_at_us,
         "context_path_revisions": {
             _context_path_key(path): revision
             for path, revision in value.context_path_revisions.items()
@@ -966,8 +920,10 @@ def _invocation_record(value: InvocationState | None) -> dict[str, object] | Non
                     "input": thaw(item.input),
                     "output": thaw(item.output),
                     "error": _error_record(item.error),
-                    "started_at_ns": item.started_at_ns,
-                    "completed_at_ns": item.completed_at_ns,
+                    "queue_duration_ns": item.queue_duration_ns,
+                    "execution_duration_ns": item.execution_duration_ns,
+                    "started_at_us": item.started_at_us,
+                    "completed_at_us": item.completed_at_us,
                 }
                 for key, item in value.scheduler.operator_calls.items()
             },
@@ -978,8 +934,8 @@ def _invocation_record(value: InvocationState | None) -> dict[str, object] | Non
                     "status": item.status,
                     "request": thaw(item.request),
                     "response": thaw(item.response),
-                    "created_at_ns": item.created_at_ns,
-                    "resumed_at_ns": item.resumed_at_ns,
+                    "created_at_us": item.created_at_us,
+                    "resumed_at_us": item.resumed_at_us,
                 }
                 for key, item in value.scheduler.waits.items()
             },
@@ -998,9 +954,11 @@ def _occurrence_record(value: NodeOccurrenceState) -> dict[str, object]:
         "status": value.status,
         "output": thaw(value.output),
         "error": _error_record(value.error),
-        "started_at_ns": value.started_at_ns,
-        "completed_at_ns": value.completed_at_ns,
-        "started_state_version": value.started_state_version,
+        "started_at_us": value.started_at_us,
+        "completed_at_us": value.completed_at_us,
+        "started_sequence": value.started_sequence,
+        "ready_at_us": value.ready_at_us,
+        "execution": _execution_record(value.execution),
         "activations": [
             {
                 "edge_id": item.edge_id,
@@ -1061,8 +1019,8 @@ def _session_from_record(value: object) -> SessionState | None:
     return SessionState(
         id=_string(record, "id"),
         context=freeze(context),
-        created_at_ns=_integer(record, "created_at_ns"),
-        updated_at_ns=_integer(record, "updated_at_ns"),
+        created_at_us=_integer(record, "created_at_us"),
+        updated_at_us=_integer(record, "updated_at_us"),
         latest_invocation_id=_optional_string(record, "latest_invocation_id"),
         context_path_revisions=MappingProxyType(
             _context_revisions(record.get("context_path_revisions"))
@@ -1093,9 +1051,9 @@ def _invocation_from_record(value: object) -> InvocationState | None:
         output=freeze(record.get("output")),
         error=_error_from_record(record.get("error")),
         cancel_reason=_optional_string(record, "cancel_reason"),
-        created_at_ns=_integer(record, "created_at_ns"),
-        started_at_ns=_optional_integer(record, "started_at_ns"),
-        completed_at_ns=_optional_integer(record, "completed_at_ns"),
+        created_at_us=_integer(record, "created_at_us"),
+        started_at_us=_optional_integer(record, "started_at_us"),
+        completed_at_us=_optional_integer(record, "completed_at_us"),
         scheduler=scheduler,
         child_plans=MappingProxyType(
             _child_plans_from_record(child_plans_record)
@@ -1165,9 +1123,11 @@ def _occurrence_from_record(value: object) -> NodeOccurrenceState:
         status=status,  # type: ignore[arg-type]
         output=freeze(record.get("output")),
         error=_error_from_record(record.get("error")),
-        started_at_ns=_optional_integer(record, "started_at_ns"),
-        completed_at_ns=_optional_integer(record, "completed_at_ns"),
-        started_state_version=_optional_integer(record, "started_state_version"),
+        started_at_us=_optional_integer(record, "started_at_us"),
+        completed_at_us=_optional_integer(record, "completed_at_us"),
+        started_sequence=_optional_integer(record, "started_sequence"),
+        ready_at_us=_optional_integer(record, "ready_at_us"),
+        execution=_execution_from_record(record["execution"]),
         activations=tuple(_activation_from_record(item) for item in activations),
         metrics=freeze(record.get("metrics")),
         recovery_attempts=_integer(record, "recovery_attempts"),
@@ -1221,8 +1181,10 @@ def _call_from_record(value: object) -> OperatorCallState:
         input=freeze(record.get("input")),
         output=freeze(record.get("output")),
         error=_error_from_record(record.get("error")),
-        started_at_ns=_integer(record, "started_at_ns"),
-        completed_at_ns=_optional_integer(record, "completed_at_ns"),
+        queue_duration_ns=_integer(record, "queue_duration_ns"),
+        execution_duration_ns=_optional_integer(record, "execution_duration_ns"),
+        started_at_us=_integer(record, "started_at_us"),
+        completed_at_us=_optional_integer(record, "completed_at_us"),
     )
 
 
@@ -1237,8 +1199,8 @@ def _wait_from_record(value: object) -> WaitState:
         status=status,  # type: ignore[arg-type]
         request=freeze(record.get("request")),
         response=freeze(record.get("response")),
-        created_at_ns=_integer(record, "created_at_ns"),
-        resumed_at_ns=_optional_integer(record, "resumed_at_ns"),
+        created_at_us=_integer(record, "created_at_us"),
+        resumed_at_us=_optional_integer(record, "resumed_at_us"),
     )
 
 
@@ -1415,3 +1377,59 @@ def _boolean(record: dict[str, object], key: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{key} must be bool.")
     return value
+
+
+def _execution_record(value: NodeExecutionState) -> dict[str, object]:
+    return {
+        "phase": value.phase, "completed_stages": list(value.completed_stages), "mapped_input": thaw(value.mapped_input),
+        "resolved_capability_id": value.resolved_capability_id,
+        "resolved_operator_id": value.resolved_operator_id,
+        "aggregate_output": thaw(value.aggregate_output),
+        "pending_context_patch": _patch_to_record(value.pending_context_patch),
+        "routing": [{"edge_id": r.edge_id, "selected": r.selected, "duration_ns": r.duration_ns} for r in value.routing],
+        "routing_source_status": value.routing_source_status,
+        "fault": _error_record(value.fault),
+    }
+
+
+def _execution_from_record(record: object) -> NodeExecutionState:
+    if not isinstance(record, dict):
+        raise TypeError("Node execution must be a mapping.")
+    return NodeExecutionState(
+        phase=_string(record, "phase"), completed_stages=tuple(record["completed_stages"]), mapped_input=freeze(record.get("mapped_input")),
+        resolved_capability_id=_optional_string(record, "resolved_capability_id"),
+        resolved_operator_id=_optional_string(record, "resolved_operator_id"),
+        aggregate_output=freeze(record.get("aggregate_output")),
+        pending_context_patch=_patch_from_record(record.get("pending_context_patch")),
+        routing=tuple(EdgeConditionResult(**item) for item in record["routing"]),
+        routing_source_status=_optional_string(record, "routing_source_status"),
+        fault=_error_from_record(record.get("fault")),
+    )
+
+
+def _validate_execution(execution: NodeExecutionState) -> None:
+    if not isinstance(execution, NodeExecutionState):
+        raise TypeError("Occurrence execution must be NodeExecutionState.")
+    stages = {"input_mapped", "capability_resolved", "aggregated", "output_bound", "routing_resolved"}
+    if execution.phase not in stages | {"none", "started", "executing", "faulted"}:
+        raise ValueError("Unknown execution phase.")
+    if not isinstance(execution.completed_stages, tuple) or not all(stage in stages for stage in execution.completed_stages):
+        raise ValueError("Unknown completed execution stage.")
+    if len(set(execution.completed_stages)) != len(execution.completed_stages):
+        raise ValueError("Completed execution stages cannot repeat.")
+    for value in (execution.resolved_capability_id, execution.resolved_operator_id):
+        _optional_non_empty_string(value, "Resolved execution identity")
+    if "capability_resolved" in execution.completed_stages and (
+        execution.resolved_capability_id is None or execution.resolved_operator_id is None
+    ):
+        raise ValueError("Resolved capability requires durable identities.")
+    if not isinstance(execution.pending_context_patch, ContextPatch):
+        raise TypeError("Execution pending patch must be ContextPatch.")
+    if not isinstance(execution.routing, tuple) or not all(isinstance(item, EdgeConditionResult) for item in execution.routing):
+        raise TypeError("Execution routing must contain condition results.")
+    if "routing_resolved" in execution.completed_stages and execution.routing_source_status not in {"complete", "error"}:
+        raise ValueError("Resolved routing must retain its source status.")
+    if execution.fault is not None and not isinstance(execution.fault, RuntimeErrorInfo):
+        raise TypeError("Execution fault must be RuntimeErrorInfo.")
+    if execution.phase == "faulted" and execution.fault is None:
+        raise ValueError("Faulted execution requires its durable error.")

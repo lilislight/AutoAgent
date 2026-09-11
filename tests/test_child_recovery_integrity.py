@@ -54,7 +54,7 @@ class _CommitThenFailSink:
             self.fail_event_name is not None
             and event.session_id == "root"
             and any(
-                log.event_name == self.fail_event_name for log in event.logs
+                log.event_name == self.fail_event_name for log in (event,)
             )
         ):
             raise RuntimeError("database acknowledgement was lost")
@@ -85,7 +85,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             nodes=[Node("work", identity)],
         )
         sink = _CommitThenFailSink()
-        sink.fail_event_name = "invocation.opened"
+        sink.fail_event_name = "invocation.started"
         source = AutoAgentApp(runtime_event_sink=sink)
         try:
             with self.assertRaises(RuntimeInfrastructureError):
@@ -98,8 +98,8 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         checkpoint = _checkpoint_from_prefix(prefix)
         invocation = _state(checkpoint, "root").invocation
         assert invocation is not None
-        self.assertEqual(invocation.status, "created")
-        self.assertFalse(invocation.scheduler.initialized)
+        self.assertEqual(invocation.status, "running")
+        self.assertTrue(invocation.scheduler.initialized)
 
         restored = AutoAgentApp()
         try:
@@ -339,7 +339,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             child_result = restored.status(handle)
             self.assertEqual(result.status, "cancelled")
             self.assertEqual(child_result.status, "cancelled")
-            root = restored._journal.state(result.session_id).invocation
+            root = restored._repository.state(result.session_id).invocation
             assert root is not None
             plan = next(iter(root.child_plans.values()))
             self.assertEqual(plan.units[0].phase, "terminal")

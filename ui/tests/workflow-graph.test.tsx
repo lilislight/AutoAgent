@@ -28,7 +28,6 @@ const completed: TraceEvent = {
   kind: "node_occurrence.completed",
   occurred_at_ns: "1",
   invocation_id: "invocation",
-  causation_id: null,
   state_version: 1,
   subject_ids: { occurrence_id: "work@root", node_id: "work" },
   status: "completed",

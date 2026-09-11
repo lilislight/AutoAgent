@@ -1,0 +1,17 @@
+{
+  "total_events": 97,
+  "json_equals_jsonl": true,
+  "approval_completion_makes_both_branches_ready_at_sequence": 13,
+  "separate_node_start_sequences": {
+    "risk@root": [
+      14
+    ],
+    "inventory@root": [
+      15
+    ]
+  },
+  "wait_resume_does_not_repeat_node_start": true,
+  "checkpoint_recovery_does_not_repeat_normalize_call": true,
+  "checkpoint_plus_suffix_equals_full_replay": true,
+  "parent_and_child_completed": true
+}

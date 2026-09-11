@@ -1,24 +1,18 @@
-"""Durable Full-mode Runtime Event envelopes and semantic Runtime logs.
-
-Each internal transition contributes one semantic log and one atomic State
-Operation batch.  A Runtime Event may envelope one or more adjacent batches;
-it never embeds a duplicate copy of the resulting Runtime State.
-"""
+"""One semantic execution boundary and its atomic, replayable StateDelta."""
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
+from .clocks import unix_time_us
+from dataclasses import dataclass, field, fields
 from typing import ClassVar, Literal, TypeAlias
 from uuid import uuid4
 
-from .scheduling import SchedulerDelta, delta_from_record, delta_to_record
-from .operations import StateOperation, StateOperationBatch
+from .operations import StateDelta
 from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 3
+RUNTIME_EVENT_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +52,8 @@ class SessionOpened:
 
 
 @dataclass(frozen=True, slots=True)
-class InvocationOpened:
-    kind: ClassVar[str] = "invocation.opened"
+class InvocationStarted:
+    kind: ClassVar[str] = "invocation.started"
     workflow_id: str
     workflow_revision_id: str
     entry_node_id: str
@@ -67,16 +61,6 @@ class InvocationOpened:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input", freeze(self.input))
-
-
-@dataclass(frozen=True, slots=True)
-class InvocationStarted:
-    kind: ClassVar[str] = "invocation.started"
-
-
-@dataclass(frozen=True, slots=True)
-class InvocationWaiting:
-    kind: ClassVar[str] = "invocation.waiting"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,13 +85,7 @@ class InvocationCancelled:
 
 
 @dataclass(frozen=True, slots=True)
-class SchedulerInitialized:
-    kind: ClassVar[str] = "scheduler.initialized"
-    delta: SchedulerDelta
-
-
-@dataclass(frozen=True, slots=True)
-class NodeOccurrenceStarted:
+class NodeStarted:
     kind: ClassVar[str] = "node_occurrence.started"
     occurrence_id: str
 
@@ -120,6 +98,7 @@ class OperatorCallStarted:
     operator_id: str
     unit_index: int
     input: DurableValue
+    queue_duration_ns: int = 0
 
     def __post_init__(self) -> None:
         if self.unit_index < 0:
@@ -132,6 +111,7 @@ class OperatorCallCompleted:
     kind: ClassVar[str] = "operator_call.completed"
     call_id: str
     output: DurableValue
+    execution_duration_ns: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output", freeze(self.output))
@@ -142,10 +122,11 @@ class OperatorCallFailed:
     kind: ClassVar[str] = "operator_call.failed"
     call_id: str
     error: RuntimeErrorInfo
+    execution_duration_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
-class NodeOccurrenceWaiting:
+class WaitRequested:
     kind: ClassVar[str] = "node_occurrence.waiting"
     occurrence_id: str
     wait_id: str
@@ -166,8 +147,10 @@ class WaitResumed:
 
 
 @dataclass(frozen=True, slots=True)
-class InvocationRecoveryRequested:
-    kind: ClassVar[str] = "invocation.recovery_requested"
+class RecoveryApplied:
+    kind: ClassVar[str] = "recovery.applied"
+    recovered_occurrence_ids: tuple[str, ...] = ()
+    lost_call_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,377 +262,179 @@ class ChildAwaitReady:
 
 
 @dataclass(frozen=True, slots=True)
-class NodeOccurrenceCompleted:
+class NodeCompleted:
     kind: ClassVar[str] = "node_occurrence.completed"
     occurrence_id: str
     output: DurableValue
-    delta: SchedulerDelta
-    patch: ContextPatch = ContextPatch()
     metrics: DurableValue = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output", freeze(self.output))
-        object.__setattr__(self, "patch", _freeze_patch(self.patch))
         object.__setattr__(self, "metrics", freeze(self.metrics))
 
 
 @dataclass(frozen=True, slots=True)
-class NodeOccurrenceFailed:
+class NodeFailed:
     kind: ClassVar[str] = "node_occurrence.failed"
     occurrence_id: str
     error: RuntimeErrorInfo
-    delta: SchedulerDelta
+
+
+@dataclass(frozen=True, slots=True)
+class InputMapped:
+    kind: ClassVar[str] = "input.mapped"
+    occurrence_id: str
+    mapped_input: DurableValue
+    duration_ns: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "mapped_input", freeze(self.mapped_input))
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResolved:
+    kind: ClassVar[str] = "capability.resolved"
+    occurrence_id: str
+    capability_id: str
+    operator_id: str
+    duration_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class Aggregated:
+    kind: ClassVar[str] = "node.aggregated"
+    occurrence_id: str
+    output: DurableValue
+    duration_ns: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output", freeze(self.output))
+
+
+@dataclass(frozen=True, slots=True)
+class OutputBound:
+    kind: ClassVar[str] = "output.bound"
+    occurrence_id: str
+    patch: ContextPatch
+    duration_ns: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "patch", _freeze_patch(self.patch))
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeConditionResult:
+    edge_id: str
+    selected: bool
+    duration_ns: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.edge_id, str) or not self.edge_id.strip():
+            raise ValueError("Condition edge_id must be a non-empty string.")
+        if type(self.selected) is not bool:
+            raise TypeError("Condition selected must be a bool.")
+        _duration(self.duration_ns)
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingResolved:
+    kind: ClassVar[str] = "routing.resolved"
+    occurrence_id: str
+    source_status: Literal["complete", "error"]
+    conditions: tuple[EdgeConditionResult, ...]
+    duration_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class NodeFaulted:
+    kind: ClassVar[str] = "node.faulted"
+    occurrence_id: str
+    phase: str
+    error: RuntimeErrorInfo
+    duration_ns: int | None = None
 
 
 RuntimeEventPayload: TypeAlias = (
-    SessionOpened
-    | InvocationOpened
+    InputMapped
+    | CapabilityResolved
+    | Aggregated
+    | OutputBound
+    | RoutingResolved
+    | NodeFaulted
+    | SessionOpened
     | InvocationStarted
-    | InvocationWaiting
     | InvocationCompleted
     | InvocationFailed
     | InvocationCancelled
-    | SchedulerInitialized
-    | NodeOccurrenceStarted
+    | NodeStarted
     | OperatorCallStarted
     | OperatorCallCompleted
     | OperatorCallFailed
-    | NodeOccurrenceWaiting
+    | WaitRequested
     | WaitResumed
-    | InvocationRecoveryRequested
+    | RecoveryApplied
     | ChildInvocationPlanned
     | ChildInvocationPhaseChanged
     | ChildAwaitSuspended
     | ChildAwaitReady
-    | NodeOccurrenceCompleted
-    | NodeOccurrenceFailed
+    | NodeCompleted
+    | NodeFailed
 )
 
 _PAYLOAD_TYPES = (
+    InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
     SessionOpened,
-    InvocationOpened,
     InvocationStarted,
-    InvocationWaiting,
     InvocationCompleted,
     InvocationFailed,
     InvocationCancelled,
-    SchedulerInitialized,
-    NodeOccurrenceStarted,
+    NodeStarted,
     OperatorCallStarted,
     OperatorCallCompleted,
     OperatorCallFailed,
-    NodeOccurrenceWaiting,
+    WaitRequested,
     WaitResumed,
-    InvocationRecoveryRequested,
+    RecoveryApplied,
     ChildInvocationPlanned,
     ChildInvocationPhaseChanged,
     ChildAwaitSuspended,
     ChildAwaitReady,
-    NodeOccurrenceCompleted,
-    NodeOccurrenceFailed,
+    NodeCompleted,
+    NodeFailed,
 )
 
 
 @dataclass(frozen=True, slots=True)
-class StateTransition:
-    """Internal semantic request from which one State Operation Batch is planned."""
-
-    session_id: str
-    payload: RuntimeEventPayload
-    invocation_id: str | None = None
-    causation_id: str | None = None
-    occurred_at_ns: int = field(default_factory=time.time_ns)
-    id: str = field(default_factory=lambda: str(uuid4()))
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.session_id, str) or not self.session_id.strip():
-            raise ValueError("State Transition session_id cannot be empty.")
-        for name, value in (
-            ("invocation_id", self.invocation_id),
-            ("causation_id", self.causation_id),
-        ):
-            if value is not None and (
-                not isinstance(value, str) or not value.strip()
-            ):
-                raise ValueError(
-                    f"State Transition {name} must be non-empty or None."
-                )
-        if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("State Transition id cannot be empty.")
-        if (
-            not isinstance(self.occurred_at_ns, int)
-            or isinstance(self.occurred_at_ns, bool)
-            or self.occurred_at_ns < 0
-        ):
-            raise ValueError("State Transition time cannot be negative.")
-        if not isinstance(self.payload, _PAYLOAD_TYPES):
-            raise TypeError("Unsupported State Transition payload type.")
-        if isinstance(self.payload, SessionOpened) != (self.invocation_id is None):
-            raise ValueError(
-                "Session Transition must omit invocation_id; Invocation Transition "
-                "must provide it."
-            )
-
-    def to_runtime_event(self, sequence: int) -> "RuntimeEvent":
-        """Create the unsealed compatibility envelope consumed by StateReducer."""
-
-        return RuntimeEvent(
-            session_id=self.session_id,
-            invocation_id=self.invocation_id,
-            sequence=sequence,
-            causation_id=self.causation_id,
-            occurred_at_ns=self.occurred_at_ns,
-            id=self.id,
-            payload=self.payload,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeLog:
-    """One semantic transition record inside a Runtime Event envelope."""
-
-    payload: RuntimeEventPayload
-    invocation_id: str | None
-    occurred_at_ns: int
-    causation_id: str | None = None
-    state_version: int | None = None
-    id: str = field(default_factory=lambda: str(uuid4()))
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("Runtime Log id cannot be empty.")
-        for name, value in (
-            ("invocation_id", self.invocation_id),
-            ("causation_id", self.causation_id),
-        ):
-            if value is not None and (
-                not isinstance(value, str) or not value.strip()
-            ):
-                raise ValueError(f"Runtime Log {name} must be non-empty or None.")
-        if (
-            not isinstance(self.occurred_at_ns, int)
-            or isinstance(self.occurred_at_ns, bool)
-            or self.occurred_at_ns < 0
-        ):
-            raise ValueError("Runtime Log time cannot be negative.")
-        if self.state_version is not None and (
-            not isinstance(self.state_version, int)
-            or isinstance(self.state_version, bool)
-            or self.state_version < 0
-        ):
-            raise ValueError("Runtime Log state_version must be non-negative or None.")
-        if not isinstance(self.payload, _PAYLOAD_TYPES):
-            raise TypeError("Unsupported Runtime Log payload type.")
-        if isinstance(self.payload, SessionOpened) != (self.invocation_id is None):
-            raise ValueError(
-                "Session Log must omit invocation_id; Invocation Log must provide it."
-            )
-
-    @property
-    def event_name(self) -> str:
-        return self.payload.kind
-
-    def to_record(self, *, include_payload: bool = True) -> dict[str, object]:
-        record: dict[str, object] = {
-            "id": self.id,
-            "invocation_id": self.invocation_id,
-            "causation_id": self.causation_id,
-            "occurred_at_ns": self.occurred_at_ns,
-            "event_name": self.event_name,
-            "state_version": self.state_version,
-        }
-        if include_payload:
-            record["payload"] = _payload_to_record(self.payload)
-        return record
-
-    @classmethod
-    def from_record(
-        cls,
-        record: dict[str, object],
-        *,
-        default_payload: RuntimeEventPayload | None = None,
-    ) -> "RuntimeLog":
-        event_name = _required_string(record, "event_name")
-        payload = (
-            _payload_from_record(event_name, _required_mapping(record, "payload"))
-            if "payload" in record
-            else default_payload
-        )
-        if payload is None or payload.kind != event_name:
-            raise ValueError("Runtime Log payload does not match event_name.")
-        return cls(
-            id=_required_string(record, "id"),
-            invocation_id=(
-                _required_string(record, "invocation_id")
-                if record.get("invocation_id") is not None
-                else None
-            ),
-            causation_id=(
-                _required_string(record, "causation_id")
-                if record.get("causation_id") is not None
-                else None
-            ),
-            occurred_at_ns=_required_integer(record, "occurred_at_ns"),
-            state_version=(
-                _required_integer(record, "state_version")
-                if record.get("state_version") is not None
-                else None
-            ),
-            payload=payload,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeEvent:
+    """One committed semantic boundary with at most one atomic StateDelta."""
+
     session_id: str
     sequence: int
     payload: RuntimeEventPayload
     invocation_id: str | None = None
-    causation_id: str | None = None
-    previous_event_id: str | None = None
-    previous_event_digest: str | None = None
-    from_state_version: int | None = None
-    to_state_version: int | None = None
-    operation_batches: tuple[StateOperationBatch, ...] = ()
-    logs: tuple[RuntimeLog, ...] = ()
-    occurred_at_ns: int = field(default_factory=time.time_ns)
+    delta: StateDelta | None = None
+    occurred_at_us: int = field(default_factory=unix_time_us)
     id: str = field(default_factory=lambda: str(uuid4()))
     schema_version: int = RUNTIME_EVENT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if not isinstance(self.session_id, str) or not self.session_id.strip():
-            raise ValueError("Runtime Event session_id cannot be empty.")
-        for name, value in (
-            ("invocation_id", self.invocation_id),
-            ("causation_id", self.causation_id),
-            ("previous_event_id", self.previous_event_id),
-            ("previous_event_digest", self.previous_event_digest),
-        ):
-            if value is not None and (
-                not isinstance(value, str) or not value.strip()
-            ):
-                raise ValueError(f"Runtime Event {name} must be non-empty or None.")
-        if (
-            not isinstance(self.sequence, int)
-            or isinstance(self.sequence, bool)
-            or self.sequence < 1
-        ):
-            raise ValueError("Runtime Event sequence must be positive.")
-        if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("Runtime Event id cannot be empty.")
-        if (
-            not isinstance(self.occurred_at_ns, int)
-            or isinstance(self.occurred_at_ns, bool)
-            or self.occurred_at_ns < 0
-        ):
-            raise ValueError("Runtime Event time cannot be negative.")
-        if (self.from_state_version is None) != (self.to_state_version is None):
-            raise ValueError(
-                "Runtime Event state-version bounds must both be present or absent."
-            )
-        if self.from_state_version is not None:
-            if (
-                not isinstance(self.from_state_version, int)
-                or isinstance(self.from_state_version, bool)
-                or self.from_state_version < 0
-                or not isinstance(self.to_state_version, int)
-                or isinstance(self.to_state_version, bool)
-                or self.to_state_version < self.from_state_version
-            ):
-                raise ValueError("Runtime Event state-version interval is invalid.")
-            if (
-                self.to_state_version > self.from_state_version
-                and not self.operation_batches
-            ):
-                raise ValueError(
-                    "A sealed Runtime Event must contain State Operation Batches."
-                )
-            if (
-                self.to_state_version == self.from_state_version
-                and self.operation_batches
-            ):
-                raise ValueError(
-                    "A zero-width Runtime Event cannot contain State Operation Batches."
-                )
-            expected = self.from_state_version
-            for batch in self.operation_batches:
-                if batch.from_state_version != expected:
-                    raise ValueError(
-                        "Runtime Event State Operation Batches are not contiguous."
-                    )
-                expected = batch.to_state_version
-            if expected != self.to_state_version:
-                raise ValueError(
-                    "Runtime Event state-version interval does not match its batches."
-                )
+        for name in ("session_id", "id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Runtime Event {name} must be a non-empty string.")
+        for name in ("invocation_id",):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"Runtime Event {name} must be a non-empty string or None.")
+        for name, minimum in (("sequence", 1), ("occurred_at_us", 0)):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+                raise ValueError(f"Runtime Event {name} is invalid.")
         if self.schema_version != RUNTIME_EVENT_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported Runtime Event schema {self.schema_version}.")
-        if not isinstance(self.payload, _PAYLOAD_TYPES):
-            raise TypeError("Unsupported Runtime Event payload type.")
-        if isinstance(self.payload, SessionOpened) != (self.invocation_id is None):
-            raise ValueError(
-                "Session Event must omit invocation_id; Invocation Event must provide it."
-            )
-        if not self.logs:
-            object.__setattr__(
-                self,
-                "logs",
-                (
-                    RuntimeLog(
-                        id=self.id,
-                        payload=self.payload,
-                        invocation_id=self.invocation_id,
-                        occurred_at_ns=self.occurred_at_ns,
-                        causation_id=self.causation_id,
-                        state_version=self.to_state_version,
-                    ),
-                ),
-            )
-        if not isinstance(self.logs, tuple) or not all(
-            isinstance(log, RuntimeLog) for log in self.logs
-        ):
-            raise TypeError("Runtime Event logs must be RuntimeLog values.")
-        if len({log.id for log in self.logs}) != len(self.logs):
-            raise ValueError("Runtime Event Log ids must be unique.")
-        if self.logs[-1].payload != self.payload:
-            raise ValueError("Runtime Event payload must equal its final Runtime Log payload.")
-        if self.logs[-1].invocation_id != self.invocation_id:
-            raise ValueError(
-                "Runtime Event invocation_id must equal its final Runtime Log."
-            )
-        if self.logs[-1].occurred_at_ns != self.occurred_at_ns:
-            raise ValueError(
-                "Runtime Event time must equal its final Runtime Log time."
-            )
-        if any(
-            later.occurred_at_ns < earlier.occurred_at_ns
-            for earlier, later in zip(self.logs, self.logs[1:])
-        ):
-            raise ValueError("Runtime Event Log times cannot move backwards.")
-        if self.from_state_version is None:
-            if any(log.state_version is not None for log in self.logs):
-                raise ValueError("Unsealed Runtime Event Logs cannot have state versions.")
-        else:
-            assert self.to_state_version is not None
-            versions = tuple(log.state_version for log in self.logs)
-            if any(version is None for version in versions):
-                raise ValueError("Sealed Runtime Event Logs require state versions.")
-            sealed_versions = tuple(version for version in versions if version is not None)
-            if (
-                any(
-                    version < self.from_state_version
-                    or version > self.to_state_version
-                    for version in sealed_versions
-                )
-                or any(
-                    later < earlier
-                    for earlier, later in zip(sealed_versions, sealed_versions[1:])
-                )
-                or sealed_versions[-1] != self.to_state_version
-            ):
-                raise ValueError(
-                    "Runtime Event Log state versions do not match its interval."
-                )
+            raise ValueError("Unsupported Runtime Event schema.")
+        validate_payload(self.payload)
+        if self.delta is not None and not isinstance(self.delta, StateDelta):
+            raise TypeError("Runtime Event delta must be StateDelta or None.")
 
     @property
     def event_name(self) -> str:
@@ -657,133 +442,40 @@ class RuntimeEvent:
 
     def to_record(self) -> dict[str, object]:
         return {
-            "schema_version": self.schema_version,
-            "id": self.id,
-            "session_id": self.session_id,
-            "invocation_id": self.invocation_id,
-            "sequence": self.sequence,
-            "causation_id": self.causation_id,
-            "previous_event_id": self.previous_event_id,
-            "previous_event_digest": self.previous_event_digest,
-            "occurred_at_ns": self.occurred_at_ns,
-            "event_name": self.event_name,
+            "schema_version": self.schema_version, "id": self.id,
+            "session_id": self.session_id, "invocation_id": self.invocation_id,
+            "sequence": self.sequence, "event_name": self.event_name,
             "payload": _payload_to_record(self.payload),
-            "from_state_version": self.from_state_version,
-            "to_state_version": self.to_state_version,
-            "operation_batches": [
-                batch.to_record() for batch in self.operation_batches
-            ],
-            "logs": [
-                log.to_record(include_payload=index != len(self.logs) - 1)
-                for index, log in enumerate(self.logs)
-            ],
+            "delta": self.delta.to_record() if self.delta is not None else None,
+            "occurred_at_us": self.occurred_at_us,
         }
 
     @classmethod
     def from_record(cls, record: dict[str, object]) -> "RuntimeEvent":
         if not isinstance(record, dict):
             raise TypeError("Runtime Event record must be a mapping.")
-        expected_fields = {
-            "schema_version",
-            "id",
-            "session_id",
-            "invocation_id",
-            "sequence",
-            "causation_id",
-            "previous_event_id",
-            "previous_event_digest",
-            "occurred_at_ns",
-            "event_name",
-            "payload",
-            "from_state_version",
-            "to_state_version",
-            "operation_batches",
-            "logs",
-        }
-        if set(record) != expected_fields:
-            raise TypeError("Runtime Event record contains missing or unknown fields.")
-        schema_version = _required_integer(record, "schema_version")
-        if schema_version != RUNTIME_EVENT_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported Runtime Event schema {schema_version}.")
-        event_name = _required_string(record, "event_name")
-        payload_record = record.get("payload")
-        if not isinstance(payload_record, dict):
-            raise TypeError("Runtime Event payload record must be a mapping.")
         event = cls(
-            schema_version=schema_version,
-            id=_required_string(record, "id"),
             session_id=_required_string(record, "session_id"),
-            invocation_id=(
-                _required_string(record, "invocation_id")
-                if record.get("invocation_id") is not None
-                else None
-            ),
             sequence=_required_integer(record, "sequence"),
-            causation_id=(
-                _required_string(record, "causation_id")
-                if record.get("causation_id") is not None
-                else None
-            ),
-            previous_event_id=(
-                _required_string(record, "previous_event_id")
-                if record.get("previous_event_id") is not None
-                else None
-            ),
-            previous_event_digest=(
-                _required_string(record, "previous_event_digest")
-                if record.get("previous_event_digest") is not None
-                else None
-            ),
-            occurred_at_ns=_required_integer(record, "occurred_at_ns"),
-            payload=_payload_from_record(event_name, payload_record),
-            from_state_version=(
-                _required_integer(record, "from_state_version")
-                if record.get("from_state_version") is not None
-                else None
-            ),
-            to_state_version=(
-                _required_integer(record, "to_state_version")
-                if record.get("to_state_version") is not None
-                else None
-            ),
-            operation_batches=tuple(
-                StateOperationBatch.from_record(item)
-                for item in _required_list(record, "operation_batches")
-            ),
-            logs=_logs_from_record(
-                _required_list(record, "logs"),
-                _payload_from_record(event_name, payload_record),
-            ),
+            payload=_payload_from_record(_required_string(record, "event_name"), _required_mapping(record, "payload")),
+            invocation_id=record.get("invocation_id"),
+            delta=StateDelta.from_record(record["delta"]) if record.get("delta") is not None else None,
+            occurred_at_us=_required_integer(record, "occurred_at_us"),
+            id=_required_string(record, "id"),
+            schema_version=_required_integer(record, "schema_version"),
         )
         if event.to_record() != record:
-            raise TypeError("Runtime Event record is not canonical.")
+            raise TypeError("Runtime Event record contains missing, unknown or non-canonical fields.")
         return event
-
-    @property
-    def operations(self) -> tuple[StateOperation, ...]:
-        return tuple(
-            operation
-            for batch in self.operation_batches
-            for operation in batch.operations
-        )
 
 
 def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
+    if isinstance(payload, (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
+        return {item.name: _encode_payload_value(getattr(payload, item.name)) for item in fields(payload)}
     if isinstance(payload, SessionOpened):
         return {
             "context": thaw(payload.context),
         }
-    if isinstance(payload, InvocationOpened):
-        return {
-            "workflow_id": payload.workflow_id,
-            "workflow_revision_id": payload.workflow_revision_id,
-            "entry_node_id": payload.entry_node_id,
-            "input": thaw(payload.input),
-        }
-    if isinstance(payload, InvocationStarted):
-        return {}
-    if isinstance(payload, InvocationWaiting):
-        return {}
     if isinstance(payload, InvocationCompleted):
         return {
             "output": thaw(payload.output),
@@ -794,26 +486,9 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
         return {
             "reason": payload.reason,
         }
-    if isinstance(payload, SchedulerInitialized):
-        return {"delta": delta_to_record(payload.delta)}
-    if isinstance(payload, NodeOccurrenceStarted):
+    if isinstance(payload, NodeStarted):
         return {"occurrence_id": payload.occurrence_id}
-    if isinstance(payload, OperatorCallStarted):
-        return {
-            "call_id": payload.call_id,
-            "occurrence_id": payload.occurrence_id,
-            "operator_id": payload.operator_id,
-            "unit_index": payload.unit_index,
-            "input": thaw(payload.input),
-        }
-    if isinstance(payload, OperatorCallCompleted):
-        return {"call_id": payload.call_id, "output": thaw(payload.output)}
-    if isinstance(payload, OperatorCallFailed):
-        return {
-            "call_id": payload.call_id,
-            "error": _error_to_record(payload.error),
-        }
-    if isinstance(payload, NodeOccurrenceWaiting):
+    if isinstance(payload, WaitRequested):
         return {
             "occurrence_id": payload.occurrence_id,
             "wait_id": payload.wait_id,
@@ -821,8 +496,6 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
         }
     if isinstance(payload, WaitResumed):
         return {"wait_id": payload.wait_id, "response": thaw(payload.response)}
-    if isinstance(payload, InvocationRecoveryRequested):
-        return {}
     if isinstance(payload, ChildInvocationPlanned):
         return {
             "creation_id": payload.creation_id,
@@ -851,41 +524,29 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
             "creation_id": payload.creation_id,
             "parent_occurrence_id": payload.parent_occurrence_id,
         }
-    if isinstance(payload, NodeOccurrenceCompleted):
-        return {
-            "occurrence_id": payload.occurrence_id,
-            "output": thaw(payload.output),
-            "delta": delta_to_record(payload.delta),
-            "patch": _patch_to_record(payload.patch),
-            "metrics": thaw(payload.metrics),
-        }
-    if isinstance(payload, NodeOccurrenceFailed):
-        return {
-            "occurrence_id": payload.occurrence_id,
-            "error": _error_to_record(payload.error),
-            "delta": delta_to_record(payload.delta),
-        }
     raise TypeError(f"Unsupported Runtime Event payload: {type(payload).__name__}.")
 
 
 def _payload_from_record(
     event_name: str, record: dict[str, object]
 ) -> RuntimeEventPayload:
+    for cls in (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied):
+        if event_name == cls.kind:
+            values = dict(record)
+            if "error" in values:
+                values["error"] = _error_from_record(values["error"])
+            if "patch" in values:
+                values["patch"] = _patch_from_record(values["patch"])
+            for key in ("recovered_occurrence_ids", "lost_call_ids"):
+                if key in values:
+                    values[key] = tuple(values[key])
+            if "conditions" in values:
+                values["conditions"] = tuple(EdgeConditionResult(**item) for item in values["conditions"])
+            return cls(**values)
     if event_name == SessionOpened.kind:
         return SessionOpened(
             _required_value(record, "context"),  # type: ignore[arg-type]
         )
-    if event_name == InvocationOpened.kind:
-        return InvocationOpened(
-            _required_string(record, "workflow_id"),
-            _required_string(record, "workflow_revision_id"),
-            _required_string(record, "entry_node_id"),
-            _required_value(record, "input"),  # type: ignore[arg-type]
-        )
-    if event_name == InvocationStarted.kind:
-        return InvocationStarted()
-    if event_name == InvocationWaiting.kind:
-        return InvocationWaiting()
     if event_name == InvocationCompleted.kind:
         return InvocationCompleted(_required_value(record, "output"))  # type: ignore[arg-type]
     if event_name == InvocationFailed.kind:
@@ -899,30 +560,10 @@ def _payload_from_record(
             if record.get("reason") is not None
             else None,
         )
-    if event_name == SchedulerInitialized.kind:
-        return SchedulerInitialized(delta_from_record(_required_mapping(record, "delta")))
-    if event_name == NodeOccurrenceStarted.kind:
-        return NodeOccurrenceStarted(_required_string(record, "occurrence_id"))
-    if event_name == OperatorCallStarted.kind:
-        return OperatorCallStarted(
-            _required_string(record, "call_id"),
-            _required_string(record, "occurrence_id"),
-            _required_string(record, "operator_id"),
-            _required_integer(record, "unit_index"),
-            _required_value(record, "input"),
-        )
-    if event_name == OperatorCallCompleted.kind:
-        return OperatorCallCompleted(
-            _required_string(record, "call_id"),
-            _required_value(record, "output"),
-        )
-    if event_name == OperatorCallFailed.kind:
-        return OperatorCallFailed(
-            _required_string(record, "call_id"),
-            _error_from_record(_required_mapping(record, "error")),
-        )
-    if event_name == NodeOccurrenceWaiting.kind:
-        return NodeOccurrenceWaiting(
+    if event_name == NodeStarted.kind:
+        return NodeStarted(_required_string(record, "occurrence_id"))
+    if event_name == WaitRequested.kind:
+        return WaitRequested(
             _required_string(record, "occurrence_id"),
             _required_string(record, "wait_id"),
             _required_value(record, "request"),
@@ -932,8 +573,6 @@ def _payload_from_record(
             _required_string(record, "wait_id"),
             _required_value(record, "response"),
         )
-    if event_name == InvocationRecoveryRequested.kind:
-        return InvocationRecoveryRequested()
     if event_name == ChildInvocationPlanned.kind:
         mode = _required_string(record, "mode")
         if mode not in {"await", "spawn"}:
@@ -972,23 +611,6 @@ def _payload_from_record(
         return ChildAwaitReady(
             _required_string(record, "creation_id"),
             _required_string(record, "parent_occurrence_id"),
-        )
-    if event_name == NodeOccurrenceCompleted.kind:
-        return NodeOccurrenceCompleted(
-            _required_string(record, "occurrence_id"),
-            _required_value(record, "output"),  # type: ignore[arg-type]
-            delta_from_record(_required_mapping(record, "delta")),
-            _patch_from_record(_required_value(record, "patch")),
-            _required_value(record, "metrics"),
-        )
-    if event_name == NodeOccurrenceFailed.kind:
-        error = record.get("error")
-        if not isinstance(error, dict):
-            raise TypeError("Node failure payload requires an error mapping.")
-        return NodeOccurrenceFailed(
-            _required_string(record, "occurrence_id"),
-            _error_from_record(error),
-            delta_from_record(_required_mapping(record, "delta")),
         )
     raise ValueError(f"Unknown Runtime Event type {event_name!r}.")
 
@@ -1057,20 +679,6 @@ def _required_list(record: dict[str, object], key: str) -> list[dict[str, object
     return value
 
 
-def _logs_from_record(
-    records: list[dict[str, object]], final_payload: RuntimeEventPayload
-) -> tuple[RuntimeLog, ...]:
-    if not records:
-        return ()
-    return tuple(
-        RuntimeLog.from_record(
-            record,
-            default_payload=(final_payload if index == len(records) - 1 else None),
-        )
-        for index, record in enumerate(records)
-    )
-
-
 def _required_value(record: dict[str, object], key: str) -> object:
     if key not in record:
         raise KeyError(f"Runtime Event payload requires {key}.")
@@ -1137,3 +745,55 @@ def _patch_from_record(value: object) -> ContextPatch:
         invocation=tuple(decode(item) for item in invocation),
         session=tuple(decode(item) for item in session),
     )
+
+
+def _encode_payload_value(value):
+    if isinstance(value, RuntimeErrorInfo):
+        return _error_to_record(value)
+    if isinstance(value, ContextPatch):
+        return _patch_to_record(value)
+    if isinstance(value, EdgeConditionResult):
+        return {item.name: getattr(value, item.name) for item in fields(value)}
+    if isinstance(value, tuple):
+        return [_encode_payload_value(item) for item in value]
+    return thaw(value)
+
+
+def _duration(value: object) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("Duration must be a non-negative integer.")
+
+
+def validate_payload(payload: RuntimeEventPayload) -> None:
+    """Validate small event-local data without traversing the Runtime State."""
+    if not isinstance(payload, _PAYLOAD_TYPES):
+        raise TypeError("Unsupported Runtime Event payload.")
+    for item in fields(payload):
+        value = getattr(payload, item.name)
+        if item.name.endswith("_id"):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{item.name} must be a non-empty string.")
+        if item.name.endswith("duration_ns") and value is not None:
+            _duration(value)
+        if item.name == "error" and not isinstance(value, RuntimeErrorInfo):
+            raise TypeError("Event error must be RuntimeErrorInfo.")
+    if isinstance(payload, OperatorCallStarted):
+        _duration(payload.unit_index)
+    if isinstance(payload, RoutingResolved):
+        if payload.source_status not in {"complete", "error"}:
+            raise ValueError("Invalid routing source status.")
+        if not isinstance(payload.conditions, tuple) or not all(isinstance(item, EdgeConditionResult) for item in payload.conditions):
+            raise TypeError("Routing conditions must be a tuple of EdgeConditionResult.")
+        if len({item.edge_id for item in payload.conditions}) != len(payload.conditions):
+            raise ValueError("Routing conditions must have unique edge identities.")
+    if isinstance(payload, NodeFaulted) and payload.phase not in {
+        "input_mapping", "capability_resolution", "operator", "aggregation",
+        "output_binding", "condition", "validation",
+    }:
+        raise ValueError("Invalid Node fault phase.")
+    if isinstance(payload, RecoveryApplied):
+        for values in (payload.recovered_occurrence_ids, payload.lost_call_ids):
+            if not isinstance(values, tuple) or not all(isinstance(value, str) and value for value in values):
+                raise TypeError("Recovery identities must be a tuple of strings.")
+            if len(set(values)) != len(values):
+                raise ValueError("Recovery identities cannot repeat.")

@@ -1,0 +1,28 @@
+{
+  "tests_run": 294,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "modules": {
+    "test_phase10_boundaries": 16,
+    "test_phase11_app_correctness": 24,
+    "test_phase12_runtime_boundaries": 16,
+    "test_phase13_lifecycle_recovery": 32,
+    "test_phase14_contract_roundtrip": 8,
+    "test_phase14_runtime_state_validation": 10,
+    "test_phase1_compiler": 28,
+    "test_phase1_contracts": 8,
+    "test_phase1_loops": 13,
+    "test_phase2_runtime_state": 22,
+    "test_phase3_scheduler": 9,
+    "test_phase4_loop_scheduler": 7,
+    "test_phase5_executor": 9,
+    "test_phase6_context": 3,
+    "test_phase7_wait_recovery": 5,
+    "test_phase8_app": 36,
+    "test_phase9_quality": 24,
+    "test_child_checkpoint_validation": 7,
+    "test_child_recovery_integrity": 9,
+    "test_executor_hardening": 8
+  }
+}

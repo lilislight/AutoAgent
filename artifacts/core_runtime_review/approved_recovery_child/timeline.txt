@@ -1,0 +1,90 @@
+Runtime Events in sink arrival order; sequence is ordered per Session.
+
+001 [core-api-demo-session #001] session.opened  delta_ops=1
+    {"context": {}}
+002 [core-api-demo-session #002] invocation.started  delta_ops=3
+    {"workflow_id": "order-processing-demo", "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06", "entry_node_id": "prepare.normalize", "input": {"order_id": "order-42", "amount": 600, "stock": 3}}
+003 [core-api-demo-session #003] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "prepare.normalize@root"}
+004 [core-api-demo-session #004] operator_call.started  delta_ops=3
+    {"call_id": "5d713161-6074-4dfd-be70-abf32a31e2af", "occurrence_id": "prepare.normalize@root", "operator_id": "normalize_order", "unit_index": 0, "input": {"order_id": "order-42", "amount": 600, "stock": 3}, "queue_duration_ns": 4021}
+005 [core-api-demo-session #005] operator_call.completed  delta_ops=2
+    {"call_id": "5d713161-6074-4dfd-be70-abf32a31e2af", "output": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}, "execution_duration_ns": 359108}
+006 [core-api-demo-session #006] output.bound  delta_ops=2
+    {"occurrence_id": "prepare.normalize@root", "patch": {"invocation": [{"operation": "set", "path": ["order"], "value": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}}], "session": []}, "duration_ns": 340649}
+007 [core-api-demo-session #007] node_occurrence.completed  delta_ops=6
+    {"occurrence_id": "prepare.normalize@root", "output": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+008 [core-api-demo-session #008] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "prepare.approval@root"}
+009 [core-api-demo-session #009] input.mapped  delta_ops=2
+    {"occurrence_id": "prepare.approval@root", "mapped_input": {"order_id": "order-42", "amount": 600, "question": "Approve this order?"}, "duration_ns": 378422}
+010 [core-api-demo-session #010] node_occurrence.waiting  delta_ops=4
+    {"occurrence_id": "prepare.approval@root", "wait_id": "186ec995-4eed-4513-85df-591458fa9dcf", "request": {"order_id": "order-42", "amount": 600, "question": "Approve this order?"}}
+011 [core-api-demo-session #011] wait.resumed  delta_ops=4
+    {"wait_id": "186ec995-4eed-4513-85df-591458fa9dcf", "response": {"approved": true}}
+012 [core-api-demo-session #012] routing.resolved  delta_ops=2
+    {"occurrence_id": "prepare.approval@root", "source_status": "complete", "conditions": [{"edge_id": "approval-to-risk", "selected": true, "duration_ns": 698132}, {"edge_id": "approval-to-inventory", "selected": true, "duration_ns": 418959}, {"edge_id": "approval-to-rejected", "selected": false, "duration_ns": 394762}], "duration_ns": 863369}
+013 [core-api-demo-session #013] node_occurrence.completed  delta_ops=6
+    {"occurrence_id": "prepare.approval@root", "output": {"approved": true}, "metrics": null}
+014 [core-api-demo-session #014] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "risk@root"}
+015 [core-api-demo-session #015] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "inventory@root"}
+016 [core-api-demo-session #016] input.mapped  delta_ops=2
+    {"occurrence_id": "risk@root", "mapped_input": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}, "duration_ns": 551761}
+017 [core-api-demo-session #017] operator_call.started  delta_ops=3
+    {"call_id": "39e9de65-f48c-4c61-9935-bbf60463a4df", "occurrence_id": "risk@root", "operator_id": "risk_check", "unit_index": 0, "input": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}, "queue_duration_ns": 3208}
+018 [core-api-demo-session #018] input.mapped  delta_ops=2
+    {"occurrence_id": "inventory@root", "mapped_input": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}, "duration_ns": 3770803}
+019 [core-api-demo-session #019] operator_call.started  delta_ops=3
+    {"call_id": "f76a8480-5709-4638-82fe-ee256bb04adb", "occurrence_id": "inventory@root", "operator_id": "inventory_check", "unit_index": 0, "input": {"order_id": "order-42", "amount": 600, "stock": 3, "currency": "USD"}, "queue_duration_ns": 1515}
+020 [core-api-demo-session #020] operator_call.completed  delta_ops=2
+    {"call_id": "39e9de65-f48c-4c61-9935-bbf60463a4df", "output": {"check": "risk", "passed": true, "detail": "amount=600"}, "execution_duration_ns": 3572878}
+021 [core-api-demo-session #021] node_occurrence.completed  delta_ops=4
+    {"occurrence_id": "risk@root", "output": {"check": "risk", "passed": true, "detail": "amount=600"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+022 [core-api-demo-session #022] operator_call.completed  delta_ops=2
+    {"call_id": "f76a8480-5709-4638-82fe-ee256bb04adb", "output": {"check": "inventory", "passed": true, "detail": "stock=3"}, "execution_duration_ns": 3760891}
+023 [core-api-demo-session #023] node_occurrence.completed  delta_ops=5
+    {"occurrence_id": "inventory@root", "output": {"check": "inventory", "passed": true, "detail": "stock=3"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+024 [core-api-demo-session #024] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "combine@root"}
+025 [core-api-demo-session #025] input.mapped  delta_ops=2
+    {"occurrence_id": "combine@root", "mapped_input": {"order_id": "order-42", "risk": {"check": "risk", "passed": true, "detail": "amount=600"}, "inventory": {"check": "inventory", "passed": true, "detail": "stock=3"}}, "duration_ns": 343067}
+026 [core-api-demo-session #026] operator_call.started  delta_ops=3
+    {"call_id": "6a032e63-7492-43d0-8ae2-51a195eccf06", "occurrence_id": "combine@root", "operator_id": "combine_checks", "unit_index": 0, "input": {"order_id": "order-42", "risk": {"check": "risk", "passed": true, "detail": "amount=600"}, "inventory": {"check": "inventory", "passed": true, "detail": "stock=3"}}, "queue_duration_ns": 1697}
+027 [core-api-demo-session #027] operator_call.completed  delta_ops=2
+    {"call_id": "6a032e63-7492-43d0-8ae2-51a195eccf06", "output": {"order_id": "order-42", "approved": true, "summary": "risk=True, inventory=True"}, "execution_duration_ns": 309627}
+028 [core-api-demo-session #028] routing.resolved  delta_ops=2
+    {"occurrence_id": "combine@root", "source_status": "complete", "conditions": [{"edge_id": "decision-to-audit", "selected": true, "duration_ns": 280876}, {"edge_id": "decision-to-review", "selected": false, "duration_ns": 240711}], "duration_ns": 439084}
+029 [core-api-demo-session #029] node_occurrence.completed  delta_ops=5
+    {"occurrence_id": "combine@root", "output": {"order_id": "order-42", "approved": true, "summary": "risk=True, inventory=True"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+030 [core-api-demo-session #030] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "spawn_audit@root"}
+031 [core-api-demo-session #031] input.mapped  delta_ops=2
+    {"occurrence_id": "spawn_audit@root", "mapped_input": {"order_id": "order-42", "summary": "risk=True, inventory=True"}, "duration_ns": 195813}
+032 [core-api-demo-session #032] child_invocation.planned  delta_ops=2
+    {"creation_id": "7dc8f6b7-5d84-45fe-80bc-c0a0b9528c78:spawn_audit@root:child", "parent_occurrence_id": "spawn_audit@root", "mode": "spawn", "workflow_id": "audit-order", "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad", "units": [{"unit_index": 0, "child_session_id": "a12af404-141a-436a-ae85-5319553d8a2a", "child_invocation_id": "7e47bb21-580c-4fd6-8508-721c6e8c9080", "input": {"order_id": "order-42", "summary": "risk=True, inventory=True"}}]}
+033 [a12af404-141a-436a-ae85-5319553d8a2a #001] session.opened  delta_ops=1
+    {"context": {}}
+034 [a12af404-141a-436a-ae85-5319553d8a2a #002] invocation.started  delta_ops=3
+    {"workflow_id": "audit-order", "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad", "entry_node_id": "write", "input": {"order_id": "order-42", "summary": "risk=True, inventory=True"}}
+035 [core-api-demo-session #033] child_invocation.phase_changed  delta_ops=2
+    {"creation_id": "7dc8f6b7-5d84-45fe-80bc-c0a0b9528c78:spawn_audit@root:child", "unit_index": 0, "phase": "opened"}
+036 [core-api-demo-session #034] child_invocation.phase_changed  delta_ops=2
+    {"creation_id": "7dc8f6b7-5d84-45fe-80bc-c0a0b9528c78:spawn_audit@root:child", "unit_index": 0, "phase": "accepted"}
+037 [core-api-demo-session #035] node_occurrence.completed  delta_ops=3
+    {"occurrence_id": "spawn_audit@root", "output": {"session_id": "a12af404-141a-436a-ae85-5319553d8a2a", "invocation_id": "7e47bb21-580c-4fd6-8508-721c6e8c9080", "workflow_id": "audit-order", "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad"}, "metrics": null}
+038 [a12af404-141a-436a-ae85-5319553d8a2a #003] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "write@root"}
+039 [a12af404-141a-436a-ae85-5319553d8a2a #004] operator_call.started  delta_ops=3
+    {"call_id": "69bbe500-9253-4e18-9b8b-8ecd7b3c107d", "occurrence_id": "write@root", "operator_id": "write_audit_record", "unit_index": 0, "input": {"order_id": "order-42", "summary": "risk=True, inventory=True"}, "queue_duration_ns": 1512}
+040 [core-api-demo-session #036] invocation.completed  delta_ops=4
+    {"output": {"spawn_audit": {"session_id": "a12af404-141a-436a-ae85-5319553d8a2a", "invocation_id": "7e47bb21-580c-4fd6-8508-721c6e8c9080", "workflow_id": "audit-order", "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad"}}}
+041 [a12af404-141a-436a-ae85-5319553d8a2a #005] operator_call.completed  delta_ops=2
+    {"call_id": "69bbe500-9253-4e18-9b8b-8ecd7b3c107d", "output": {"order_id": "order-42", "stored": true}, "execution_duration_ns": 100578785}
+042 [a12af404-141a-436a-ae85-5319553d8a2a #006] node_occurrence.completed  delta_ops=3
+    {"occurrence_id": "write@root", "output": {"order_id": "order-42", "stored": true}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+043 [a12af404-141a-436a-ae85-5319553d8a2a #007] invocation.completed  delta_ops=4
+    {"output": {"order_id": "order-42", "stored": true}}
+044 [core-api-demo-session #037] child_invocation.phase_changed  delta_ops=2
+    {"creation_id": "7dc8f6b7-5d84-45fe-80bc-c0a0b9528c78:spawn_audit@root:child", "unit_index": 0, "phase": "terminal"}

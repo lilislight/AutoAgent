@@ -6,9 +6,9 @@ from typing_extensions import TypedDict
 from autoagent.core import (
     Edge,
     InvocationCancelled,
-    InvocationRecoveryRequested,
+    RecoveryApplied,
     Node,
-    NodeOccurrenceWaiting,
+    WaitRequested,
     OperatorCallStarted,
     RuntimeEvent,
     RuntimeTransitionError,
@@ -49,7 +49,7 @@ class WaitRecoveryTests(unittest.TestCase):
         harness.start("approval@root")
         wait = harness.workflow.node("approval").executable
         request = wait.input_contract.validate({"question": "continue?"})
-        harness.emit(NodeOccurrenceWaiting("approval@root", "wait-1", request))
+        harness.emit(WaitRequested("approval@root", "wait-1", request))
         state = harness.state
         self.assertEqual(state.invocation.scheduler.occurrences["approval@root"].status, "waiting")
         self.assertEqual(state.invocation.scheduler.waits["wait-1"].request, request)
@@ -57,9 +57,8 @@ class WaitRecoveryTests(unittest.TestCase):
         response = wait.output_contract.validate({"answer": "yes"})
         harness.emit(WaitResumed("wait-1", response))
         state = harness.state
-        self.assertEqual(state.invocation.scheduler.ready, ("approval@root",))
+        self.assertEqual(state.invocation.scheduler.ready, ())
         self.assertEqual(state.invocation.scheduler.waits["wait-1"].response, response)
-        harness.start("approval@root")
         harness.complete("approval@root", {"approval->finish"})
         self.assertEqual(state.invocation.scheduler.waits["wait-1"].status, "resumed")
 
@@ -71,7 +70,7 @@ class WaitRecoveryTests(unittest.TestCase):
         )
         harness.start("approval@root")
         harness.emit(
-            NodeOccurrenceWaiting(
+            WaitRequested(
                 "approval@root", "wait-1", {"question": "continue?"}
             )
         )
@@ -97,12 +96,12 @@ class WaitRecoveryTests(unittest.TestCase):
                 "call-1", "node@root", "finish", 0, {"answer": "pending"}
             )
         )
-        harness.emit(InvocationRecoveryRequested())
+        harness.emit(RecoveryApplied())
         scheduler = harness.state.invocation.scheduler
         self.assertEqual(scheduler.operator_calls["call-1"].status, "lost")
-        self.assertEqual(scheduler.occurrences["node@root"].status, "ready")
+        self.assertEqual(scheduler.occurrences["node@root"].status, "running")
         self.assertEqual(scheduler.occurrences["node@root"].recovery_attempts, 1)
-        self.assertEqual(scheduler.ready, ("node@root",))
+        self.assertEqual(scheduler.ready, ())
 
     def test_recovery_keeps_waits_waiting_and_cancel_converges_all_work(self) -> None:
         """Verify recovery keeps waits waiting and cancel converges all work."""
@@ -112,11 +111,11 @@ class WaitRecoveryTests(unittest.TestCase):
         )
         harness.start("approval@root")
         harness.emit(
-            NodeOccurrenceWaiting(
+            WaitRequested(
                 "approval@root", "wait-1", {"question": "continue?"}
             )
         )
-        harness.emit(InvocationRecoveryRequested())
+        harness.emit(RecoveryApplied())
         self.assertEqual(
             harness.state.invocation.scheduler.waits["wait-1"].status, "waiting"
         )
@@ -132,9 +131,9 @@ class WaitRecoveryTests(unittest.TestCase):
     def test_wait_and_recovery_events_round_trip(self) -> None:
         """Verify wait and recovery events round trip."""
         payloads = (
-            NodeOccurrenceWaiting("node@root", "wait", {"question": "q"}),
+            WaitRequested("node@root", "wait", {"question": "q"}),
             WaitResumed("wait", {"answer": "a"}),
-            InvocationRecoveryRequested(),
+            RecoveryApplied(),
         )
         for sequence, payload in enumerate(payloads, 1):
             event = RuntimeEvent(

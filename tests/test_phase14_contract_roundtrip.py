@@ -80,7 +80,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
             self.assertEqual(result.error.type, "TypeError")
             self.assertIn("floats must be finite", result.error.message)
 
-            state = app._journal.state(result.session_id)
+            state = app._repository.state(result.session_id)
             invocation = state.invocation
             self.assertIsNotNone(invocation)
             assert invocation is not None
@@ -118,7 +118,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
             self.assertEqual(result.error.type, "TypeError")
             self.assertIn("floats must be finite", result.error.message)
 
-            state = app._journal.state(result.session_id)
+            state = app._repository.state(result.session_id)
             invocation = state.invocation
             self.assertIsNotNone(invocation)
             assert invocation is not None

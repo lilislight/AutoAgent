@@ -12,79 +12,28 @@ from ..executor import (
 )
 from ..operators import Operator, OperatorRegistration
 from ..runtime import (
-    NodeOccurrenceCompleted,
-    NodeOccurrenceFailed,
-    NodeOccurrenceStarted,
     SessionCheckpoint,
     RuntimeEvent,
     RuntimeState,
-    SchedulerInitialized,
-    StateOperationBatch,
-    StateTransition,
+    SchedulerDelta,
+    RuntimeEvent,
     UserEvent,
 )
 from ..workflow import Capability, EdgeIR, ErrorInfo, NodeIR, WorkflowIR
 
 
-class RuntimeJournalPort(Protocol):
-    """Non-blocking in-process boundary for canonical Runtime Events.
-
-    A database adapter must not implement this port with blocking I/O on the
-    Runtime Loop. External persistence consumes emitted Event batches through
-    the hosting layer.
-    """
-
-    def apply_transition(self, transition: StateTransition) -> RuntimeState: ...
-
-    def append(self, event: RuntimeEvent) -> RuntimeState: ...
-
-    def append_many(self, events: tuple[RuntimeEvent, ...]) -> RuntimeState: ...
-
-    def stage(self, event: RuntimeEvent) -> RuntimeState: ...
-
-    def flush(self, session_id: str) -> RuntimeEvent | None: ...
-
-    def begin_event_group(self, session_id: str) -> None:
-        """Start one exclusive group whose staged prefix must remain invisible.
-
-        While active, ``append`` may update live State, but ordinary ``flush``
-        must reject the Session and checkpoint capture must omit the group.
-        """
-        ...
-
-    def commit_event_group(self, session_id: str) -> RuntimeEvent | None:
-        """Seal every grouped transition as one Runtime Event, or return None."""
-        ...
-
-    def abort_event_group(self, session_id: str) -> bool:
-        """Restore pre-group State, pending batches and Event-id ownership."""
-        ...
-
-    def event_group_active(self, session_id: str) -> bool:
-        """Return whether the Session currently owns an uncommitted group."""
-        ...
-
-    def pending_batches(self, session_id: str) -> tuple[StateOperationBatch, ...]: ...
-
+class RuntimeRepositoryPort(Protocol):
+    async def commit(self, *, session_id: str, invocation_id: str | None, payload: object,
+                     occurred_at_us: int | None = None,
+                     scheduler_delta=None) -> RuntimeEvent: ...
+    async def settle(self, session_id: str) -> None: ...
     def state(self, session_id: str) -> RuntimeState: ...
-
     def events(self, session_id: str) -> tuple[RuntimeEvent, ...]: ...
-
     def drain_events(self, session_id: str) -> tuple[RuntimeEvent, ...]: ...
-
     def session_ids(self) -> tuple[str, ...]: ...
-
-    def discard_states(self, session_ids: tuple[str, ...]) -> None:
-        """Discard only States with no active group, pending, or unacknowledged Event."""
-        ...
-
+    def discard_states(self, session_ids: tuple[str, ...]) -> None: ...
     def install_states(self, states: Mapping[str, RuntimeState]) -> None: ...
-
-    def capture_checkpoint(
-        self, session_id: str, *, captured_at_ns: int | None = None
-    ) -> SessionCheckpoint:
-        """Capture one recoverable Runtime Session."""
-        ...
+    def capture_checkpoint(self, session_id: str, *, captured_at_us: int | None = None) -> SessionCheckpoint: ...
 
 
 class UserEventJournalPort(Protocol):
@@ -98,7 +47,7 @@ class UserEventJournalPort(Protocol):
         kind: str,
         payload: object,
         occurrence_id: str | None,
-        occurred_at_ns: int,
+        occurred_at_us: int,
     ) -> UserEvent: ...
 
     def events(self, invocation_id: str) -> tuple[UserEvent, ...]: ...
@@ -113,9 +62,7 @@ class SchedulerPort(Protocol):
 
     def initialize(
         self, workflow: WorkflowIR, state: RuntimeState
-    ) -> SchedulerInitialized: ...
-
-    def start(self, occurrence_id: str) -> NodeOccurrenceStarted: ...
+    ) -> SchedulerDelta: ...
 
     def complete(
         self,
@@ -125,7 +72,7 @@ class SchedulerPort(Protocol):
         output: object,
         *,
         selected_edge_ids: set[str] | None = None,
-    ) -> NodeOccurrenceCompleted: ...
+    ) -> SchedulerDelta: ...
 
     def fail(
         self,
@@ -135,7 +82,7 @@ class SchedulerPort(Protocol):
         error,
         *,
         selected_edge_ids: set[str] | None = None,
-    ) -> NodeOccurrenceFailed: ...
+    ) -> SchedulerDelta: ...
 
 
 class NodeExecutorPort(Protocol):
@@ -149,6 +96,10 @@ class NodeExecutorPort(Protocol):
     async def call_hook(
         self, handler: Callable[..., object], *args: object
     ) -> object: ...
+
+    async def timed(self, handler, *args, **kwargs) -> tuple[object, int]: ...
+
+    async def evaluate_conditions(self, edges: tuple[EdgeIR, ...], **kwargs): ...
 
     async def map_input(
         self,
@@ -191,6 +142,8 @@ class NodeExecutorPort(Protocol):
         session_context: object = None,
         on_call_event: CallEventHandler,
         on_stream_chunk: StreamChunkHandler,
+        completed_calls=None,
+        aggregate: bool = True,
     ) -> NodeExecutionResult: ...
 
 
@@ -227,7 +180,7 @@ __all__ = [
     "Clock",
     "NodeExecutorPort",
     "OperatorRegistryPort",
-    "RuntimeJournalPort",
+    "RuntimeRepositoryPort",
     "SchedulerPort",
     "UserEventJournalPort",
 ]

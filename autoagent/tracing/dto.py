@@ -179,7 +179,6 @@ class TraceEventResponse(_ResponseModel):
     kind: str
     occurred_at_ns: str
     invocation_id: str | None
-    causation_id: str | None
     state_version: int | None
     subject_ids: dict[str, str]
     status: str | None

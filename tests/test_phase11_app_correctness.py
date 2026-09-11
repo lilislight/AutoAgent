@@ -34,8 +34,8 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core import (
-    InMemoryEventJournal,
-    NodeOccurrenceCompleted,
+    RuntimeRepository,
+    NodeCompleted,
     SessionCheckpoint,
     RuntimeEvent,
     StateReducer,
@@ -134,7 +134,7 @@ class AppCorrectnessTests(unittest.TestCase):
                 session_id="unload-pending-result",
             )
             for _ in range(100):
-                invocation = app._journal.state(submitted.session_id).invocation
+                invocation = app._repository.state(submitted.session_id).invocation
                 if invocation is not None and invocation.terminal:
                     break
                 time.sleep(0.001)
@@ -221,7 +221,7 @@ class AppCorrectnessTests(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertIsNotNone(result.error)
             self.assertEqual(result.error.type, "CancelledError")
-            state = app._journal.state(result.session_id)
+            state = app._repository.state(result.session_id)
             self.assertTrue(
                 all(
                     occurrence.status != "running"
@@ -250,7 +250,7 @@ class AppCorrectnessTests(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertIsNotNone(result.error)
             self.assertEqual(result.error.type, "CancelledError")
-            state = app._journal.state(result.session_id)
+            state = app._repository.state(result.session_id)
             occurrence = next(iter(state.invocation.scheduler.occurrences.values()))
             self.assertEqual(occurrence.status, "failed")
         finally:
@@ -259,17 +259,17 @@ class AppCorrectnessTests(unittest.TestCase):
     def test_non_streaming_invoke_does_not_capture_a_checkpoint(self) -> None:
         """Build a checkpoint only for a lifecycle transfer operation."""
 
-        class CountingJournal(InMemoryEventJournal):
+        class CountingJournal(RuntimeRepository):
             captures = 0
 
-            def capture_checkpoint(self, root_session_id, *, captured_at_ns=None):
+            def capture_checkpoint(self, root_session_id, *, captured_at_us=None):
                 self.captures += 1
                 return super().capture_checkpoint(
-                    root_session_id, captured_at_ns=captured_at_ns
+                    root_session_id, captured_at_us=captured_at_us
                 )
 
         journal = CountingJournal()
-        app = AutoAgentApp(runtime_journal=journal)
+        app = AutoAgentApp(runtime_repository=journal)
         try:
             result = app.invoke(
                 Workflow(
@@ -329,7 +329,7 @@ class AppCorrectnessTests(unittest.TestCase):
             self.assertEqual(len({event.id for event in sink.events}), len(sink.events))
             self.assertEqual(
                 StateReducer().reduce(tuple(sink.events)),
-                app._journal.state(result.session_id),
+                app._repository.state(result.session_id),
             )
         finally:
             app.close()
@@ -412,7 +412,7 @@ class AppCorrectnessTests(unittest.TestCase):
                 await asyncio.sleep(0)
                 self.assertTrue(sink.completed.wait(1))
                 with self.assertRaisesRegex(
-                    RuntimeTransitionError, "SESSION_RESULT_PENDING"
+                    RuntimeTransitionError, "SESSION_INVOCATION_ACTIVE"
                 ):
                     await app.ainvoke(
                         workflow,
@@ -484,7 +484,7 @@ class AppCorrectnessTests(unittest.TestCase):
                 await app._await(app._submit(finish()))
                 self.assertTrue(sink.completed.wait(1))
                 with self.assertRaisesRegex(
-                    RuntimeTransitionError, "SESSION_RESULT_PENDING"
+                    RuntimeTransitionError, "SESSION_INVOCATION_ACTIVE"
                 ):
                     await app.ainvoke(
                         workflow,
@@ -571,7 +571,7 @@ class AppCorrectnessTests(unittest.TestCase):
                 ):
                     target.recover(loaded.invocations[0])
                 self.assertEqual(
-                    tuple(target._journal.session_ids()),
+                    tuple(target._repository.session_ids()),
                     (checkpoint.session_id,),
                 )
             finally:
@@ -632,12 +632,12 @@ class AppCorrectnessTests(unittest.TestCase):
         try:
             target.register_workflow(parent)
             target.load_checkpoint(AppCheckpoint((parent_checkpoint, child_checkpoint)))
-            before = tuple(target._journal.session_ids())
+            before = tuple(target._repository.session_ids())
             with self.assertRaisesRegex(
                 RuntimeTransitionError, "CHECKPOINT_CHILD_OWNERSHIP_CONFLICT"
             ):
                 target.load_checkpoint(second)
-            self.assertEqual(tuple(target._journal.session_ids()), before)
+            self.assertEqual(tuple(target._repository.session_ids()), before)
             self.assertEqual(len(target.close().sessions), 2)
         finally:
             target.close()
@@ -717,8 +717,8 @@ class AppCorrectnessTests(unittest.TestCase):
     def test_invalid_entry_does_not_open_an_invocation(self) -> None:
         """Verify invalid admission leaves no Session state or Runtime Events."""
 
-        journal = InMemoryEventJournal()
-        app = AutoAgentApp(runtime_journal=journal)
+        journal = RuntimeRepository()
+        app = AutoAgentApp(runtime_repository=journal)
         workflow = Workflow("entry-admission", nodes=[Node("entry", identity)])
         try:
             with self.assertRaisesRegex(Exception, "Entry"):
@@ -797,10 +797,11 @@ class AppCorrectnessTests(unittest.TestCase):
         first_branch_committed = asyncio.Event()
         condition_saw_first = asyncio.Event()
 
-        class CoordinatedJournal(InMemoryEventJournal):
-            def append(self, event):  # type: ignore[no-untyped-def]
-                state = super().append(event)
-                if isinstance(event.payload, NodeOccurrenceCompleted):
+        class CoordinatedJournal(RuntimeRepository):
+            async def commit(self, **kwargs):
+                event = await super().commit(**kwargs)
+                state = self.state(event.session_id)
+                if isinstance(event.payload, NodeCompleted):
                     invocation = state.invocation
                     assert invocation is not None
                     occurrence = invocation.scheduler.occurrences[
@@ -808,7 +809,7 @@ class AppCorrectnessTests(unittest.TestCase):
                     ]
                     if occurrence.node_id == "first":
                         first_branch_committed.set()
-                return state
+                return event
 
         async def first(value: Value) -> Value:
             return value
@@ -830,7 +831,7 @@ class AppCorrectnessTests(unittest.TestCase):
             return selected
 
         journal = CoordinatedJournal()
-        app = AutoAgentApp(runtime_journal=journal)
+        app = AutoAgentApp(runtime_repository=journal)
         workflow = Workflow(
             "parallel-condition-context",
             nodes=[

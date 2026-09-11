@@ -5,12 +5,7 @@ from __future__ import annotations
 from collections import deque
 
 from ..errors import LoopControlError, RuntimeTransitionError
-from ..runtime.events import (
-    NodeOccurrenceCompleted,
-    NodeOccurrenceFailed,
-    RuntimeErrorInfo,
-    SchedulerInitialized,
-)
+from ..runtime.events import RuntimeErrorInfo
 from ..runtime.scheduling import (
     Activation,
     EdgeResolution,
@@ -35,7 +30,7 @@ class Scheduler(DAGScheduler):
 
     def initialize(
         self, workflow: WorkflowIR, state: RuntimeState
-    ) -> SchedulerInitialized:
+    ) -> SchedulerDelta:
         if not workflow.loop_regions:
             return super().initialize(workflow, state)
         invocation = _running_invocation(state)
@@ -55,7 +50,7 @@ class Scheduler(DAGScheduler):
             if node_id != entry:
                 planner.plan_skipped(node_id, ())
         planner.propagate()
-        return SchedulerInitialized(planner.delta())
+        return planner.delta()
 
     def complete(
         self,
@@ -65,7 +60,7 @@ class Scheduler(DAGScheduler):
         output: object,
         *,
         selected_edge_ids: set[str] | frozenset[str] = frozenset(),
-    ) -> NodeOccurrenceCompleted:
+    ) -> SchedulerDelta:
         if not workflow.loop_regions:
             return super().complete(
                 workflow,
@@ -84,7 +79,7 @@ class Scheduler(DAGScheduler):
             selected_edge_ids,
         )
         planner.propagate()
-        return NodeOccurrenceCompleted(occurrence_id, output, planner.delta())  # type: ignore[arg-type]
+        return planner.delta()
 
     def fail(
         self,
@@ -94,7 +89,7 @@ class Scheduler(DAGScheduler):
         error: RuntimeErrorInfo,
         *,
         selected_edge_ids: set[str] | frozenset[str] = frozenset(),
-    ) -> NodeOccurrenceFailed:
+    ) -> SchedulerDelta:
         if not workflow.loop_regions:
             return super().fail(
                 workflow,
@@ -113,7 +108,7 @@ class Scheduler(DAGScheduler):
             selected_edge_ids,
         )
         planner.propagate()
-        return NodeOccurrenceFailed(occurrence_id, error, planner.delta())
+        return planner.delta()
 
 class _LoopPlanner:
     """Mutable transition-local projection; only its immutable delta is emitted."""

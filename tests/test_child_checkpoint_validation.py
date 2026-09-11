@@ -135,7 +135,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
                 RuntimeTransitionError, "CHECKPOINT_CHILD_IDENTITY_MISMATCH"
             ):
                 target.load_checkpoint(AppCheckpoint((parent_checkpoint, forged)))
-            self.assertEqual(target._journal.session_ids(), ())
+            self.assertEqual(target._repository.session_ids(), ())
         finally:
             target.close()
 

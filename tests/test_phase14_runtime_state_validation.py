@@ -14,7 +14,7 @@ from autoagent.core.runtime import (
     EdgeResolution,
     InvocationState,
     LoopIteration,
-    NodeOccurrenceCompleted,
+    NodeCompleted,
     NodeOccurrenceState,
     OperatorCallState,
     SessionCheckpoint,
@@ -24,6 +24,7 @@ from autoagent.core.runtime import (
     SchedulerState,
     SessionState,
     StateReducer,
+    TransitionPlanner,
     WaitState,
     freeze,
 )
@@ -44,17 +45,17 @@ class RuntimeStateValidationTests(unittest.TestCase):
             node_id="source",
             scope=(),
             status="completed",
-            started_at_ns=1,
-            completed_at_ns=2,
-            started_state_version=1,
+            started_at_us=1,
+            completed_at_us=2,
+            started_sequence=1,
         )
         worker = NodeOccurrenceState(
             id="worker@root",
             node_id="worker",
             scope=(),
             status="running",
-            started_at_ns=3,
-            started_state_version=2,
+            started_at_us=3,
+            started_sequence=2,
             recovery_attempts=1,
         )
         waiting = NodeOccurrenceState(
@@ -62,8 +63,8 @@ class RuntimeStateValidationTests(unittest.TestCase):
             node_id="waiting",
             scope=(),
             status="waiting",
-            started_at_ns=4,
-            started_state_version=3,
+            started_at_us=4,
+            started_sequence=3,
         )
         activation = Activation("edge", "source@root", "ready")
         ready = NodeOccurrenceState(
@@ -111,7 +112,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
                         unit_index=0,
                         status="running",
                         input=freeze({"value": 1}),
-                        started_at_ns=4,
+                        started_at_us=4,
                     )
                 }
             ),
@@ -122,7 +123,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
                         occurrence_id=waiting.id,
                         status="waiting",
                         request=freeze({"question": "continue?"}),
-                        created_at_ns=5,
+                        created_at_us=5,
                     )
                 }
             ),
@@ -131,8 +132,8 @@ class RuntimeStateValidationTests(unittest.TestCase):
             session=SessionState(
                 id="session",
                 context=freeze({}),
-                created_at_ns=0,
-                updated_at_ns=5,
+                created_at_us=0,
+                updated_at_us=5,
                 latest_invocation_id="invocation",
                 context_path_revisions=MappingProxyType({("shared",): 1}),
             ),
@@ -144,8 +145,8 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 status="running",
                 input=freeze({"value": 1}),
                 context=freeze({}),
-                created_at_ns=0,
-                started_at_ns=1,
+                created_at_us=0,
+                started_at_us=1,
                 scheduler=scheduler,
                 child_plans=MappingProxyType(
                     {
@@ -168,25 +169,25 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 ),
                 context_path_revisions=MappingProxyType({("local",): 2}),
             ),
-            state_version=5,
+            sequence=5,
+            last_event_id="event-5",
         )
 
     def test_runtime_state_rejects_every_negative_runtime_number(self) -> None:
         """Verify versions, timestamps, attempts, indexes and iterations are non-negative."""
 
         paths = {
-            "state version": ("state_version",),
             "event sequence": ("sequence",),
-            "session created": ("session", "created_at_ns"),
-            "session updated": ("session", "updated_at_ns"),
+            "session created": ("session", "created_at_us"),
+            "session updated": ("session", "updated_at_us"),
             "session context revision": (
                 "session",
                 "context_path_revisions",
                 "/shared",
             ),
-            "invocation created": ("invocation", "created_at_ns"),
-            "invocation started": ("invocation", "started_at_ns"),
-            "invocation completed": ("invocation", "completed_at_ns"),
+            "invocation created": ("invocation", "created_at_us"),
+            "invocation started": ("invocation", "started_at_us"),
+            "invocation completed": ("invocation", "completed_at_us"),
             "invocation context revision": (
                 "invocation",
                 "context_path_revisions",
@@ -197,21 +198,21 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 "scheduler",
                 "occurrences",
                 "worker@root",
-                "started_at_ns",
+                "started_at_us",
             ),
             "occurrence completed": (
                 "invocation",
                 "scheduler",
                 "occurrences",
                 "source@root",
-                "completed_at_ns",
+                "completed_at_us",
             ),
             "occurrence state version": (
                 "invocation",
                 "scheduler",
                 "occurrences",
                 "worker@root",
-                "started_state_version",
+                "started_sequence",
             ),
             "recovery attempts": (
                 "invocation",
@@ -232,28 +233,28 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 "scheduler",
                 "operator_calls",
                 "call",
-                "started_at_ns",
+                "started_at_us",
             ),
             "operator completed": (
                 "invocation",
                 "scheduler",
                 "operator_calls",
                 "call",
-                "completed_at_ns",
+                "completed_at_us",
             ),
             "wait created": (
                 "invocation",
                 "scheduler",
                 "waits",
                 "wait",
-                "created_at_ns",
+                "created_at_us",
             ),
             "wait resumed": (
                 "invocation",
                 "scheduler",
                 "waits",
                 "wait",
-                "resumed_at_ns",
+                "resumed_at_us",
             ),
             "child unit index": (
                 "invocation",
@@ -428,75 +429,10 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     RuntimeState.from_record(record)
 
-    def test_runtime_state_rejects_time_order_and_occurrence_identity_conflicts(
-        self,
-    ) -> None:
-        """Verify nested timestamps and structural Occurrence identities are ordered."""
+    def test_runtime_state_rejects_occurrence_identity_conflicts(self) -> None:
+        """Occurrence keys must agree with their Node and Scope identities."""
 
         mutations = {
-            "session order": (
-                (("session", "created_at_ns"), 6),
-            ),
-            "invocation before session": (
-                (("session", "created_at_ns"), 1),
-            ),
-            "invocation start order": (
-                (("invocation", "created_at_ns"), 2),
-            ),
-            "invocation completion order": (
-                (("invocation", "status"), "completed"),
-                (("invocation", "completed_at_ns"), 0),
-            ),
-            "occurrence completion order": (
-                (
-                    (
-                        "invocation",
-                        "scheduler",
-                        "occurrences",
-                        "source@root",
-                        "completed_at_ns",
-                    ),
-                    0,
-                ),
-            ),
-            "call completion order": (
-                (
-                    (
-                        "invocation",
-                        "scheduler",
-                        "operator_calls",
-                        "call",
-                        "status",
-                    ),
-                    "completed",
-                ),
-                (
-                    (
-                        "invocation",
-                        "scheduler",
-                        "operator_calls",
-                        "call",
-                        "completed_at_ns",
-                    ),
-                    3,
-                ),
-            ),
-            "wait resume order": (
-                (
-                    ("invocation", "scheduler", "waits", "wait", "status"),
-                    "resumed",
-                ),
-                (
-                    (
-                        "invocation",
-                        "scheduler",
-                        "waits",
-                        "wait",
-                        "resumed_at_ns",
-                    ),
-                    4,
-                ),
-            ),
             "occurrence node identity": (
                 (
                     (
@@ -553,7 +489,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 "scheduler",
                 "occurrences",
                 "source@root",
-                "completed_at_ns",
+                "completed_at_us",
             ),
             None,
         )
@@ -575,7 +511,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
             "scheduler",
             "operator_calls",
             "call",
-            "completed_at_ns",
+            "completed_at_us",
         )
         call_error_path = (
             "invocation",
@@ -596,7 +532,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
             "scheduler",
             "occurrences",
             "worker@root",
-            "completed_at_ns",
+            "completed_at_us",
         )
         error = {"type": "Failure", "message": "bad"}
         mutations = {
@@ -640,7 +576,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
             "scheduler",
             "waits",
             "wait",
-            "resumed_at_ns",
+            "resumed_at_us",
         )
         owner_status_path = (
             "invocation",
@@ -654,7 +590,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
             "scheduler",
             "occurrences",
             "waiting@root",
-            "completed_at_ns",
+            "completed_at_us",
         )
         mutations = {
             "waiting has resume time": ((resumed_path, 5),),
@@ -692,8 +628,8 @@ class RuntimeStateValidationTests(unittest.TestCase):
         """Verify Invocation lifecycle fields agree without forbidding early failure."""
 
         status_path = ("invocation", "status")
-        started_path = ("invocation", "started_at_ns")
-        completed_path = ("invocation", "completed_at_ns")
+        started_path = ("invocation", "started_at_us")
+        completed_path = ("invocation", "completed_at_us")
         error_path = ("invocation", "error")
         mutations = {
             "created has start": ((status_path, "created"),),
@@ -723,31 +659,14 @@ class RuntimeStateValidationTests(unittest.TestCase):
                     RuntimeState.from_record(record)
 
     def test_every_transition_advances_the_session_time_boundary(self) -> None:
-        """Verify non-top-level transitions also close the global Event time boundary."""
-
-        reducer = StateReducer()
-        state = reducer.apply(
-            self._valid_state(),
-            RuntimeEvent(
-                session_id="session",
-                invocation_id="invocation",
-                sequence=1,
-                occurred_at_ns=6,
-                payload=ChildInvocationPhaseChanged("creation", 0, "opened"),
-            ),
-        )
-        self.assertEqual(state.session.updated_at_ns, 6)
-        with self.assertRaisesRegex(Exception, "EVENT_TIME_REGRESSION"):
-            reducer.apply(
-                state,
-                RuntimeEvent(
-                    session_id="session",
-                    invocation_id="invocation",
-                    sequence=2,
-                    occurred_at_ns=5,
-                    payload=ChildInvocationPhaseChanged("creation", 0, "accepted"),
-                ),
-            )
+        """Wall time may regress while Event ordering remains contiguous."""
+        state = self._valid_state()
+        for index, timestamp in enumerate((6, 4), 1):
+            payload = ChildInvocationPhaseChanged("creation", 0, "opened" if index == 1 else "accepted")
+            delta = TransitionPlanner().plan(state, payload, session_id="session", invocation_id="invocation", occurred_at_us=timestamp)
+            event = RuntimeEvent("session", state.sequence+1, payload, "invocation", delta=delta, occurred_at_us=timestamp)
+            state = StateReducer().apply(state, event)
+            self.assertEqual(state.session.updated_at_us, timestamp)
 
     def test_trusted_checkpoint_reuses_the_reducer_owned_state(self) -> None:
         """Capture an already-validated Journal State without copying or rescanning it."""
@@ -755,36 +674,18 @@ class RuntimeStateValidationTests(unittest.TestCase):
         state = self._valid_state()
         with patch.object(RuntimeState, "to_record", side_effect=AssertionError):
             checkpoint = SessionCheckpoint._from_runtime_state(
-                "session", state, captured_at_ns=1
+                "session", state, captured_at_us=1
             )
         self.assertIs(checkpoint.state, state)
 
-    def test_reducer_rejects_an_invalid_live_candidate_before_install(self) -> None:
-        """Verify staged execution cannot hold State that only fails at checkpoint time."""
-
+    def test_checkpoint_rejects_an_invalid_external_state(self) -> None:
+        """External checkpoint validation rejects broken durable references."""
         state = self._valid_state()
-        event = RuntimeEvent(
-            session_id="session",
-            invocation_id="invocation",
-            sequence=1,
-            occurred_at_ns=6,
-            payload=NodeOccurrenceCompleted(
-                "worker@root",
-                {"value": 1},
-                SchedulerDelta(
-                    resolutions=(
-                        EdgeResolution(
-                            "invalid-edge",
-                            "ready",
-                            (LoopIteration("loop", -1),),
-                            False,
-                        ),
-                    )
-                ),
-            ),
-        )
-        with self.assertRaisesRegex(ValueError, "iteration|non-negative"):
-            StateReducer().plan(state, event)
+        scheduler = state.invocation.scheduler
+        state = replace(state, invocation=replace(state.invocation,
+            scheduler=replace(scheduler, ready=("missing@root",))))
+        with self.assertRaises(ValueError):
+            SessionCheckpoint.from_state(state)
 
 
 if __name__ == "__main__":

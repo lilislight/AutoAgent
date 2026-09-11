@@ -89,7 +89,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 "RuntimeState",
                 "StateOperation",
                 "StateReducer",
-                "InMemoryEventJournal",
+                "RuntimeRepository",
                 "RuntimeEventSink",
                 "AutoAgentServer",
                 "RuntimeStore",
@@ -322,7 +322,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
             {"session_id": "session", "invocation_id": "", "sequence": 1},
             {"session_id": "session", "invocation_id": "inv", "sequence": True},
             {"session_id": "session", "invocation_id": "inv", "sequence": 1, "kind": " "},
-            {"session_id": "session", "invocation_id": "inv", "sequence": 1, "occurred_at_ns": -1},
+            {"session_id": "session", "invocation_id": "inv", "sequence": 1, "occurred_at_us": -1},
         ):
             arguments = {"kind": "kind", "payload": {}, **values}
             with self.subTest(arguments=arguments):

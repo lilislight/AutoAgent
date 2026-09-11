@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
+from .clocks import unix_time_us
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 from .state import RuntimeState, validate_runtime_state
 
 
-SESSION_CHECKPOINT_SCHEMA_VERSION = 1
+SESSION_CHECKPOINT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +20,7 @@ class SessionCheckpoint:
 
     session_id: str
     state: RuntimeState
-    captured_at_ns: int = field(default_factory=time.time_ns)
+    captured_at_us: int = field(default_factory=unix_time_us)
     id: str = field(default_factory=lambda: str(uuid4()))
     schema_version: int = SESSION_CHECKPOINT_SCHEMA_VERSION
     _digest: str | None = field(default=None, repr=False, compare=False)
@@ -34,22 +34,26 @@ class SessionCheckpoint:
                 f"Unsupported Session Checkpoint schema {self.schema_version}."
             )
         if (
-            not isinstance(self.captured_at_ns, int)
-            or isinstance(self.captured_at_ns, bool)
-            or self.captured_at_ns < 0
+            not isinstance(self.captured_at_us, int)
+            or isinstance(self.captured_at_us, bool)
+            or self.captured_at_us < 0
         ):
-            raise ValueError("Session Checkpoint captured_at_ns must be non-negative.")
+            raise ValueError("Session Checkpoint captured_at_us must be non-negative.")
         if not isinstance(self.state, RuntimeState):
             raise TypeError("Session Checkpoint state must be a RuntimeState.")
         state = self.state
         if self._trusted_runtime_state:
-            _validate_state_identity(self.session_id, state)
+            _validate_state(self.session_id, state)
         else:
             state = RuntimeState.from_record(state.to_record())
             _validate_state(self.session_id, state)
         object.__setattr__(self, "state", state)
         if self._digest is not None:
             _non_empty_string(self._digest, "digest")
+
+    @property
+    def sequence(self) -> int:
+        return self.state.sequence
 
     @property
     def digest(self) -> str:
@@ -64,7 +68,7 @@ class SessionCheckpoint:
         cls,
         state: RuntimeState,
         *,
-        captured_at_ns: int | None = None,
+        captured_at_us: int | None = None,
         id: str | None = None,
     ) -> "SessionCheckpoint":
         """Build an isolated canonical checkpoint from an external State."""
@@ -74,8 +78,8 @@ class SessionCheckpoint:
             "session_id": state.session.id,
             "state": state,
         }
-        if captured_at_ns is not None:
-            arguments["captured_at_ns"] = captured_at_ns
+        if captured_at_us is not None:
+            arguments["captured_at_us"] = captured_at_us
         if id is not None:
             arguments["id"] = id
         return cls(**arguments)  # type: ignore[arg-type]
@@ -86,13 +90,13 @@ class SessionCheckpoint:
         session_id: str,
         state: RuntimeState,
         *,
-        captured_at_ns: int,
+        captured_at_us: int,
     ) -> "SessionCheckpoint":
         """Capture one trusted Reducer-owned immutable State reference."""
         return cls(
             session_id=session_id,
             state=state,
-            captured_at_ns=captured_at_ns,
+            captured_at_us=captured_at_us,
             _trusted_runtime_state=True,
         )
 
@@ -114,7 +118,8 @@ class SessionCheckpoint:
             "schema_version",
             "id",
             "session_id",
-            "captured_at_ns",
+            "captured_at_us",
+            "sequence",
             "state",
             "digest",
         }
@@ -130,6 +135,8 @@ class SessionCheckpoint:
         raw_state = record.get("state")
         if not isinstance(raw_state, dict):
             raise TypeError("Session Checkpoint state must be a mapping.")
+        if _integer(record, "sequence") != raw_state.get("sequence"):
+            raise ValueError("Checkpoint sequence must match Runtime State.")
         expected_digest = _string(record, "digest")
         record_without_digest = {
             key: value for key, value in record.items() if key != "digest"
@@ -139,7 +146,7 @@ class SessionCheckpoint:
         return cls(
             session_id=_string(record, "session_id"),
             state=RuntimeState.from_record(raw_state),
-            captured_at_ns=_integer(record, "captured_at_ns"),
+            captured_at_us=_integer(record, "captured_at_us"),
             id=_string(record, "id"),
             schema_version=schema_version,
             _digest=expected_digest,
@@ -151,7 +158,8 @@ class SessionCheckpoint:
             "schema_version": self.schema_version,
             "id": self.id,
             "session_id": self.session_id,
-            "captured_at_ns": self.captured_at_ns,
+            "captured_at_us": self.captured_at_us,
+            "sequence": self.sequence,
             "state": self.state.to_record(),
         }
 

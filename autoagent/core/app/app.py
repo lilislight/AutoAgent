@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import math
 import threading
-import time
 import warnings
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import CancelledError as FutureCancelledError, Future
@@ -14,36 +13,30 @@ from typing import cast, get_args
 from uuid import uuid4
 
 from ..compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
-from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
+from ..errors import RuntimeTransitionError
 from ..executor import CapabilityResolver, NodeExecutor, WorkflowExecutor
 from ..hosting import RuntimeEventSink, UserEventSink
 from ..operators import Operator, OperatorRegistry, Wait
+from ..runtime.clocks import unix_time_us
 from ..runtime import (
     ChildAwaitReady,
-    ChildAwaitSuspended,
     ChildInvocationPhaseChanged,
     ChildInvocationPlanned,
-    InMemoryEventJournal,
+    RuntimeRepository,
+    InMemoryRuntimeEventStore,
     InMemoryUserEventJournal,
     InvocationCancelled,
-    InvocationCompleted,
     InvocationFailed,
-    InvocationOpened,
-    InvocationRecoveryRequested,
+    RecoveryApplied,
     InvocationState,
     InvocationStarted,
-    InvocationWaiting,
-    NodeOccurrenceCompleted,
-    NodeOccurrenceFailed,
-    NodeOccurrenceStarted,
-    NodeOccurrenceWaiting,
+    NodeCompleted,
+    NodeFailed,
     SessionCheckpoint,
     RuntimeErrorInfo,
     RuntimeEvent,
     RuntimeState,
-    SchedulerInitialized,
     SessionOpened,
-    StateTransition,
     TaskRuntime,
     UserEvent,
     WaitResumed,
@@ -65,7 +58,7 @@ from .ports import (
     Clock,
     NodeExecutorPort,
     OperatorRegistryPort,
-    RuntimeJournalPort,
+    RuntimeRepositoryPort,
     SchedulerPort,
     UserEventJournalPort,
 )
@@ -82,13 +75,13 @@ class AutoAgentApp:
         max_operator_concurrency: int = 32,
         max_node_executions_per_invocation: int = 1_000,
         capability_resolver: CapabilityResolver | None = None,
-        runtime_journal: RuntimeJournalPort | None = None,
+        runtime_repository: RuntimeRepositoryPort | None = None,
         runtime_event_sink: RuntimeEventSink | None = None,
         user_event_sink: UserEventSink | None = None,
         user_event_journal: UserEventJournalPort | None = None,
         scheduler: SchedulerPort | None = None,
         node_executor: NodeExecutorPort | None = None,
-        clock_ns: Clock | None = None,
+        clock_us: Clock | None = None,
         operator_registry: OperatorRegistryPort | None = None,
     ) -> None:
         _positive_integer(max_operator_concurrency, "max_operator_concurrency")
@@ -102,7 +95,13 @@ class AutoAgentApp:
             str, WorkflowDefinitionSnapshot
         ] = {}
         self._latest_workflow_revision: dict[str, str] = {}
-        self._journal = runtime_journal or InMemoryEventJournal()
+        self._repository = runtime_repository or RuntimeRepository(sink=runtime_event_sink)
+        if runtime_repository is not None and runtime_event_sink is not None:
+            if not isinstance(runtime_repository, RuntimeRepository):
+                raise TypeError("Inject the durable EventStore into a custom RuntimeRepository.")
+            if not isinstance(runtime_repository.event_store, InMemoryRuntimeEventStore):
+                raise ValueError("Configure one durable boundary: EventStore or sink.")
+            runtime_repository.sink = runtime_event_sink
         self._runtime_event_sink = runtime_event_sink
         self._user_event_sink = user_event_sink
         self._user_event_sink_errors: dict[str, BaseException] = {}
@@ -119,11 +118,11 @@ class AutoAgentApp:
         self._node_executor = node_executor or NodeExecutor(
             max_operator_concurrency=max_operator_concurrency
         )
-        self._clock_ns = clock_ns or time.time_ns
+        self._clock_us = clock_us or unix_time_us
         self._operator_registry = operator_registry or OperatorRegistry()
         self._task_runtime = TaskRuntime()
         self._workflow_executor = WorkflowExecutor(
-            journal=self._journal,
+            journal=self._repository,
             scheduler=self._scheduler,
             node_executor=self._node_executor,  # type: ignore[arg-type]
             task_runtime=self._task_runtime,
@@ -131,8 +130,6 @@ class AutoAgentApp:
             emit=self._emit,
             emit_user=self._emit_user,
             start_child=self._start_drive,
-            begin_child_admission=self._begin_child_admission,
-            abort_child_admission=self._abort_child_admission,
             ensure_child_durable=self._ensure_child_durable,
             max_node_executions_per_invocation=max_node_executions_per_invocation,
             capability_resolver=capability_resolver,
@@ -140,7 +137,7 @@ class AutoAgentApp:
         self._runtime_loop = RuntimeLoop()
         self._attached_streams: dict[str, AttachedStream] = {}
         self._attached_stream_tasks: dict[str, asyncio.Task[None]] = {}
-        self._last_transition_ids: dict[str, str] = {}
+        self._admission_retirements: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
         self._runtime_locks: dict[str, asyncio.Lock] = {}
         self._child_capacities: dict[tuple[str, str], asyncio.Semaphore] = {}
         # Durable ownership remains in parent Runtime State.  This transient
@@ -642,7 +639,7 @@ class AutoAgentApp:
         """Coordinate Runtime-loop quiescence outside every caller loop."""
 
         try:
-            # A preloaded RuntimeJournal is valid even when this App never
+            # A preloaded RuntimeRepository is valid even when this App never
             # starts an Invocation.  Always enter the RuntimeLoop so close
             # captures that retained root/child graph instead of returning an
             # empty checkpoint merely because the loop is still lazy.
@@ -799,7 +796,7 @@ class AutoAgentApp:
             # owns only their canonical durable representation; execution
             # restores the domain value before calling the Operator.
             value = entry_node.input_contract.to_record(value)
-        state = self._journal.state(session_id)
+        state = self._repository.state(session_id)
         old_child_sessions: tuple[str, ...] = ()
         retired_invocation_ids: tuple[str, ...] = ()
         if state.session is None:
@@ -816,11 +813,14 @@ class AutoAgentApp:
             )
         elif state.invocation is not None:
             old_child_sessions = self._descendant_sessions(session_id)
+            for child_id in old_child_sessions:
+                if not self._task_runtime.is_live(child_id):
+                    await self._repository.settle(child_id)
             active_children = [
                 child_id
                 for child_id in old_child_sessions
                 if (
-                    (child := self._journal.state(child_id).invocation) is None
+                    (child := self._repository.state(child_id).invocation) is None
                     or not child.terminal
                     or self._task_runtime.is_live(child_id)
                 )
@@ -837,7 +837,7 @@ class AutoAgentApp:
                     child.id
                     for child_session_id in old_child_sessions
                     if (
-                        child := self._journal.state(child_session_id).invocation
+                        child := self._repository.state(child_session_id).invocation
                     ) is not None
                 ),
             )
@@ -860,8 +860,6 @@ class AutoAgentApp:
                 # replacement; otherwise retiring Child State would silently
                 # drain the only recoverable copy of unacknowledged progress.
                 previous_graph = (session_id, *old_child_sessions)
-                for previous_session_id in previous_graph:
-                    self._journal.flush(previous_session_id)
                 await self._export_runtime_events(previous_graph)
                 # A Child task whose terminal Event export failed is no longer
                 # live, but its parent phase can still be ``accepted``.  Once
@@ -870,7 +868,7 @@ class AutoAgentApp:
                 # were rejected before this point so this cannot race their own
                 # ``_settle_child`` calls.
                 for child_session_id in reversed(old_child_sessions):
-                    child = self._journal.state(child_session_id).invocation
+                    child = self._repository.state(child_session_id).invocation
                     if child is not None and child.terminal:
                         await self._settle_child(child_session_id, child.id)
                 if not self._child_graph_settled(
@@ -883,14 +881,16 @@ class AutoAgentApp:
                         "Child plan reaches its terminal phase.",
                     )
             if state.session is None:
-                self._journal.begin_event_group(session_id)
                 await self._emit(session_id, None, SessionOpened(session_context or {}))
             invocation_id = str(uuid4())
+            if retired_invocation_ids:
+                self._admission_retirements[session_id] = (
+                    invocation_id, old_child_sessions, retired_invocation_ids)
             try:
                 opened = await self._emit(
                     session_id,
                     invocation_id,
-                    InvocationOpened(
+                    InvocationStarted(
                         compiled.workflow_id,
                         compiled.workflow_revision_id,
                         entry,
@@ -898,28 +898,9 @@ class AutoAgentApp:
                     ),
                 )
             finally:
-                current = self._journal.state(session_id).invocation
+                current = self._repository.state(session_id).invocation
                 if current is not None and current.id == invocation_id:
-                    # State application precedes Host Event export.  Once the
-                    # new root Invocation is installed, its superseded Child
-                    # graph must be retired even if the sink rejects export.
-                    # The unacknowledged root Event remains in the Journal for
-                    # an idempotent Host retry; obsolete Child State must not
-                    # become a second independent Root at close.
-                    self._retire_invocation_graph(
-                        session_id,
-                        old_child_sessions,
-                        retired_invocation_ids,
-                    )
-            started = await self._emit(
-                session_id, invocation_id, InvocationStarted(), opened.id
-            )
-            await self._emit(
-                session_id,
-                invocation_id,
-                self._scheduler.initialize(compiled, self._journal.state(session_id)),
-                started.id,
-            )
+                    self._finish_admission_retirement(session_id)
             ref = InvocationRef(
                 session_id=session_id,
                 invocation_id=invocation_id,
@@ -932,7 +913,7 @@ class AutoAgentApp:
             await task
             return await self._result(ref)
         except asyncio.CancelledError:
-            current = self._journal.state(session_id).invocation
+            current = self._repository.state(session_id).invocation
             if (
                 not self._public_caller_is_cancelling()
                 and invocation_id is not None
@@ -970,12 +951,9 @@ class AutoAgentApp:
                         "Invocation caller cancelled.",
                     )
                 elif current is None:
-                    self._abort_admission(session_id)
                     await self._discard_incomplete_session(session_id)
             raise
         except BaseException:
-            if grouped_root_admission:
-                self._abort_admission(session_id)
             raise
         finally:
             self._release_result_lease(session_id)
@@ -1108,14 +1086,14 @@ class AutoAgentApp:
     async def _cancel_graph(self, ref: InvocationRef, reason: str | None) -> None:
         target = ref.session_id
         session_ids = (target, *self._descendant_sessions(target))
-        root_state = self._journal.state(target)
+        root_state = self._repository.state(target)
         root_invocation = root_state.invocation
         if root_invocation is not None and not root_invocation.terminal:
             await self._emit(
                 target, root_invocation.id, InvocationCancelled(reason)
             )
         for session_id in session_ids[1:]:
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is not None and not invocation.terminal:
                 await self._emit(
                     session_id,
@@ -1134,10 +1112,10 @@ class AutoAgentApp:
                 return_exceptions=True,
             )
         for session_id in reversed(session_ids[1:]):
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is not None and invocation.terminal:
                 await self._settle_child(session_id, invocation.id)
-        target_invocation = self._journal.state(target).invocation
+        target_invocation = self._repository.state(target).invocation
         if target_invocation is not None and target_invocation.terminal:
             await self._settle_child(target, target_invocation.id)
 
@@ -1150,7 +1128,7 @@ class AutoAgentApp:
         target_path = {ref.session_id}
         current_session_id = ref.session_id
         while current_session_id != root:
-            current = self._journal.state(current_session_id).invocation
+            current = self._repository.state(current_session_id).invocation
             parent = self._parent_plan(
                 current_session_id,
                 current.id if current is not None else None,
@@ -1189,7 +1167,7 @@ class AutoAgentApp:
             self._release_result_lease(root)
 
     async def _finish_caller_cancellation(self, ref: InvocationRef) -> None:
-        current = self._journal.state(ref.session_id).invocation
+        current = self._repository.state(ref.session_id).invocation
         if current is None or current.id != ref.invocation_id or current.terminal:
             return
         operation = asyncio.create_task(
@@ -1214,12 +1192,12 @@ class AutoAgentApp:
         if session_id in seen:
             return
         seen.add(session_id)
-        state = self._journal.state(session_id)
+        state = self._repository.state(session_id)
         invocation = state.invocation
         if invocation is None:
             return
         await self._accept_recovered_child_invocations(session_id, invocation.id)
-        state = self._journal.state(session_id)
+        state = self._repository.state(session_id)
         invocation = state.invocation
         assert invocation is not None
         if invocation.status in {"failed", "cancelled"}:
@@ -1265,7 +1243,7 @@ class AutoAgentApp:
             (unit.session_id, plan.mode)
             for plan in invocation.child_plans.values()
             for unit in plan.units
-            if self._journal.state(unit.session_id).invocation is not None
+            if self._repository.state(unit.session_id).invocation is not None
         )
         if child_sessions:
             recovered = await asyncio.gather(
@@ -1288,7 +1266,7 @@ class AutoAgentApp:
             ):
                 if not isinstance(outcome, BaseException):
                     continue
-                child = self._journal.state(child_session_id).invocation
+                child = self._repository.state(child_session_id).invocation
                 if isinstance(outcome, asyncio.CancelledError) and (
                     child is not None and child.terminal
                 ):
@@ -1296,33 +1274,12 @@ class AutoAgentApp:
                     # while the graph recovery coordinator is awaiting it.
                     continue
                 raise outcome
-        state = self._journal.state(session_id)
+        state = self._repository.state(session_id)
         invocation = state.invocation
         assert invocation is not None
         if invocation.terminal:
             await self._settle_child(session_id, invocation.id)
             return
-        if invocation.status == "created":
-            await self._emit(session_id, invocation.id, InvocationStarted())
-            invocation = self._journal.state(session_id).invocation
-            assert invocation is not None
-        if not invocation.scheduler.initialized:
-            await self._emit(
-                session_id,
-                invocation.id,
-                self._scheduler.initialize(workflow, self._journal.state(session_id)),
-            )
-            invocation = self._journal.state(session_id).invocation
-            assert invocation is not None
-        elif invocation.status == "running" and any(
-            item.status == "running"
-            for item in invocation.scheduler.occurrences.values()
-        ):
-            await self._emit(
-                session_id, invocation.id, InvocationRecoveryRequested()
-            )
-            invocation = self._journal.state(session_id).invocation
-            assert invocation is not None
         if invocation.status == "running":
             task = self._task_runtime.task(session_id) or self._start_drive(
                 workflow, session_id, invocation.id, None, None
@@ -1336,7 +1293,7 @@ class AutoAgentApp:
     ) -> None:
         """Close every opened Child admission before recovery drives it."""
 
-        parent = self._journal.state(parent_session_id).invocation
+        parent = self._repository.state(parent_session_id).invocation
         assert parent is not None and parent.id == parent_invocation_id
         candidates = tuple(
             (creation_id, unit.unit_index, unit.session_id)
@@ -1345,7 +1302,7 @@ class AutoAgentApp:
             if unit.phase == "opened"
         )
         for creation_id, unit_index, child_session_id in candidates:
-            current = self._journal.state(parent_session_id).invocation
+            current = self._repository.state(parent_session_id).invocation
             assert current is not None and current.id == parent_invocation_id
             plan = current.child_plans.get(creation_id)
             if plan is None or unit_index >= len(plan.units):
@@ -1353,7 +1310,7 @@ class AutoAgentApp:
             unit = plan.units[unit_index]
             if unit.phase != "opened":
                 continue
-            child = self._journal.state(child_session_id).invocation
+            child = self._repository.state(child_session_id).invocation
             if child is None:
                 continue
             await self._emit(
@@ -1371,25 +1328,26 @@ class AutoAgentApp:
         invocation = state.invocation
         if invocation is None:
             return RuntimeErrorInfo("RecoveryStateInvalid", "Invocation is missing.")
-        planned_occurrences = {
-            plan.parent_occurrence_id for plan in invocation.child_plans.values()
-        }
         for occurrence in invocation.scheduler.occurrences.values():
             if occurrence.status != "running":
                 continue
             node = workflow.node(occurrence.node_id)
-            if occurrence.id in planned_occurrences and not (
-                (node.map is not None and node.map.aggregate is not None)
-                or node.output_binding is not None
-                or any(
-                    edge.condition is not None
-                    for edge in workflow.outgoing(node.id)
-                )
+            if occurrence.execution.fault is not None or any(
+                call.occurrence_id == occurrence.id and call.status == "failed"
+                and call.error is not None and call.error.type != "CancelledError"
+                for call in invocation.scheduler.operator_calls.values()
             ):
-                # The durable Child plan makes framework-only admission and
-                # awaiting idempotent: inputs and Child identities are reused.
-                # User post-processing Hooks are not covered by that plan and
-                # must still obey the Node's explicit replay policy.
+                continue
+            unknown_calls = [call for call in invocation.scheduler.operator_calls.values()
+                if call.occurrence_id == occurrence.id and (call.status in {"running", "lost"}
+                    or (call.status == "failed" and call.error is not None and call.error.type == "CancelledError"))]
+            stages = occurrence.execution.completed_stages
+            child_hooks_pending = isinstance(node.executable, WorkflowIR) and (
+                (node.map is not None and node.map.aggregate is not None and "aggregated" not in stages)
+                or (node.output_binding is not None and "output_bound" not in stages)
+                or (any(edge.condition is not None for edge in workflow.outgoing(node.id)) and "routing_resolved" not in stages)
+            )
+            if not unknown_calls and not child_hooks_pending:
                 continue
             recovery = node.recovery_mode
             if recovery.mode == "never":
@@ -1406,8 +1364,8 @@ class AutoAgentApp:
 
     async def _resident_invocations(self) -> tuple[InvocationRef, ...]:
         refs: list[InvocationRef] = []
-        for session_id in sorted(self._journal.session_ids()):
-            invocation = self._journal.state(session_id).invocation
+        for session_id in sorted(self._repository.session_ids()):
+            invocation = self._repository.state(session_id).invocation
             if invocation is not None:
                 refs.append(self._ref_for_invocation(session_id, invocation))
         return tuple(refs)
@@ -1421,7 +1379,7 @@ class AutoAgentApp:
             related = self._resident_related_sessions(ref.session_id)
             allowed = {"waiting", "completed", "failed", "cancelled"}
             for session_id in related:
-                invocation = self._journal.state(session_id).invocation
+                invocation = self._repository.state(session_id).invocation
                 if (
                     invocation is None
                     or invocation.status not in allowed
@@ -1446,9 +1404,8 @@ class AutoAgentApp:
             checkpoint = await self._capture_checkpoint_locked(ref.session_id)
             invocation = state.invocation
             assert invocation is not None
-            self._journal.discard_states((ref.session_id,))
+            self._repository.discard_states((ref.session_id,))
             self._task_runtime.release_wake_event(ref.session_id)
-            self._last_transition_ids.pop(ref.session_id, None)
             self._runtime_locks.pop(ref.session_id, None)
             self._result_leases.pop(ref.session_id, None)
             self._user_event_journal.discard(invocation.id)
@@ -1458,7 +1415,7 @@ class AutoAgentApp:
                 for key, value in self._child_capacities.items()
                 if key[0] != ref.session_id
             }
-            resident = set(self._journal.session_ids())
+            resident = set(self._repository.session_ids())
             self._child_owners = {
                 child: owner
                 for child, owner in self._child_owners.items()
@@ -1486,15 +1443,15 @@ class AutoAgentApp:
                 "CHECKPOINT_SESSION_DUPLICATE",
                 "A Session can appear only once in one checkpoint load.",
             )
-        existing_ids = set(self._journal.session_ids())
+        existing_ids = set(self._repository.session_ids())
         for session_id, state in all_states.items():
-            if session_id in existing_ids and self._journal.state(session_id) != state:
+            if session_id in existing_ids and self._repository.state(session_id) != state:
                 raise RuntimeTransitionError(
                     "CHECKPOINT_SESSION_CONFLICT",
                     "Checkpoint conflicts with the current Runtime Session.",
                 )
         combined = {
-            session_id: self._journal.state(session_id)
+            session_id: self._repository.state(session_id)
             for session_id in existing_ids
         }
         combined.update(all_states)
@@ -1514,11 +1471,8 @@ class AutoAgentApp:
                 "CHECKPOINT_SESSION_LIVE",
                 "Checkpoint loading cannot replace a live Runtime Session.",
             )
-        self._journal.install_states(all_states)
+        self._repository.install_states(all_states)
         self._rebuild_child_owners()
-        for session_id, state in all_states.items():
-            if state.last_event_id is not None:
-                self._last_transition_ids[session_id] = state.last_event_id
         refs = tuple(
             InvocationRef(
                 session_id=session_id,
@@ -1586,13 +1540,7 @@ class AutoAgentApp:
             for plan in invocation.child_plans.values()
             for unit in plan.units
         ):
-            if self._journal.event_group_active(unit.session_id):
-                # Admission traces are observable one transition at a time,
-                # while their canonical Event and checkpoint membership are
-                # all-or-nothing.  Do not publish a ref whose own Result
-                # could not yet carry a self-contained recovery checkpoint.
-                continue
-            child = self._journal.state(unit.session_id).invocation
+            child = self._repository.state(unit.session_id).invocation
             if child is None or child.id != unit.invocation_id:
                 continue
             handles.append(
@@ -1622,8 +1570,11 @@ class AutoAgentApp:
         if stream_tasks:
             await asyncio.gather(*stream_tasks, return_exceptions=True)
         await self._task_runtime.cancel_all()
+        for session_id in self._repository.session_ids():
+            await self._repository.settle(session_id)
+            self._finish_admission_retirement(session_id)
         await self._discard_incomplete_sessions()
-        session_ids = self._journal.session_ids()
+        session_ids = self._repository.session_ids()
         checkpoints = tuple(
             [await self._capture_checkpoint(session_id) for session_id in session_ids]
         )
@@ -1654,7 +1605,7 @@ class AutoAgentApp:
             else:
                 async with capacity:
                     await self._workflow_executor.drive(workflow, session_id)
-            current = self._journal.state(session_id).invocation
+            current = self._repository.state(session_id).invocation
             if current is not None and current.status in {"failed", "cancelled"}:
                 await self._cancel_descendants(
                     session_id,
@@ -1671,10 +1622,10 @@ class AutoAgentApp:
         if parent_info is None:
             return
         parent_session_id, creation_id, unit_index = parent_info
-        child_invocation = self._journal.state(session_id).invocation
+        child_invocation = self._repository.state(session_id).invocation
         if child_invocation is None or not child_invocation.terminal:
             return
-        parent = self._journal.state(parent_session_id).invocation
+        parent = self._repository.state(parent_session_id).invocation
         if parent is None:
             return
         plan = parent.child_plans.get(creation_id)
@@ -1688,7 +1639,7 @@ class AutoAgentApp:
                 parent.id,
                 ChildInvocationPhaseChanged(creation_id, unit_index, "terminal"),
             )
-            parent = self._journal.state(parent_session_id).invocation
+            parent = self._repository.state(parent_session_id).invocation
             assert parent is not None
             plan = parent.child_plans[creation_id]
         if plan.mode != "await":
@@ -1697,7 +1648,7 @@ class AutoAgentApp:
         if occurrence is None or occurrence.status != "waiting":
             return
         child_states = tuple(
-            self._journal.state(item.session_id).invocation for item in plan.units
+            self._repository.state(item.session_id).invocation for item in plan.units
         )
         if any(
             child is not None and child.status in {"failed", "cancelled"}
@@ -1712,7 +1663,7 @@ class AutoAgentApp:
                 parent.id,
                 creation_id,
             )
-            parent = self._journal.state(parent_session_id).invocation
+            parent = self._repository.state(parent_session_id).invocation
             assert parent is not None
             plan = parent.child_plans[creation_id]
         if any(item.phase != "terminal" for item in plan.units):
@@ -1722,7 +1673,7 @@ class AutoAgentApp:
             parent.id,
             ChildAwaitReady(creation_id, plan.parent_occurrence_id),
         )
-        parent_state = self._journal.state(parent_session_id)
+        parent_state = self._repository.state(parent_session_id)
         parent = parent_state.invocation
         if parent is not None and not parent.terminal and not self._closing:
             workflow = self._workflow_for_state(parent_state)
@@ -1749,14 +1700,14 @@ class AutoAgentApp:
                 return_exceptions=True,
             )
         for session_id in reversed(descendants):
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is not None and not invocation.terminal:
                 await self._emit(
                     session_id,
                     invocation.id,
                     InvocationCancelled(reason),
                 )
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is not None and invocation.terminal:
                 await self._settle_child(session_id, invocation.id)
 
@@ -1776,7 +1727,7 @@ class AutoAgentApp:
         if supplied is not None:
             self._child_capacities[key] = supplied
             return supplied
-        parent_state = self._journal.state(parent_session_id)
+        parent_state = self._repository.state(parent_session_id)
         parent = parent_state.invocation
         if parent is None:
             return None
@@ -1803,33 +1754,40 @@ class AutoAgentApp:
         session_id: str,
         invocation_id: str | None,
         payload: object,
-        causation_id: str | None = None,
-    ) -> StateTransition:
+    ) -> RuntimeEvent:
         root = self._root_session_id(session_id)
         async with self._runtime_lock(root):
-            transition = StateTransition(
-                session_id=session_id,
-                invocation_id=invocation_id,
-                payload=payload,  # type: ignore[arg-type]
-                causation_id=(
-                    causation_id
-                    if causation_id is not None
-                    else self._last_transition_ids.get(session_id)
-                ),
-                occurred_at_ns=self._clock_ns(),
-            )
-            self._journal.apply_transition(transition)
-            if self._journal.event_group_active(session_id) and (
-                isinstance(payload, SchedulerInitialized)
-                or (
-                    isinstance(payload, InvocationOpened)
-                    and self._parent_plan(session_id) is None
+            state = self._repository.state(session_id)
+            graph_delta = None
+            if isinstance(payload, RecoveryApplied):
+                payload = RecoveryApplied(
+                    tuple(item.id for item in state.invocation.scheduler.occurrences.values() if item.status == "running"),
+                    tuple(item.id for item in state.invocation.scheduler.operator_calls.values() if item.status == "running"),
                 )
-            ):
-                # A new Root atomically opens Session + Invocation; a Child
-                # atomically opens through Scheduler initialization so a Host
-                # can never acknowledge an unrecoverable prefix.
-                self._journal.commit_event_group(session_id)
+            if isinstance(payload, InvocationStarted):
+                workflow = self._workflows[payload.workflow_revision_id]
+                initial = InvocationState(invocation_id, payload.workflow_id, payload.workflow_revision_id,
+                    payload.entry_node_id, "running", payload.input, {}, started_at_us=0)
+                graph_delta = self._scheduler.initialize(workflow, replace(state, invocation=initial))
+            elif isinstance(payload, (NodeCompleted, NodeFailed)):
+                workflow = self._workflow_for_state(state)
+                occurrence = state.invocation.scheduler.occurrences[payload.occurrence_id]
+                source_status = "complete" if isinstance(payload, NodeCompleted) else "error"
+                selected = frozenset(
+                    [item.edge_id for item in occurrence.execution.routing if item.selected
+                     and occurrence.execution.routing_source_status == source_status]
+                    + [edge.id for edge in workflow.outgoing(occurrence.node_id)
+                       if edge.on == source_status and edge.condition is None])
+                if isinstance(payload, NodeCompleted):
+                    graph_delta = self._scheduler.complete(workflow, state, payload.occurrence_id,
+                        payload.output, selected_edge_ids=selected)
+                else:
+                    graph_delta = self._scheduler.fail(workflow, state, payload.occurrence_id,
+                        payload.error, selected_edge_ids=selected)
+            transition = await self._repository.commit(
+                session_id=session_id, invocation_id=invocation_id, payload=payload,
+                occurred_at_us=self._clock_us(), scheduler_delta=graph_delta,
+            )
             if isinstance(payload, ChildInvocationPlanned):
                 for unit in payload.units:
                     self._child_owners[unit.child_session_id] = (
@@ -1838,37 +1796,12 @@ class AutoAgentApp:
                         unit.unit_index,
                         unit.child_invocation_id,
                     )
-            self._last_transition_ids[session_id] = transition.id
             await self._export_runtime_events((session_id,))
             return transition
 
-    def _begin_child_admission(self, session_id: str) -> None:
-        self._journal.begin_event_group(session_id)
-
-    def _abort_child_admission(self, session_id: str) -> None:
-        self._abort_admission(session_id)
-
-    def _abort_admission(self, session_id: str) -> None:
-        if self._journal.abort_event_group(session_id):
-            # A grouped admission starts from an empty Session State, so every
-            # transition causation id created inside that group is gone too.
-            self._last_transition_ids.pop(session_id, None)
-
     async def _ensure_child_durable(self, session_id: str) -> None:
-        """Persist Child progress before a dependent parent phase can advance."""
-
-        root = self._root_session_id(session_id)
-        async with self._runtime_lock(root):
-            if self._journal.event_group_active(session_id):
-                raise RuntimeTransitionError(
-                    "CHILD_ADMISSION_INCOMPLETE",
-                    "Child admission did not reach Scheduler initialization.",
-                )
-            # Retrying after a sink failure reaches this barrier with the
-            # complete Event still owned by the Journal.  Exporting here is
-            # therefore both the normal durability fence and the retry path.
-            self._journal.flush(session_id)
-            await self._export_runtime_events((session_id,))
+        await self._repository.settle(session_id)
+        await self._export_runtime_events((session_id,))
 
     async def _emit_user(
         self,
@@ -1889,7 +1822,7 @@ class AutoAgentApp:
                 kind=kind,
                 payload=payload,
                 occurrence_id=occurrence_id,
-                occurred_at_ns=self._clock_ns(),
+                occurred_at_us=self._clock_us(),
             )
             sink = self._user_event_sink
             if (
@@ -1933,8 +1866,9 @@ class AutoAgentApp:
     async def _capture_checkpoint_locked(
         self, session_id: str
     ) -> SessionCheckpoint:
-        checkpoint = self._journal.capture_checkpoint(
-            session_id, captured_at_ns=self._clock_ns()
+        await self._repository.settle(session_id)
+        checkpoint = self._repository.capture_checkpoint(
+            session_id, captured_at_us=self._clock_us()
         )
         await self._export_runtime_events((checkpoint.session_id,))
         return checkpoint
@@ -1968,7 +1902,7 @@ class AutoAgentApp:
 
         if self._public_caller_is_cancelling():
             return False
-        current = self._journal.state(ref.session_id).invocation
+        current = self._repository.state(ref.session_id).invocation
         return (
             current is not None
             and current.id == ref.invocation_id
@@ -1984,20 +1918,9 @@ class AutoAgentApp:
 
     async def _export_runtime_events(self, session_ids: tuple[str, ...]) -> None:
         for session_id in dict.fromkeys(session_ids):
-            events = self._journal.events(session_id)
-            if not events:
-                continue
-            if self._runtime_event_sink is not None:
-                try:
-                    for event in events:
-                        await self._runtime_event_sink.append(event)
-                except asyncio.CancelledError:
-                    raise
-                except BaseException as error:
-                    raise RuntimeInfrastructureError(
-                        "Runtime Event sink rejected canonical progress."
-                    ) from error
-            self._journal.drain_events(session_id)
+            await self._repository.settle(session_id)
+            self._finish_admission_retirement(session_id)
+            self._repository.drain_events(session_id)
 
     async def _result(self, ref: InvocationRef) -> InvocationResult:
         root = self._root_session_id(ref.session_id)
@@ -2036,6 +1959,16 @@ class AutoAgentApp:
     # ------------------------------------------------------------------
     # State graph helpers
 
+    def _finish_admission_retirement(self, session_id: str) -> None:
+        retirement = self._admission_retirements.get(session_id)
+        if retirement is None:
+            return
+        invocation_id, children, old_invocations = retirement
+        current = self._repository.state(session_id).invocation
+        if current is not None and current.id == invocation_id:
+            self._retire_invocation_graph(session_id, children, old_invocations)
+            del self._admission_retirements[session_id]
+
     def _retire_invocation_graph(
         self,
         root_session_id: str,
@@ -2045,10 +1978,9 @@ class AutoAgentApp:
         """Release the superseded Invocation graph after root replacement."""
 
         if child_session_ids:
-            self._journal.discard_states(child_session_ids)
+            self._repository.discard_states(child_session_ids)
             for child_session_id in child_session_ids:
                 self._child_owners.pop(child_session_id, None)
-                self._last_transition_ids.pop(child_session_id, None)
                 self._runtime_locks.pop(child_session_id, None)
             retired_sessions = {root_session_id, *child_session_ids}
             self._child_capacities = {
@@ -2071,12 +2003,7 @@ class AutoAgentApp:
     ) -> RuntimeState:
         if not isinstance(ref, InvocationRef):
             raise TypeError("Control operations require an InvocationRef.")
-        if self._journal.event_group_active(ref.session_id):
-            raise RuntimeTransitionError(
-                "CHILD_ADMISSION_INCOMPLETE",
-                "Invocation admission has not reached its recoverable boundary.",
-            )
-        state = self._journal.state(ref.session_id)
+        state = self._repository.state(ref.session_id)
         invocation = state.invocation
         if (
             invocation is None
@@ -2108,7 +2035,7 @@ class AutoAgentApp:
     def _resident_related_sessions(self, session_id: str) -> tuple[str, ...]:
         """Return the resident component connected by durable Child ownership."""
 
-        resident = set(self._journal.session_ids())
+        resident = set(self._repository.session_ids())
         adjacency: dict[str, set[str]] = {}
         for child_session_id, owner in self._child_owners.items():
             parent_session_id = owner[0]
@@ -2139,7 +2066,7 @@ class AutoAgentApp:
             and child_invocation_id != owned_invocation_id
         ):
             return None
-        parent = self._journal.state(parent_session_id).invocation
+        parent = self._repository.state(parent_session_id).invocation
         plan = parent.child_plans.get(creation_id) if parent is not None else None
         if plan is None or unit_index >= len(plan.units):
             return None
@@ -2153,8 +2080,8 @@ class AutoAgentApp:
 
     def _rebuild_child_owners(self) -> None:
         owners: dict[str, tuple[str, str, int, str]] = {}
-        for parent_session_id in self._journal.session_ids():
-            parent = self._journal.state(parent_session_id).invocation
+        for parent_session_id in self._repository.session_ids():
+            parent = self._repository.state(parent_session_id).invocation
             if parent is None:
                 continue
             for creation_id, plan in parent.child_plans.items():
@@ -2179,7 +2106,7 @@ class AutoAgentApp:
         visited: set[str] = set()
         while current not in visited:
             visited.add(current)
-            state = self._journal.state(current)
+            state = self._repository.state(current)
             invocation = state.invocation
             parent = self._parent_plan(
                 current, invocation.id if invocation is not None else None
@@ -2197,7 +2124,7 @@ class AutoAgentApp:
         seen = {root_session_id}
         while pending:
             session_id = pending.pop()
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is None:
                 continue
             for plan in invocation.child_plans.values():
@@ -2217,7 +2144,7 @@ class AutoAgentApp:
         """Return whether a terminal graph has no unfinished Child plan phase."""
 
         for session_id in (root_session_id, *descendant_session_ids):
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is None:
                 return False
             if session_id != root_session_id and not invocation.terminal:
@@ -2231,10 +2158,10 @@ class AutoAgentApp:
         return True
 
     def _root_session_ids(self) -> tuple[str, ...]:
-        sessions = set(self._journal.session_ids())
+        sessions = set(self._repository.session_ids())
         children: set[str] = set()
         for session_id in sessions:
-            invocation = self._journal.state(session_id).invocation
+            invocation = self._repository.state(session_id).invocation
             if invocation is None:
                 continue
             children.update(
@@ -2248,8 +2175,8 @@ class AutoAgentApp:
     async def _discard_incomplete_sessions(self) -> None:
         incomplete = tuple(
             session_id
-            for session_id in self._journal.session_ids()
-            if self._journal.state(session_id).invocation is None
+            for session_id in self._repository.session_ids()
+            if self._repository.state(session_id).invocation is None
         )
         if not incomplete:
             return
@@ -2257,15 +2184,12 @@ class AutoAgentApp:
             await self._discard_incomplete_session(session_id)
 
     async def _discard_incomplete_session(self, session_id: str) -> None:
-        self._abort_admission(session_id)
-        state = self._journal.state(session_id)
+        state = self._repository.state(session_id)
         if state.session is None or state.invocation is not None:
             return
-        self._journal.flush(session_id)
         await self._export_runtime_events((session_id,))
-        self._journal.discard_states((session_id,))
+        self._repository.discard_states((session_id,))
         self._child_owners.pop(session_id, None)
-        self._last_transition_ids.pop(session_id, None)
         self._runtime_locks.pop(session_id, None)
 
     def _workflow_for_state(self, state: RuntimeState) -> WorkflowIR:

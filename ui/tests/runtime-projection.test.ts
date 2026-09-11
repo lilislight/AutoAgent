@@ -242,7 +242,6 @@ function trace(
     kind: `node_occurrence.${status}`,
     occurred_at_ns: String(sequence),
     invocation_id: "invocation",
-    causation_id: null,
     state_version: sequence,
     subject_ids: { node_id: nodeId, occurrence_id: occurrenceId },
     status,

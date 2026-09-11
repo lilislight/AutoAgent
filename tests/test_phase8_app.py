@@ -24,12 +24,12 @@ from autoagent import (
     Workflow,
 )
 from autoagent.core import (
-    InMemoryEventJournal,
-    InvocationRecoveryRequested,
+    RuntimeRepository,
+    RecoveryApplied,
     InvocationResult,
-    NodeOccurrenceStarted,
+    NodeStarted,
 )
-from autoagent.core.runtime import StateTransition
+from autoagent.core.runtime import RuntimeEvent
 
 
 class Value(TypedDict):
@@ -106,10 +106,10 @@ def at_least_two(context: ConditionContext) -> bool:
 
 class AppTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.journal = InMemoryEventJournal()
+        self.journal = RuntimeRepository()
         self.app = AutoAgentApp(
             max_operator_concurrency=8,
-            runtime_journal=self.journal,
+            runtime_repository=self.journal,
         )
 
     def tearDown(self) -> None:
@@ -401,7 +401,7 @@ class AppTests(unittest.TestCase):
         calls = tuple(state.invocation.scheduler.operator_calls.values())
         self.assertEqual(len(calls), 3)
         self.assertFalse(any(call.status == "running" for call in calls))
-        self.assertTrue(all(call.completed_at_ns is not None for call in calls))
+        self.assertTrue(all(call.completed_at_us is not None for call in calls))
 
     def test_async_submit_join_resume_and_cancel_are_symmetric(self) -> None:
         """Verify async submit, join, resume, and cancel are symmetric."""
@@ -1127,8 +1127,8 @@ class AppTests(unittest.TestCase):
         source.register_workflow(new)
         checkpoint = source.close().sessions[0]
 
-        recovered_journal = InMemoryEventJournal()
-        recovered_app = AutoAgentApp(runtime_journal=recovered_journal)
+        recovered_journal = RuntimeRepository()
+        recovered_app = AutoAgentApp(runtime_repository=recovered_journal)
         try:
             old_ir = recovered_app.register_workflow(old)
             new_ir = recovered_app.register_workflow(new)
@@ -1195,8 +1195,8 @@ class AppTests(unittest.TestCase):
         self.assertTrue(started.wait(1))
         checkpoint = source.close().sessions[0]
 
-        recovered_journal = InMemoryEventJournal()
-        recovered_app = AutoAgentApp(runtime_journal=recovered_journal)
+        recovered_journal = RuntimeRepository()
+        recovered_app = AutoAgentApp(runtime_repository=recovered_journal)
         try:
             recovered_app.register_workflow(workflow)
             loaded = recovered_app.load_checkpoint(checkpoint)
@@ -1277,25 +1277,12 @@ class AppTests(unittest.TestCase):
             for occurrence in invocation.scheduler.occurrences.values()
             if occurrence.status == "running"
         )
-        prefix_journal = InMemoryEventJournal()
+        prefix_journal = RuntimeRepository()
         prefix_journal.install_states({checkpoint.session_id: checkpoint.state})
-        prefix_journal.append(
-            StateTransition(
-                session_id=checkpoint.session_id,
-                invocation_id=invocation.id,
-                occurred_at_ns=state.session.updated_at_ns + 1,
-                payload=InvocationRecoveryRequested(),
-            ).to_runtime_event(state.sequence + 1)
-        )
-        recovered_once = prefix_journal.state(checkpoint.session_id)
-        prefix_journal.append(
-            StateTransition(
-                session_id=checkpoint.session_id,
-                invocation_id=invocation.id,
-                occurred_at_ns=recovered_once.session.updated_at_ns + 1,
-                payload=NodeOccurrenceStarted(occurrence_id),
-            ).to_runtime_event(recovered_once.sequence + 1)
-        )
+        asyncio.run(prefix_journal.commit(
+            session_id=checkpoint.session_id, invocation_id=invocation.id,
+            occurred_at_us=state.session.updated_at_us+1, payload=RecoveryApplied(),
+        ))
         exhausted_checkpoint = prefix_journal.capture_checkpoint(
             checkpoint.session_id
         )

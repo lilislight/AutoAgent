@@ -49,7 +49,6 @@ class TraceEvent:
     kind: str
     occurred_at_ns: int
     invocation_id: str | None = None
-    causation_id: str | None = None
     state_version: int | None = None
     subject_ids: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
@@ -72,7 +71,6 @@ class TraceEvent:
                 raise ValueError(f"Trace Event {name} cannot be empty.")
         for name, value in (
             ("invocation_id", self.invocation_id),
-            ("causation_id", self.causation_id),
             ("status", self.status),
         ):
             if value is not None and (
@@ -123,7 +121,6 @@ class TraceEvent:
             "kind": self.kind,
             "occurred_at_ns": self.occurred_at_ns,
             "invocation_id": self.invocation_id,
-            "causation_id": self.causation_id,
             "state_version": self.state_version,
             "subject_ids": dict(self.subject_ids),
             "status": self.status,
@@ -146,7 +143,6 @@ class TraceEvent:
             "kind",
             "occurred_at_ns",
             "invocation_id",
-            "causation_id",
             "state_version",
             "subject_ids",
             "status",
@@ -173,7 +169,6 @@ class TraceEvent:
             kind=_string(record, "kind"),
             occurred_at_ns=_integer(record, "occurred_at_ns", minimum=0),
             invocation_id=_optional_string(record, "invocation_id"),
-            causation_id=_optional_string(record, "causation_id"),
             state_version=_optional_integer(record, "state_version"),
             subject_ids=subject_ids,  # type: ignore[arg-type]
             status=_optional_string(record, "status"),
@@ -206,7 +201,6 @@ def project_trace_event(
             payload=log.payload,
             invocation_id=log.invocation_id,
             occurred_at_ns=log.occurred_at_ns,
-            causation_id=log.causation_id,
         )
     subjects, status, error, metrics, attributes = _safe_projection(log.payload)
     return TraceEvent(
@@ -216,7 +210,6 @@ def project_trace_event(
         kind=log.event_name,
         occurred_at_ns=log.occurred_at_ns,
         invocation_id=log.invocation_id,
-        causation_id=log.causation_id,
         state_version=log.state_version,
         subject_ids=subjects,
         status=status,

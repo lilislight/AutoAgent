@@ -5,13 +5,7 @@ from __future__ import annotations
 from collections import deque
 
 from ..errors import RuntimeTransitionError
-from ..runtime.events import (
-    NodeOccurrenceCompleted,
-    NodeOccurrenceFailed,
-    NodeOccurrenceStarted,
-    RuntimeErrorInfo,
-    SchedulerInitialized,
-)
+from ..runtime.events import RuntimeErrorInfo
 from ..runtime.scheduling import (
     Activation,
     EdgeResolution,
@@ -30,7 +24,7 @@ class DAGScheduler:
 
     def initialize(
         self, workflow: WorkflowIR, state: RuntimeState
-    ) -> SchedulerInitialized:
+    ) -> SchedulerDelta:
         invocation = _running_invocation(state)
         if workflow.loop_regions:
             raise RuntimeTransitionError(
@@ -65,16 +59,11 @@ class DAGScheduler:
             flattened,
             known_plans=(entry_plan, *skipped_entries),
         )
-        return SchedulerInitialized(
-            SchedulerDelta(
-                resolutions=propagated.resolutions,
-                ready=(entry_plan, *propagated.ready),
-                skipped=(*skipped_entries, *propagated.skipped),
-            )
+        return SchedulerDelta(
+            resolutions=propagated.resolutions,
+            ready=(entry_plan, *propagated.ready),
+            skipped=(*skipped_entries, *propagated.skipped),
         )
-
-    def start(self, occurrence_id: str) -> NodeOccurrenceStarted:
-        return NodeOccurrenceStarted(occurrence_id)
 
     def complete(
         self,
@@ -84,7 +73,7 @@ class DAGScheduler:
         output: object,
         *,
         selected_edge_ids: set[str] | frozenset[str] = frozenset(),
-    ) -> NodeOccurrenceCompleted:
+    ) -> SchedulerDelta:
         occurrence = _running_occurrence(state, occurrence_id)
         resolutions = self._resolve_outgoing(
             workflow,
@@ -94,7 +83,7 @@ class DAGScheduler:
             selected_edge_ids,
         )
         delta = self._propagate(workflow, state, resolutions)
-        return NodeOccurrenceCompleted(occurrence_id, output, delta)  # type: ignore[arg-type]
+        return delta
 
     def fail(
         self,
@@ -104,7 +93,7 @@ class DAGScheduler:
         error: RuntimeErrorInfo,
         *,
         selected_edge_ids: set[str] | frozenset[str] = frozenset(),
-    ) -> NodeOccurrenceFailed:
+    ) -> SchedulerDelta:
         occurrence = _running_occurrence(state, occurrence_id)
         resolutions = self._resolve_outgoing(
             workflow,
@@ -114,7 +103,7 @@ class DAGScheduler:
             selected_edge_ids,
         )
         delta = self._propagate(workflow, state, resolutions)
-        return NodeOccurrenceFailed(occurrence_id, error, delta)
+        return delta
 
     def _resolve_outgoing(
         self,

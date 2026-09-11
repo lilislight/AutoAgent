@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from autoagent.core.runtime import (RuntimeState, TransitionPlanner, InvocationState,
+    NodeStarted, NodeCompleted, NodeFailed, OutputBound)
+from autoagent.core.context import ContextPatch
 import unittest
 from typing_extensions import TypedDict
 
 from autoagent.core import (
     ConditionContext,
     Edge,
-    InMemoryEventJournal,
     InputMappingContext,
-    InvocationOpened,
     InvocationStarted,
     Node,
     RuntimeErrorInfo,
@@ -39,57 +42,78 @@ def condition(context: ConditionContext) -> bool:
     return context.output is not None
 
 
+@dataclass
+class PlannedCompletion:
+    occurrence_id: str
+    output: object
+    delta: object
+    patch: ContextPatch = ContextPatch()
+
+
+@dataclass
+class PlannedFailure:
+    occurrence_id: str
+    error: object
+    delta: object
+
+
+class HarnessScheduler(Scheduler):
+    """Attach test intent to pure Scheduler results without changing Core APIs."""
+    def complete(self, workflow, state, occurrence_id, output, **kwargs):
+        return PlannedCompletion(occurrence_id, output,
+            super().complete(workflow, state, occurrence_id, output, **kwargs))
+
+    def fail(self, workflow, state, occurrence_id, error, **kwargs):
+        return PlannedFailure(occurrence_id, error,
+            super().fail(workflow, state, occurrence_id, error, **kwargs))
+
+
 class Harness:
     def __init__(self, workflow: Workflow, *, entry: str) -> None:
         self.workflow = WorkflowCompiler().compile_or_raise(workflow)
-        self.scheduler = Scheduler()
-        self.journal = InMemoryEventJournal()
+        self.scheduler = HarnessScheduler()
+        self._state = RuntimeState()
+        self._events = []
+        self.planner = TransitionPlanner()
+        self.reducer = StateReducer()
+        self.journal = SimpleNamespace(state=lambda _: self._state,
+            events=lambda _: tuple(self._events), reducer=self.reducer)
         self.emit(SessionOpened({}), invocation_id=None)
-        self.emit(
-            InvocationOpened(
-                self.workflow.workflow_id,
-                self.workflow.workflow_revision_id,
-                entry,
-                {"value": 1},
-            )
-        )
-        self.emit(InvocationStarted())
-        self.emit(self.scheduler.initialize(self.workflow, self.state))
+        payload = InvocationStarted(self.workflow.workflow_id, self.workflow.workflow_revision_id, entry, {"value":1})
+        initial = InvocationState("invocation", payload.workflow_id, payload.workflow_revision_id, entry, "running", payload.input, {})
+        graph = self.scheduler.initialize(self.workflow, replace(self._state, invocation=initial))
+        self.emit(payload, scheduler_delta=graph)
 
     @property
     def state(self):
-        return self.journal.state("session")
+        return self._state
 
-    def emit(self, payload, *, invocation_id: str | None = "invocation"):
+    def emit(self, payload, *, invocation_id="invocation", scheduler_delta=None):
         if isinstance(payload, SessionOpened):
             invocation_id = None
-        sequence = self.journal.state("session").sequence + 1
-        event = RuntimeEvent(
-            session_id="session",
-            invocation_id=invocation_id,
-            sequence=sequence,
-            occurred_at_ns=sequence * 10,
-            id=f"event-{sequence}",
-            payload=payload,
-        )
-        self.journal.append(event)
+        if isinstance(payload, PlannedCompletion):
+            if payload.patch != ContextPatch():
+                self.emit(OutputBound(payload.occurrence_id, payload.patch, 0))
+            scheduler_delta = payload.delta
+            payload = NodeCompleted(payload.occurrence_id, payload.output)
+        elif isinstance(payload, PlannedFailure):
+            scheduler_delta = payload.delta
+            payload = NodeFailed(payload.occurrence_id, payload.error)
+        sequence = self._state.sequence+1
+        delta = self.planner.plan(self._state, payload, session_id="session", invocation_id=invocation_id,
+            occurred_at_us=sequence*10, scheduler_delta=scheduler_delta)
+        event = RuntimeEvent("session", sequence, payload, invocation_id,
+            delta=delta, id=f"event-{sequence}", occurred_at_us=sequence*10)
+        self._state = self.reducer.apply(self._state, event)
+        self._events.append(event)
         return event
 
-    def start(self, occurrence_id: str) -> None:
-        self.emit(self.scheduler.start(occurrence_id))
+    def start(self, occurrence_id):
+        self.emit(NodeStarted(occurrence_id))
 
-    def complete(
-        self, occurrence_id: str, selected: set[str] | None = None
-    ) -> None:
-        self.emit(
-            self.scheduler.complete(
-                self.workflow,
-                self.state,
-                occurrence_id,
-                {"value": 1},
-                selected_edge_ids=selected or set(),
-            )
-        )
+    def complete(self, occurrence_id, selected=None):
+        self.emit(self.scheduler.complete(self.workflow, self.state, occurrence_id,
+            {"value":1}, selected_edge_ids=selected or set()))
 
 
 class DAGSchedulerTests(unittest.TestCase):
@@ -112,7 +136,7 @@ class DAGSchedulerTests(unittest.TestCase):
         activation = scheduler.occurrences["b@root"].activations[0]
         self.assertEqual(activation.edge_id, "a->b")
         self.assertEqual(activation.source_occurrence_id, "a@root")
-        activation_record = harness.journal.events("session")[-1].to_record()["payload"]["delta"]["resolutions"][0]["activation"]
+        activation_record = next(op.to_record()["value"]["activations"][0] for op in harness.journal.events("session")[-1].delta.operations if "occurrences" in op.path and op.op == "add")
         self.assertNotIn("output", activation_record)
 
     def test_fan_out_ready_order_is_compiled_edge_order(self) -> None:

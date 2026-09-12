@@ -1,0 +1,260 @@
+{
+  "contracts": {
+    "NullableDocument_10": {
+      "samples_ms": [
+        0.017004,
+        0.01466,
+        0.013769,
+        0.013453,
+        0.013161,
+        0.013125,
+        0.013184
+      ],
+      "median_ms": 0.013453,
+      "peak_bytes": 4432,
+      "python_fast_path": true
+    },
+    "NullableBatch_10": {
+      "samples_ms": [
+        0.004621,
+        0.003961,
+        0.003212,
+        0.003055,
+        0.003112,
+        0.003085,
+        0.003081
+      ],
+      "median_ms": 0.003112,
+      "peak_bytes": 920,
+      "python_fast_path": true
+    },
+    "UnionDocument_10": {
+      "samples_ms": [
+        0.012403,
+        0.008468,
+        0.006972,
+        0.006392,
+        0.007048,
+        0.0063,
+        0.00601
+      ],
+      "median_ms": 0.006972,
+      "peak_bytes": 1489,
+      "python_fast_path": false
+    },
+    "ModelDocument_10": {
+      "samples_ms": [
+        0.022693,
+        0.019752,
+        0.018281,
+        0.017836,
+        0.017749,
+        0.017801,
+        0.017803
+      ],
+      "median_ms": 0.017836,
+      "peak_bytes": 8442,
+      "python_fast_path": false
+    },
+    "CustomDocument_10": {
+      "samples_ms": [
+        0.021782,
+        0.018921,
+        0.018368,
+        0.017926,
+        0.01784,
+        0.018226,
+        0.019616
+      ],
+      "median_ms": 0.018368,
+      "peak_bytes": 8442,
+      "python_fast_path": false
+    },
+    "NullableDocument_10000": {
+      "samples_ms": [
+        12.469439,
+        12.80452,
+        13.760016,
+        12.681868,
+        12.629424,
+        12.513732,
+        12.377627
+      ],
+      "median_ms": 12.629424,
+      "peak_bytes": 3840638,
+      "python_fast_path": true
+    },
+    "NullableBatch_10000": {
+      "samples_ms": [
+        0.878937,
+        0.858133,
+        0.985164,
+        0.909398,
+        0.867071,
+        0.858735,
+        0.863288
+      ],
+      "median_ms": 0.867071,
+      "peak_bytes": 160536,
+      "python_fast_path": true
+    },
+    "UnionDocument_10000": {
+      "samples_ms": [
+        2.208725,
+        2.401024,
+        2.206443,
+        2.272868,
+        2.308528,
+        2.192432,
+        2.216122
+      ],
+      "median_ms": 2.216122,
+      "peak_bytes": 361536,
+      "python_fast_path": false
+    },
+    "ModelDocument_10000": {
+      "samples_ms": [
+        17.31295,
+        18.000218,
+        17.619324,
+        17.374842,
+        17.555764,
+        17.866848,
+        17.084822
+      ],
+      "median_ms": 17.555764,
+      "peak_bytes": 7146862,
+      "python_fast_path": false
+    },
+    "CustomDocument_10000": {
+      "samples_ms": [
+        17.375762,
+        17.53925,
+        16.957319,
+        18.546219,
+        17.642442,
+        17.704209,
+        17.703862
+      ],
+      "median_ms": 17.642442,
+      "peak_bytes": 7146862,
+      "python_fast_path": false
+    }
+  },
+  "workflows": {
+    "NullableDocument_10": {
+      "samples_ms": [
+        1.077585,
+        0.915964,
+        0.881158,
+        0.903927,
+        0.874311,
+        0.865565,
+        0.917004
+      ],
+      "median_ms": 0.903927,
+      "peak_bytes": 54877,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 0.020921,
+        "workflow_ms": 1.037596,
+        "restore_fraction": 0.02016295359658287
+      }
+    },
+    "ModelDocument_10": {
+      "samples_ms": [
+        0.942541,
+        0.999556,
+        0.945578,
+        1.146335,
+        1.03478,
+        0.930507,
+        0.979221
+      ],
+      "median_ms": 0.979221,
+      "peak_bytes": 53213,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 0.043399,
+        "workflow_ms": 1.116046,
+        "restore_fraction": 0.03888638998750948
+      }
+    },
+    "NullableBatch_10": {
+      "samples_ms": [
+        1.110702,
+        0.943837,
+        0.818935,
+        0.815342,
+        0.77359,
+        0.881232,
+        0.797246
+      ],
+      "median_ms": 0.818935,
+      "peak_bytes": 36709,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 0.009954,
+        "workflow_ms": 0.886424,
+        "restore_fraction": 0.011229389095963105
+      }
+    },
+    "NullableDocument_10000": {
+      "samples_ms": [
+        122.211847,
+        117.709363,
+        115.313715,
+        126.981353,
+        118.02689,
+        117.622487,
+        116.84876
+      ],
+      "median_ms": 117.709363,
+      "peak_bytes": 20406204,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 11.72836,
+        "workflow_ms": 120.318772,
+        "restore_fraction": 0.09747739114225668
+      }
+    },
+    "ModelDocument_10000": {
+      "samples_ms": [
+        122.961388,
+        132.60041,
+        123.954684,
+        128.108382,
+        122.771897,
+        122.007142,
+        134.411692
+      ],
+      "median_ms": 123.954684,
+      "peak_bytes": 19601756,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 15.931412,
+        "workflow_ms": 125.725579,
+        "restore_fraction": 0.126715757658193
+      }
+    },
+    "NullableBatch_10000": {
+      "samples_ms": [
+        17.711299,
+        17.906091,
+        18.124753,
+        17.758487,
+        17.709077,
+        18.186704,
+        17.85635
+      ],
+      "median_ms": 17.85635,
+      "peak_bytes": 834548,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 0.875044,
+        "workflow_ms": 17.501346,
+        "restore_fraction": 0.049998668673826574
+      }
+    }
+  }
+}

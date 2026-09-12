@@ -13,6 +13,7 @@ from tests.benchmarks.benchmark_core_execution import Value, identity, shrink, l
 def assert_index(repository, session_id):
     actual = repository.execution_index(session_id)
     expected = ExecutionIndex(repository.state(session_id))
+    assert actual.child_remaining == expected.child_remaining
     assert actual.started_count == expected.started_count
     assert actual.waiting_count == expected.waiting_count
     assert {k:v for k,v in actual.occurrence_counts.items() if v} == expected.occurrence_counts

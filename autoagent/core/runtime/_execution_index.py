@@ -3,6 +3,7 @@
 
 class ExecutionIndex:
     def __init__(self, state):
+        self.child_remaining = {}
         self.started_count = 0
         self.occurrence_counts = {}
         self.waiting_count = 0
@@ -12,6 +13,8 @@ class ExecutionIndex:
         self.waits_by_occurrence = {}
         invocation = state.invocation
         if invocation is not None:
+            self.child_remaining = {key: sum(unit.phase != "terminal" for unit in plan.units)
+                                    for key, plan in invocation.child_plans.items()}
             scheduler = invocation.scheduler
             for collection in ('occurrences', 'operator_calls', 'waits'):
                 for item in getattr(scheduler, collection).values():
@@ -50,19 +53,35 @@ class ExecutionIndex:
             if not group:
                 del groups[item.occurrence_id]
 
-    def advance(self, before, after, delta):
+    def advance(self, before, after, delta, *, child_unit=None):
         """Update touched entities only; bulk replacement rebuilds from State."""
         touched = {}
+        child_plans = None
         for operation in delta.operations:
             path = operation.path
-            if path == ('invocation',) or path == ('invocation', 'scheduler'):
+            if path in (('invocation',), ('invocation', 'scheduler'), ('invocation', 'child_plans')):
                 return ExecutionIndex(after)
+            if len(path) >= 3 and path[:2] == ('invocation', 'child_plans'):
+                if child_plans is None:
+                    child_plans = set()
+                child_plans.add(path[2])
             if len(path) >= 3 and path[:2] == ('invocation', 'scheduler') and path[2] in (
                 'occurrences', 'operator_calls', 'waits'
             ):
                 if len(path) == 3:
                     return ExecutionIndex(after)
                 touched[(path[2], path[3])] = None
+        for key in child_plans or ():
+            plan = after.invocation.child_plans.get(key)
+            if plan is None:
+                self.child_remaining.pop(key, None)
+            elif child_unit is not None and child_unit[0] == key and key in self.child_remaining:
+                unit = child_unit[1]
+                old = before.invocation.child_plans[key].units[unit]
+                new = plan.units[unit]
+                self.child_remaining[key] += (new.phase != 'terminal') - (old.phase != 'terminal')
+            else:
+                self.child_remaining[key] = sum(unit.phase != 'terminal' for unit in plan.units)
         for collection, key in touched:
             old = getattr(before.invocation.scheduler, collection).get(key)
             new = getattr(after.invocation.scheduler, collection).get(key)

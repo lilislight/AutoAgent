@@ -1,0 +1,18 @@
+{
+  "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+  "chain_50000": {
+    "median_ns": 69932809,
+    "retained_bytes": 843201,
+    "peak_bytes": 3271455
+  },
+  "repeat_100": {
+    "median_ns": 83434156,
+    "retained_bytes": 9858,
+    "peak_bytes": 219718
+  },
+  "loop_100": {
+    "median_ns": 98078202,
+    "retained_bytes": 241148,
+    "peak_bytes": 373866
+  }
+}

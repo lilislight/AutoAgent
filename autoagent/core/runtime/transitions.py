@@ -25,6 +25,7 @@ from .state import (
 from .scheduling import SchedulerDelta, boundary_key, occurrence_key
 from .values import freeze
 from ._overlay import PlanningOverlay
+from ._context_index import revision_index, _previews
 from ._chunked import ChunkedUnits, runtime_mapping, child_units
 
 SCHED = ("invocation", "scheduler")
@@ -505,9 +506,22 @@ def _apply_context_operations(
         return context, revisions
     from ..context import _ContextEdit
     from ._chunked import MapEdit
+    cache = _previews.get()
+    if cache is not None and cache.closed:
+        cache = None
+    if cache is not None:
+        for old_context, old_revisions, old_operations, start, forward, result in cache:
+            if (old_context is context and old_revisions is revisions and old_operations is operations
+                    and start == started_sequence and forward == (committed_sequence > started_sequence)):
+                updated = MapEdit(revisions)
+                for operation in operations:
+                    updated[operation.path] = committed_sequence
+                return result, updated.finish()
     current = _ContextEdit(context)
     updated_revisions = MapEdit(revisions)
-    recent = [path for path, revision in revisions.items() if revision > started_sequence]
+    index = revision_index(revisions)
+    recent = ([] if index is not None else
+              [path for path, revision in revisions.items() if revision > started_sequence])
     seen: set[tuple[str, ...]] = set()
     for operation in operations:
         if operation.path in seen:
@@ -516,7 +530,7 @@ def _apply_context_operations(
                 f"Context Patch changes path {'.'.join(operation.path)!r} twice.",
             )
         seen.add(operation.path)
-        if any(
+        if (index is not None and index.conflicts(operation.path, started_sequence)) or any(
             _paths_overlap(operation.path, path) for path in recent
         ):
             raise RuntimeTransitionError(
@@ -527,7 +541,11 @@ def _apply_context_operations(
         updated_revisions[operation.path] = committed_sequence
         if committed_sequence > started_sequence:
             recent.append(operation.path)
-    return current.finish(), updated_revisions.finish()
+    result = current.finish()
+    if cache is not None:
+        cache.append((context, revisions, operations, started_sequence,
+                      committed_sequence > started_sequence, result))
+    return result, updated_revisions.finish()
 
 
 def _paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:

@@ -1,0 +1,6 @@
+{
+  "baseline_contract_commit": "18d9c4fa2aa4700de63a39a74480378735e0ac42",
+  "baseline_contract_sha256": "9559b9c8e068a1bcf34ba05ae23c593e59310ea97066cd6d46be0db4b8aa469d",
+  "after_contract_sha256": "bbcd1aedcdb2c37c9f0cbdfafdb15bbbf2309c7d99f84b48258edcd5cb365a4c",
+  "scope": "Only nullable/Literal eligibility differs; all previous uncommitted Core improvements present in both runs."
+}

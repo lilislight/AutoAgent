@@ -1644,13 +1644,7 @@ class AutoAgentApp:
         occurrence = parent.scheduler.occurrences.get(plan.parent_occurrence_id)
         if occurrence is None or occurrence.status != "waiting":
             return
-        child_states = tuple(
-            self._repository.state(item.session_id).invocation for item in plan.units
-        )
-        if any(
-            child is not None and child.status in {"failed", "cancelled"}
-            for child in child_states
-        ):
+        if self._repository.has_failed_child(plan):
             # Once an awaited parent has suspended, a terminal failure is
             # enough to decide the whole Map.  Converge every remaining unit
             # before waking the parent so its failure boundary is recoverable
@@ -1663,7 +1657,7 @@ class AutoAgentApp:
             parent = self._repository.state(parent_session_id).invocation
             assert parent is not None
             plan = parent.child_plans[creation_id]
-        if any(item.phase != "terminal" for item in plan.units):
+        if self._repository.execution_index(parent_session_id).child_remaining[creation_id]:
             return
         await self._emit(
             parent_session_id,

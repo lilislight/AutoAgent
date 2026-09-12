@@ -1,0 +1,194 @@
+{
+  "contracts": {
+    "NullableDocument_10": {
+      "samples_ms": [
+        0.018576,
+        0.017667,
+        0.014346,
+        0.014172,
+        0.015596,
+        0.013906,
+        0.01396
+      ],
+      "median_ms": 0.014346,
+      "peak_bytes": 4432,
+      "python_fast_path": true
+    },
+    "UnionDocument_10": {
+      "samples_ms": [
+        0.013484,
+        0.008313,
+        0.007069,
+        0.006892,
+        0.006411,
+        0.006248,
+        0.006811
+      ],
+      "median_ms": 0.006892,
+      "peak_bytes": 1513,
+      "python_fast_path": false
+    },
+    "ModelDocument_10": {
+      "samples_ms": [
+        0.024737,
+        0.02115,
+        0.019594,
+        0.01891,
+        0.018898,
+        0.018916,
+        0.018773
+      ],
+      "median_ms": 0.018916,
+      "peak_bytes": 8442,
+      "python_fast_path": false
+    },
+    "CustomDocument_10": {
+      "samples_ms": [
+        0.024181,
+        0.02021,
+        0.01952,
+        0.019403,
+        0.019089,
+        0.019262,
+        0.01904
+      ],
+      "median_ms": 0.019403,
+      "peak_bytes": 8442,
+      "python_fast_path": false
+    },
+    "NullableDocument_10000": {
+      "samples_ms": [
+        13.32514,
+        13.174261,
+        13.149899,
+        13.428054,
+        13.282421,
+        13.143297,
+        13.289162
+      ],
+      "median_ms": 13.282421,
+      "peak_bytes": 3840638,
+      "python_fast_path": true
+    },
+    "UnionDocument_10000": {
+      "samples_ms": [
+        2.303574,
+        2.315079,
+        2.299062,
+        2.290873,
+        2.815454,
+        2.303753,
+        2.437571
+      ],
+      "median_ms": 2.303753,
+      "peak_bytes": 361536,
+      "python_fast_path": false
+    },
+    "ModelDocument_10000": {
+      "samples_ms": [
+        17.836226,
+        19.195935,
+        18.472085,
+        19.045035,
+        19.782012,
+        19.054591,
+        18.404403
+      ],
+      "median_ms": 19.045035,
+      "peak_bytes": 7146862,
+      "python_fast_path": false
+    },
+    "CustomDocument_10000": {
+      "samples_ms": [
+        18.305676,
+        18.956777,
+        19.027845,
+        19.959297,
+        18.416834,
+        18.758666,
+        18.143282
+      ],
+      "median_ms": 18.758666,
+      "peak_bytes": 7146862,
+      "python_fast_path": false
+    }
+  },
+  "workflows": {
+    "NullableDocument_10": {
+      "samples_ms": [
+        1.320813,
+        1.050598,
+        0.958798,
+        0.980783,
+        0.962329,
+        0.933242,
+        1.00095
+      ],
+      "median_ms": 0.980783,
+      "peak_bytes": 55165,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 0.029823,
+        "workflow_ms": 1.705642,
+        "restore_fraction": 0.017484911839647475
+      }
+    },
+    "ModelDocument_10": {
+      "samples_ms": [
+        1.007286,
+        0.972689,
+        1.242427,
+        1.131955,
+        0.948328,
+        0.972278,
+        0.939581
+      ],
+      "median_ms": 0.972689,
+      "peak_bytes": 53501,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 0.041382,
+        "workflow_ms": 1.118574,
+        "restore_fraction": 0.03699531725214425
+      }
+    },
+    "NullableDocument_10000": {
+      "samples_ms": [
+        125.740993,
+        122.392715,
+        122.425143,
+        136.273046,
+        124.621724,
+        123.645987,
+        121.078038
+      ],
+      "median_ms": 123.645987,
+      "peak_bytes": 20406204,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 12.432206,
+        "workflow_ms": 128.507591,
+        "restore_fraction": 0.09674296983747832
+      }
+    },
+    "ModelDocument_10000": {
+      "samples_ms": [
+        125.78391,
+        139.971598,
+        127.598663,
+        129.029911,
+        129.300473,
+        127.096886,
+        141.135193
+      ],
+      "median_ms": 129.029911,
+      "peak_bytes": 19601916,
+      "profile": {
+        "restore_calls": 1,
+        "restore_ms": 16.584592,
+        "workflow_ms": 130.024444,
+        "restore_fraction": 0.12754980132812566
+      }
+    }
+  }
+}

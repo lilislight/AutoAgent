@@ -1,0 +1,194 @@
+{
+  "contracts": {
+    "NullableDocument_10": {
+      "before": {
+        "median_ms": 0.015029,
+        "peak_bytes": 5394
+      },
+      "after": {
+        "median_ms": 0.013652,
+        "peak_bytes": 4432
+      },
+      "latency_change_percent": -9.162286246589934
+    },
+    "NullableBatch_10": {
+      "before": {
+        "median_ms": 0.005959,
+        "peak_bytes": 1508
+      },
+      "after": {
+        "median_ms": 0.003187,
+        "peak_bytes": 920
+      },
+      "latency_change_percent": -46.51787212619567
+    },
+    "UnionDocument_10": {
+      "before": {
+        "median_ms": 0.006143,
+        "peak_bytes": 1449
+      },
+      "after": {
+        "median_ms": 0.006972,
+        "peak_bytes": 1489
+      },
+      "latency_change_percent": 13.495034999186073
+    },
+    "ModelDocument_10": {
+      "before": {
+        "median_ms": 0.019255,
+        "peak_bytes": 8442
+      },
+      "after": {
+        "median_ms": 0.018323,
+        "peak_bytes": 8442
+      },
+      "latency_change_percent": -4.840301220462228
+    },
+    "CustomDocument_10": {
+      "before": {
+        "median_ms": 0.018456,
+        "peak_bytes": 8442
+      },
+      "after": {
+        "median_ms": 0.018368,
+        "peak_bytes": 8442
+      },
+      "latency_change_percent": -0.47680970957955093
+    },
+    "NullableDocument_10000": {
+      "before": {
+        "median_ms": 13.786939,
+        "peak_bytes": 4266648
+      },
+      "after": {
+        "median_ms": 12.629424,
+        "peak_bytes": 3840638
+      },
+      "latency_change_percent": -8.395735993319475
+    },
+    "NullableBatch_10000": {
+      "before": {
+        "median_ms": 1.962434,
+        "peak_bytes": 521926
+      },
+      "after": {
+        "median_ms": 0.856346,
+        "peak_bytes": 160536
+      },
+      "latency_change_percent": -56.363067496792254
+    },
+    "UnionDocument_10000": {
+      "before": {
+        "median_ms": 2.336029,
+        "peak_bytes": 361536
+      },
+      "after": {
+        "median_ms": 2.216122,
+        "peak_bytes": 361536
+      },
+      "latency_change_percent": -5.132941414682779
+    },
+    "ModelDocument_10000": {
+      "before": {
+        "median_ms": 17.874692,
+        "peak_bytes": 7146862
+      },
+      "after": {
+        "median_ms": 17.612136,
+        "peak_bytes": 7146862
+      },
+      "latency_change_percent": -1.4688700650058784
+    },
+    "CustomDocument_10000": {
+      "before": {
+        "median_ms": 17.580525,
+        "peak_bytes": 7146862
+      },
+      "after": {
+        "median_ms": 17.078872,
+        "peak_bytes": 7146862
+      },
+      "latency_change_percent": -2.8534585855655714
+    }
+  },
+  "workflows": {
+    "NullableDocument_10": {
+      "before": {
+        "median_ms": 0.918015,
+        "peak_bytes": 55293,
+        "profile_restore_fraction": 0.03047297468342106
+      },
+      "after": {
+        "median_ms": 0.942155,
+        "peak_bytes": 54877,
+        "profile_restore_fraction": 0.02016295359658287
+      },
+      "latency_change_percent": 2.6295866625272835
+    },
+    "ModelDocument_10": {
+      "before": {
+        "median_ms": 0.950687,
+        "peak_bytes": 53501,
+        "profile_restore_fraction": 0.03741130833524068
+      },
+      "after": {
+        "median_ms": 1.057807,
+        "peak_bytes": 53213,
+        "profile_restore_fraction": 0.036379321978350344
+      },
+      "latency_change_percent": 11.267641190002609
+    },
+    "NullableBatch_10": {
+      "before": {
+        "median_ms": 0.844182,
+        "peak_bytes": 37125,
+        "profile_restore_fraction": 0.023356944552554423
+      },
+      "after": {
+        "median_ms": 0.843952,
+        "peak_bytes": 36709,
+        "profile_restore_fraction": 0.011058249519253726
+      },
+      "latency_change_percent": -0.027245309660706152
+    },
+    "NullableDocument_10000": {
+      "before": {
+        "median_ms": 121.087736,
+        "peak_bytes": 20562108,
+        "profile_restore_fraction": 0.09698362464374571
+      },
+      "after": {
+        "median_ms": 117.709363,
+        "peak_bytes": 20406204,
+        "profile_restore_fraction": 0.09747739114225668
+      },
+      "latency_change_percent": -2.7900207829470114
+    },
+    "ModelDocument_10000": {
+      "before": {
+        "median_ms": 122.920672,
+        "peak_bytes": 19601756,
+        "profile_restore_fraction": 0.12251820314987301
+      },
+      "after": {
+        "median_ms": 123.198443,
+        "peak_bytes": 19601756,
+        "profile_restore_fraction": 0.126715757658193
+      },
+      "latency_change_percent": 0.22597582284613615
+    },
+    "NullableBatch_10000": {
+      "before": {
+        "median_ms": 18.771246,
+        "peak_bytes": 1146452,
+        "profile_restore_fraction": 0.10499287723587375
+      },
+      "after": {
+        "median_ms": 17.85635,
+        "peak_bytes": 834548,
+        "profile_restore_fraction": 0.049998668673826574
+      },
+      "latency_change_percent": -4.873922594163449
+    }
+  }
+}

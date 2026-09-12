@@ -1,0 +1,173 @@
+{
+  "python": "3.12.13 (main, Jun 23 2026, 15:18:55) [Clang 22.1.3 ]",
+  "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+  "method": "Public synchronous API; null sink; setup/close excluded; tracemalloc separate; no Core edits.",
+  "correctness": {
+    "context_replay": {
+      "sessions": 1,
+      "events": 7
+    },
+    "child_replay": {
+      "sessions": 33,
+      "events": 329
+    }
+  },
+  "context": {
+    "0": {
+      "samples_ms": [
+        1.103607,
+        1.30106,
+        1.25729,
+        1.108554,
+        1.075319,
+        1.134698,
+        1.204406
+      ],
+      "median_ms": 1.134698,
+      "incremental_peak_bytes": 38213
+    },
+    "1000": {
+      "samples_ms": [
+        1.256978,
+        1.442952,
+        1.429766,
+        1.157133,
+        1.155322,
+        1.379824,
+        1.185208
+      ],
+      "median_ms": 1.256978,
+      "incremental_peak_bytes": 46613
+    },
+    "10000": {
+      "samples_ms": [
+        1.268537,
+        1.602104,
+        1.175099,
+        1.088466,
+        1.064539,
+        1.310478,
+        1.273178
+      ],
+      "median_ms": 1.268537,
+      "incremental_peak_bytes": 42717
+    },
+    "50000": {
+      "samples_ms": [
+        1.325727,
+        1.185749,
+        1.367376,
+        1.29445,
+        1.39242,
+        1.078419,
+        1.141698
+      ],
+      "median_ms": 1.29445,
+      "incremental_peak_bytes": 49341
+    }
+  },
+  "empty_context_control": {
+    "0": {
+      "samples_ms": [
+        1.181413,
+        1.037297,
+        1.098455,
+        1.379085,
+        1.219409,
+        1.014729,
+        0.975482
+      ],
+      "median_ms": 1.098455,
+      "incremental_peak_bytes": 36298
+    },
+    "1000": {
+      "samples_ms": [
+        1.073283,
+        1.06005,
+        1.057608,
+        1.017118,
+        1.218382,
+        1.04024,
+        0.991804
+      ],
+      "median_ms": 1.057608,
+      "incremental_peak_bytes": 36298
+    },
+    "10000": {
+      "samples_ms": [
+        1.114143,
+        1.075366,
+        1.077855,
+        1.027104,
+        0.987124,
+        1.069088,
+        1.024221
+      ],
+      "median_ms": 1.069088,
+      "incremental_peak_bytes": 36298
+    },
+    "50000": {
+      "samples_ms": [
+        1.406064,
+        1.124702,
+        1.002688,
+        0.956577,
+        1.003836,
+        1.322688,
+        1.180731
+      ],
+      "median_ms": 1.124702,
+      "incremental_peak_bytes": 36298
+    }
+  },
+  "children": {
+    "10": {
+      "samples_ms": [
+        24.656172,
+        25.22268,
+        24.227657,
+        24.456014,
+        24.625433
+      ],
+      "median_ms": 24.625433,
+      "incremental_peak_bytes": 211467,
+      "settle_child_snapshot_state_reads": 0
+    },
+    "100": {
+      "samples_ms": [
+        237.104537,
+        259.243517,
+        246.738419,
+        239.672182,
+        237.772765
+      ],
+      "median_ms": 239.672182,
+      "incremental_peak_bytes": 651016,
+      "settle_child_snapshot_state_reads": 0
+    },
+    "300": {
+      "samples_ms": [
+        812.885517,
+        719.722247,
+        726.406736,
+        723.757985,
+        712.884092
+      ],
+      "median_ms": 723.757985,
+      "incremental_peak_bytes": 1358078,
+      "settle_child_snapshot_state_reads": 0
+    },
+    "1000": {
+      "samples_ms": [
+        2298.569282,
+        2294.6759,
+        2403.383353,
+        2554.318015,
+        2472.025889
+      ],
+      "median_ms": 2403.383353,
+      "incremental_peak_bytes": 3322229,
+      "settle_child_snapshot_state_reads": 0
+    }
+  }
+}

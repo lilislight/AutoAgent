@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 from .clocks import unix_time_us
+from ._context_index import ContextRevisionIndex, planning_indexes
 from collections.abc import Mapping
 
-from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied
+from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged
 from .state import RuntimeState
 from ._execution_index import ExecutionIndex
 from .checkpoint import SessionCheckpoint
@@ -35,6 +36,8 @@ class RuntimeRepository:
         self.reducer = reducer or StateReducer()
         self.sink = sink
         self._states: dict[str, RuntimeState] = {}
+        self._context_indexes = {}
+        self._failed_sessions = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._execution_indexes: dict[str, ExecutionIndex] = {}
         self._pending: dict[str, tuple[RuntimeEvent, RuntimeState]] = {}
@@ -73,11 +76,22 @@ class RuntimeRepository:
                     tuple(item.id for item in scheduler.operator_calls.values() if item.status == "running"),
                 )
             timestamp = unix_time_us() if occurred_at_us is None else occurred_at_us
-            delta = self.planner.plan(
-                before, payload, occurred_at_us=timestamp,
-                session_id=session_id, invocation_id=invocation_id,
-                scheduler_delta=scheduler_delta,
-            )
+            patch = (before.invocation.scheduler.occurrences[payload.occurrence_id].execution.pending_context_patch
+                     if isinstance(payload, NodeCompleted) and before.invocation is not None
+                     and payload.occurrence_id in before.invocation.scheduler.occurrences else None)
+            if patch is not None and (patch.session or patch.invocation):
+                with planning_indexes(self._context_lookups(session_id, before)):
+                    delta = self.planner.plan(
+                        before, payload, occurred_at_us=timestamp,
+                        session_id=session_id, invocation_id=invocation_id,
+                        scheduler_delta=scheduler_delta,
+                    )
+            else:
+                delta = self.planner.plan(
+                    before, payload, occurred_at_us=timestamp,
+                    session_id=session_id, invocation_id=invocation_id,
+                    scheduler_delta=scheduler_delta,
+                )
             event = RuntimeEvent(
                 session_id, before.sequence + 1, payload, invocation_id,
                 delta=delta, occurred_at_us=timestamp,
@@ -103,10 +117,63 @@ class RuntimeRepository:
         index = self._execution_indexes.get(session_id)
         self._execution_indexes[session_id] = (
             ExecutionIndex(candidate) if index is None
-            else index.advance(self._states[session_id], candidate, event.delta)
+            else index.advance(self._states[session_id], candidate, event.delta,
+                child_unit=(event.payload.creation_id, event.payload.unit_index)
+                if type(self.planner) is TransitionPlanner and isinstance(event.payload, ChildInvocationPhaseChanged)
+                else None)
         )
+        before = self._states.get(session_id)
+        lookups = self._context_indexes.get(session_id, {})
+        for name, lookup in tuple(lookups.items()):
+            owner = getattr(candidate, name)
+            revisions = owner.context_path_revisions if owner is not None else None
+            if revisions is lookup.revisions:
+                continue
+            old_owner = getattr(before, name) if before is not None else None
+            if (type(self.planner) is TransitionPlanner and isinstance(event.payload, NodeCompleted)
+                    and old_owner is not None and old_owner.context_path_revisions is lookup.revisions):
+                occurrence = before.invocation.scheduler.occurrences[event.payload.occurrence_id]
+                operations = getattr(occurrence.execution.pending_context_patch, name)
+                lookups[name] = lookup.advance(revisions, operations)
+            else:
+                del lookups[name]
+        old_status = before.invocation.status if before is not None and before.invocation is not None else None
+        new_status = candidate.invocation.status if candidate.invocation is not None else None
+        if old_status != new_status:
+            self._update_failure(session_id, candidate)
         self._states[session_id] = candidate
         del self._pending[session_id]
+
+    def _update_failure(self, session_id, state):
+        if state.invocation is not None and state.invocation.status in {'failed', 'cancelled'}:
+            self._failed_sessions.add(session_id)
+        else:
+            self._failed_sessions.discard(session_id)
+
+    def has_failed_child(self, plan):
+        # Failure convergence remains a scan; successful completion avoids it.
+        return bool(self._failed_sessions) and any(
+            unit.session_id in self._failed_sessions for unit in plan.units)
+
+    def _context_lookups(self, session_id, state):
+        lookups = self._context_indexes.setdefault(session_id, {})
+        for name in ('session', 'invocation'):
+            owner = getattr(state, name)
+            if owner is None:
+                lookups.pop(name, None)
+                continue
+            revisions = owner.context_path_revisions
+            existing = lookups.get(name)
+            if existing is None or existing.revisions is not revisions:
+                lookups[name] = ContextRevisionIndex(revisions)
+        return tuple(lookups.values())
+
+    def preview_context_patch(self, session_id, occurrence_id, patch):
+        state = self.state(session_id)
+        if not patch.session and not patch.invocation:
+            return TransitionPlanner().preview_context_patch(state, occurrence_id, patch)
+        with planning_indexes(self._context_lookups(session_id, state)):
+            return TransitionPlanner().preview_context_patch(state, occurrence_id, patch)
 
     def execution_index(self, session_id: str) -> ExecutionIndex:
         """Internal derived lookups for the currently acknowledged State."""
@@ -127,7 +194,9 @@ class RuntimeRepository:
         if any(self._locks.get(sid) is not None and self._locks[sid].locked() for sid in session_ids):
             raise RuntimeTransitionError("SESSION_COMMIT_ACTIVE", "Session commit is active.")
         for sid in session_ids:
+            self._failed_sessions.discard(sid)
             self._states.pop(sid, None)
+            self._context_indexes.pop(sid, None)
             self._execution_indexes.pop(sid, None)
             self._locks.pop(sid, None)
 
@@ -146,6 +215,9 @@ class RuntimeRepository:
                 raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Session already exists.")
             candidates[sid] = state
         indexes = {sid: ExecutionIndex(state) for sid, state in candidates.items()}
+        for sid, state in candidates.items():
+            self._context_indexes.pop(sid, None)
+            self._update_failure(sid, state)
         self._states.update(candidates)
         self._execution_indexes.update(indexes)
 

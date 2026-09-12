@@ -1,0 +1,85 @@
+{
+  "context": {
+    "0": {
+      "before_ms": 1.1504,
+      "after_ms": 1.134698,
+      "change_percent": -1.3649165507649608
+    },
+    "1000": {
+      "before_ms": 1.300608,
+      "after_ms": 1.256978,
+      "change_percent": -3.3545849325853805
+    },
+    "10000": {
+      "before_ms": 2.038923,
+      "after_ms": 1.268537,
+      "change_percent": -37.783967320001786
+    },
+    "50000": {
+      "before_ms": 5.910693,
+      "after_ms": 1.29445,
+      "change_percent": -78.0998607100724
+    }
+  },
+  "children": {
+    "10": {
+      "before_ms": 25.834804,
+      "after_ms": 24.625433,
+      "change_percent": -4.681169634575111
+    },
+    "100": {
+      "before_ms": 256.211176,
+      "after_ms": 239.672182,
+      "change_percent": -6.45521958027312
+    },
+    "300": {
+      "before_ms": 798.958581,
+      "after_ms": 723.757985,
+      "change_percent": -9.412327220502059
+    },
+    "1000": {
+      "before_ms": 2706.521726,
+      "after_ms": 2403.383353,
+      "change_percent": -11.200293353935553
+    }
+  },
+  "empty_context_control": {
+    "0": {
+      "before_ms": 0.994708,
+      "after_ms": 1.098455,
+      "change_percent": 10.429895004363088
+    },
+    "1000": {
+      "before_ms": 1.128899,
+      "after_ms": 1.057608,
+      "change_percent": -6.315091075463797
+    },
+    "10000": {
+      "before_ms": 1.03041,
+      "after_ms": 1.069088,
+      "change_percent": 3.7536514591279158
+    },
+    "50000": {
+      "before_ms": 0.983277,
+      "after_ms": 1.124702,
+      "change_percent": 14.383027366652534
+    }
+  },
+  "paired_execution": {
+    "chain_50000": {
+      "before": 68.415033,
+      "after": 69.283651,
+      "change_percent": 1.269630316483239
+    },
+    "repeat_100": {
+      "before": 88.796932,
+      "after": 88.829845,
+      "change_percent": 0.037065469784480776
+    },
+    "loop_100": {
+      "before": 105.68144,
+      "after": 107.887513,
+      "change_percent": 2.0874743947470797
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "flat_1000": {
+    "median_build_ms": 0.108801,
+    "samples_ms": [
+      0.113484,
+      0.109337,
+      0.108801,
+      0.108708,
+      0.108542
+    ],
+    "retained_bytes": 440,
+    "peak_bytes": 600,
+    "strict_ancestor_entries": 0
+  },
+  "shared_parent_1000": {
+    "median_build_ms": 0.296534,
+    "samples_ms": [
+      0.29712,
+      0.308522,
+      0.29252,
+      0.292568,
+      0.296534
+    ],
+    "retained_bytes": 696,
+    "peak_bytes": 856,
+    "strict_ancestor_entries": 1
+  },
+  "unique_parent_1000": {
+    "median_build_ms": 0.340043,
+    "samples_ms": [
+      0.358656,
+      0.301024,
+      0.343304,
+      0.340043,
+      0.291668
+    ],
+    "retained_bytes": 85272,
+    "peak_bytes": 88616,
+    "strict_ancestor_entries": 1000
+  },
+  "flat_50000": {
+    "median_build_ms": 5.64635,
+    "samples_ms": [
+      5.882102,
+      5.719636,
+      5.64635,
+      5.582857,
+      5.563097
+    ],
+    "retained_bytes": 272,
+    "peak_bytes": 432,
+    "strict_ancestor_entries": 0
+  },
+  "shared_parent_50000": {
+    "median_build_ms": 15.321573,
+    "samples_ms": [
+      14.793408,
+      15.321573,
+      15.248855,
+      15.338316,
+      15.639437
+    ],
+    "retained_bytes": 560,
+    "peak_bytes": 720,
+    "strict_ancestor_entries": 1
+  },
+  "unique_parent_50000": {
+    "median_build_ms": 17.490307,
+    "samples_ms": [
+      18.109755,
+      17.149049,
+      17.490307,
+      16.908196,
+      17.718992
+    ],
+    "retained_bytes": 5021768,
+    "peak_bytes": 6029784,
+    "strict_ancestor_entries": 50000
+  }
+}

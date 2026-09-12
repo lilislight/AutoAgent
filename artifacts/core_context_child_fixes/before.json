@@ -1,0 +1,174 @@
+{
+  "python": "3.12.13 (main, Jun 23 2026, 15:18:55) [Clang 22.1.3 ]",
+  "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+  "method": "Public synchronous API; null sink; setup/close excluded; tracemalloc separate; no Core edits.",
+  "correctness": {
+    "context_replay": {
+      "sessions": 1,
+      "events": 7
+    },
+    "child_replay": {
+      "sessions": 33,
+      "events": 329
+    }
+  },
+  "context": {
+    "0": {
+      "samples_ms": [
+        1.277644,
+        1.222781,
+        1.128759,
+        1.192176,
+        1.067434,
+        1.049328,
+        1.1504
+      ],
+      "median_ms": 1.1504,
+      "incremental_peak_bytes": 36974
+    },
+    "1000": {
+      "samples_ms": [
+        1.364174,
+        1.198936,
+        1.583232,
+        1.302657,
+        1.220652,
+        1.168176,
+        1.300608
+      ],
+      "median_ms": 1.300608,
+      "incremental_peak_bytes": 46041
+    },
+    "10000": {
+      "samples_ms": [
+        2.297816,
+        1.976305,
+        2.002978,
+        2.038923,
+        2.236057,
+        2.41701,
+        2.022324
+      ],
+      "median_ms": 2.038923,
+      "incremental_peak_bytes": 42145
+    },
+    "50000": {
+      "samples_ms": [
+        6.027469,
+        6.276299,
+        5.635877,
+        5.996049,
+        5.910693,
+        5.896907,
+        5.739564
+      ],
+      "median_ms": 5.910693,
+      "incremental_peak_bytes": 48769
+    }
+  },
+  "children": {
+    "10": {
+      "samples_ms": [
+        24.592547,
+        27.173341,
+        26.709384,
+        25.834804,
+        25.026283
+      ],
+      "median_ms": 25.834804,
+      "incremental_peak_bytes": 200468,
+      "settle_child_snapshot_state_reads": 100
+    },
+    "100": {
+      "samples_ms": [
+        263.40792,
+        249.250948,
+        272.973174,
+        256.211176,
+        250.790851
+      ],
+      "median_ms": 256.211176,
+      "incremental_peak_bytes": 650745,
+      "settle_child_snapshot_state_reads": 10000
+    },
+    "300": {
+      "samples_ms": [
+        798.958581,
+        793.16653,
+        833.328433,
+        804.55492,
+        768.576076
+      ],
+      "median_ms": 798.958581,
+      "incremental_peak_bytes": 1357705,
+      "settle_child_snapshot_state_reads": 90000
+    },
+    "1000": {
+      "samples_ms": [
+        2730.767602,
+        2705.584199,
+        2800.151475,
+        2646.727191,
+        2706.521726
+      ],
+      "median_ms": 2706.521726,
+      "incremental_peak_bytes": 3322026,
+      "settle_child_snapshot_state_reads": 1000000
+    }
+  },
+  "empty_context_control": {
+    "0": {
+      "samples_ms": [
+        1.185017,
+        0.994708,
+        0.975876,
+        0.939888,
+        0.942994,
+        1.036896,
+        1.080365
+      ],
+      "median_ms": 0.994708,
+      "incremental_peak_bytes": 36105
+    },
+    "1000": {
+      "samples_ms": [
+        1.193418,
+        1.117067,
+        1.128899,
+        1.150056,
+        1.083266,
+        1.127792,
+        1.155118
+      ],
+      "median_ms": 1.128899,
+      "incremental_peak_bytes": 35833
+    },
+    "10000": {
+      "samples_ms": [
+        1.038379,
+        0.987112,
+        1.03041,
+        0.990261,
+        1.531569,
+        0.987537,
+        1.033976
+      ],
+      "median_ms": 1.03041,
+      "incremental_peak_bytes": 35777
+    },
+    "50000": {
+      "samples_ms": [
+        1.005218,
+        1.192568,
+        1.001918,
+        0.961756,
+        0.946061,
+        0.983277,
+        0.960948
+      ],
+      "median_ms": 0.983277,
+      "incremental_peak_bytes": 35777
+    }
+  },
+  "commit": "18d9c4fa2aa4700de63a39a74480378735e0ac42"
+}

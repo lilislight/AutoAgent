@@ -6,6 +6,9 @@ compiles Workflows and exposes no public application API.
 
 from __future__ import annotations
 
+from ..runtime._context_index import context_previews
+from contextlib import nullcontext
+
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -39,7 +42,6 @@ from ..runtime import (
     RuntimeErrorInfo,
     RuntimeState,
     SessionOpened,
-    TransitionPlanner,
     RuntimeEvent,
     TaskRuntime,
     UserEvent,
@@ -354,19 +356,21 @@ class WorkflowExecutor:
                     patch, duration = await self._node_executor.timed(self._node_executor.bind_output, node, output,
                         invocation_context=current.context, session_context=latest.session.context)
                     if node.output_binding is not None:
-                        await emit(OutputBound(occurrence_id, patch, duration))
-                candidate_session, candidate_invocation = TransitionPlanner().preview_context_patch(latest, occurrence_id, patch)
-                phase = "condition"
-                execution = current_execution()
-                if "routing_resolved" not in execution.completed_stages:
-                    conditions, duration = await self._node_executor.evaluate_conditions(workflow.outgoing(node.id),
-                        source_status="complete", source_node_id=node.id, output=output, error=None,
-                        invocation_context=candidate_invocation, session_context=candidate_session)
-                    if conditions:
-                        await emit(RoutingResolved(occurrence_id, "complete", conditions, duration))
-                phase = "validation"
-                await emit(NodeCompleted(occurrence_id, output,
-                    metrics={"call_count": metrics.call_count, "peak_parallelism": metrics.peak_parallelism} if metrics else None))
+                        accepted = await emit(OutputBound(occurrence_id, patch, duration))
+                        patch = accepted.payload.patch
+                with context_previews() if patch.session or patch.invocation else nullcontext():
+                    candidate_session, candidate_invocation = self._repository.preview_context_patch(session_id, occurrence_id, patch)
+                    phase = "condition"
+                    execution = current_execution()
+                    if "routing_resolved" not in execution.completed_stages:
+                        conditions, duration = await self._node_executor.evaluate_conditions(workflow.outgoing(node.id),
+                            source_status="complete", source_node_id=node.id, output=output, error=None,
+                            invocation_context=candidate_invocation, session_context=candidate_session)
+                        if conditions:
+                            await emit(RoutingResolved(occurrence_id, "complete", conditions, duration))
+                    phase = "validation"
+                    await emit(NodeCompleted(occurrence_id, output,
+                        metrics={"call_count": metrics.call_count, "peak_parallelism": metrics.peak_parallelism} if metrics else None))
             await self._emit_mapped_user_events(node, session_id=session_id, invocation_id=invocation.id,
                 occurrence_id=occurrence_id, output=output, invocation_context=candidate_invocation,
                 session_context=candidate_session)

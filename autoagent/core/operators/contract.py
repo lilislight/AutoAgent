@@ -231,7 +231,8 @@ def _simple_adapter_schema(schema):
     if isinstance(schema, dict):
         kind = schema.get('type')
         if kind is not None and (not isinstance(kind, str) or kind not in {
-            'typed-dict', 'typed-dict-field', 'list', 'dict', 'str', 'bool', 'int', 'float', 'none'
+            'typed-dict', 'typed-dict-field', 'list', 'dict', 'str', 'bool', 'int', 'float', 'none',
+            'nullable', 'literal'
         }):
             return False
         if 'serialization' in schema:
@@ -249,6 +250,13 @@ def _simple_json_annotation(annotation, seen=frozenset()):
         return False
     origin = get_origin(annotation)
     args = get_args(annotation)
+    if origin in (Union, UnionType):
+        # Nullable JSON types have no competing branch selection. General
+        # unions retain JSON-mode validation until equivalence is established.
+        return (len(args) == 2 and type(None) in args and
+                all(_simple_json_annotation(item, seen) for item in args))
+    if origin is Literal:
+        return bool(args) and all(type(item) in (str, bool, int, type(None)) for item in args)
     if origin in (Required, NotRequired):
         return _simple_json_annotation(args[0], seen)
     if origin is list:

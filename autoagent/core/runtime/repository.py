@@ -6,8 +6,8 @@ from .clocks import unix_time_us
 from collections.abc import Mapping
 
 from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied
-from .event_store import InMemoryRuntimeEventStore, RuntimeEventStore
 from .state import RuntimeState
+from ._execution_index import ExecutionIndex
 from .checkpoint import SessionCheckpoint
 from .reducer import StateReducer
 from .scheduling import SchedulerDelta
@@ -26,25 +26,28 @@ class RuntimeRepository:
 
     def __init__(
         self,
-        event_store: RuntimeEventStore | None = None,
         *,
         planner: TransitionPlanner | None = None,
         reducer: StateReducer | None = None,
         sink: RuntimeEventSink | None = None,
     ) -> None:
-        if event_store is not None and sink is not None:
-            raise ValueError("Configure one durable boundary: EventStore or sink.")
-        self.event_store = event_store or InMemoryRuntimeEventStore()
         self.planner = planner or TransitionPlanner()
         self.reducer = reducer or StateReducer()
         self.sink = sink
         self._states: dict[str, RuntimeState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._execution_indexes: dict[str, ExecutionIndex] = {}
         self._pending: dict[str, tuple[RuntimeEvent, RuntimeState]] = {}
-        self._events: dict[str, list[RuntimeEvent]] = {}
 
     def state(self, session_id: str) -> RuntimeState:
-        return self._states.get(session_id, RuntimeState())
+        state = self._states.get(session_id)
+        return RuntimeState() if state is None else state
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = self._locks[session_id] = asyncio.Lock()
+        return lock
 
     async def commit(
         self,
@@ -55,7 +58,7 @@ class RuntimeRepository:
         occurred_at_us: int | None = None,
         scheduler_delta: SchedulerDelta | None = None,
     ) -> RuntimeEvent:
-        async with self._locks.setdefault(session_id, asyncio.Lock()):
+        async with self._session_lock(session_id):
             pending = self._pending.get(session_id)
             await self._settle_pending(session_id)
             if pending is not None:
@@ -90,30 +93,29 @@ class RuntimeRepository:
             return
         event, candidate = pending
         try:
-            # With a sink, the in-memory store is only the local Event history.
             # External adapters must idempotently accept a repeated Event id.
             if self.sink is not None:
                 await self.sink.append(event)
-            await self.event_store.append(event, expected_sequence=event.sequence - 1)
         except asyncio.CancelledError:
             raise
         except BaseException as error:
             raise RuntimeInfrastructureError("Runtime Event append failed.") from error
+        index = self._execution_indexes.get(session_id)
+        self._execution_indexes[session_id] = (
+            ExecutionIndex(candidate) if index is None
+            else index.advance(self._states[session_id], candidate, event.delta)
+        )
         self._states[session_id] = candidate
-        self._events.setdefault(session_id, []).append(event)
         del self._pending[session_id]
+
+    def execution_index(self, session_id: str) -> ExecutionIndex:
+        """Internal derived lookups for the currently acknowledged State."""
+        return self._execution_indexes[session_id]
 
     async def settle(self, session_id: str) -> None:
         """Retry an unresolved append without planning any new execution."""
-        async with self._locks.setdefault(session_id, asyncio.Lock()):
+        async with self._session_lock(session_id):
             await self._settle_pending(session_id)
-
-    def events(self, session_id: str) -> tuple[RuntimeEvent, ...]:
-        return tuple(self._events.get(session_id, ()))
-
-    def drain_events(self, session_id: str) -> tuple[RuntimeEvent, ...]:
-        """Release the observation buffer; EventStore remains history owner."""
-        return tuple(self._events.pop(session_id, ()))
 
     def session_ids(self) -> tuple[str, ...]:
         return tuple(self._states)
@@ -126,10 +128,8 @@ class RuntimeRepository:
             raise RuntimeTransitionError("SESSION_COMMIT_ACTIVE", "Session commit is active.")
         for sid in session_ids:
             self._states.pop(sid, None)
-            self._events.pop(sid, None)
+            self._execution_indexes.pop(sid, None)
             self._locks.pop(sid, None)
-            if isinstance(self.event_store, InMemoryRuntimeEventStore):
-                self.event_store.discard(sid)
 
     def install_states(self, states: Mapping[str, RuntimeState]) -> None:
         """Validate and isolate an entire checkpoint graph before installation."""
@@ -145,9 +145,9 @@ class RuntimeRepository:
             if sid in self._pending or (sid in self._states and self._states[sid] != state):
                 raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Session already exists.")
             candidates[sid] = state
-        if isinstance(self.event_store, InMemoryRuntimeEventStore):
-            self.event_store.anchor_many({sid: state.sequence for sid, state in candidates.items()})
+        indexes = {sid: ExecutionIndex(state) for sid, state in candidates.items()}
         self._states.update(candidates)
+        self._execution_indexes.update(indexes)
 
     def capture_checkpoint(
         self, session_id: str, *, captured_at_us: int | None = None,

@@ -12,6 +12,7 @@ from dataclasses import replace
 from typing import cast
 from uuid import uuid4
 
+from ..runtime._execution_index import ExecutionIndex
 from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
 from ..operators import Operator, Wait
 from ..runtime import (
@@ -43,6 +44,7 @@ from ..runtime import (
     TaskRuntime,
     UserEvent,
     thaw,
+    freeze,
 )
 from ..workflow import (
     AggregationContext,
@@ -105,6 +107,20 @@ class WorkflowExecutor:
         self._capability_resolver = capability_resolver
         self._completion_locks: dict[str, asyncio.Lock] = {}
 
+    def _execution_index(self, session_id):
+        lookup = getattr(self._repository, "execution_index", None)
+        return lookup(session_id) if lookup is not None else ExecutionIndex(self._repository.state(session_id))
+
+    def _occurrence_calls(self, session_id, occurrence_id):
+        invocation = self._repository.state(session_id).invocation
+        ids = self._execution_index(session_id).calls_by_occurrence.get(occurrence_id, ())
+        return tuple(invocation.scheduler.operator_calls[key] for key in ids)
+
+    def _occurrence_waits(self, session_id, occurrence_id):
+        invocation = self._repository.state(session_id).invocation
+        ids = self._execution_index(session_id).waits_by_occurrence.get(occurrence_id, ())
+        return tuple(invocation.scheduler.waits[key] for key in ids)
+
     async def drive(self, workflow: WorkflowIR, session_id: str) -> None:
         """Run until terminal state or a stable external Wait boundary."""
 
@@ -117,12 +133,9 @@ class WorkflowExecutor:
                 invocation = state.invocation
                 if invocation is None or invocation.terminal:
                     return
-                execution_count = sum(
-                    item.started_sequence is not None
-                    for item in invocation.scheduler.occurrences.values()
-                )
-                dispatchable = tuple(dict.fromkeys((*invocation.scheduler.ready,
-                    *(item.id for item in invocation.scheduler.occurrences.values() if item.status == "running"))))
+                index = self._execution_index(session_id)
+                execution_count = index.started_count
+                dispatchable = tuple(dict.fromkeys((*invocation.scheduler.ready, *index.running)))
                 for occurrence_id in dispatchable:
                     if occurrence_id in tasks:
                         continue
@@ -156,7 +169,7 @@ class WorkflowExecutor:
                     # sees it done and starts a replacement drive.
                     current = self._repository.state(session_id).invocation
                     if current is not None and not current.terminal:
-                        if current.scheduler.ready or any(item.status == "running" for item in current.scheduler.occurrences.values()):
+                        if current.scheduler.ready or self._execution_index(session_id).running:
                             wake.clear()
                             continue
                     return
@@ -239,21 +252,21 @@ class WorkflowExecutor:
             if execution.fault is not None:
                 await self._finish_node_error(workflow, node, session_id, occurrence_id, execution.fault)
                 return
-            failed_call = next((call for call in invocation.scheduler.operator_calls.values()
+            failed_call = next((call for call in self._occurrence_calls(session_id, occurrence_id)
                 if call.occurrence_id == occurrence_id and call.status == "failed"
                 and call.error is not None and call.error.type != "CancelledError"), None)
             if failed_call is not None:
                 await emit(NodeFaulted(occurrence_id, "operator", failed_call.error))
                 await self._finish_node_error(workflow, node, session_id, occurrence_id, failed_call.error)
                 return
-            resumed = next((item for item in invocation.scheduler.waits.values()
+            resumed = next((item for item in self._occurrence_waits(session_id, occurrence_id)
                 if item.occurrence_id == occurrence_id and item.status == "resumed"), None)
             if isinstance(node.executable, Wait) and resumed is not None:
                 output = node.executable.output_contract.restore(thaw(resumed.response))
                 if node.output_contract is not None:
                     output = node.output_contract.to_record(output)
             elif "aggregated" in execution.completed_stages:
-                output = thaw(execution.aggregate_output)
+                output = execution.aggregate_output
             else:
                 child_plan = self._child_plan(invocation, occurrence_id) if isinstance(node.executable, WorkflowIR) else None
                 if "input_mapped" in execution.completed_stages:
@@ -262,8 +275,12 @@ class WorkflowExecutor:
                     values = [thaw(unit.input) for unit in child_plan.units]
                     mapped = self._restore_mapped(node, values if node.map is not None else values[0])
                 else:
+                    incoming = self._incoming_values(invocation, occurrence_id)
+                    invocation_input = (
+                        thaw(invocation.input) if node.input_mapping is not None or not incoming else None
+                    )
                     mapped, duration = await self._node_executor.timed(self._node_executor.map_input, node,
-                        invocation_input=thaw(invocation.input), incoming=self._incoming_values(invocation, occurrence_id),
+                        invocation_input=invocation_input, incoming=incoming,
                         invocation_context=invocation.context, session_context=state.session.context)
                     if node.input_mapping is not None:
                         await emit(InputMapped(occurrence_id, self._record_mapped(node, mapped), duration))
@@ -286,6 +303,8 @@ class WorkflowExecutor:
                 phase = "operator"
                 if isinstance(node.executable, WorkflowIR):
                     output, metrics = await self._execute_child_node(node, occurrence_id, mapped, state)
+                    if node.output_contract is not None:
+                        output = node.output_contract.to_record(output)
                 else:
                     async def emit_chunk(chunk):
                         try:
@@ -294,8 +313,8 @@ class WorkflowExecutor:
                             raise
                         except Exception:
                             return
-                    calls = self._repository.state(session_id).invocation.scheduler.operator_calls
-                    completed = {item.unit_index: item for item in calls.values()
+                    calls = self._occurrence_calls(session_id, occurrence_id)
+                    completed = {item.unit_index: item for item in calls
                         if item.occurrence_id == occurrence_id and item.status == "completed"}
                     result = await self._node_executor.execute(executable_node, occurrence_id, mapped,
                         invocation_context=invocation.context, session_context=state.session.context,
@@ -309,9 +328,19 @@ class WorkflowExecutor:
                         output, duration = await self._node_executor.timed(self._node_executor.call_hook,
                             node.map.aggregate, aggregate_context)
                         record = node.output_contract.to_record(output) if node.output_contract is not None else output
-                        await emit(Aggregated(occurrence_id, record, duration))
-                if node.output_contract is not None:
-                    output = node.output_contract.to_record(output)
+                        accepted = await emit(Aggregated(occurrence_id, record, duration))
+                        output = accepted.payload.output
+                    else:
+                        # The accepted Call outputs have already passed their
+                        # contracts. Propagate those owned values, not another
+                        # record conversion of the transient executor result.
+                        calls = self._occurrence_calls(session_id, occurrence_id)
+                        accepted = {item.unit_index: item.output for item in calls
+                            if item.occurrence_id == occurrence_id and item.status == "completed"}
+                        if node.map is None:
+                            output = accepted[0]
+                        else:
+                            output = freeze(tuple(accepted[index] for index in range(len(mapped))))
             # Context preview, routing and final commit remain serialized per
             # Session so other node completions cannot invalidate the preview.
             async with self._completion_locks.setdefault(session_id, asyncio.Lock()):
@@ -897,7 +926,7 @@ class WorkflowExecutor:
             session_context=(
                 session_context if isinstance(session_context, Mapping) else {}
             ),
-            output=output,
+            output=thaw(output),
         )
         for mapping in node.user_events:
             try:
@@ -998,14 +1027,10 @@ class WorkflowExecutor:
         state = self._repository.state(session_id)
         invocation = _active_invocation(state)
         scheduler = invocation.scheduler
-        if any(
-            item.status in {"ready", "running"}
-            for item in scheduler.occurrences.values()
-        ):
+        index = self._execution_index(session_id)
+        if any(index.occurrence_counts.get(status, 0) for status in ("ready", "running", "waiting")):
             return
-        if any(item.status == "waiting" for item in scheduler.occurrences.values()):
-            return
-        if any(item.status == "waiting" for item in scheduler.waits.values()):
+        if index.waiting_count:
             return
         unhandled = [
             item
@@ -1034,9 +1059,9 @@ class WorkflowExecutor:
             )
             return
         output = (
-            thaw(exits[0].output)
+            exits[0].output
             if len(workflow.exit_node_ids) == 1
-            else {item.node_id: thaw(item.output) for item in exits}
+            else {item.node_id: item.output for item in exits}
         )
         await self._emit(
             session_id, invocation.id, InvocationCompleted(output)
@@ -1049,6 +1074,8 @@ class WorkflowExecutor:
             return None
         invocation = self._repository.state(session_id).invocation
         if invocation is None:
+            return None
+        if not self._execution_index(session_id).occurrence_counts.get("failed", 0):
             return None
         return next(
             (

@@ -1,0 +1,19 @@
+{
+  "calls": 500,
+  "method": "5 timing samples without counters; separate instrumentation run; noop handler; 1 worker; pool creation/shutdown included",
+  "burst_pool": {
+    "median_ns": 94073693,
+    "thread_starts": 500,
+    "pipes": 500
+  },
+  "persistent_pool_reference": {
+    "median_ns": 47400818,
+    "thread_starts": 1,
+    "pipes": 500
+  },
+  "completed_future": {
+    "median_ns": 11578927,
+    "thread_starts": 0,
+    "pipes": 500
+  }
+}

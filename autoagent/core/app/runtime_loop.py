@@ -156,6 +156,8 @@ class RuntimeLoop:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
+        from ..executor.future import _acquire_notifier, _release_notifier
+        notifier = _acquire_notifier(loop) if os.name != "nt" else None
         if self._reader is not None:
             loop.add_reader(self._reader, self._drain_pipe)
             self._ready.set()
@@ -170,6 +172,8 @@ class RuntimeLoop:
         if pending:
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         loop.run_until_complete(loop.shutdown_asyncgens())
+        if notifier is not None:
+            _release_notifier(notifier)
         loop.close()
 
     def _drain_pipe(self) -> None:

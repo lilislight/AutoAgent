@@ -1,0 +1,1887 @@
+[
+  {
+    "schema_version": 5,
+    "id": "84dc95d5-833b-4958-9c41-06882d2b87e1",
+    "session_id": "approval_rejected",
+    "invocation_id": null,
+    "sequence": 1,
+    "event_name": "session.opened",
+    "payload": {
+      "context": {}
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session"
+          ],
+          "value": {
+            "id": "approval_rejected",
+            "context": {},
+            "created_at_us": 1789201575632349,
+            "updated_at_us": 1789201575632349,
+            "latest_invocation_id": null,
+            "context_path_revisions": {}
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575632349
+  },
+  {
+    "schema_version": 5,
+    "id": "f4af4784-17ac-4f1c-abb5-eb5371f1c7a4",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 2,
+    "event_name": "invocation.started",
+    "payload": {
+      "workflow_id": "order-processing-demo",
+      "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06",
+      "entry_node_id": "prepare.normalize",
+      "input": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "stock": 3
+      }
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575634466
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation"
+          ],
+          "value": {
+            "id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+            "workflow_id": "order-processing-demo",
+            "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06",
+            "entry_node_id": "prepare.normalize",
+            "status": "running",
+            "input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3
+            },
+            "context": {},
+            "output": null,
+            "error": null,
+            "cancel_reason": null,
+            "created_at_us": 1789201575634466,
+            "started_at_us": 1789201575634466,
+            "completed_at_us": null,
+            "scheduler": {
+              "initialized": true,
+              "ready": [
+                "prepare.normalize@root"
+              ],
+              "occurrences": {
+                "prepare.normalize@root": {
+                  "id": "prepare.normalize@root",
+                  "node_id": "prepare.normalize",
+                  "scope": [],
+                  "status": "ready",
+                  "output": null,
+                  "error": null,
+                  "started_at_us": null,
+                  "completed_at_us": null,
+                  "started_sequence": null,
+                  "ready_at_us": 1789201575634466,
+                  "execution": {
+                    "phase": "none",
+                    "completed_stages": [],
+                    "mapped_input": null,
+                    "resolved_capability_id": null,
+                    "resolved_operator_id": null,
+                    "aggregate_output": null,
+                    "pending_context_patch": {
+                      "invocation": [],
+                      "session": []
+                    },
+                    "routing": [],
+                    "routing_source_status": null,
+                    "fault": null
+                  },
+                  "activations": [],
+                  "metrics": null,
+                  "recovery_attempts": 0
+                }
+              },
+              "resolutions": {},
+              "boundary_resolutions": {},
+              "operator_calls": {},
+              "waits": {}
+            },
+            "child_plans": {},
+            "context_path_revisions": {}
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "latest_invocation_id"
+          ],
+          "value": "019ad926-5a43-4316-acc9-89e5b3d289ee"
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575634466
+  },
+  {
+    "schema_version": 5,
+    "id": "1db657f8-40e3-4851-90c8-d3e9361aaeab",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 3,
+    "event_name": "node_occurrence.started",
+    "payload": {
+      "occurrence_id": "prepare.normalize@root"
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575636250
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.normalize@root"
+          ],
+          "value": {
+            "id": "prepare.normalize@root",
+            "node_id": "prepare.normalize",
+            "scope": [],
+            "status": "running",
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575636250,
+            "completed_at_us": null,
+            "started_sequence": 3,
+            "ready_at_us": 1789201575634466,
+            "execution": {
+              "phase": "started",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "ready"
+          ],
+          "value": []
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575636250
+  },
+  {
+    "schema_version": 5,
+    "id": "191e3dc9-cf6b-49a9-a023-6ee79fdf6068",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 4,
+    "event_name": "operator_call.started",
+    "payload": {
+      "call_id": "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+      "occurrence_id": "prepare.normalize@root",
+      "operator_id": "normalize_order",
+      "unit_index": 0,
+      "input": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "stock": 3
+      },
+      "queue_duration_ns": 1595
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575638023
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "2fc2ae39-4478-4d79-b8f6-3fc1768a6545"
+          ],
+          "value": {
+            "id": "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+            "occurrence_id": "prepare.normalize@root",
+            "operator_id": "normalize_order",
+            "unit_index": 0,
+            "status": "running",
+            "input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3
+            },
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575638023,
+            "completed_at_us": null,
+            "queue_duration_ns": 1595,
+            "execution_duration_ns": null
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.normalize@root",
+            "execution"
+          ],
+          "value": {
+            "phase": "executing",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575638023
+  },
+  {
+    "schema_version": 5,
+    "id": "cb42d2a1-60fc-47d1-9710-46a535aec160",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 5,
+    "event_name": "operator_call.completed",
+    "payload": {
+      "call_id": "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+      "output": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "stock": 3,
+        "currency": "USD"
+      },
+      "execution_duration_ns": 341468
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575640481
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+            "status"
+          ],
+          "value": "completed"
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+            "output"
+          ],
+          "value": {
+            "order_id": "approval_rejected",
+            "amount": 600,
+            "stock": 3,
+            "currency": "USD"
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+            "error"
+          ],
+          "value": null
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+            "completed_at_us"
+          ],
+          "value": 1789201575640481
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "2fc2ae39-4478-4d79-b8f6-3fc1768a6545",
+            "execution_duration_ns"
+          ],
+          "value": 341468
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575640481
+  },
+  {
+    "schema_version": 5,
+    "id": "64720329-f420-4a1e-a35f-1f8a25cc87e4",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 6,
+    "event_name": "output.bound",
+    "payload": {
+      "occurrence_id": "prepare.normalize@root",
+      "patch": {
+        "invocation": [
+          {
+            "operation": "set",
+            "path": [
+              "order"
+            ],
+            "value": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3,
+              "currency": "USD"
+            }
+          }
+        ],
+        "session": []
+      },
+      "duration_ns": 141499
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575642327
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.normalize@root",
+            "execution"
+          ],
+          "value": {
+            "phase": "output_bound",
+            "completed_stages": [
+              "output_bound"
+            ],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [
+                {
+                  "operation": "set",
+                  "path": [
+                    "order"
+                  ],
+                  "value": {
+                    "order_id": "approval_rejected",
+                    "amount": 600,
+                    "stock": 3,
+                    "currency": "USD"
+                  }
+                }
+              ],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575642327
+  },
+  {
+    "schema_version": 5,
+    "id": "93a0f792-e974-4ef1-887d-24064fa53fbb",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 7,
+    "event_name": "node_occurrence.completed",
+    "payload": {
+      "occurrence_id": "prepare.normalize@root",
+      "output": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "stock": 3,
+        "currency": "USD"
+      },
+      "metrics": {
+        "call_count": 1,
+        "peak_parallelism": 1
+      }
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575643891
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.normalize@root"
+          ],
+          "value": {
+            "id": "prepare.normalize@root",
+            "node_id": "prepare.normalize",
+            "scope": [],
+            "status": "completed",
+            "output": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3,
+              "currency": "USD"
+            },
+            "error": null,
+            "started_at_us": 1789201575636250,
+            "completed_at_us": 1789201575643891,
+            "started_sequence": 3,
+            "ready_at_us": 1789201575634466,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": {
+              "call_count": 1,
+              "peak_parallelism": 1
+            },
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "context"
+          ],
+          "value": {
+            "order": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3,
+              "currency": "USD"
+            }
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "context_path_revisions"
+          ],
+          "value": {
+            "/order": 7
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root"
+          ],
+          "value": {
+            "id": "prepare.approval@root",
+            "node_id": "prepare.approval",
+            "scope": [],
+            "status": "ready",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": null,
+            "started_sequence": null,
+            "ready_at_us": 1789201575643891,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "prepare.normalize->prepare.approval",
+                "source_occurrence_id": "prepare.normalize@root",
+                "target_node_id": "prepare.approval"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "ready"
+          ],
+          "value": [
+            "prepare.approval@root"
+          ]
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575643891
+  },
+  {
+    "schema_version": 5,
+    "id": "5749816c-a5bf-4858-be38-478cd3598a93",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 8,
+    "event_name": "node_occurrence.started",
+    "payload": {
+      "occurrence_id": "prepare.approval@root"
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575646006
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root"
+          ],
+          "value": {
+            "id": "prepare.approval@root",
+            "node_id": "prepare.approval",
+            "scope": [],
+            "status": "running",
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575646006,
+            "completed_at_us": null,
+            "started_sequence": 8,
+            "ready_at_us": 1789201575643891,
+            "execution": {
+              "phase": "started",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "prepare.normalize->prepare.approval",
+                "source_occurrence_id": "prepare.normalize@root",
+                "target_node_id": "prepare.approval"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "ready"
+          ],
+          "value": []
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575646006
+  },
+  {
+    "schema_version": 5,
+    "id": "8813215d-f64c-41a4-8081-8c55cf3b63b9",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 9,
+    "event_name": "input.mapped",
+    "payload": {
+      "occurrence_id": "prepare.approval@root",
+      "mapped_input": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "question": "Approve this order?"
+      },
+      "duration_ns": 159936
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575647939
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root",
+            "execution"
+          ],
+          "value": {
+            "phase": "input_mapped",
+            "completed_stages": [
+              "input_mapped"
+            ],
+            "mapped_input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "question": "Approve this order?"
+            },
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575647939
+  },
+  {
+    "schema_version": 5,
+    "id": "7bea5457-cef5-4cc6-acad-cae639c438ee",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 10,
+    "event_name": "node_occurrence.waiting",
+    "payload": {
+      "occurrence_id": "prepare.approval@root",
+      "wait_id": "d5387f2a-0468-4acd-89ef-3a8e972c7503",
+      "request": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "question": "Approve this order?"
+      }
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575650742
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root"
+          ],
+          "value": {
+            "id": "prepare.approval@root",
+            "node_id": "prepare.approval",
+            "scope": [],
+            "status": "waiting",
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575646006,
+            "completed_at_us": null,
+            "started_sequence": 8,
+            "ready_at_us": 1789201575643891,
+            "execution": {
+              "phase": "input_mapped",
+              "completed_stages": [
+                "input_mapped"
+              ],
+              "mapped_input": {
+                "order_id": "approval_rejected",
+                "amount": 600,
+                "question": "Approve this order?"
+              },
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "prepare.normalize->prepare.approval",
+                "source_occurrence_id": "prepare.normalize@root",
+                "target_node_id": "prepare.approval"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "waits",
+            "d5387f2a-0468-4acd-89ef-3a8e972c7503"
+          ],
+          "value": {
+            "id": "d5387f2a-0468-4acd-89ef-3a8e972c7503",
+            "occurrence_id": "prepare.approval@root",
+            "status": "waiting",
+            "request": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "question": "Approve this order?"
+            },
+            "response": null,
+            "created_at_us": 1789201575650742,
+            "resumed_at_us": null
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "status"
+          ],
+          "value": "waiting"
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575650742
+  },
+  {
+    "schema_version": 5,
+    "id": "33a593f6-cae4-42c3-9508-7b35db385505",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 11,
+    "event_name": "wait.resumed",
+    "payload": {
+      "wait_id": "d5387f2a-0468-4acd-89ef-3a8e972c7503",
+      "response": {
+        "approved": false
+      }
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575653677
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "waits",
+            "d5387f2a-0468-4acd-89ef-3a8e972c7503"
+          ],
+          "value": {
+            "id": "d5387f2a-0468-4acd-89ef-3a8e972c7503",
+            "occurrence_id": "prepare.approval@root",
+            "status": "resumed",
+            "request": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "question": "Approve this order?"
+            },
+            "response": {
+              "approved": false
+            },
+            "created_at_us": 1789201575650742,
+            "resumed_at_us": 1789201575653677
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root"
+          ],
+          "value": {
+            "id": "prepare.approval@root",
+            "node_id": "prepare.approval",
+            "scope": [],
+            "status": "running",
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575646006,
+            "completed_at_us": null,
+            "started_sequence": 8,
+            "ready_at_us": 1789201575653677,
+            "execution": {
+              "phase": "input_mapped",
+              "completed_stages": [
+                "input_mapped"
+              ],
+              "mapped_input": {
+                "order_id": "approval_rejected",
+                "amount": 600,
+                "question": "Approve this order?"
+              },
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "prepare.normalize->prepare.approval",
+                "source_occurrence_id": "prepare.normalize@root",
+                "target_node_id": "prepare.approval"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "status"
+          ],
+          "value": "running"
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575653677
+  },
+  {
+    "schema_version": 5,
+    "id": "52afb4d5-db73-4f5e-97be-aea3af396723",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 12,
+    "event_name": "routing.resolved",
+    "payload": {
+      "occurrence_id": "prepare.approval@root",
+      "source_status": "complete",
+      "conditions": [
+        {
+          "edge_id": "approval-to-risk",
+          "selected": false,
+          "duration_ns": 572051
+        },
+        {
+          "edge_id": "approval-to-inventory",
+          "selected": false,
+          "duration_ns": 528394
+        },
+        {
+          "edge_id": "approval-to-rejected",
+          "selected": true,
+          "duration_ns": 554490
+        }
+      ],
+      "duration_ns": 862977
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575657269
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root",
+            "execution"
+          ],
+          "value": {
+            "phase": "routing_resolved",
+            "completed_stages": [
+              "input_mapped",
+              "routing_resolved"
+            ],
+            "mapped_input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "question": "Approve this order?"
+            },
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [
+              {
+                "edge_id": "approval-to-risk",
+                "selected": false,
+                "duration_ns": 572051
+              },
+              {
+                "edge_id": "approval-to-inventory",
+                "selected": false,
+                "duration_ns": 528394
+              },
+              {
+                "edge_id": "approval-to-rejected",
+                "selected": true,
+                "duration_ns": 554490
+              }
+            ],
+            "routing_source_status": "complete",
+            "fault": null
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575657269
+  },
+  {
+    "schema_version": 5,
+    "id": "e7af3fd2-1491-43f1-b90c-ec7178d8698d",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 13,
+    "event_name": "node_occurrence.completed",
+    "payload": {
+      "occurrence_id": "prepare.approval@root",
+      "output": {
+        "approved": false
+      },
+      "metrics": null
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575659267
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "prepare.approval@root"
+          ],
+          "value": {
+            "id": "prepare.approval@root",
+            "node_id": "prepare.approval",
+            "scope": [],
+            "status": "completed",
+            "output": {
+              "approved": false
+            },
+            "error": null,
+            "started_at_us": 1789201575646006,
+            "completed_at_us": 1789201575659267,
+            "started_sequence": 8,
+            "ready_at_us": 1789201575653677,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "prepare.normalize->prepare.approval",
+                "source_occurrence_id": "prepare.normalize@root",
+                "target_node_id": "prepare.approval"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "approval_rejected@root"
+          ],
+          "value": {
+            "id": "approval_rejected@root",
+            "node_id": "approval_rejected",
+            "scope": [],
+            "status": "ready",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": null,
+            "started_sequence": null,
+            "ready_at_us": 1789201575659267,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "approval-to-rejected",
+                "source_occurrence_id": "prepare.approval@root",
+                "target_node_id": "approval_rejected"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "risk@root"
+          ],
+          "value": {
+            "id": "risk@root",
+            "node_id": "risk",
+            "scope": [],
+            "status": "skipped",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": 1789201575659267,
+            "started_sequence": null,
+            "ready_at_us": null,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "inventory@root"
+          ],
+          "value": {
+            "id": "inventory@root",
+            "node_id": "inventory",
+            "scope": [],
+            "status": "skipped",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": 1789201575659267,
+            "started_sequence": null,
+            "ready_at_us": null,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "combine@root"
+          ],
+          "value": {
+            "id": "combine@root",
+            "node_id": "combine",
+            "scope": [],
+            "status": "skipped",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": 1789201575659267,
+            "started_sequence": null,
+            "ready_at_us": null,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "spawn_audit@root"
+          ],
+          "value": {
+            "id": "spawn_audit@root",
+            "node_id": "spawn_audit",
+            "scope": [],
+            "status": "skipped",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": 1789201575659267,
+            "started_sequence": null,
+            "ready_at_us": null,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "manual_review@root"
+          ],
+          "value": {
+            "id": "manual_review@root",
+            "node_id": "manual_review",
+            "scope": [],
+            "status": "skipped",
+            "output": null,
+            "error": null,
+            "started_at_us": null,
+            "completed_at_us": 1789201575659267,
+            "started_sequence": null,
+            "ready_at_us": null,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "ready"
+          ],
+          "value": [
+            "approval_rejected@root"
+          ]
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575659267
+  },
+  {
+    "schema_version": 5,
+    "id": "429faf20-bd4f-4fc3-8d41-7921c6a55d0d",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 14,
+    "event_name": "node_occurrence.started",
+    "payload": {
+      "occurrence_id": "approval_rejected@root"
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575661404
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "approval_rejected@root"
+          ],
+          "value": {
+            "id": "approval_rejected@root",
+            "node_id": "approval_rejected",
+            "scope": [],
+            "status": "running",
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575661404,
+            "completed_at_us": null,
+            "started_sequence": 14,
+            "ready_at_us": 1789201575659267,
+            "execution": {
+              "phase": "started",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "approval-to-rejected",
+                "source_occurrence_id": "prepare.approval@root",
+                "target_node_id": "approval_rejected"
+              }
+            ],
+            "metrics": null,
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "ready"
+          ],
+          "value": []
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575661404
+  },
+  {
+    "schema_version": 5,
+    "id": "9dc5f6ca-1219-4251-b5d4-18dbc58bcf10",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 15,
+    "event_name": "input.mapped",
+    "payload": {
+      "occurrence_id": "approval_rejected@root",
+      "mapped_input": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "stock": 3,
+        "currency": "USD"
+      },
+      "duration_ns": 154851
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575663297
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "approval_rejected@root",
+            "execution"
+          ],
+          "value": {
+            "phase": "input_mapped",
+            "completed_stages": [
+              "input_mapped"
+            ],
+            "mapped_input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3,
+              "currency": "USD"
+            },
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575663297
+  },
+  {
+    "schema_version": 5,
+    "id": "f03c4df0-f9c9-4447-bbe2-2c82015f98ec",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 16,
+    "event_name": "operator_call.started",
+    "payload": {
+      "call_id": "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+      "occurrence_id": "approval_rejected@root",
+      "operator_id": "reject_order",
+      "unit_index": 0,
+      "input": {
+        "order_id": "approval_rejected",
+        "amount": 600,
+        "stock": 3,
+        "currency": "USD"
+      },
+      "queue_duration_ns": 1744
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575664874
+        },
+        {
+          "op": "add",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016"
+          ],
+          "value": {
+            "id": "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+            "occurrence_id": "approval_rejected@root",
+            "operator_id": "reject_order",
+            "unit_index": 0,
+            "status": "running",
+            "input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3,
+              "currency": "USD"
+            },
+            "output": null,
+            "error": null,
+            "started_at_us": 1789201575664874,
+            "completed_at_us": null,
+            "queue_duration_ns": 1744,
+            "execution_duration_ns": null
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "approval_rejected@root",
+            "execution"
+          ],
+          "value": {
+            "phase": "executing",
+            "completed_stages": [
+              "input_mapped"
+            ],
+            "mapped_input": {
+              "order_id": "approval_rejected",
+              "amount": 600,
+              "stock": 3,
+              "currency": "USD"
+            },
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          }
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575664874
+  },
+  {
+    "schema_version": 5,
+    "id": "d270d5d1-9dd1-4832-97c7-aae93c78dbf7",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 17,
+    "event_name": "operator_call.completed",
+    "payload": {
+      "call_id": "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+      "output": {
+        "order_id": "approval_rejected",
+        "approved": false,
+        "summary": "approval was rejected"
+      },
+      "execution_duration_ns": 154056
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575666719
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+            "status"
+          ],
+          "value": "completed"
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+            "output"
+          ],
+          "value": {
+            "order_id": "approval_rejected",
+            "approved": false,
+            "summary": "approval was rejected"
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+            "error"
+          ],
+          "value": null
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+            "completed_at_us"
+          ],
+          "value": 1789201575666719
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "operator_calls",
+            "ec0dc9b2-7fbc-47ce-99d9-e5ef6fbc0016",
+            "execution_duration_ns"
+          ],
+          "value": 154056
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575666719
+  },
+  {
+    "schema_version": 5,
+    "id": "89cd17d4-0fe5-4b7f-8b8c-39f654e9570a",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 18,
+    "event_name": "node_occurrence.completed",
+    "payload": {
+      "occurrence_id": "approval_rejected@root",
+      "output": {
+        "order_id": "approval_rejected",
+        "approved": false,
+        "summary": "approval was rejected"
+      },
+      "metrics": {
+        "call_count": 1,
+        "peak_parallelism": 1
+      }
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575668256
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "occurrences",
+            "approval_rejected@root"
+          ],
+          "value": {
+            "id": "approval_rejected@root",
+            "node_id": "approval_rejected",
+            "scope": [],
+            "status": "completed",
+            "output": {
+              "order_id": "approval_rejected",
+              "approved": false,
+              "summary": "approval was rejected"
+            },
+            "error": null,
+            "started_at_us": 1789201575661404,
+            "completed_at_us": 1789201575668256,
+            "started_sequence": 14,
+            "ready_at_us": 1789201575659267,
+            "execution": {
+              "phase": "none",
+              "completed_stages": [],
+              "mapped_input": null,
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "aggregate_output": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "routing": [],
+              "routing_source_status": null,
+              "fault": null
+            },
+            "activations": [
+              {
+                "edge_id": "approval-to-rejected",
+                "source_occurrence_id": "prepare.approval@root",
+                "target_node_id": "approval_rejected"
+              }
+            ],
+            "metrics": {
+              "call_count": 1,
+              "peak_parallelism": 1
+            },
+            "recovery_attempts": 0
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "scheduler",
+            "ready"
+          ],
+          "value": []
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575668256
+  },
+  {
+    "schema_version": 5,
+    "id": "2f39b11e-9dae-43aa-86da-05a90c2eacbd",
+    "session_id": "approval_rejected",
+    "invocation_id": "019ad926-5a43-4316-acc9-89e5b3d289ee",
+    "sequence": 19,
+    "event_name": "invocation.completed",
+    "payload": {
+      "output": {
+        "approval_rejected": {
+          "order_id": "approval_rejected",
+          "approved": false,
+          "summary": "approval was rejected"
+        }
+      }
+    },
+    "delta": {
+      "operations": [
+        {
+          "op": "replace",
+          "path": [
+            "session",
+            "updated_at_us"
+          ],
+          "value": 1789201575670063
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "status"
+          ],
+          "value": "completed"
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "output"
+          ],
+          "value": {
+            "approval_rejected": {
+              "order_id": "approval_rejected",
+              "approved": false,
+              "summary": "approval was rejected"
+            }
+          }
+        },
+        {
+          "op": "replace",
+          "path": [
+            "invocation",
+            "completed_at_us"
+          ],
+          "value": 1789201575670063
+        }
+      ]
+    },
+    "occurred_at_us": 1789201575670063
+  }
+]

@@ -113,3 +113,39 @@ def _path(value: str | tuple[str, ...]) -> tuple[str, ...]:
 
 
 __all__ = ["ContextOperation", "ContextPatch", "apply_context_operation"]
+
+
+class _ContextEdit:
+    """Private batch workspace; each modified ancestor is materialized once."""
+    def __init__(self, context):
+        from .runtime._chunked import MapEdit
+        if not isinstance(context, Mapping):
+            raise RuntimeTransitionError('CONTEXT_NOT_MAPPING', 'Runtime Context must be a mapping.')
+        self.values = MapEdit(context)
+        self.children = {}
+
+    def apply(self, operation):
+        from .runtime.values import freeze
+        current = self
+        for key in operation.path[:-1]:
+            child = current.children.get(key)
+            if child is None:
+                value = current.values.get(key)
+                if value is None:
+                    value = MappingProxyType({})
+                if not isinstance(value, Mapping):
+                    raise RuntimeTransitionError('CONTEXT_PATH_NOT_MAPPING', f'Context path component {key!r} is not a mapping.')
+                child = _ContextEdit(value)
+                current.children[key] = child
+            current = child
+        key = operation.path[-1]
+        current.children.pop(key, None)
+        if operation.operation == 'set':
+            current.values[key] = freeze(operation.value)
+        else:
+            current.values.pop(key, None)
+
+    def finish(self):
+        for key, child in self.children.items():
+            self.values[key] = child.finish()
+        return self.values.finish()

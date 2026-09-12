@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..runtime._overlay import PlanningOverlay
+
 from collections import deque
 
 from ..errors import RuntimeTransitionError
@@ -148,9 +150,9 @@ class DAGScheduler:
         known_plans: tuple[OccurrencePlan, ...] = (),
     ) -> SchedulerDelta:
         invocation = _running_invocation(state)
-        existing_occurrences = set(invocation.scheduler.occurrences)
+        existing_occurrences = invocation.scheduler.occurrences
         planned = {item.id for item in known_plans}
-        resolutions = dict(invocation.scheduler.resolutions)
+        resolutions = PlanningOverlay(invocation.scheduler.resolutions)
         new_resolutions: list[EdgeResolution] = []
         ready: list[OccurrencePlan] = []
         skipped: list[OccurrencePlan] = []

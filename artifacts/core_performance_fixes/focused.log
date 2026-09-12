@@ -1,0 +1,14 @@
+test_acknowledged_event_is_released (tests.test_phase2_runtime_state.RepositoryTests.test_acknowledged_event_is_released)
+Core retains State but releases acknowledged Events with or without a sink. ... ok
+test_append_failure_keeps_visible_state_and_retries_same_event (tests.test_phase2_runtime_state.RepositoryTests.test_append_failure_keeps_visible_state_and_retries_same_event)
+Ambiguous append retries preserve Event identity and hide candidate State. ... ok
+test_cancelled_append_does_not_publish_state (tests.test_phase2_runtime_state.RepositoryTests.test_cancelled_append_does_not_publish_state)
+Cancellation while storage is blocked preserves the last committed prefix. ... ok
+test_concurrent_same_session_commit_uses_one_order (tests.test_phase2_runtime_state.RepositoryTests.test_concurrent_same_session_commit_uses_one_order)
+Concurrent commits reserve contiguous sequence numbers under the Session lock. ... ok
+test_hours_of_execution_preserve_nanosecond_duration (tests.test_phase2_runtime_state.RuntimeClockUnitTests.test_hours_of_execution_preserve_nanosecond_duration)
+A six-hour Operator duration round-trips exactly without changing units. ... ok
+test_old_clock_schema_is_rejected (tests.test_phase2_runtime_state.RuntimeClockUnitTests.test_old_clock_schema_is_rejected)
+Earlier schema versions cannot silently reinterpret timestamp units. ... ok
+test_wall_clock_records_use_integer_microseconds (tests.test_phase2_runtime_state.RuntimeClockUnitTests.test_wall_clock_records_use_integer_microseconds)
+Events, State, User Events and Checkpoints use the same Unix microseconds. ... 

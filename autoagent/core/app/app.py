@@ -23,7 +23,6 @@ from ..runtime import (
     ChildInvocationPhaseChanged,
     ChildInvocationPlanned,
     RuntimeRepository,
-    InMemoryRuntimeEventStore,
     InMemoryUserEventJournal,
     InvocationCancelled,
     InvocationFailed,
@@ -98,9 +97,7 @@ class AutoAgentApp:
         self._repository = runtime_repository or RuntimeRepository(sink=runtime_event_sink)
         if runtime_repository is not None and runtime_event_sink is not None:
             if not isinstance(runtime_repository, RuntimeRepository):
-                raise TypeError("Inject the durable EventStore into a custom RuntimeRepository.")
-            if not isinstance(runtime_repository.event_store, InMemoryRuntimeEventStore):
-                raise ValueError("Configure one durable boundary: EventStore or sink.")
+                raise TypeError("Configure the sink on the custom RuntimeRepository.")
             runtime_repository.sink = runtime_event_sink
         self._runtime_event_sink = runtime_event_sink
         self._user_event_sink = user_event_sink
@@ -860,7 +857,7 @@ class AutoAgentApp:
                 # replacement; otherwise retiring Child State would silently
                 # drain the only recoverable copy of unacknowledged progress.
                 previous_graph = (session_id, *old_child_sessions)
-                await self._export_runtime_events(previous_graph)
+                await self._settle_runtime_commits(previous_graph)
                 # A Child task whose terminal Event export failed is no longer
                 # live, but its parent phase can still be ``accepted``.  Once
                 # the retry above makes every terminal Child durable, converge
@@ -1778,12 +1775,15 @@ class AutoAgentApp:
                      and occurrence.execution.routing_source_status == source_status]
                     + [edge.id for edge in workflow.outgoing(occurrence.node_id)
                        if edge.on == source_status and edge.condition is None])
+                planning_options = {}
+                if type(self._scheduler) is Scheduler and hasattr(self._repository, 'execution_index'):
+                    planning_options['_execution_index'] = self._repository.execution_index(session_id)
                 if isinstance(payload, NodeCompleted):
                     graph_delta = self._scheduler.complete(workflow, state, payload.occurrence_id,
-                        payload.output, selected_edge_ids=selected)
+                        payload.output, selected_edge_ids=selected, **planning_options)
                 else:
                     graph_delta = self._scheduler.fail(workflow, state, payload.occurrence_id,
-                        payload.error, selected_edge_ids=selected)
+                        payload.error, selected_edge_ids=selected, **planning_options)
             transition = await self._repository.commit(
                 session_id=session_id, invocation_id=invocation_id, payload=payload,
                 occurred_at_us=self._clock_us(), scheduler_delta=graph_delta,
@@ -1796,12 +1796,12 @@ class AutoAgentApp:
                         unit.unit_index,
                         unit.child_invocation_id,
                     )
-            await self._export_runtime_events((session_id,))
+            await self._settle_runtime_commits((session_id,))
             return transition
 
     async def _ensure_child_durable(self, session_id: str) -> None:
         await self._repository.settle(session_id)
-        await self._export_runtime_events((session_id,))
+        await self._settle_runtime_commits((session_id,))
 
     async def _emit_user(
         self,
@@ -1870,7 +1870,7 @@ class AutoAgentApp:
         checkpoint = self._repository.capture_checkpoint(
             session_id, captured_at_us=self._clock_us()
         )
-        await self._export_runtime_events((checkpoint.session_id,))
+        await self._settle_runtime_commits((checkpoint.session_id,))
         return checkpoint
 
     def _runtime_lock(self, root_session_id: str) -> asyncio.Lock:
@@ -1916,11 +1916,10 @@ class AutoAgentApp:
         else:
             self._result_leases.pop(root_session_id, None)
 
-    async def _export_runtime_events(self, session_ids: tuple[str, ...]) -> None:
+    async def _settle_runtime_commits(self, session_ids: tuple[str, ...]) -> None:
         for session_id in dict.fromkeys(session_ids):
             await self._repository.settle(session_id)
             self._finish_admission_retirement(session_id)
-            self._repository.drain_events(session_id)
 
     async def _result(self, ref: InvocationRef) -> InvocationResult:
         root = self._root_session_id(ref.session_id)
@@ -2187,7 +2186,7 @@ class AutoAgentApp:
         state = self._repository.state(session_id)
         if state.session is None or state.invocation is not None:
             return
-        await self._export_runtime_events((session_id,))
+        await self._settle_runtime_commits((session_id,))
         self._repository.discard_states((session_id,))
         self._child_owners.pop(session_id, None)
         self._runtime_locks.pop(session_id, None)

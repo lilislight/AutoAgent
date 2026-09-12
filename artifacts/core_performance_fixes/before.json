@@ -1,0 +1,66 @@
+{
+  "cold_call_update_100": {
+    "median_ns": 34772,
+    "peak_bytes": 8824
+  },
+  "steady_call_update_100": {
+    "median_ns": 33434,
+    "peak_bytes": 8824
+  },
+  "steady_child_phase_100": {
+    "median_ns": 11236,
+    "peak_bytes": 4888
+  },
+  "cold_call_update_10000": {
+    "median_ns": 693337,
+    "peak_bytes": 394496
+  },
+  "steady_call_update_10000": {
+    "median_ns": 702809,
+    "peak_bytes": 394496
+  },
+  "steady_child_phase_10000": {
+    "median_ns": 93366,
+    "peak_bytes": 163288
+  },
+  "cold_call_update_50000": {
+    "median_ns": 7267692,
+    "peak_bytes": 3286784
+  },
+  "steady_call_update_50000": {
+    "median_ns": 7578177,
+    "peak_bytes": 3286784
+  },
+  "steady_child_phase_50000": {
+    "median_ns": 538992,
+    "peak_bytes": 803288
+  },
+  "context_10000keys_100ops": {
+    "median_ns": 69981533,
+    "peak_bytes": 618048
+  },
+  "empty_context_50000revisions": {
+    "median_ns": 5138489,
+    "peak_bytes": 4332448
+  },
+  "internal_restore_50000": {
+    "median_ns": 12387582,
+    "peak_bytes": 4673870
+  },
+  "runtime_dispatch_500": {
+    "median_ns": 99487011,
+    "peak_bytes": 18887
+  },
+  "live_map_100": {
+    "median_ns": 25512407,
+    "peak_bytes": 388866
+  },
+  "live_map_1000": {
+    "median_ns": 290333095,
+    "peak_bytes": 3084356
+  },
+  "live_map_5000": {
+    "median_ns": 3045807818,
+    "peak_bytes": 10213686
+  }
+}

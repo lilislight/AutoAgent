@@ -12,7 +12,7 @@ from autoagent import (AutoAgentApp, ContextOperation, ContextPatch, Edge, Map, 
     Workflow, InputMappingContext, OutputBindingContext, ConditionContext, AggregationContext,
     RuntimeInfrastructureError, RuntimeTransitionError)
 from autoagent.core.runtime import (RuntimeEvent, RuntimeState, StateReducer, StateDelta,
-    StateOperation, RuntimeRepository, InMemoryRuntimeEventStore, SessionOpened,
+    StateOperation, RuntimeRepository, SessionOpened,
     InvocationStarted, InputMapped, OperatorCallStarted, OperatorCallCompleted,
     Aggregated, OutputBound, RoutingResolved, NodeStarted, NodeCompleted, SessionCheckpoint,
     TransitionPlanner, RecoveryApplied)
@@ -148,52 +148,66 @@ class RuntimeReducerTests(unittest.TestCase):
 class RepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_append_failure_keeps_visible_state_and_retries_same_event(self):
         """Ambiguous append retries preserve Event identity and hide candidate State."""
-        class Store(InMemoryRuntimeEventStore):
+        class Store(RecordingSink):
             fail = True
-            async def append(self, event, *, expected_sequence):
-                await super().append(event, expected_sequence=expected_sequence)
+            async def append(self, event):
+                if self.events:
+                    assert self.events[0] is event
+                await super().append(event)
                 if self.fail:
                     self.fail = False
                     raise OSError("ack lost")
-        store = Store(); repository = RuntimeRepository(store)
+        store = Store(); repository = RuntimeRepository(sink=store)
         with self.assertRaises(RuntimeInfrastructureError):
             await repository.commit(session_id="s", invocation_id=None, payload=SessionOpened({}))
         self.assertEqual(repository.state("s").sequence, 0)
+        self.assertNotIn("s", repository._execution_indexes)
         await repository.settle("s")
         self.assertEqual(repository.state("s").sequence, 1)
-        self.assertEqual(len(await store.read("s")), 1)
+        self.assertEqual(len(store.events), 1)
 
     async def test_concurrent_same_session_commit_uses_one_order(self):
         """Concurrent commits reserve contiguous sequence numbers under the Session lock."""
-        repository = RuntimeRepository()
+        sink = RecordingSink()
+        repository = RuntimeRepository(sink=sink)
         await repository.commit(session_id="s", invocation_id=None, payload=SessionOpened({}))
         from autoagent.core.runtime import SchedulerDelta, OccurrencePlan
         await repository.commit(session_id="s", invocation_id="i",
             payload=InvocationStarted("w", "r", "entry", {}),
             scheduler_delta=SchedulerDelta(ready=(OccurrencePlan("entry@root", "entry", ()),)))
         await asyncio.gather(*(repository.commit(session_id="s", invocation_id="i", payload=RecoveryApplied()) for _ in range(20)))
-        events = await repository.event_store.read("s")
+        events = sink.events
         self.assertEqual([e.sequence for e in events], list(range(1, 23)))
         self.assertEqual(repository.state("s"), StateReducer().reduce(events))
 
-    async def test_store_rejects_conflicts_and_accepts_exact_duplicate(self):
-        """Storage idempotency accepts one exact Event and rejects competing history."""
-        repository = RuntimeRepository()
-        event = await repository.commit(session_id="s", invocation_id=None, payload=SessionOpened({}))
-        await repository.event_store.append(event, expected_sequence=0)
-        with self.assertRaises(RuntimeTransitionError):
-            await repository.event_store.append(replace(event, id="other"), expected_sequence=0)
-        with self.assertRaises(RuntimeTransitionError):
-            await repository.event_store.append(replace(event, payload=SessionOpened({"other":1})), expected_sequence=0)
+    async def test_acknowledged_event_is_released(self):
+        """Core retains State but releases acknowledged Events with or without a sink."""
+        import weakref
+        import gc
+        class TrackedEvent(RuntimeEvent):
+            __slots__ = ("__weakref__",)
+        class Sink:
+            async def append(self, event):
+                self.reference = weakref.ref(event)
+        for sink in (None, Sink()):
+            repository = RuntimeRepository(sink=sink)
+            with patch("autoagent.core.runtime.repository.RuntimeEvent", TrackedEvent):
+                event = await repository.commit(session_id="s", invocation_id=None, payload=SessionOpened({}))
+            reference = weakref.ref(event)
+            del event
+            gc.collect()
+            self.assertIsNone(reference())
+            self.assertEqual(repository.state("s").sequence, 1)
+            self.assertEqual(repository._pending, {})
 
     async def test_cancelled_append_does_not_publish_state(self):
         """Cancellation while storage is blocked preserves the last committed prefix."""
         entered = asyncio.Event(); release = asyncio.Event()
-        class Store(InMemoryRuntimeEventStore):
-            async def append(self, event, *, expected_sequence):
+        class Store(RecordingSink):
+            async def append(self, event):
                 entered.set(); await release.wait()
-                await super().append(event, expected_sequence=expected_sequence)
-        repository = RuntimeRepository(Store())
+                await super().append(event)
+        repository = RuntimeRepository(sink=Store())
         task = asyncio.create_task(repository.commit(session_id="s", invocation_id=None, payload=SessionOpened({})))
         await entered.wait(); task.cancel()
         with self.assertRaises(asyncio.CancelledError): await task

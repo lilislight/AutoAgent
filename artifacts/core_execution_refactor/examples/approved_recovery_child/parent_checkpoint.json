@@ -1,0 +1,179 @@
+{
+  "captured_at_us": 1789190537321133,
+  "digest": "9cf529296628f0ba1793686575af330fc480d5f117c79829a52dbc90fb20603c",
+  "id": "8dc84519-b57a-4a49-8d6e-83dd4e032e27",
+  "schema_version": 3,
+  "sequence": 10,
+  "session_id": "core-api-demo-session",
+  "state": {
+    "invocation": {
+      "cancel_reason": null,
+      "child_plans": {},
+      "completed_at_us": null,
+      "context": {
+        "order": {
+          "amount": 600,
+          "currency": "USD",
+          "order_id": "order-42",
+          "stock": 3
+        }
+      },
+      "context_path_revisions": {
+        "/order": 7
+      },
+      "created_at_us": 1789190537301837,
+      "entry_node_id": "prepare.normalize",
+      "error": null,
+      "id": "90dc83a1-565d-47ec-a158-cdf59c53e8e9",
+      "input": {
+        "amount": 600,
+        "order_id": "order-42",
+        "stock": 3
+      },
+      "output": null,
+      "scheduler": {
+        "boundary_resolutions": {},
+        "initialized": true,
+        "occurrences": {
+          "prepare.approval@root": {
+            "activations": [
+              {
+                "edge_id": "prepare.normalize->prepare.approval",
+                "source_occurrence_id": "prepare.normalize@root",
+                "target_node_id": "prepare.approval"
+              }
+            ],
+            "completed_at_us": null,
+            "error": null,
+            "execution": {
+              "aggregate_output": null,
+              "completed_stages": [
+                "input_mapped"
+              ],
+              "fault": null,
+              "mapped_input": {
+                "amount": 600,
+                "order_id": "order-42",
+                "question": "Approve this order?"
+              },
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "phase": "input_mapped",
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "routing": [],
+              "routing_source_status": null
+            },
+            "id": "prepare.approval@root",
+            "metrics": null,
+            "node_id": "prepare.approval",
+            "output": null,
+            "ready_at_us": 1789190537311902,
+            "recovery_attempts": 0,
+            "scope": [],
+            "started_at_us": 1789190537313829,
+            "started_sequence": 8,
+            "status": "waiting"
+          },
+          "prepare.normalize@root": {
+            "activations": [],
+            "completed_at_us": 1789190537311902,
+            "error": null,
+            "execution": {
+              "aggregate_output": null,
+              "completed_stages": [],
+              "fault": null,
+              "mapped_input": null,
+              "pending_context_patch": {
+                "invocation": [],
+                "session": []
+              },
+              "phase": "none",
+              "resolved_capability_id": null,
+              "resolved_operator_id": null,
+              "routing": [],
+              "routing_source_status": null
+            },
+            "id": "prepare.normalize@root",
+            "metrics": {
+              "call_count": 1,
+              "peak_parallelism": 1
+            },
+            "node_id": "prepare.normalize",
+            "output": {
+              "amount": 600,
+              "currency": "USD",
+              "order_id": "order-42",
+              "stock": 3
+            },
+            "ready_at_us": 1789190537301837,
+            "recovery_attempts": 0,
+            "scope": [],
+            "started_at_us": 1789190537304020,
+            "started_sequence": 3,
+            "status": "completed"
+          }
+        },
+        "operator_calls": {
+          "0b4606ae-a856-4d6b-bc33-33a1eb72bd5f": {
+            "completed_at_us": 1789190537307941,
+            "error": null,
+            "execution_duration_ns": 384387,
+            "id": "0b4606ae-a856-4d6b-bc33-33a1eb72bd5f",
+            "input": {
+              "amount": 600,
+              "order_id": "order-42",
+              "stock": 3
+            },
+            "occurrence_id": "prepare.normalize@root",
+            "operator_id": "normalize_order",
+            "output": {
+              "amount": 600,
+              "currency": "USD",
+              "order_id": "order-42",
+              "stock": 3
+            },
+            "queue_duration_ns": 3272,
+            "started_at_us": 1789190537305988,
+            "status": "completed",
+            "unit_index": 0
+          }
+        },
+        "ready": [],
+        "resolutions": {},
+        "waits": {
+          "a5cd76e7-26d0-4c0e-bf78-9469f8c50a52": {
+            "created_at_us": 1789190537318837,
+            "id": "a5cd76e7-26d0-4c0e-bf78-9469f8c50a52",
+            "occurrence_id": "prepare.approval@root",
+            "request": {
+              "amount": 600,
+              "order_id": "order-42",
+              "question": "Approve this order?"
+            },
+            "response": null,
+            "resumed_at_us": null,
+            "status": "waiting"
+          }
+        }
+      },
+      "started_at_us": 1789190537301837,
+      "status": "waiting",
+      "workflow_id": "order-processing-demo",
+      "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06"
+    },
+    "last_event_id": "0d08a8b9-3f62-4796-9ef1-47bfa53fb71f",
+    "schema_version": 5,
+    "sequence": 10,
+    "session": {
+      "context": {},
+      "context_path_revisions": {},
+      "created_at_us": 1789190537295246,
+      "id": "core-api-demo-session",
+      "latest_invocation_id": "90dc83a1-565d-47ec-a158-cdf59c53e8e9",
+      "updated_at_us": 1789190537318837
+    }
+  }
+}

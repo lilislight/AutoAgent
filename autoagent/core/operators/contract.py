@@ -127,12 +127,17 @@ class ValueContract:
         compare=False,
     )
 
+    _python_record_equivalent: bool = field(init=False, repr=False, compare=False, default=False)
+
     def __post_init__(self) -> None:
+        object.__setattr__(self, "_python_record_equivalent", _simple_json_annotation(self.annotation))
         object.__setattr__(
             self,
             "_adapter",
             None if self.annotation is None else TypeAdapter(self.annotation),
         )
+        if self._adapter is not None and not _simple_adapter_schema(self._adapter.core_schema):
+            object.__setattr__(self, "_python_record_equivalent", False)
 
     @classmethod
     def create(cls, annotation: object, *, location: str) -> "ValueContract":
@@ -164,7 +169,10 @@ class ValueContract:
         return validated
 
     def to_record(self, value: object) -> object:
-        validated = self.validate(value)
+        return self._to_record_validated(self.validate(value))
+
+    def _to_record_validated(self, validated: object) -> object:
+        """Encode a value already validated by this contract at this boundary."""
         if validated is None:
             return None
         assert self._adapter is not None
@@ -176,6 +184,18 @@ class ValueContract:
         )
         _validate_json_record(record)
         return record
+
+    def _restore_internal(self, value: object) -> object:
+        """Avoid JSON text only for plain JSON contracts and equivalent records."""
+        if not self._python_record_equivalent or not _simple_json_record(value):
+            return self.restore(value)
+        validated = self.validate(value)
+        canonical = (None if self._adapter is None else self._adapter.dump_python(
+            validated, mode="json", round_trip=True, by_alias=True
+        ))
+        if canonical != value:
+            raise TypeError("Value record is not in canonical contract form.")
+        return validated
 
     def restore(self, value: object) -> object:
         if self.annotation is None:
@@ -205,6 +225,63 @@ class ValueContract:
         if is_typeddict(self.annotation):
             return dict(validated)
         return validated
+
+
+def _simple_adapter_schema(schema):
+    if isinstance(schema, dict):
+        kind = schema.get('type')
+        if kind is not None and (not isinstance(kind, str) or kind not in {
+            'typed-dict', 'typed-dict-field', 'list', 'dict', 'str', 'bool', 'int', 'float', 'none'
+        }):
+            return False
+        if 'serialization' in schema:
+            return False
+        return all(_simple_adapter_schema(value) for value in schema.values())
+    if isinstance(schema, (list, tuple)):
+        return all(_simple_adapter_schema(value) for value in schema)
+    return True
+
+
+def _simple_json_annotation(annotation, seen=frozenset()):
+    if annotation in (str, bool, int, float, type(None), None):
+        return True
+    if annotation in seen:
+        return False
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin in (Required, NotRequired):
+        return _simple_json_annotation(args[0], seen)
+    if origin is list:
+        return len(args) == 1 and _simple_json_annotation(args[0], seen)
+    if origin is dict:
+        return len(args) == 2 and args[0] is str and _simple_json_annotation(args[1], seen)
+    if is_typeddict(annotation) and not hasattr(annotation, '__pydantic_config__'):
+        try:
+            hints = get_type_hints(annotation, include_extras=True)
+        except (NameError, TypeError):
+            return False
+        return all(_simple_json_annotation(item, seen | {annotation}) for item in hints.values())
+    return False
+
+
+def _simple_json_record(value):
+    if value is None or type(value) is bool:
+        return True
+    if type(value) is int:
+        return value.bit_length() <= 63
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) is str:
+        try:
+            value.encode('utf-8')
+        except UnicodeEncodeError:
+            return False
+        return True
+    if type(value) is list:
+        return all((type(item) is int and item.bit_length() <= 63) or _simple_json_record(item) for item in value)
+    if type(value) is dict:
+        return all(type(key) is str and _simple_json_record(key) and _simple_json_record(item) for key, item in value.items())
+    return False
 
 
 def _validate_json_record(value: object) -> None:

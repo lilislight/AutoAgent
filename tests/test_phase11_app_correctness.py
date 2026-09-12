@@ -717,7 +717,9 @@ class AppCorrectnessTests(unittest.TestCase):
     def test_invalid_entry_does_not_open_an_invocation(self) -> None:
         """Verify invalid admission leaves no Session state or Runtime Events."""
 
-        journal = RuntimeRepository()
+        from tests.test_phase2_runtime_state import RecordingSink
+        sink = RecordingSink()
+        journal = RuntimeRepository(sink=sink)
         app = AutoAgentApp(runtime_repository=journal)
         workflow = Workflow("entry-admission", nodes=[Node("entry", identity)])
         try:
@@ -730,7 +732,7 @@ class AppCorrectnessTests(unittest.TestCase):
                 )
 
             self.assertIsNone(journal.state("entry-session").session)
-            self.assertEqual(journal.events("entry-session"), ())
+            self.assertEqual(sink.events, [])
             result = app.invoke(
                 workflow,
                 {"value": 1},

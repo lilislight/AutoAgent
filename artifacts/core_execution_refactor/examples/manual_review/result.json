@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "output": {
+    "manual_review": {
+      "order_id": "manual_review",
+      "approved": false,
+      "summary": "manual review required: risk=False, inventory=True"
+    }
+  }
+}

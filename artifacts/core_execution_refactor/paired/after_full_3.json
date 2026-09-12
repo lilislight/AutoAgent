@@ -1,0 +1,63 @@
+{
+  "chain_100": {
+    "checkpoint_bytes": 105475,
+    "duration_ns": 1734895755,
+    "peak_bytes": 3093896,
+    "runtime_event_bytes": 568201,
+    "runtime_event_count": 403
+  },
+  "large_context_small_output": {
+    "checkpoint_bytes": 1002119,
+    "duration_ns": 18496104,
+    "peak_bytes": 123787,
+    "runtime_event_bytes": 2007654,
+    "runtime_event_count": 7
+  },
+  "live_registered_chain_nodes": {
+    "100": {
+      "median_duration_ns": 87691535
+    },
+    "200": {
+      "median_duration_ns": 178354114
+    },
+    "400": {
+      "median_duration_ns": 373222003
+    },
+    "50": {
+      "median_duration_ns": 44215822
+    }
+  },
+  "map_500": {
+    "checkpoint_bytes": 201576,
+    "duration_ns": 721618407,
+    "peak_bytes": 2867999,
+    "runtime_event_bytes": 4745783,
+    "runtime_event_count": 1006
+  },
+  "reducer_replay_event_prefixes": {
+    "100": {
+      "median_duration_ns": 3709515,
+      "runtime_event_count": 100,
+      "runtime_state_decode_count": 0,
+      "sequence": 100
+    },
+    "200": {
+      "median_duration_ns": 7903531,
+      "runtime_event_count": 200,
+      "runtime_state_decode_count": 0,
+      "sequence": 200
+    },
+    "400": {
+      "median_duration_ns": 16907375,
+      "runtime_event_count": 400,
+      "runtime_state_decode_count": 0,
+      "sequence": 400
+    },
+    "50": {
+      "median_duration_ns": 1974380,
+      "runtime_event_count": 50,
+      "runtime_state_decode_count": 0,
+      "sequence": 50
+    }
+  }
+}

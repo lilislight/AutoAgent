@@ -144,7 +144,7 @@ class NodeExecutor:
             )
         if node.map is None and node.input_contract is not None:
             value = (
-                node.input_contract.restore(value)
+                node.input_contract._restore_internal(value)
                 if node.input_mapping is None
                 else node.input_contract.validate(value)
             )
@@ -410,7 +410,7 @@ class NodeExecutor:
                 operator.id,
                 unit_index,
                 (
-                    operator.contract.input.to_record(validated)
+                    operator.contract.input._to_record_validated(validated)
                     if operator.contract.accepts_input
                     else None
                 ),
@@ -447,7 +447,7 @@ class NodeExecutor:
 
         try:
             output, contract = await invoke_and_validate()
-            output_record = contract.to_record(output)
+            output_record = contract._to_record_validated(output)
         except _RuntimeEmitFailure as failure:
             raise failure.error from failure
         except UserCallableCancelledError:
@@ -508,7 +508,7 @@ class NodeExecutor:
                         chunk = operator.contract.stream_chunk.validate(
                             chunk
                         )
-                        emitted_chunk = operator.contract.stream_chunk.to_record(
+                        emitted_chunk = operator.contract.stream_chunk._to_record_validated(
                             chunk
                         )
                     else:
@@ -537,7 +537,7 @@ class NodeExecutor:
                         chunk = operator.contract.stream_chunk.validate(
                             chunk
                         )
-                        emitted_chunk = operator.contract.stream_chunk.to_record(
+                        emitted_chunk = operator.contract.stream_chunk._to_record_validated(
                             chunk
                         )
                     else:
@@ -750,67 +750,66 @@ async def _close_stream_source(
 
 
 class _BurstThreadPool(Executor):
-    """Lazy bounded workers that exit when the current work burst is drained.
-
-    Workers never wait for a future notification: they drain queued work and
-    exit. This keeps idle resource use bounded and isolates worker lifecycle
-    from Node execution semantics.
-    """
+    """Lazy bounded daemon workers, reused without idle polling."""
 
     def __init__(self, max_workers: int) -> None:
         self._max_workers = max_workers
-        self._jobs: deque[tuple[Future[object], Callable[[], object]]] = deque()
-        self._lock = threading.Lock()
-        self._threads: set[threading.Thread] = set()
-        self._active_workers = 0
+        self._jobs = deque()
+        self._condition = threading.Condition()
+        self._threads = set()
+        self._idle = 0
         self._closed = False
 
     def submit(self, fn, /, *args, **kwargs):
-        future: Future[object] = Future()
-        with self._lock:
+        future = Future()
+        with self._condition:
             if self._closed:
                 raise RuntimeError("Operator thread pool is closed.")
             self._jobs.append((future, lambda: fn(*args, **kwargs)))
-            if self._active_workers < self._max_workers:
-                thread = threading.Thread(
-                    target=self._worker,
-                    name=f"autoagent-operator-{self._active_workers}",
-                    daemon=True,
-                )
-                self._active_workers += 1
+            if len(self._jobs) > self._idle and len(self._threads) < self._max_workers:
+                thread = threading.Thread(target=self._worker,
+                    name=f"autoagent-operator-{len(self._threads)}", daemon=True)
                 self._threads.add(thread)
                 thread.start()
+            self._condition.notify()
         return future
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
-        with self._lock:
-            if self._closed:
-                return
+        with self._condition:
             self._closed = True
             if cancel_futures:
                 while self._jobs:
-                    future, _call = self._jobs.popleft()
+                    future, _ = self._jobs.popleft()
                     future.cancel()
             threads = tuple(self._threads)
+            self._condition.notify_all()
         if wait:
             for thread in threads:
                 thread.join()
 
-    def _worker(self) -> None:
-        while True:
-            with self._lock:
-                if not self._jobs:
-                    self._active_workers -= 1
-                    self._threads.discard(threading.current_thread())
-                    return
-                job = self._jobs.popleft()
-            future, call = job
-            if not future.set_running_or_notify_cancel():
-                continue
-            try:
-                future.set_result(call())
-            except BaseException as error:
-                future.set_exception(error)
+    def _worker(self):
+        try:
+            while True:
+                with self._condition:
+                    while not self._jobs:
+                        if self._closed:
+                            return
+                        self._idle += 1
+                        try:
+                            self._condition.wait()
+                        finally:
+                            self._idle -= 1
+                    future, call = self._jobs.popleft()
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(call())
+                    except BaseException as error:
+                        future.set_exception(error)
+                # Idle threads must not keep the last callable/result alive.
+                del future, call
+        finally:
+            with self._condition:
+                self._threads.discard(threading.current_thread())
 
 
 def _next_item(iterator: Iterator[object]) -> tuple[bool, object | None]:

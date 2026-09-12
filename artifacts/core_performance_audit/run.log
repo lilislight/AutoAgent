@@ -1,0 +1,112 @@
+micro complete
+{
+  "method": "Synthetic micro probes: median of 7, separate tracemalloc peak. Profiles run on actual runtime thread; no sink; async trivial operators.",
+  "micro": {
+    "call_field_width_100": {
+      "median_ns": 35283,
+      "peak_bytes": 8824
+    },
+    "node_complete_history_100": {
+      "median_ns": 46893,
+      "peak_bytes": 7008
+    },
+    "node_complete_forward_history_100": {
+      "median_ns": 51537,
+      "peak_bytes": 7640
+    },
+    "empty_patch_revisions_100": {
+      "median_ns": 5122,
+      "peak_bytes": 7872
+    },
+    "one_patch_revisions_100": {
+      "median_ns": 23386,
+      "peak_bytes": 11296
+    },
+    "child_phase_units_100": {
+      "median_ns": 12806,
+      "peak_bytes": 4888
+    },
+    "call_field_width_10000": {
+      "median_ns": 801202,
+      "peak_bytes": 394496
+    },
+    "node_complete_history_10000": {
+      "median_ns": 1359209,
+      "peak_bytes": 90264
+    },
+    "node_complete_forward_history_10000": {
+      "median_ns": 555872,
+      "peak_bytes": 90880
+    },
+    "empty_patch_revisions_10000": {
+      "median_ns": 594728,
+      "peak_bytes": 522656
+    },
+    "one_patch_revisions_10000": {
+      "median_ns": 2221387,
+      "peak_bytes": 687360
+    },
+    "child_phase_units_10000": {
+      "median_ns": 98106,
+      "peak_bytes": 163288
+    },
+    "call_field_width_50000": {
+      "median_ns": 4910708,
+      "peak_bytes": 3286784
+    },
+    "node_complete_history_50000": {
+      "median_ns": 6673884,
+      "peak_bytes": 449464
+    },
+    "node_complete_forward_history_50000": {
+      "median_ns": 2751250,
+      "peak_bytes": 450080
+    },
+    "empty_patch_revisions_50000": {
+      "median_ns": 3907267,
+      "peak_bytes": 4332448
+    },
+    "one_patch_revisions_50000": {
+      "median_ns": 14821229,
+      "peak_bytes": 5906184
+    },
+    "child_phase_units_50000": {
+      "median_ns": 585634,
+      "peak_bytes": 803288
+    },
+    "patch_10000keys_1ops": {
+      "median_ns": 1173151,
+      "peak_bytes": 392216
+    },
+    "patch_10000keys_10ops": {
+      "median_ns": 6727551,
+      "peak_bytes": 601488
+    },
+    "patch_10000keys_100ops": {
+      "median_ns": 65503349,
+      "peak_bytes": 618048
+    },
+    "restore_list_50000": {
+      "median_ns": 10724221,
+      "peak_bytes": 2681854
+    },
+    "validate_python_list_50000_reference_only": {
+      "median_ns": 795676,
+      "peak_bytes": 400424
+    }
+  },
+  "profiles": {
+    "chain400": {
+      "profile_total_seconds": 0.581096802,
+      "occurrences": 400
+    },
+    "loop300": {
+      "profile_total_seconds": 0.824952503,
+      "occurrences": 302
+    },
+    "map2000": {
+      "profile_total_seconds": 1.4167715570000001,
+      "occurrences": 1
+    }
+  }
+}

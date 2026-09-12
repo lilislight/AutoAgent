@@ -1,0 +1,24 @@
+{
+  "python": "3.12.13",
+  "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+  "method": "5 timed samples, median; separate tracemalloc peak; no persistence sink",
+  "large_nested_pipeline": {
+    "median_duration_ns": 74619516,
+    "peak_bytes": 5141524,
+    "rows": 1500
+  },
+  "wide_four_field_updates": {
+    "100": {
+      "median_duration_ns": 40816,
+      "peak_bytes": 8776
+    },
+    "10000": {
+      "median_duration_ns": 715444,
+      "peak_bytes": 394496
+    },
+    "50000": {
+      "median_duration_ns": 4898970,
+      "peak_bytes": 3286784
+    }
+  }
+}

@@ -1,0 +1,164 @@
+======================================================================
+ERROR: test_child_persistence_integrity (unittest.loader._FailedTest.test_child_persistence_integrity)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_child_persistence_integrity
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_child_persistence_integrity.py", line 24, in <module>
+    from autoagent.core import (
+ImportError: cannot import name 'InMemoryEventJournal' from 'autoagent.core' (/home/chengqian/projects/AutoAgent/autoagent/core/__init__.py)
+
+
+======================================================================
+ERROR: test_cli (unittest.loader._FailedTest.test_cli)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_cli
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_cli.py", line 16, in <module>
+    from autoagent.cli import main
+  File "/home/chengqian/projects/AutoAgent/autoagent/cli/__init__.py", line 3, in <module>
+    from .main import main
+  File "/home/chengqian/projects/AutoAgent/autoagent/cli/main.py", line 25, in <module>
+    from autoagent.host import (
+  File "/home/chengqian/projects/AutoAgent/autoagent/host/__init__.py", line 11, in <module>
+    from .host import AutoAgentHost
+  File "/home/chengqian/projects/AutoAgent/autoagent/host/host.py", line 35, in <module>
+    from autoagent.hosting import SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/__init__.py", line 13, in <module>
+    from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/sqlite.py", line 25, in <module>
+    from autoagent.core.runtime import (
+ImportError: cannot import name 'InvocationOpened' from 'autoagent.core.runtime' (/home/chengqian/projects/AutoAgent/autoagent/core/runtime/__init__.py). Did you mean: 'InvocationRef'?
+
+
+======================================================================
+ERROR: test_host_lifecycle (unittest.loader._FailedTest.test_host_lifecycle)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_host_lifecycle
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_host_lifecycle.py", line 27, in <module>
+    from autoagent.host import (
+  File "/home/chengqian/projects/AutoAgent/autoagent/host/__init__.py", line 11, in <module>
+    from .host import AutoAgentHost
+  File "/home/chengqian/projects/AutoAgent/autoagent/host/host.py", line 35, in <module>
+    from autoagent.hosting import SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/__init__.py", line 13, in <module>
+    from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/sqlite.py", line 25, in <module>
+    from autoagent.core.runtime import (
+ImportError: cannot import name 'InvocationOpened' from 'autoagent.core.runtime' (/home/chengqian/projects/AutoAgent/autoagent/core/runtime/__init__.py). Did you mean: 'InvocationRef'?
+
+
+======================================================================
+ERROR: test_host_project (unittest.loader._FailedTest.test_host_project)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_host_project
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_host_project.py", line 16, in <module>
+    from autoagent.host import (
+  File "/home/chengqian/projects/AutoAgent/autoagent/host/__init__.py", line 11, in <module>
+    from .host import AutoAgentHost
+  File "/home/chengqian/projects/AutoAgent/autoagent/host/host.py", line 35, in <module>
+    from autoagent.hosting import SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/__init__.py", line 13, in <module>
+    from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/sqlite.py", line 25, in <module>
+    from autoagent.core.runtime import (
+ImportError: cannot import name 'InvocationOpened' from 'autoagent.core.runtime' (/home/chengqian/projects/AutoAgent/autoagent/core/runtime/__init__.py). Did you mean: 'InvocationRef'?
+
+
+======================================================================
+ERROR: test_host_runtime_store (unittest.loader._FailedTest.test_host_runtime_store)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_host_runtime_store
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_host_runtime_store.py", line 20, in <module>
+    import autoagent.hosting.sqlite as sqlite_hosting
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/__init__.py", line 13, in <module>
+    from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/sqlite.py", line 25, in <module>
+    from autoagent.core.runtime import (
+ImportError: cannot import name 'InvocationOpened' from 'autoagent.core.runtime' (/home/chengqian/projects/AutoAgent/autoagent/core/runtime/__init__.py). Did you mean: 'InvocationRef'?
+
+
+======================================================================
+ERROR: test_runtime_checkpoint_trace (unittest.loader._FailedTest.test_runtime_checkpoint_trace)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_runtime_checkpoint_trace
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_runtime_checkpoint_trace.py", line 11, in <module>
+    from autoagent.core import InMemoryEventJournal, InvocationOpened, SessionOpened
+ImportError: cannot import name 'InMemoryEventJournal' from 'autoagent.core' (/home/chengqian/projects/AutoAgent/autoagent/core/__init__.py)
+
+
+======================================================================
+ERROR: test_tracing_server (unittest.loader._FailedTest.test_tracing_server)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_tracing_server
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_tracing_server.py", line 18, in <module>
+    from autoagent.hosting import RuntimeEventStoreError, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/__init__.py", line 13, in <module>
+    from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/sqlite.py", line 25, in <module>
+    from autoagent.core.runtime import (
+ImportError: cannot import name 'InvocationOpened' from 'autoagent.core.runtime' (/home/chengqian/projects/AutoAgent/autoagent/core/runtime/__init__.py). Did you mean: 'InvocationRef'?
+
+
+======================================================================
+ERROR: test_user_event_persistence (unittest.loader._FailedTest.test_user_event_persistence)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_user_event_persistence
+Traceback (most recent call last):
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 396, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/unittest/loader.py", line 339, in _get_module_from_name
+    __import__(name)
+  File "/home/chengqian/projects/AutoAgent/tests/test_user_event_persistence.py", line 16, in <module>
+    from autoagent.hosting import (
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/__init__.py", line 13, in <module>
+    from .sqlite import SQLITE_STORE_SCHEMA_VERSION, SQLiteRuntimeStore
+  File "/home/chengqian/projects/AutoAgent/autoagent/hosting/sqlite.py", line 25, in <module>
+    from autoagent.core.runtime import (
+ImportError: cannot import name 'InvocationOpened' from 'autoagent.core.runtime' (/home/chengqian/projects/AutoAgent/autoagent/core/runtime/__init__.py). Did you mean: 'InvocationRef'?
+
+
+----------------------------------------------------------------------
+Ran 320 tests in 14.740s
+
+FAILED (errors=8)

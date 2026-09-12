@@ -1,0 +1,70 @@
+Runtime Events in sink arrival order; sequence is ordered per Session.
+
+001 [manual_review #001] session.opened  delta_ops=1
+    {"context": {}}
+002 [manual_review #002] invocation.started  delta_ops=3
+    {"workflow_id": "order-processing-demo", "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06", "entry_node_id": "prepare.normalize", "input": {"order_id": "manual_review", "amount": 1600, "stock": 3}}
+003 [manual_review #003] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "prepare.normalize@root"}
+004 [manual_review #004] operator_call.started  delta_ops=3
+    {"call_id": "3633b25e-17d2-4521-b7ed-f85e40675876", "occurrence_id": "prepare.normalize@root", "operator_id": "normalize_order", "unit_index": 0, "input": {"order_id": "manual_review", "amount": 1600, "stock": 3}, "queue_duration_ns": 1538}
+005 [manual_review #005] operator_call.completed  delta_ops=6
+    {"call_id": "3633b25e-17d2-4521-b7ed-f85e40675876", "output": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}, "execution_duration_ns": 255440}
+006 [manual_review #006] output.bound  delta_ops=2
+    {"occurrence_id": "prepare.normalize@root", "patch": {"invocation": [{"operation": "set", "path": ["order"], "value": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}}], "session": []}, "duration_ns": 203524}
+007 [manual_review #007] node_occurrence.completed  delta_ops=6
+    {"occurrence_id": "prepare.normalize@root", "output": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+008 [manual_review #008] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "prepare.approval@root"}
+009 [manual_review #009] input.mapped  delta_ops=2
+    {"occurrence_id": "prepare.approval@root", "mapped_input": {"order_id": "manual_review", "amount": 1600, "question": "Approve this order?"}, "duration_ns": 204922}
+010 [manual_review #010] node_occurrence.waiting  delta_ops=4
+    {"occurrence_id": "prepare.approval@root", "wait_id": "5246531d-75bc-4bf3-b2ad-865e02ea8544", "request": {"order_id": "manual_review", "amount": 1600, "question": "Approve this order?"}}
+011 [manual_review #011] wait.resumed  delta_ops=4
+    {"wait_id": "5246531d-75bc-4bf3-b2ad-865e02ea8544", "response": {"approved": true}}
+012 [manual_review #012] routing.resolved  delta_ops=2
+    {"occurrence_id": "prepare.approval@root", "source_status": "complete", "conditions": [{"edge_id": "approval-to-risk", "selected": true, "duration_ns": 470551}, {"edge_id": "approval-to-inventory", "selected": true, "duration_ns": 259251}, {"edge_id": "approval-to-rejected", "selected": false, "duration_ns": 355815}], "duration_ns": 704423}
+013 [manual_review #013] node_occurrence.completed  delta_ops=6
+    {"occurrence_id": "prepare.approval@root", "output": {"approved": true}, "metrics": null}
+014 [manual_review #014] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "risk@root"}
+015 [manual_review #015] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "inventory@root"}
+016 [manual_review #016] input.mapped  delta_ops=2
+    {"occurrence_id": "risk@root", "mapped_input": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}, "duration_ns": 405896}
+017 [manual_review #017] operator_call.started  delta_ops=3
+    {"call_id": "471d3fcc-cbbe-49d7-a783-15c3cf863816", "occurrence_id": "risk@root", "operator_id": "risk_check", "unit_index": 0, "input": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}, "queue_duration_ns": 1772}
+018 [manual_review #018] input.mapped  delta_ops=2
+    {"occurrence_id": "inventory@root", "mapped_input": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}, "duration_ns": 4227224}
+019 [manual_review #019] operator_call.started  delta_ops=3
+    {"call_id": "1672981d-8bb2-46df-87e8-b362dd649dad", "occurrence_id": "inventory@root", "operator_id": "inventory_check", "unit_index": 0, "input": {"order_id": "manual_review", "amount": 1600, "stock": 3, "currency": "USD"}, "queue_duration_ns": 1450}
+020 [manual_review #020] operator_call.completed  delta_ops=6
+    {"call_id": "471d3fcc-cbbe-49d7-a783-15c3cf863816", "output": {"check": "risk", "passed": false, "detail": "amount=1600"}, "execution_duration_ns": 4301798}
+021 [manual_review #021] node_occurrence.completed  delta_ops=4
+    {"occurrence_id": "risk@root", "output": {"check": "risk", "passed": false, "detail": "amount=1600"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+022 [manual_review #022] operator_call.completed  delta_ops=6
+    {"call_id": "1672981d-8bb2-46df-87e8-b362dd649dad", "output": {"check": "inventory", "passed": true, "detail": "stock=3"}, "execution_duration_ns": 3958102}
+023 [manual_review #023] node_occurrence.completed  delta_ops=5
+    {"occurrence_id": "inventory@root", "output": {"check": "inventory", "passed": true, "detail": "stock=3"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+024 [manual_review #024] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "combine@root"}
+025 [manual_review #025] input.mapped  delta_ops=2
+    {"occurrence_id": "combine@root", "mapped_input": {"order_id": "manual_review", "risk": {"check": "risk", "passed": false, "detail": "amount=1600"}, "inventory": {"check": "inventory", "passed": true, "detail": "stock=3"}}, "duration_ns": 368465}
+026 [manual_review #026] operator_call.started  delta_ops=3
+    {"call_id": "2ad0fc23-6eeb-43dc-b134-4ec5c4eb6c80", "occurrence_id": "combine@root", "operator_id": "combine_checks", "unit_index": 0, "input": {"order_id": "manual_review", "risk": {"check": "risk", "passed": false, "detail": "amount=1600"}, "inventory": {"check": "inventory", "passed": true, "detail": "stock=3"}}, "queue_duration_ns": 1880}
+027 [manual_review #027] operator_call.completed  delta_ops=6
+    {"call_id": "2ad0fc23-6eeb-43dc-b134-4ec5c4eb6c80", "output": {"order_id": "manual_review", "approved": false, "summary": "risk=False, inventory=True"}, "execution_duration_ns": 361893}
+028 [manual_review #028] routing.resolved  delta_ops=2
+    {"occurrence_id": "combine@root", "source_status": "complete", "conditions": [{"edge_id": "decision-to-audit", "selected": false, "duration_ns": 339768}, {"edge_id": "decision-to-review", "selected": true, "duration_ns": 392309}], "duration_ns": 604000}
+029 [manual_review #029] node_occurrence.completed  delta_ops=5
+    {"occurrence_id": "combine@root", "output": {"order_id": "manual_review", "approved": false, "summary": "risk=False, inventory=True"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+030 [manual_review #030] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "manual_review@root"}
+031 [manual_review #031] operator_call.started  delta_ops=3
+    {"call_id": "a0caaea2-d8c2-4150-b39a-0fe1aa902e80", "occurrence_id": "manual_review@root", "operator_id": "manual_review", "unit_index": 0, "input": {"order_id": "manual_review", "approved": false, "summary": "risk=False, inventory=True"}, "queue_duration_ns": 1474}
+032 [manual_review #032] operator_call.completed  delta_ops=6
+    {"call_id": "a0caaea2-d8c2-4150-b39a-0fe1aa902e80", "output": {"order_id": "manual_review", "approved": false, "summary": "manual review required: risk=False, inventory=True"}, "execution_duration_ns": 364342}
+033 [manual_review #033] node_occurrence.completed  delta_ops=3
+    {"occurrence_id": "manual_review@root", "output": {"order_id": "manual_review", "approved": false, "summary": "manual review required: risk=False, inventory=True"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+034 [manual_review #034] invocation.completed  delta_ops=4
+    {"output": {"manual_review": {"order_id": "manual_review", "approved": false, "summary": "manual review required: risk=False, inventory=True"}}}

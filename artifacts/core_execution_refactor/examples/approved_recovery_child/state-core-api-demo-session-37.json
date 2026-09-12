@@ -1,0 +1,507 @@
+{
+  "schema_version": 5,
+  "sequence": 37,
+  "last_event_id": "53b4e9f0-80c2-4cab-8bc4-d99baa29ff9c",
+  "session": {
+    "id": "core-api-demo-session",
+    "context": {},
+    "created_at_us": 1789190537295246,
+    "updated_at_us": 1789190537595020,
+    "latest_invocation_id": "90dc83a1-565d-47ec-a158-cdf59c53e8e9",
+    "context_path_revisions": {}
+  },
+  "invocation": {
+    "id": "90dc83a1-565d-47ec-a158-cdf59c53e8e9",
+    "workflow_id": "order-processing-demo",
+    "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06",
+    "entry_node_id": "prepare.normalize",
+    "status": "completed",
+    "input": {
+      "order_id": "order-42",
+      "amount": 600,
+      "stock": 3
+    },
+    "context": {
+      "order": {
+        "order_id": "order-42",
+        "amount": 600,
+        "stock": 3,
+        "currency": "USD"
+      }
+    },
+    "output": {
+      "spawn_audit": {
+        "session_id": "a3f07bdd-e03b-4db6-bbf7-b755a2b53e9b",
+        "invocation_id": "73d230e1-67c3-4add-88ee-885434355705",
+        "workflow_id": "audit-order",
+        "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad"
+      }
+    },
+    "error": null,
+    "cancel_reason": null,
+    "created_at_us": 1789190537301837,
+    "started_at_us": 1789190537301837,
+    "completed_at_us": 1789190537488659,
+    "context_path_revisions": {
+      "/order": 7
+    },
+    "child_plans": {
+      "90dc83a1-565d-47ec-a158-cdf59c53e8e9:spawn_audit@root:child": {
+        "creation_id": "90dc83a1-565d-47ec-a158-cdf59c53e8e9:spawn_audit@root:child",
+        "parent_occurrence_id": "spawn_audit@root",
+        "mode": "spawn",
+        "workflow_id": "audit-order",
+        "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad",
+        "units": [
+          {
+            "unit_index": 0,
+            "session_id": "a3f07bdd-e03b-4db6-bbf7-b755a2b53e9b",
+            "invocation_id": "73d230e1-67c3-4add-88ee-885434355705",
+            "input": {
+              "order_id": "order-42",
+              "summary": "risk=True, inventory=True"
+            },
+            "phase": "terminal"
+          }
+        ]
+      }
+    },
+    "scheduler": {
+      "initialized": true,
+      "ready": [],
+      "occurrences": {
+        "prepare.normalize@root": {
+          "id": "prepare.normalize@root",
+          "node_id": "prepare.normalize",
+          "scope": [],
+          "status": "completed",
+          "output": {
+            "order_id": "order-42",
+            "amount": 600,
+            "stock": 3,
+            "currency": "USD"
+          },
+          "error": null,
+          "started_at_us": 1789190537304020,
+          "completed_at_us": 1789190537311902,
+          "started_sequence": 3,
+          "ready_at_us": 1789190537301837,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [],
+          "metrics": {
+            "call_count": 1,
+            "peak_parallelism": 1
+          },
+          "recovery_attempts": 0
+        },
+        "prepare.approval@root": {
+          "id": "prepare.approval@root",
+          "node_id": "prepare.approval",
+          "scope": [],
+          "status": "completed",
+          "output": {
+            "approved": true
+          },
+          "error": null,
+          "started_at_us": 1789190537313829,
+          "completed_at_us": 1789190537439307,
+          "started_sequence": 8,
+          "ready_at_us": 1789190537433267,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [
+            {
+              "edge_id": "prepare.normalize->prepare.approval",
+              "source_occurrence_id": "prepare.normalize@root",
+              "target_node_id": "prepare.approval"
+            }
+          ],
+          "metrics": null,
+          "recovery_attempts": 0
+        },
+        "risk@root": {
+          "id": "risk@root",
+          "node_id": "risk",
+          "scope": [],
+          "status": "completed",
+          "output": {
+            "check": "risk",
+            "passed": true,
+            "detail": "amount=600"
+          },
+          "error": null,
+          "started_at_us": 1789190537441248,
+          "completed_at_us": 1789190537453729,
+          "started_sequence": 14,
+          "ready_at_us": 1789190537439307,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [
+            {
+              "edge_id": "approval-to-risk",
+              "source_occurrence_id": "prepare.approval@root",
+              "target_node_id": "risk"
+            }
+          ],
+          "metrics": {
+            "call_count": 1,
+            "peak_parallelism": 1
+          },
+          "recovery_attempts": 0
+        },
+        "inventory@root": {
+          "id": "inventory@root",
+          "node_id": "inventory",
+          "scope": [],
+          "status": "completed",
+          "output": {
+            "check": "inventory",
+            "passed": true,
+            "detail": "stock=3"
+          },
+          "error": null,
+          "started_at_us": 1789190537442872,
+          "completed_at_us": 1789190537457328,
+          "started_sequence": 15,
+          "ready_at_us": 1789190537439307,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [
+            {
+              "edge_id": "approval-to-inventory",
+              "source_occurrence_id": "prepare.approval@root",
+              "target_node_id": "inventory"
+            }
+          ],
+          "metrics": {
+            "call_count": 1,
+            "peak_parallelism": 1
+          },
+          "recovery_attempts": 0
+        },
+        "approval_rejected@root": {
+          "id": "approval_rejected@root",
+          "node_id": "approval_rejected",
+          "scope": [],
+          "status": "skipped",
+          "output": null,
+          "error": null,
+          "started_at_us": null,
+          "completed_at_us": 1789190537439307,
+          "started_sequence": null,
+          "ready_at_us": null,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [],
+          "metrics": null,
+          "recovery_attempts": 0
+        },
+        "combine@root": {
+          "id": "combine@root",
+          "node_id": "combine",
+          "scope": [],
+          "status": "completed",
+          "output": {
+            "order_id": "order-42",
+            "approved": true,
+            "summary": "risk=True, inventory=True"
+          },
+          "error": null,
+          "started_at_us": 1789190537459512,
+          "completed_at_us": 1789190537470105,
+          "started_sequence": 24,
+          "ready_at_us": 1789190537457328,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [
+            {
+              "edge_id": "risk-result",
+              "source_occurrence_id": "risk@root",
+              "target_node_id": "combine"
+            },
+            {
+              "edge_id": "inventory-result",
+              "source_occurrence_id": "inventory@root",
+              "target_node_id": "combine"
+            }
+          ],
+          "metrics": {
+            "call_count": 1,
+            "peak_parallelism": 1
+          },
+          "recovery_attempts": 0
+        },
+        "spawn_audit@root": {
+          "id": "spawn_audit@root",
+          "node_id": "spawn_audit",
+          "scope": [],
+          "status": "completed",
+          "output": {
+            "session_id": "a3f07bdd-e03b-4db6-bbf7-b755a2b53e9b",
+            "invocation_id": "73d230e1-67c3-4add-88ee-885434355705",
+            "workflow_id": "audit-order",
+            "workflow_revision_id": "audit-order:6477982fac5d64273e6046ee5630724ce72d5ff0ccd94cce0a00d6fb5bb4d2ad"
+          },
+          "error": null,
+          "started_at_us": 1789190537472797,
+          "completed_at_us": 1789190537483008,
+          "started_sequence": 30,
+          "ready_at_us": 1789190537470105,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [
+            {
+              "edge_id": "decision-to-audit",
+              "source_occurrence_id": "combine@root",
+              "target_node_id": "spawn_audit"
+            }
+          ],
+          "metrics": null,
+          "recovery_attempts": 0
+        },
+        "manual_review@root": {
+          "id": "manual_review@root",
+          "node_id": "manual_review",
+          "scope": [],
+          "status": "skipped",
+          "output": null,
+          "error": null,
+          "started_at_us": null,
+          "completed_at_us": 1789190537470105,
+          "started_sequence": null,
+          "ready_at_us": null,
+          "execution": {
+            "phase": "none",
+            "completed_stages": [],
+            "mapped_input": null,
+            "resolved_capability_id": null,
+            "resolved_operator_id": null,
+            "aggregate_output": null,
+            "pending_context_patch": {
+              "invocation": [],
+              "session": []
+            },
+            "routing": [],
+            "routing_source_status": null,
+            "fault": null
+          },
+          "activations": [],
+          "metrics": null,
+          "recovery_attempts": 0
+        }
+      },
+      "resolutions": {},
+      "boundary_resolutions": {},
+      "operator_calls": {
+        "0b4606ae-a856-4d6b-bc33-33a1eb72bd5f": {
+          "id": "0b4606ae-a856-4d6b-bc33-33a1eb72bd5f",
+          "occurrence_id": "prepare.normalize@root",
+          "operator_id": "normalize_order",
+          "unit_index": 0,
+          "status": "completed",
+          "input": {
+            "order_id": "order-42",
+            "amount": 600,
+            "stock": 3
+          },
+          "output": {
+            "order_id": "order-42",
+            "amount": 600,
+            "stock": 3,
+            "currency": "USD"
+          },
+          "error": null,
+          "queue_duration_ns": 3272,
+          "execution_duration_ns": 384387,
+          "started_at_us": 1789190537305988,
+          "completed_at_us": 1789190537307941
+        },
+        "cc3f4248-d1ef-4a42-b4e6-f8deef01a307": {
+          "id": "cc3f4248-d1ef-4a42-b4e6-f8deef01a307",
+          "occurrence_id": "risk@root",
+          "operator_id": "risk_check",
+          "unit_index": 0,
+          "status": "completed",
+          "input": {
+            "order_id": "order-42",
+            "amount": 600,
+            "stock": 3,
+            "currency": "USD"
+          },
+          "output": {
+            "check": "risk",
+            "passed": true,
+            "detail": "amount=600"
+          },
+          "error": null,
+          "queue_duration_ns": 3405,
+          "execution_duration_ns": 3836006,
+          "started_at_us": 1789190537446403,
+          "completed_at_us": 1789190537451830
+        },
+        "9d8288a6-2794-4a08-b035-458e18f2a0eb": {
+          "id": "9d8288a6-2794-4a08-b035-458e18f2a0eb",
+          "occurrence_id": "inventory@root",
+          "operator_id": "inventory_check",
+          "unit_index": 0,
+          "status": "completed",
+          "input": {
+            "order_id": "order-42",
+            "amount": 600,
+            "stock": 3,
+            "currency": "USD"
+          },
+          "output": {
+            "check": "inventory",
+            "passed": true,
+            "detail": "stock=3"
+          },
+          "error": null,
+          "queue_duration_ns": 1855,
+          "execution_duration_ns": 4243555,
+          "started_at_us": 1789190537449756,
+          "completed_at_us": 1789190537455633
+        },
+        "9ff5ede7-2a1b-4781-9a3e-dfa654430bb3": {
+          "id": "9ff5ede7-2a1b-4781-9a3e-dfa654430bb3",
+          "occurrence_id": "combine@root",
+          "operator_id": "combine_checks",
+          "unit_index": 0,
+          "status": "completed",
+          "input": {
+            "order_id": "order-42",
+            "risk": {
+              "check": "risk",
+              "passed": true,
+              "detail": "amount=600"
+            },
+            "inventory": {
+              "check": "inventory",
+              "passed": true,
+              "detail": "stock=3"
+            }
+          },
+          "output": {
+            "order_id": "order-42",
+            "approved": true,
+            "summary": "risk=True, inventory=True"
+          },
+          "error": null,
+          "queue_duration_ns": 1598,
+          "execution_duration_ns": 279260,
+          "started_at_us": 1789190537463901,
+          "completed_at_us": 1789190537465920
+        }
+      },
+      "waits": {
+        "a5cd76e7-26d0-4c0e-bf78-9469f8c50a52": {
+          "id": "a5cd76e7-26d0-4c0e-bf78-9469f8c50a52",
+          "occurrence_id": "prepare.approval@root",
+          "status": "resumed",
+          "request": {
+            "amount": 600,
+            "order_id": "order-42",
+            "question": "Approve this order?"
+          },
+          "response": {
+            "approved": true
+          },
+          "created_at_us": 1789190537318837,
+          "resumed_at_us": 1789190537433267
+        }
+      }
+    }
+  }
+}

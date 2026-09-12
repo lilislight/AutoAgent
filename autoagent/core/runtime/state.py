@@ -17,6 +17,7 @@ from .scheduling import (
     occurrence_key,
 )
 from .values import DurableValue, freeze, thaw
+from ._chunked import ChunkedUnits, runtime_mapping, child_units
 from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
@@ -76,7 +77,7 @@ class ChildInvocationPlan:
     mode: ChildInvocationMode
     workflow_id: str
     workflow_revision_id: str
-    units: tuple[ChildUnitState, ...] = ()
+    units: tuple[ChildUnitState, ...] | ChunkedUnits = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,7 +639,7 @@ def _validate_child_plans(
             )
         if plan.mode not in {"await", "spawn"}:
             raise ValueError(f"Unsupported Child Invocation mode {plan.mode!r}.")
-        if not isinstance(plan.units, tuple) or not plan.units:
+        if not isinstance(plan.units, (tuple, ChunkedUnits)) or not plan.units:
             raise ValueError("Child Invocation Plan units must be a non-empty tuple.")
         for expected_index, unit in enumerate(plan.units):
             if not isinstance(unit, ChildUnitState):
@@ -1055,7 +1056,7 @@ def _invocation_from_record(value: object) -> InvocationState | None:
         started_at_us=_optional_integer(record, "started_at_us"),
         completed_at_us=_optional_integer(record, "completed_at_us"),
         scheduler=scheduler,
-        child_plans=MappingProxyType(
+        child_plans=runtime_mapping(
             _child_plans_from_record(child_plans_record)
         ),
         context_path_revisions=MappingProxyType(
@@ -1082,19 +1083,19 @@ def _scheduler_from_record(value: object) -> SchedulerState:
     return SchedulerState(
         initialized=initialized,
         ready=tuple(ready),
-        occurrences=MappingProxyType(
+        occurrences=runtime_mapping(
             {key: _occurrence_from_record(item) for key, item in occurrences.items()}
         ),
-        resolutions=MappingProxyType(
+        resolutions=runtime_mapping(
             {key: _resolution_from_record(item) for key, item in resolutions.items()}
         ),
-        boundary_resolutions=MappingProxyType(
+        boundary_resolutions=runtime_mapping(
             {key: _boundary_from_record(item) for key, item in boundaries.items()}
         ),
-        operator_calls=MappingProxyType(
+        operator_calls=runtime_mapping(
             {key: _call_from_record(item) for key, item in calls.items()}
         ),
-        waits=MappingProxyType(
+        waits=runtime_mapping(
             {key: _wait_from_record(item) for key, item in waits.items()}
         ),
     )
@@ -1245,7 +1246,7 @@ def _child_plan_from_record(value: object) -> ChildInvocationPlan:
         mode=mode,  # type: ignore[arg-type]
         workflow_id=_string(record, "workflow_id"),
         workflow_revision_id=_string(record, "workflow_revision_id"),
-        units=tuple(units),
+        units=child_units(tuple(units)),
     )
 
 

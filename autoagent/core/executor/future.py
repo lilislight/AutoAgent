@@ -103,6 +103,15 @@ async def await_concurrent_future(
 ) -> T:
     """Await a concurrent Future without polling or a default executor."""
 
+    if future.done():
+        # Keep an asynchronous cancellation boundary without cross-thread I/O.
+        waiter = asyncio.get_running_loop().create_future()
+        def ready():
+            if not waiter.done():
+                waiter.set_result(None)
+        asyncio.get_running_loop().call_soon(ready)
+        await waiter
+        return future.result()
     if os.name == "nt":
         return await _await_with_threadsafe_callback(
             future,

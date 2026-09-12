@@ -1,11 +1,12 @@
 """Live transition planning. Replay never invokes user code or this planner."""
 from __future__ import annotations
 
+from collections import ChainMap
 from dataclasses import replace
 from types import MappingProxyType
 
 from ..errors import RuntimeTransitionError
-from ..context import ContextOperation, ContextPatch, apply_context_operation
+from ..context import ContextOperation, ContextPatch
 from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
@@ -15,15 +16,16 @@ from .events import (
     ChildInvocationPhaseChanged, ChildAwaitSuspended, ChildAwaitReady,
     validate_payload,
 )
-from .operations import StateDelta, StateOperation, _encode_runtime
+from .operations import StateDelta, StateOperation
 from .state import (
     RuntimeState, SessionState, InvocationState, SchedulerState,
     NodeOccurrenceState, NodeExecutionState, OperatorCallState, WaitState,
     ChildInvocationPlan, ChildUnitState, _validate_scope,
 )
-from .state import _session_record, _invocation_record, _occurrence_record, _execution_record
 from .scheduling import SchedulerDelta, boundary_key, occurrence_key
 from .values import freeze
+from ._overlay import PlanningOverlay
+from ._chunked import ChunkedUnits, runtime_mapping, child_units
 
 SCHED = ("invocation", "scheduler")
 
@@ -36,9 +38,9 @@ class TransitionPlanner:
         validate_payload(payload)
         operations = []
         def put(path, value, op="replace"):
-            operations.append(StateOperation(op, path, _encode_runtime(value)))
+            operations.append(StateOperation._from_owned(op, path, value))
         def occurrence_put(item):
-            put((*SCHED, "occurrences", item.id), _occurrence_record(item))
+            put((*SCHED, "occurrences", item.id), item)
         def workspace(item, **changes):
             phase = changes.get("phase")
             if phase in {"input_mapped", "capability_resolved", "aggregated", "output_bound", "routing_resolved"}:
@@ -49,14 +51,14 @@ class TransitionPlanner:
                     raise RuntimeTransitionError("EXECUTION_STAGE_DUPLICATE", "Execution stage already committed.")
                 changes["completed_stages"] = tuple(dict.fromkeys((*item.execution.completed_stages, phase)))
             put((*SCHED, "occurrences", item.id, "execution"),
-                _execution_record(replace(item.execution, **changes)))
+                replace(item.execution, **changes))
         session = state.session
         if isinstance(payload, SessionOpened):
             if session is not None:
                 raise RuntimeTransitionError("SESSION_ALREADY_OPEN", "Session already exists.")
             if not isinstance(payload.context, MappingProxyType) and not hasattr(payload.context, "items"):
                 raise TypeError("Session Context must be a mapping.")
-            put(("session",), _session_record(SessionState(session_id, payload.context, occurred_at_us, occurred_at_us)))
+            put(("session",), SessionState(session_id, payload.context, occurred_at_us, occurred_at_us))
             return StateDelta(tuple(operations))
         if session is None:
             raise RuntimeTransitionError("SESSION_NOT_OPEN", "Event requires an open Session.")
@@ -74,7 +76,7 @@ class TransitionPlanner:
                 raise ValueError("InvocationStarted requires initial SchedulerDelta.")
             new = replace(new, scheduler=self._apply_scheduler_delta(
                 replace(new.scheduler, initialized=True), scheduler_delta, occurred_at_us))
-            put(("invocation",), _invocation_record(new))
+            put(("invocation",), new)
             put(("session", "latest_invocation_id"), invocation_id)
             return StateDelta(tuple(operations))
         if inv is None or inv.id != invocation_id:
@@ -90,7 +92,7 @@ class TransitionPlanner:
             return occ
         def graph(delta, scheduler=None):
             before = scheduler or sched
-            planned = self._apply_scheduler_delta(before, delta, occurred_at_us)
+            planned = self._apply_scheduler_delta(before, delta, occurred_at_us, temporary=True)
             for item in delta.resolutions:
                 if item.id not in delta.consumed_resolution_ids:
                     put((*SCHED, "resolutions", item.id), item, "add")
@@ -104,7 +106,7 @@ class TransitionPlanner:
                 if boundary_key(item.loop_region_id, item.loop_scope) in delta.closed_boundaries:
                     put((*SCHED, "boundary_resolutions", key), None, "remove")
             for item in (*delta.ready, *delta.skipped):
-                put((*SCHED, "occurrences", item.id), _occurrence_record(planned.occurrences[item.id]), "add")
+                put((*SCHED, "occurrences", item.id), planned.occurrences[item.id], "add")
             for item in delta.revived:
                 occurrence_put(planned.occurrences[item.id])
             put((*SCHED, "ready"), planned.ready)
@@ -142,10 +144,14 @@ class TransitionPlanner:
             if call is None or call.status != "running":
                 raise RuntimeTransitionError("OPERATOR_CALL_NOT_RUNNING", "Operator Call is not running.")
             success = isinstance(payload, OperatorCallCompleted)
-            put((*SCHED, "operator_calls", call.id), replace(call,
-                status="completed" if success else "failed", output=payload.output if success else None,
-                error=None if success else payload.error, completed_at_us=occurred_at_us,
-                execution_duration_ns=payload.execution_duration_ns))
+            for name, value in (
+                ("status", "completed" if success else "failed"),
+                ("output", payload.output if success else None),
+                ("error", None if success else payload.error),
+                ("completed_at_us", occurred_at_us),
+                ("execution_duration_ns", payload.execution_duration_ns),
+            ):
+                put((*SCHED, "operator_calls", call.id, name), value)
         elif isinstance(payload, (NodeCompleted, NodeFailed)):
             require_occ()
             success = isinstance(payload, NodeCompleted)
@@ -161,8 +167,11 @@ class TransitionPlanner:
                     if getattr(patch, name):
                         put((name, "context"), updated.context)
                         put((name, "context_path_revisions"), updated.context_path_revisions)
-            graph(scheduler_delta, replace(sched, occurrences=MappingProxyType({**sched.occurrences, oid: terminal})))
-            remaining = [item for key, item in sched.occurrences.items() if key != oid]
+            graph(scheduler_delta, replace(sched, occurrences=ChainMap({oid: terminal}, sched.occurrences)))
+            remaining = (
+                [item for key, item in sched.occurrences.items() if key != oid]
+                if not scheduler_delta.ready and not scheduler_delta.revived else ()
+            )
             if not scheduler_delta.ready and not scheduler_delta.revived and remaining and all(
                 item.status in {"waiting", "completed", "failed", "skipped", "cancelled"} for item in remaining
             ) and any(item.status == "waiting" for item in remaining):
@@ -226,7 +235,7 @@ class TransitionPlanner:
                 raise RuntimeTransitionError("CHILD_PARENT_OCCURRENCE_NOT_RUNNING", "Child requires a running parent.")
             plan = ChildInvocationPlan(payload.creation_id, payload.parent_occurrence_id, payload.mode,
                 payload.workflow_id, payload.workflow_revision_id,
-                tuple(ChildUnitState(u.unit_index, u.child_session_id, u.child_invocation_id, u.input) for u in payload.units))
+                child_units(tuple(ChildUnitState(u.unit_index, u.child_session_id, u.child_invocation_id, u.input) for u in payload.units)))
             put(("invocation", "child_plans", plan.creation_id), plan, "add")
         elif isinstance(payload, ChildInvocationPhaseChanged):
             plan = inv.child_plans.get(payload.creation_id)
@@ -235,8 +244,15 @@ class TransitionPlanner:
             unit = plan.units[payload.unit_index]
             if {"planned":"opened", "opened":"accepted", "accepted":"terminal"}.get(unit.phase) != payload.phase:
                 raise RuntimeTransitionError("CHILD_PHASE_INVALID", "Invalid Child phase transition.")
-            units = list(plan.units); units[payload.unit_index] = replace(unit, phase=payload.phase)
-            put(("invocation", "child_plans", plan.creation_id), replace(plan, units=tuple(units)))
+            updated = replace(unit, phase=payload.phase)
+            if isinstance(plan.units, ChunkedUnits) or len(plan.units) >= 512:
+                units = plan.units if isinstance(plan.units, ChunkedUnits) else ChunkedUnits(plan.units)
+                units = units.replace_at(payload.unit_index, updated)
+            else:
+                units = list(plan.units)
+                units[payload.unit_index] = updated
+                units = tuple(units)
+            put(("invocation", "child_plans", plan.creation_id), replace(plan, units=units))
         elif isinstance(payload, (ChildAwaitSuspended, ChildAwaitReady)):
             plan = inv.child_plans.get(payload.creation_id)
             if plan is None or plan.mode != "await" or plan.parent_occurrence_id != payload.parent_occurrence_id:
@@ -291,11 +307,12 @@ class TransitionPlanner:
         scheduler: SchedulerState,
         delta: SchedulerDelta,
         occurred_at_us: int,
+        *, temporary: bool = False,
     ) -> SchedulerState:
-        occurrences = dict(scheduler.occurrences)
-        resolutions = dict(scheduler.resolutions)
-        boundary_resolutions = dict(scheduler.boundary_resolutions)
-        available_resolutions = {**resolutions, **boundary_resolutions}
+        occurrences = PlanningOverlay(scheduler.occurrences)
+        resolutions = PlanningOverlay(scheduler.resolutions)
+        boundary_resolutions = PlanningOverlay(scheduler.boundary_resolutions)
+        available_resolutions = ChainMap({}, scheduler.boundary_resolutions, scheduler.resolutions)
         ready = list(scheduler.ready)
 
         for resolution in delta.resolutions:
@@ -423,9 +440,9 @@ class TransitionPlanner:
         return SchedulerState(
             initialized=scheduler.initialized,
             ready=tuple(ready),
-            occurrences=MappingProxyType(occurrences),
-            resolutions=MappingProxyType(resolutions),
-            boundary_resolutions=MappingProxyType(boundary_resolutions),
+            occurrences=MappingProxyType(occurrences) if temporary else runtime_mapping(dict(occurrences)),
+            resolutions=MappingProxyType(resolutions) if temporary else runtime_mapping(dict(resolutions)),
+            boundary_resolutions=MappingProxyType(boundary_resolutions) if temporary else runtime_mapping(dict(boundary_resolutions)),
             operator_calls=scheduler.operator_calls,
             waits=scheduler.waits,
         )
@@ -484,8 +501,13 @@ def _apply_context_operations(
     started_sequence: int,
     committed_sequence: int,
 ):
-    current = context
-    updated_revisions = dict(revisions)
+    if not operations:
+        return context, revisions
+    from ..context import _ContextEdit
+    from ._chunked import MapEdit
+    current = _ContextEdit(context)
+    updated_revisions = MapEdit(revisions)
+    recent = [path for path, revision in revisions.items() if revision > started_sequence]
     seen: set[tuple[str, ...]] = set()
     for operation in operations:
         if operation.path in seen:
@@ -495,17 +517,17 @@ def _apply_context_operations(
             )
         seen.add(operation.path)
         if any(
-            revision > started_sequence
-            and (_paths_overlap(operation.path, path))
-            for path, revision in updated_revisions.items()
+            _paths_overlap(operation.path, path) for path in recent
         ):
             raise RuntimeTransitionError(
                 "CONTEXT_WRITE_CONFLICT",
                 f"Context path {'.'.join(operation.path)!r} changed after Node start.",
             )
-        current = apply_context_operation(current, operation)
+        current.apply(operation)
         updated_revisions[operation.path] = committed_sequence
-    return current, MappingProxyType(updated_revisions)
+        if committed_sequence > started_sequence:
+            recent.append(operation.path)
+    return current.finish(), updated_revisions.finish()
 
 
 def _paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:

@@ -1,0 +1,143 @@
+{
+  "baseline_commit": "91f0c98c5baed8d23ce917f4631db1d43a2cfab0",
+  "baseline_source": "git archive of baseline commit, run from /tmp/autoagent-memory-before",
+  "interpreter": "/home/chengqian/projects/AutoAgent/.venv/bin/python",
+  "comparisons": {
+    "focused": {
+      "large_nested_pipeline/median_duration_ns": {
+        "before": 320189088,
+        "after": 77963667,
+        "reduction_percent": 75.65,
+        "before_divided_by_after": 4.107
+      },
+      "large_nested_pipeline/peak_bytes": {
+        "before": 14839877,
+        "after": 5141733,
+        "reduction_percent": 65.35,
+        "before_divided_by_after": 2.886
+      },
+      "wide_four_field_updates/100/median_duration_ns": {
+        "before": 130691,
+        "after": 39551,
+        "reduction_percent": 69.74,
+        "before_divided_by_after": 3.304
+      },
+      "wide_four_field_updates/100/peak_bytes": {
+        "before": 15624,
+        "after": 8776,
+        "reduction_percent": 43.83,
+        "before_divided_by_after": 1.78
+      },
+      "wide_four_field_updates/10000/median_duration_ns": {
+        "before": 2797829,
+        "after": 715207,
+        "reduction_percent": 74.44,
+        "before_divided_by_after": 3.912
+      },
+      "wide_four_field_updates/10000/peak_bytes": {
+        "before": 605672,
+        "after": 394496,
+        "reduction_percent": 34.87,
+        "before_divided_by_after": 1.535
+      },
+      "wide_four_field_updates/50000/median_duration_ns": {
+        "before": 19897192,
+        "after": 4788214,
+        "reduction_percent": 75.94,
+        "before_divided_by_after": 4.155
+      },
+      "wide_four_field_updates/50000/peak_bytes": {
+        "before": 5212824,
+        "after": 3286784,
+        "reduction_percent": 36.95,
+        "before_divided_by_after": 1.586
+      }
+    },
+    "full": {
+      "chain_100/duration_ns": {
+        "before": 1917604728,
+        "after": 1779008049,
+        "reduction_percent": 7.23,
+        "before_divided_by_after": 1.078
+      },
+      "chain_100/peak_bytes": {
+        "before": 3309758,
+        "after": 3093677,
+        "reduction_percent": 6.53,
+        "before_divided_by_after": 1.07
+      },
+      "large_context_small_output/duration_ns": {
+        "before": 21517907,
+        "after": 19101738,
+        "reduction_percent": 11.23,
+        "before_divided_by_after": 1.126
+      },
+      "large_context_small_output/peak_bytes": {
+        "before": 124960,
+        "after": 123424,
+        "reduction_percent": 1.23,
+        "before_divided_by_after": 1.012
+      },
+      "live_registered_chain_nodes/100/median_duration_ns": {
+        "before": 130053054,
+        "after": 91308229,
+        "reduction_percent": 29.79,
+        "before_divided_by_after": 1.424
+      },
+      "live_registered_chain_nodes/200/median_duration_ns": {
+        "before": 268779451,
+        "after": 191208964,
+        "reduction_percent": 28.86,
+        "before_divided_by_after": 1.406
+      },
+      "live_registered_chain_nodes/400/median_duration_ns": {
+        "before": 562878245,
+        "after": 411543363,
+        "reduction_percent": 26.89,
+        "before_divided_by_after": 1.368
+      },
+      "live_registered_chain_nodes/50/median_duration_ns": {
+        "before": 62545029,
+        "after": 45131064,
+        "reduction_percent": 27.84,
+        "before_divided_by_after": 1.386
+      },
+      "map_500/duration_ns": {
+        "before": 7207281870,
+        "after": 725168106,
+        "reduction_percent": 89.94,
+        "before_divided_by_after": 9.939
+      },
+      "map_500/peak_bytes": {
+        "before": 62178746,
+        "after": 2887939,
+        "reduction_percent": 95.36,
+        "before_divided_by_after": 21.53
+      },
+      "reducer_replay_event_prefixes/100/median_duration_ns": {
+        "before": 8337914,
+        "after": 4174802,
+        "reduction_percent": 49.93,
+        "before_divided_by_after": 1.997
+      },
+      "reducer_replay_event_prefixes/200/median_duration_ns": {
+        "before": 16535713,
+        "after": 8408933,
+        "reduction_percent": 49.15,
+        "before_divided_by_after": 1.966
+      },
+      "reducer_replay_event_prefixes/400/median_duration_ns": {
+        "before": 33584781,
+        "after": 17380428,
+        "reduction_percent": 48.25,
+        "before_divided_by_after": 1.932
+      },
+      "reducer_replay_event_prefixes/50/median_duration_ns": {
+        "before": 4270361,
+        "after": 2022798,
+        "reduction_percent": 52.63,
+        "before_divided_by_after": 2.111
+      }
+    }
+  }
+}

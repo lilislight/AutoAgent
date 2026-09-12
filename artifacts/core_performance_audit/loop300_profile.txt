@@ -1,0 +1,86 @@
+         1209903 function calls (1183930 primitive calls) in 0.825 seconds
+
+   Ordered by: cumulative time
+   List reduced from 447 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     4138    0.015    0.000    0.949    0.000 base_events.py:1922(_run_once)
+     4792    0.004    0.000    0.803    0.000 events.py:86(_run)
+     4792    0.010    0.000    0.800    0.000 {method 'run' of '_contextvars.Context' objects}
+      602    0.010    0.000    0.499    0.001 workflow_executor.py:239(_execute_occurrence)
+     1511    0.010    0.000    0.471    0.000 app.py:1749(_emit)
+     1206    0.002    0.000    0.407    0.000 workflow_executor.py:246(emit)
+     1511    0.012    0.000    0.389    0.000 repository.py:52(commit)
+     1511    0.003    0.000    0.195    0.000 reducer.py:14(apply)
+      302    0.002    0.000    0.195    0.001 node_executor.py:210(execute)
+      302    0.001    0.000    0.192    0.001 node_executor.py:236(run_unit)
+      302    0.000    0.000    0.190    0.001 node_executor.py:322(_call)
+      302    0.001    0.000    0.189    0.001 node_executor.py:348(_call_once)
+     1511    0.004    0.000    0.186    0.000 operations.py:390(apply_runtime_delta)
+      302    0.004    0.000    0.186    0.001 node_executor.py:386(_call_once_admitted)
+     1200    0.002    0.000    0.162    0.000 node_executor.py:108(evaluate)
+     1804    0.006    0.000    0.162    0.000 node_executor.py:95(timed)
+     4138    0.006    0.000    0.143    0.000 selectors.py:451(select)
+     1200    0.001    0.000    0.135    0.000 node_executor.py:88(call_hook)
+     4138    0.020    0.000    0.135    0.000 {method 'poll' of 'select.epoll' objects}
+  600/520    0.001    0.000    0.124    0.000 threading.py:1018(_bootstrap)
+     1200    0.002    0.000    0.121    0.000 node_executor.py:610(_invoke)
+     1511    0.018    0.000    0.116    0.000 transitions.py:35(plan)
+     1200    0.002    0.000    0.116    0.000 node_executor.py:641(_run_sync)
+20230/5439    0.026    0.000    0.102    0.000 operations.py:334(apply)
+      605    0.000    0.000    0.094    0.000 app.py:1597(run)
+      605    0.007    0.000    0.093    0.000 workflow_executor.py:124(drive)
+     1200    0.005    0.000    0.084    0.000 future.py:99(await_concurrent_future)
+    11474    0.047    0.000    0.082    0.000 dataclasses.py:1540(replace)
+     8752    0.040    0.000    0.080    0.000 operations.py:319(__init__)
+8752/1511    0.019    0.000    0.071    0.000 operations.py:375(finish)
+  600/520    0.001    0.000    0.069    0.000 threading.py:1058(_bootstrap_inner)
+      600    0.002    0.000    0.061    0.000 future.py:79(_acquire_notifier)
+  600/520    0.001    0.000    0.051    0.000 threading.py:1001(run)
+      300    0.001    0.000    0.050    0.000 future.py:26(__init__)
+  600/520    0.008    0.000    0.049    0.000 node_executor.py:799(_worker)
+      302    0.001    0.000    0.049    0.000 loop_scheduler.py:55(complete)
+      600    0.014    0.000    0.049    0.000 node_executor.py:768(submit)
+      600    0.002    0.000    0.041    0.000 _base.py:537(set_result)
+      300    0.010    0.000    0.038    0.000 {built-in method posix.pipe}
+     3022    0.015    0.000    0.036    0.000 events.py:767(validate_payload)
+
+
+         1209903 function calls (1183930 primitive calls) in 0.825 seconds
+
+   Ordered by: internal time
+   List reduced from 447 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    11474    0.047    0.000    0.082    0.000 dataclasses.py:1540(replace)
+     8752    0.040    0.000    0.080    0.000 operations.py:319(__init__)
+20230/5439    0.026    0.000    0.102    0.000 operations.py:334(apply)
+   194088    0.022    0.000    0.022    0.000 {built-in method builtins.getattr}
+      600    0.022    0.000    0.022    0.000 {built-in method _thread.start_new_thread}
+   159656    0.021    0.000    0.028    0.000 {built-in method builtins.isinstance}
+     4138    0.020    0.000    0.135    0.000 {method 'poll' of 'select.epoll' objects}
+8752/1511    0.019    0.000    0.071    0.000 operations.py:375(finish)
+     9964    0.019    0.000    0.032    0.000 dataclasses.py:1278(fields)
+     1511    0.018    0.000    0.116    0.000 transitions.py:35(plan)
+     4138    0.015    0.000    0.949    0.000 base_events.py:1922(_run_once)
+     3022    0.015    0.000    0.036    0.000 events.py:767(validate_payload)
+      600    0.014    0.000    0.049    0.000 node_executor.py:768(submit)
+     1511    0.012    0.000    0.389    0.000 repository.py:52(commit)
+      300    0.010    0.000    0.038    0.000 {built-in method posix.pipe}
+     5976    0.010    0.000    0.010    0.000 {method '__exit__' of '_thread.lock' objects}
+      602    0.010    0.000    0.499    0.001 workflow_executor.py:239(_execute_occurrence)
+    83595    0.010    0.000    0.010    0.000 dataclasses.py:1293(<genexpr>)
+     1511    0.010    0.000    0.471    0.000 app.py:1749(_emit)
+     4792    0.010    0.000    0.800    0.000 {method 'run' of '_contextvars.Context' objects}
+     1510    0.009    0.000    0.012    0.000 _execution_index.py:40(advance)
+  600/520    0.008    0.000    0.049    0.000 node_executor.py:799(_worker)
+     1200    0.008    0.000    0.008    0.000 {method 'release' of '_thread.lock' objects}
+3600/2400    0.008    0.000    0.007    0.000 {method 'acquire' of '_thread.lock' objects}
+     1161    0.007    0.000    0.009    0.000 {built-in method posix.read}
+      303    0.007    0.000    0.029    0.000 transitions.py:294(_apply_scheduler_delta)
+      600    0.007    0.000    0.009    0.000 {built-in method posix.write}
+      605    0.007    0.000    0.093    0.000 workflow_executor.py:124(drive)
+     1804    0.006    0.000    0.162    0.000 node_executor.py:95(timed)
+     1511    0.006    0.000    0.026    0.000 events.py:420(__post_init__)
+
+

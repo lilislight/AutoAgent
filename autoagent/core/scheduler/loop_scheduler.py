@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..runtime._overlay import PlanningOverlay
+
 from collections import deque
 
 from ..errors import LoopControlError, RuntimeTransitionError
@@ -60,6 +62,7 @@ class Scheduler(DAGScheduler):
         output: object,
         *,
         selected_edge_ids: set[str] | frozenset[str] = frozenset(),
+        _execution_index=None,
     ) -> SchedulerDelta:
         if not workflow.loop_regions:
             return super().complete(
@@ -70,7 +73,7 @@ class Scheduler(DAGScheduler):
                 selected_edge_ids=selected_edge_ids,
             )
         occurrence = _running_occurrence(state, occurrence_id)
-        planner = _LoopPlanner(workflow, state, terminal_occurrence_id=occurrence_id)
+        planner = _LoopPlanner(workflow, state, terminal_occurrence_id=occurrence_id, execution_index=_execution_index)
         planner.resolve_outgoing(
             occurrence.id,
             occurrence.node_id,
@@ -89,6 +92,7 @@ class Scheduler(DAGScheduler):
         error: RuntimeErrorInfo,
         *,
         selected_edge_ids: set[str] | frozenset[str] = frozenset(),
+        _execution_index=None,
     ) -> SchedulerDelta:
         if not workflow.loop_regions:
             return super().fail(
@@ -99,7 +103,7 @@ class Scheduler(DAGScheduler):
                 selected_edge_ids=selected_edge_ids,
             )
         occurrence = _running_occurrence(state, occurrence_id)
-        planner = _LoopPlanner(workflow, state, terminal_occurrence_id=occurrence_id)
+        planner = _LoopPlanner(workflow, state, terminal_occurrence_id=occurrence_id, execution_index=_execution_index)
         planner.resolve_outgoing(
             occurrence.id,
             occurrence.node_id,
@@ -119,14 +123,16 @@ class _LoopPlanner:
         state: RuntimeState,
         *,
         terminal_occurrence_id: str | None = None,
+        execution_index=None,
     ) -> None:
+        self.execution_index = execution_index
         self.workflow = workflow
         self.scheduler = _running_invocation(state).scheduler
         self.terminal_occurrence_id = terminal_occurrence_id
         self.terminal_failed = False
-        self.resolutions = dict(self.scheduler.resolutions)
-        self.boundaries = dict(self.scheduler.boundary_resolutions)
-        self.known_occurrences = set(self.scheduler.occurrences)
+        self.resolutions = PlanningOverlay(self.scheduler.resolutions)
+        self.boundaries = PlanningOverlay(self.scheduler.boundary_resolutions)
+        self.known_occurrences = PlanningOverlay(self.scheduler.occurrences)
         self.new_resolutions: list[EdgeResolution] = []
         self.new_boundaries: list[LoopBoundaryResolution] = []
         self.closed_boundaries: list[str] = []
@@ -158,14 +164,14 @@ class _LoopPlanner:
         )
         if plan.id in self.known_occurrences:
             return
-        self.known_occurrences.add(plan.id)
+        self.known_occurrences[plan.id] = None
         self.ready.append(plan)
 
     def plan_skipped(self, node_id: str, scope: ExecutionScope) -> None:
         plan = OccurrencePlan(occurrence_key(node_id, scope), node_id, scope)
         if plan.id in self.known_occurrences:
             return
-        self.known_occurrences.add(plan.id)
+        self.known_occurrences[plan.id] = None
         self.skipped.append(plan)
         self._skip_outgoing(node_id, scope)
 
@@ -491,6 +497,12 @@ class _LoopPlanner:
             f"Loop {region.id!r} stabilized without Back or Exit.",
         )
 
+    def _scope_occurrences(self, region, loop_scope):
+        if self.execution_index is None:
+            return self.scheduler.occurrences.items()
+        ids = self.execution_index.occurrences_by_scope.get((region.id, loop_scope), ())
+        return ((key, self.scheduler.occurrences[key]) for key in ids)
+
     def _scope_has_recorded_failure(
         self, region: LoopRegionIR, loop_scope: ExecutionScope
     ) -> bool:
@@ -498,13 +510,13 @@ class _LoopPlanner:
             occurrence.status == "failed"
             and occurrence.node_id in region.node_ids
             and self._region_scope(occurrence.scope, region.id) == loop_scope
-            for occurrence in self.scheduler.occurrences.values()
+            for _, occurrence in self._scope_occurrences(region, loop_scope)
         )
 
     def _scope_was_activated(
         self, region: LoopRegionIR, loop_scope: ExecutionScope
     ) -> bool:
-        for occurrence_id, occurrence in self.scheduler.occurrences.items():
+        for occurrence_id, occurrence in self._scope_occurrences(region, loop_scope):
             if occurrence.node_id not in region.node_ids:
                 continue
             if self._region_scope(occurrence.scope, region.id) != loop_scope:
@@ -522,7 +534,7 @@ class _LoopPlanner:
     def _scope_has_active_work(
         self, region: LoopRegionIR, loop_scope: ExecutionScope
     ) -> bool:
-        for occurrence_id, occurrence in self.scheduler.occurrences.items():
+        for occurrence_id, occurrence in self._scope_occurrences(region, loop_scope):
             if occurrence_id == self.terminal_occurrence_id:
                 continue
             if occurrence.status not in {"ready", "running"}:

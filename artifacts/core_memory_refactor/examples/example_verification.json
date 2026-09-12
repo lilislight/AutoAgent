@@ -1,0 +1,102 @@
+{
+  "approved_recovery_child": {
+    "events": 44,
+    "sessions": {
+      "core-api-demo-session": 37,
+      "40556cef-aabf-4611-998a-4b75bafabc46": 7
+    },
+    "event_types": {
+      "session.opened": 2,
+      "invocation.started": 2,
+      "node_occurrence.started": 7,
+      "operator_call.started": 5,
+      "operator_call.completed": 5,
+      "output.bound": 1,
+      "node_occurrence.completed": 7,
+      "input.mapped": 5,
+      "node_occurrence.waiting": 1,
+      "wait.resumed": 1,
+      "routing.resolved": 2,
+      "child_invocation.planned": 1,
+      "child_invocation.phase_changed": 3,
+      "invocation.completed": 2
+    },
+    "all_prefixes_valid": true,
+    "all_records_roundtrip": true,
+    "checkpoint_checks": [
+      {
+        "session_id": "core-api-demo-session",
+        "sequence": 10,
+        "checkpoint_equals_replay": true
+      },
+      {
+        "session_id": "40556cef-aabf-4611-998a-4b75bafabc46",
+        "sequence": 7,
+        "checkpoint_equals_replay": true
+      },
+      {
+        "session_id": "core-api-demo-session",
+        "sequence": 37,
+        "checkpoint_equals_replay": true
+      }
+    ]
+  },
+  "approval_rejected": {
+    "events": 19,
+    "sessions": {
+      "approval_rejected": 19
+    },
+    "event_types": {
+      "session.opened": 1,
+      "invocation.started": 1,
+      "node_occurrence.started": 3,
+      "operator_call.started": 2,
+      "operator_call.completed": 2,
+      "output.bound": 1,
+      "node_occurrence.completed": 3,
+      "input.mapped": 2,
+      "node_occurrence.waiting": 1,
+      "wait.resumed": 1,
+      "routing.resolved": 1,
+      "invocation.completed": 1
+    },
+    "all_prefixes_valid": true,
+    "all_records_roundtrip": true,
+    "checkpoint_checks": [
+      {
+        "session_id": "approval_rejected",
+        "sequence": 19,
+        "checkpoint_equals_replay": true
+      }
+    ]
+  },
+  "manual_review": {
+    "events": 34,
+    "sessions": {
+      "manual_review": 34
+    },
+    "event_types": {
+      "session.opened": 1,
+      "invocation.started": 1,
+      "node_occurrence.started": 6,
+      "operator_call.started": 5,
+      "operator_call.completed": 5,
+      "output.bound": 1,
+      "node_occurrence.completed": 6,
+      "input.mapped": 4,
+      "node_occurrence.waiting": 1,
+      "wait.resumed": 1,
+      "routing.resolved": 2,
+      "invocation.completed": 1
+    },
+    "all_prefixes_valid": true,
+    "all_records_roundtrip": true,
+    "checkpoint_checks": [
+      {
+        "session_id": "manual_review",
+        "sequence": 34,
+        "checkpoint_equals_replay": true
+      }
+    ]
+  }
+}

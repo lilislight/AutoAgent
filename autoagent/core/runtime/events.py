@@ -734,7 +734,7 @@ def _patch_from_record(value: object) -> ContextPatch:
         return ContextOperation(
             operation,  # type: ignore[arg-type]
             tuple(path),
-            item.get("value"),
+            freeze(item.get("value")),
         )
 
     invocation = value.get("invocation", [])

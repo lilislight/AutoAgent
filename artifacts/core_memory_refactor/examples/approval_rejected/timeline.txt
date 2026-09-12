@@ -1,0 +1,40 @@
+Runtime Events in sink arrival order; sequence is ordered per Session.
+
+001 [approval_rejected #001] session.opened  delta_ops=1
+    {"context": {}}
+002 [approval_rejected #002] invocation.started  delta_ops=3
+    {"workflow_id": "order-processing-demo", "workflow_revision_id": "order-processing-demo:48a67c1ccfc0a605e85d2ef546e6a56a19dd93d24e77f28ca3e77835d243ce06", "entry_node_id": "prepare.normalize", "input": {"order_id": "approval_rejected", "amount": 600, "stock": 3}}
+003 [approval_rejected #003] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "prepare.normalize@root"}
+004 [approval_rejected #004] operator_call.started  delta_ops=3
+    {"call_id": "04335bca-3268-4fd6-b378-6e89cf32f900", "occurrence_id": "prepare.normalize@root", "operator_id": "normalize_order", "unit_index": 0, "input": {"order_id": "approval_rejected", "amount": 600, "stock": 3}, "queue_duration_ns": 1438}
+005 [approval_rejected #005] operator_call.completed  delta_ops=6
+    {"call_id": "04335bca-3268-4fd6-b378-6e89cf32f900", "output": {"order_id": "approval_rejected", "amount": 600, "stock": 3, "currency": "USD"}, "execution_duration_ns": 264339}
+006 [approval_rejected #006] output.bound  delta_ops=2
+    {"occurrence_id": "prepare.normalize@root", "patch": {"invocation": [{"operation": "set", "path": ["order"], "value": {"order_id": "approval_rejected", "amount": 600, "stock": 3, "currency": "USD"}}], "session": []}, "duration_ns": 393539}
+007 [approval_rejected #007] node_occurrence.completed  delta_ops=6
+    {"occurrence_id": "prepare.normalize@root", "output": {"order_id": "approval_rejected", "amount": 600, "stock": 3, "currency": "USD"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+008 [approval_rejected #008] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "prepare.approval@root"}
+009 [approval_rejected #009] input.mapped  delta_ops=2
+    {"occurrence_id": "prepare.approval@root", "mapped_input": {"order_id": "approval_rejected", "amount": 600, "question": "Approve this order?"}, "duration_ns": 345587}
+010 [approval_rejected #010] node_occurrence.waiting  delta_ops=4
+    {"occurrence_id": "prepare.approval@root", "wait_id": "f372036f-f3ce-464d-962c-21907854a0cc", "request": {"order_id": "approval_rejected", "amount": 600, "question": "Approve this order?"}}
+011 [approval_rejected #011] wait.resumed  delta_ops=4
+    {"wait_id": "f372036f-f3ce-464d-962c-21907854a0cc", "response": {"approved": false}}
+012 [approval_rejected #012] routing.resolved  delta_ops=2
+    {"occurrence_id": "prepare.approval@root", "source_status": "complete", "conditions": [{"edge_id": "approval-to-risk", "selected": false, "duration_ns": 634600}, {"edge_id": "approval-to-inventory", "selected": false, "duration_ns": 374733}, {"edge_id": "approval-to-rejected", "selected": true, "duration_ns": 454940}], "duration_ns": 875571}
+013 [approval_rejected #013] node_occurrence.completed  delta_ops=9
+    {"occurrence_id": "prepare.approval@root", "output": {"approved": false}, "metrics": null}
+014 [approval_rejected #014] node_occurrence.started  delta_ops=3
+    {"occurrence_id": "approval_rejected@root"}
+015 [approval_rejected #015] input.mapped  delta_ops=2
+    {"occurrence_id": "approval_rejected@root", "mapped_input": {"order_id": "approval_rejected", "amount": 600, "stock": 3, "currency": "USD"}, "duration_ns": 262362}
+016 [approval_rejected #016] operator_call.started  delta_ops=3
+    {"call_id": "14f9a225-a657-47f8-a55b-8fe42f5f5149", "occurrence_id": "approval_rejected@root", "operator_id": "reject_order", "unit_index": 0, "input": {"order_id": "approval_rejected", "amount": 600, "stock": 3, "currency": "USD"}, "queue_duration_ns": 1906}
+017 [approval_rejected #017] operator_call.completed  delta_ops=6
+    {"call_id": "14f9a225-a657-47f8-a55b-8fe42f5f5149", "output": {"order_id": "approval_rejected", "approved": false, "summary": "approval was rejected"}, "execution_duration_ns": 267773}
+018 [approval_rejected #018] node_occurrence.completed  delta_ops=3
+    {"occurrence_id": "approval_rejected@root", "output": {"order_id": "approval_rejected", "approved": false, "summary": "approval was rejected"}, "metrics": {"call_count": 1, "peak_parallelism": 1}}
+019 [approval_rejected #019] invocation.completed  delta_ops=4
+    {"output": {"approval_rejected": {"order_id": "approval_rejected", "approved": false, "summary": "approval was rejected"}}}

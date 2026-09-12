@@ -1,0 +1,86 @@
+         1045792 function calls (1017383 primitive calls) in 0.581 seconds
+
+   Ordered by: cumulative time
+   List reduced from 306 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     2402    0.008    0.000    0.613    0.000 base_events.py:1922(_run_once)
+     2803    0.002    0.000    0.598    0.000 events.py:86(_run)
+     2803    0.006    0.000    0.596    0.000 {method 'run' of '_contextvars.Context' objects}
+      400    0.010    0.000    0.457    0.001 workflow_executor.py:239(_execute_occurrence)
+     1603    0.009    0.000    0.446    0.000 app.py:1749(_emit)
+     1603    0.011    0.000    0.396    0.000 repository.py:52(commit)
+     1200    0.002    0.000    0.359    0.000 workflow_executor.py:246(emit)
+      400    0.003    0.000    0.248    0.001 node_executor.py:210(execute)
+      400    0.001    0.000    0.244    0.001 node_executor.py:236(run_unit)
+      400    0.000    0.000    0.242    0.001 node_executor.py:322(_call)
+      400    0.001    0.000    0.241    0.001 node_executor.py:348(_call_once)
+      400    0.004    0.000    0.238    0.001 node_executor.py:386(_call_once_admitted)
+     1603    0.003    0.000    0.210    0.000 reducer.py:14(apply)
+     1603    0.004    0.000    0.201    0.000 operations.py:390(apply_runtime_delta)
+      801    0.000    0.000    0.124    0.000 app.py:1597(run)
+      801    0.009    0.000    0.123    0.000 workflow_executor.py:124(drive)
+24010/6407    0.029    0.000    0.115    0.000 operations.py:334(apply)
+     1603    0.021    0.000    0.109    0.000 transitions.py:35(plan)
+     9206    0.048    0.000    0.089    0.000 operations.py:319(__init__)
+    12412    0.050    0.000    0.088    0.000 dataclasses.py:1540(replace)
+9206/1603    0.020    0.000    0.072    0.000 operations.py:375(finish)
+     3206    0.014    0.000    0.034    0.000 events.py:767(validate_payload)
+    10412    0.019    0.000    0.032    0.000 dataclasses.py:1278(fields)
+   160156    0.021    0.000    0.028    0.000 {built-in method builtins.isinstance}
+     1603    0.006    0.000    0.025    0.000 events.py:420(__post_init__)
+   204964    0.023    0.000    0.023    0.000 {built-in method builtins.getattr}
+      400    0.002    0.000    0.020    0.000 transitions.py:92(graph)
+      400    0.001    0.000    0.018    0.000 loop_scheduler.py:55(complete)
+      400    0.001    0.000    0.018    0.000 scheduler.py:70(complete)
+     4809    0.003    0.000    0.017    0.000 repository.py:90(_settle_pending)
+      800    0.002    0.000    0.017    0.000 transitions.py:439(_apply_context_patch)
+      401    0.005    0.000    0.016    0.000 transitions.py:294(_apply_scheduler_delta)
+     1603    0.002    0.000    0.016    0.000 events.py:417(<lambda>)
+     2004    0.003    0.000    0.015    0.000 uuid.py:723(uuid4)
+      800    0.002    0.000    0.014    0.000 node_executor.py:95(timed)
+     1602    0.009    0.000    0.013    0.000 _execution_index.py:40(advance)
+     2004    0.002    0.000    0.013    0.000 values.py:80(freeze)
+      401    0.005    0.000    0.013    0.000 scheduler.py:144(_propagate)
+     6407    0.004    0.000    0.012    0.000 transitions.py:39(put)
+2804/1203    0.007    0.000    0.011    0.000 values.py:91(_freeze)
+
+
+         1045792 function calls (1017383 primitive calls) in 0.581 seconds
+
+   Ordered by: internal time
+   List reduced from 306 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    12412    0.050    0.000    0.088    0.000 dataclasses.py:1540(replace)
+     9206    0.048    0.000    0.089    0.000 operations.py:319(__init__)
+24010/6407    0.029    0.000    0.115    0.000 operations.py:334(apply)
+   204964    0.023    0.000    0.023    0.000 {built-in method builtins.getattr}
+     1603    0.021    0.000    0.109    0.000 transitions.py:35(plan)
+   160156    0.021    0.000    0.028    0.000 {built-in method builtins.isinstance}
+9206/1603    0.020    0.000    0.072    0.000 operations.py:375(finish)
+    10412    0.019    0.000    0.032    0.000 dataclasses.py:1278(fields)
+     3206    0.014    0.000    0.034    0.000 events.py:767(validate_payload)
+     1603    0.011    0.000    0.396    0.000 repository.py:52(commit)
+      400    0.010    0.000    0.457    0.001 workflow_executor.py:239(_execute_occurrence)
+    85667    0.010    0.000    0.010    0.000 dataclasses.py:1293(<genexpr>)
+     1603    0.009    0.000    0.446    0.000 app.py:1749(_emit)
+      801    0.009    0.000    0.123    0.000 workflow_executor.py:124(drive)
+     1602    0.009    0.000    0.013    0.000 _execution_index.py:40(advance)
+     2402    0.008    0.000    0.613    0.000 base_events.py:1922(_run_once)
+2804/1203    0.007    0.000    0.011    0.000 values.py:91(_freeze)
+     1603    0.006    0.000    0.025    0.000 events.py:420(__post_init__)
+     2004    0.006    0.000    0.008    0.000 uuid.py:139(__init__)
+     2803    0.006    0.000    0.596    0.000 {method 'run' of '_contextvars.Context' objects}
+     6407    0.006    0.000    0.007    0.000 operations.py:45(_from_owned)
+      401    0.005    0.000    0.016    0.000 transitions.py:294(_apply_scheduler_delta)
+      401    0.005    0.000    0.013    0.000 scheduler.py:144(_propagate)
+    28062    0.004    0.000    0.004    0.000 {method 'get' of 'dict' objects}
+     6407    0.004    0.000    0.012    0.000 transitions.py:39(put)
+     1603    0.004    0.000    0.201    0.000 operations.py:390(apply_runtime_delta)
+    20824    0.004    0.000    0.004    0.000 {method 'endswith' of 'str' objects}
+     9206    0.004    0.000    0.006    0.000 dataclasses.py:1301(is_dataclass)
+      400    0.004    0.000    0.238    0.001 node_executor.py:386(_call_once_admitted)
+     1200    0.004    0.000    0.009    0.000 tasks.py:731(gather)
+
+

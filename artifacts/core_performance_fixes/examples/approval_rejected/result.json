@@ -1,0 +1,10 @@
+{
+  "status": "completed",
+  "output": {
+    "approval_rejected": {
+      "order_id": "approval_rejected",
+      "approved": false,
+      "summary": "approval was rejected"
+    }
+  }
+}

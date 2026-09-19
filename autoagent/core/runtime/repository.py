@@ -6,7 +6,7 @@ from .clocks import unix_time_us
 from ._context_index import ContextRevisionIndex, planning_indexes
 from collections.abc import Mapping
 
-from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged
+from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated
 from .state import RuntimeState
 from ._execution_index import ExecutionIndex
 from .checkpoint import SessionCheckpoint
@@ -60,6 +60,7 @@ class RuntimeRepository:
         payload: RuntimeEventPayload,
         occurred_at_us: int | None = None,
         scheduler_delta: SchedulerDelta | None = None,
+        output_node_ids: tuple[str, ...] | None = None,
     ) -> RuntimeEvent:
         async with self._session_lock(session_id):
             pending = self._pending.get(session_id)
@@ -75,6 +76,12 @@ class RuntimeRepository:
                     tuple(item.id for item in scheduler.occurrences.values() if item.status == "running"),
                     tuple(item.id for item in scheduler.operator_calls.values() if item.status == "running"),
                 )
+            planning_options = {}
+            if type(self.planner) is TransitionPlanner and isinstance(
+                payload, (NodeCompleted, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated)
+            ):
+                planning_options['_execution_index'] = self._execution_indexes.get(session_id)
+                planning_options['_output_node_ids'] = output_node_ids
             timestamp = unix_time_us() if occurred_at_us is None else occurred_at_us
             patch = (before.invocation.scheduler.occurrences[payload.occurrence_id].execution.pending_context_patch
                      if isinstance(payload, NodeCompleted) and before.invocation is not None
@@ -84,13 +91,13 @@ class RuntimeRepository:
                     delta = self.planner.plan(
                         before, payload, occurred_at_us=timestamp,
                         session_id=session_id, invocation_id=invocation_id,
-                        scheduler_delta=scheduler_delta,
+                        scheduler_delta=scheduler_delta, **planning_options,
                     )
             else:
                 delta = self.planner.plan(
                     before, payload, occurred_at_us=timestamp,
                     session_id=session_id, invocation_id=invocation_id,
-                    scheduler_delta=scheduler_delta,
+                    scheduler_delta=scheduler_delta, **planning_options,
                 )
             event = RuntimeEvent(
                 session_id, before.sequence + 1, payload, invocation_id,
@@ -179,10 +186,20 @@ class RuntimeRepository:
         """Internal derived lookups for the currently acknowledged State."""
         return self._execution_indexes[session_id]
 
-    async def settle(self, session_id: str) -> None:
-        """Retry an unresolved append without planning any new execution."""
+    async def settle(self, session_id: str) -> RuntimeEvent | None:
+        """Retry an unresolved append and return its exact Event, if any.
+
+        App settles before Scheduler planning so planning observes acknowledged
+        State. The returned Event lets an identical retry avoid a second plan.
+        """
+        # There is no await between capturing an Event and installing pending.
+        # On the Runtime loop, absence therefore needs no lock acquisition.
+        if session_id not in self._pending:
+            return None
         async with self._session_lock(session_id):
+            pending = self._pending.get(session_id)
             await self._settle_pending(session_id)
+            return pending[0] if pending is not None else None
 
     def session_ids(self) -> tuple[str, ...]:
         return tuple(self._states)

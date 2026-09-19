@@ -358,9 +358,9 @@ def main() -> None:
     # Result contains only the Invocation boundary data.
     print_result("source reached Wait", waiting)
 
-    # unload_session() transfers one quiescent Session out of Core memory and
-    # returns its checkpoint. invoke/stream never build checkpoints implicitly.
-    save_checkpoint(PARENT_CHECKPOINT_PATH, source.unload_session(waiting.ref))
+    # Explicitly capture a checkpoint while releasing this quiescent Session.
+    # Without capture_checkpoint=True, unload_session() returns None.
+    save_checkpoint(PARENT_CHECKPOINT_PATH, source.unload_session(waiting.ref, capture_checkpoint=True))
     source.close()
 
     # Simulate a new process. Loading restores State without requiring Workflow
@@ -398,9 +398,8 @@ def main() -> None:
     child = recovered.join(child_ref, timeout=2.0)
     print_result("spawned audit child", child)
 
-    # checkpoint(handle) lets callers persist a Child independently at any
-    # stable point while it remains present in this App.
-    save_checkpoint(CHILD_CHECKPOINT_PATH, recovered.unload_session(child_ref))
+    # Explicitly capture and unload the quiescent Child independently.
+    save_checkpoint(CHILD_CHECKPOINT_PATH, recovered.unload_session(child_ref, capture_checkpoint=True))
     recovered.close()
 
 

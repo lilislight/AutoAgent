@@ -175,6 +175,11 @@ class ValueContract:
         """Encode a value already validated by this contract at this boundary."""
         if validated is None:
             return None
+        if self._python_record_equivalent:
+            # Plain validated JSON containers already have record form. The
+            # Runtime Event freeze boundary detaches them before user code runs.
+            _validate_json_record(validated)
+            return validated
         assert self._adapter is not None
         record = self._adapter.dump_python(
             validated,
@@ -190,10 +195,9 @@ class ValueContract:
         if not self._python_record_equivalent or not _simple_json_record(value):
             return self.restore(value)
         validated = self.validate(value)
-        canonical = (None if self._adapter is None else self._adapter.dump_python(
-            validated, mode="json", round_trip=True, by_alias=True
-        ))
-        if canonical != value:
+        # This eligibility excludes serializers, aliases, models and custom
+        # validators: serialization is the identity on the validated JSON tree.
+        if validated != value:
             raise TypeError("Value record is not in canonical contract form.")
         return validated
 

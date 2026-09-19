@@ -1,0 +1,3 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 34.91796875, "maxrss_mib": 34.91796875}
+{"kind": "point", "stage": "after_run", "rss_mib": 70.28125, "maxrss_mib": 127.640625, "elapsed_s": 0.8046692420030013}
+{"kind": "done"}

@@ -1,0 +1,9 @@
+{
+  "rows": 33822,
+  "compact_json_bytes": 1048483,
+  "python_raw_live_bytes": 8662080,
+  "raw_and_frozen_live_bytes": 17869636,
+  "frozen_only_live_bytes": 11371948,
+  "after_release_live_bytes": 7740,
+  "method": "Separate tracemalloc probe of the worker list/dict shape; no App or Event retention; not RSS."
+}

@@ -1,0 +1,136 @@
+--- a/autoagent/core/operators/contract.py
++++ b/autoagent/core/operators/contract.py
+@@ -175,6 +175,11 @@
+         """Encode a value already validated by this contract at this boundary."""
+         if validated is None:
+             return None
++        if self._python_record_equivalent:
++            # Plain validated JSON containers already have record form. The
++            # Runtime Event freeze boundary detaches them before user code runs.
++            _validate_json_record(validated)
++            return validated
+         assert self._adapter is not None
+         record = self._adapter.dump_python(
+             validated,
+@@ -190,10 +195,9 @@
+         if not self._python_record_equivalent or not _simple_json_record(value):
+             return self.restore(value)
+         validated = self.validate(value)
+-        canonical = (None if self._adapter is None else self._adapter.dump_python(
+-            validated, mode="json", round_trip=True, by_alias=True
+-        ))
+-        if canonical != value:
++        # This eligibility excludes serializers, aliases, models and custom
++        # validators: serialization is the identity on the validated JSON tree.
++        if validated != value:
+             raise TypeError("Value record is not in canonical contract form.")
+         return validated
+ 
+--- a/autoagent/core/executor/node_executor.py
++++ b/autoagent/core/executor/node_executor.py
+@@ -219,7 +219,10 @@
+         on_stream_chunk: StreamChunkHandler = _ignore_chunk,
+         completed_calls=None,
+         aggregate: bool = True,
++        _retain_outputs: bool = True,
+     ) -> NodeExecutionResult:
++        if not _retain_outputs and aggregate:
++            raise ValueError("Discarding transient outputs requires external aggregation.")
+         if self._closed:
+             raise RuntimeError("NodeExecutor is closed.")
+         if isinstance(node.executable, (Capability, WorkflowIR)):
+@@ -238,12 +241,15 @@
+             if completed_calls is not None and index in completed_calls:
+                 call = completed_calls[index]
+                 contract = node.output_contract if node.stream is not None else node.executable.contract.output
+-                return contract.restore(thaw(call.output)), 0
++                # Loaded checkpoints still cross the original contract boundary.
++                # Discard after validation, never bypass it for recovered data.
++                restored = contract.restore(thaw(call.output))
++                return (restored if _retain_outputs else None), 0
+             async with lock:
+                 active += 1
+                 peak = max(peak, active)
+             try:
+-                return await self._call(
++                output, count = await self._call(
+                     node,
+                     occurrence_id,
+                     index,
+@@ -253,6 +259,7 @@
+                     on_call_event,
+                     on_stream_chunk,
+                 )
++                return (output if _retain_outputs else None), count
+             finally:
+                 async with lock:
+                     active -= 1
+--- a/autoagent/core/executor/workflow_executor.py
++++ b/autoagent/core/executor/workflow_executor.py
+@@ -292,6 +292,9 @@
+                         invocation_context=invocation.context, session_context=state.session.context)
+                     if node.input_mapping is not None:
+                         await emit(InputMapped(occurrence_id, self._record_mapped(node, mapped), duration))
++                # The validated mapped value owns the execution input. Do not
++                # keep the pre-validation thawed graph input throughout a Call.
++                incoming = invocation_input = None
+                 if isinstance(node.executable, Wait):
+                     await emit(WaitRequested(occurrence_id, str(uuid4()), node.executable.input_contract.to_record(mapped)))
+                     return
+@@ -328,9 +331,15 @@
+                     calls = self._occurrence_calls(session_id, occurrence_id)
+                     completed = {item.unit_index: item for item in calls
+                         if item.occurrence_id == occurrence_id and item.status == "completed"}
++                    execution_options = {}
++                    if type(self._node_executor) is NodeExecutor and (node.map is None or node.map.aggregate is None):
++                        # This path forwards accepted immutable Call records below;
++                        # no user aggregator consumes the transient Python outputs.
++                        execution_options['_retain_outputs'] = False
+                     result = await self._node_executor.execute(executable_node, occurrence_id, mapped,
+                         invocation_context=invocation_context, session_context=session_context,
+-                        on_call_event=emit, on_stream_chunk=emit_chunk, completed_calls=completed, aggregate=False)
++                        on_call_event=emit, on_stream_chunk=emit_chunk, completed_calls=completed, aggregate=False,
++                        **execution_options)
+                     output, metrics = result.output, result.metrics
+                     if node.map is not None and node.map.aggregate is not None:
+                         phase = "aggregation"
+--- a/autoagent/core/runtime/transitions.py
++++ b/autoagent/core/runtime/transitions.py
+@@ -128,7 +128,16 @@
+             require_occ(); workspace(occ, phase="capability_resolved",
+                 resolved_capability_id=payload.capability_id, resolved_operator_id=payload.operator_id)
+         elif isinstance(payload, Aggregated):
+-            require_occ(); workspace(occ, phase="aggregated", aggregate_output=payload.output)
++            require_occ()
++            call_ids = (_execution_index.calls_by_occurrence.get(oid, ()) if _execution_index is not None
++                        else tuple(c.id for c in sched.operator_calls.values() if c.occurrence_id == oid))
++            if any(sched.operator_calls[key].status == "running" for key in call_ids):
++                raise RuntimeTransitionError("AGGREGATION_CALLS_ACTIVE", "Aggregation requires settled Operator Calls.")
++            workspace(occ, phase="aggregated", aggregate_output=payload.output, mapped_input=None)
++            for key in call_ids:
++                call = sched.operator_calls[key]
++                if call.input is not None or call.output is not None:
++                    put((*SCHED, "operator_calls", key), replace(call, input=None, output=None))
+         elif isinstance(payload, OutputBound):
+             require_occ(); workspace(occ, phase="output_bound", pending_context_patch=payload.patch)
+         elif isinstance(payload, RoutingResolved):
+--- a/autoagent/core/runtime/repository.py
++++ b/autoagent/core/runtime/repository.py
+@@ -6,7 +6,7 @@
+ from ._context_index import ContextRevisionIndex, planning_indexes
+ from collections.abc import Mapping
+ 
+-from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged, NodeFailed, WaitRequested, ChildAwaitSuspended
++from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated
+ from .state import RuntimeState
+ from ._execution_index import ExecutionIndex
+ from .checkpoint import SessionCheckpoint
+@@ -78,7 +78,7 @@
+                 )
+             planning_options = {}
+             if type(self.planner) is TransitionPlanner and isinstance(
+-                payload, (NodeCompleted, NodeFailed, WaitRequested, ChildAwaitSuspended)
++                payload, (NodeCompleted, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated)
+             ):
+                 planning_options['_execution_index'] = self._execution_indexes.get(session_id)
+                 planning_options['_output_node_ids'] = output_node_ids

@@ -1,0 +1,75 @@
+[
+  {
+    "case": {
+      "name": "map_no_aggregate",
+      "invocations": 3,
+      "width": 4,
+      "rows": 16000
+    },
+    "status": "completed",
+    "parent_peak_mib": 126.59375,
+    "rss_guard_mib": 896.0,
+    "points": [
+      {
+        "kind": "point",
+        "stage": "baseline",
+        "rss_mib": 34.91796875,
+        "maxrss_mib": 34.91796875
+      },
+      {
+        "kind": "point",
+        "stage": "after_run",
+        "rss_mib": 70.28125,
+        "maxrss_mib": 127.640625,
+        "elapsed_s": 0.8046692420030013
+      },
+      {
+        "kind": "done"
+      }
+    ]
+  },
+  {
+    "case": {
+      "name": "aggregate_binding_heap",
+      "invocations": 1,
+      "width": 4,
+      "rows": 4096,
+      "aggregate": true,
+      "trace": true
+    },
+    "status": "completed",
+    "parent_peak_mib": 58.42578125,
+    "rss_guard_mib": 896.0,
+    "points": [
+      {
+        "kind": "point",
+        "stage": "baseline",
+        "rss_mib": 34.66796875,
+        "maxrss_mib": 34.66796875,
+        "python_live_mib": 0.0013074874877929688,
+        "python_peak_mib": 0.011128425598144531
+      },
+      {
+        "kind": "point",
+        "stage": "binding",
+        "rss_mib": 54.3203125,
+        "maxrss_mib": 60.23046875,
+        "call_outputs_with_rows": 0,
+        "python_live_mib": 0.05154895782470703,
+        "python_peak_mib": 8.628006935119629
+      },
+      {
+        "kind": "point",
+        "stage": "after_run",
+        "rss_mib": 54.3203125,
+        "maxrss_mib": 60.23046875,
+        "elapsed_s": 0.3119105529913213,
+        "python_live_mib": 0.04037284851074219,
+        "python_peak_mib": 8.628006935119629
+      },
+      {
+        "kind": "done"
+      }
+    ]
+  }
+]

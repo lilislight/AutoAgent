@@ -219,7 +219,10 @@ class NodeExecutor:
         on_stream_chunk: StreamChunkHandler = _ignore_chunk,
         completed_calls=None,
         aggregate: bool = True,
+        _retain_outputs: bool = True,
     ) -> NodeExecutionResult:
+        if not _retain_outputs and aggregate:
+            raise ValueError("Discarding transient outputs requires external aggregation.")
         if self._closed:
             raise RuntimeError("NodeExecutor is closed.")
         if isinstance(node.executable, (Capability, WorkflowIR)):
@@ -238,12 +241,15 @@ class NodeExecutor:
             if completed_calls is not None and index in completed_calls:
                 call = completed_calls[index]
                 contract = node.output_contract if node.stream is not None else node.executable.contract.output
-                return contract.restore(thaw(call.output)), 0
+                # Loaded checkpoints still cross the original contract boundary.
+                # Discard after validation, never bypass it for recovered data.
+                restored = contract.restore(thaw(call.output))
+                return (restored if _retain_outputs else None), 0
             async with lock:
                 active += 1
                 peak = max(peak, active)
             try:
-                return await self._call(
+                output, count = await self._call(
                     node,
                     occurrence_id,
                     index,
@@ -253,6 +259,7 @@ class NodeExecutor:
                     on_call_event,
                     on_stream_chunk,
                 )
+                return (output if _retain_outputs else None), count
             finally:
                 async with lock:
                     active -= 1

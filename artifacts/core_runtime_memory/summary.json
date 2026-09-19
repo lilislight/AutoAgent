@@ -1,0 +1,499 @@
+[
+  {
+    "case": "text_1m_10cycles",
+    "status": "completed",
+    "baseline_rss_mib": 35.296875,
+    "runtime_peak_rss_mib": 67.9375,
+    "after_run_rss_mib": 67.9375,
+    "after_unload_rss_mib": 36.1484375,
+    "calls": 32,
+    "last_completed_cycles": {
+      "root-0": 10
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_1m_30cycles",
+    "status": "completed",
+    "baseline_rss_mib": 35.07421875,
+    "runtime_peak_rss_mib": 127.8203125,
+    "after_run_rss_mib": 127.8203125,
+    "after_unload_rss_mib": 98.91015625,
+    "calls": 92,
+    "last_completed_cycles": {
+      "root-0": 30
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_1m_60cycles",
+    "status": "completed",
+    "baseline_rss_mib": 35.28125,
+    "runtime_peak_rss_mib": 218.28125,
+    "after_run_rss_mib": 218.28125,
+    "after_unload_rss_mib": 99.33203125,
+    "calls": 182,
+    "last_completed_cycles": {
+      "root-0": 60
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_2m_10cycles",
+    "status": "completed",
+    "baseline_rss_mib": 35.15625,
+    "runtime_peak_rss_mib": 99.7109375,
+    "after_run_rss_mib": 99.7109375,
+    "after_unload_rss_mib": 35.984375,
+    "calls": 32,
+    "last_completed_cycles": {
+      "root-0": 10
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_2m_30cycles",
+    "status": "completed",
+    "baseline_rss_mib": 35.06640625,
+    "runtime_peak_rss_mib": 219.8203125,
+    "after_run_rss_mib": 219.8203125,
+    "after_unload_rss_mib": 159.8984375,
+    "calls": 92,
+    "last_completed_cycles": {
+      "root-0": 30
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_2m_60cycles",
+    "status": "completed",
+    "baseline_rss_mib": 35.27734375,
+    "runtime_peak_rss_mib": 400.26171875,
+    "after_run_rss_mib": 400.26171875,
+    "after_unload_rss_mib": 222.33203125,
+    "calls": 182,
+    "last_completed_cycles": {
+      "root-0": 60
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_no_context",
+    "status": "completed",
+    "baseline_rss_mib": 35.12890625,
+    "runtime_peak_rss_mib": 219.82421875,
+    "after_run_rss_mib": 219.82421875,
+    "after_unload_rss_mib": 159.8984375,
+    "calls": 92,
+    "last_completed_cycles": {
+      "root-0": 30
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "same_text_reference",
+    "status": "completed",
+    "baseline_rss_mib": 37.33984375,
+    "runtime_peak_rss_mib": 40.15625,
+    "after_run_rss_mib": 40.15625,
+    "after_unload_rss_mib": 40.15625,
+    "calls": 92,
+    "last_completed_cycles": {
+      "root-0": 30
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "context_only_overwrite",
+    "status": "completed",
+    "baseline_rss_mib": 35.3046875,
+    "runtime_peak_rss_mib": 44.48046875,
+    "after_run_rss_mib": 44.48046875,
+    "after_unload_rss_mib": 36.84375,
+    "calls": 182,
+    "last_completed_cycles": {
+      "root-0": 60
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "context_only_append",
+    "status": "completed",
+    "baseline_rss_mib": 35.00390625,
+    "runtime_peak_rss_mib": 219.76171875,
+    "after_run_rss_mib": 219.76171875,
+    "after_unload_rss_mib": 159.84765625,
+    "calls": 92,
+    "last_completed_cycles": {
+      "root-0": 30
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_3_invocations",
+    "status": "completed",
+    "baseline_rss_mib": 35.01953125,
+    "runtime_peak_rss_mib": 309.72265625,
+    "after_run_rss_mib": 309.72265625,
+    "after_unload_rss_mib": 97.9453125,
+    "calls": 141,
+    "last_completed_cycles": {
+      "root-0": 15,
+      "root-1": 15,
+      "root-2": 15
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_5_invocations",
+    "status": "completed",
+    "baseline_rss_mib": 35.10546875,
+    "runtime_peak_rss_mib": 340.02734375,
+    "after_run_rss_mib": 340.02734375,
+    "after_unload_rss_mib": 222.265625,
+    "calls": 160,
+    "last_completed_cycles": {
+      "root-0": 10,
+      "root-1": 10,
+      "root-2": 10,
+      "root-3": 10,
+      "root-4": 10
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_5_invocations_512_limit",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.00390625,
+    "runtime_peak_rss_mib": 460.04296875,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {
+      "root-0": 13,
+      "root-1": 13,
+      "root-2": 13,
+      "root-3": 13,
+      "root-4": 13
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "text_5_invocations_1g_limit",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.078125,
+    "runtime_peak_rss_mib": 905.15625,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {
+      "root-0": 28,
+      "root-1": 28,
+      "root-2": 28,
+      "root-3": 28,
+      "root-4": 28
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "rows_forward",
+    "status": "completed",
+    "baseline_rss_mib": 35.015625,
+    "runtime_peak_rss_mib": 320.4453125,
+    "after_run_rss_mib": 320.4453125,
+    "after_unload_rss_mib": 52.296875,
+    "calls": 14,
+    "last_completed_cycles": {
+      "root-0": 4
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "rows_strip_input",
+    "status": "completed",
+    "baseline_rss_mib": 35.4296875,
+    "runtime_peak_rss_mib": 216.7890625,
+    "after_run_rss_mib": 207.8203125,
+    "after_unload_rss_mib": 50.4140625,
+    "calls": 14,
+    "last_completed_cycles": {
+      "root-0": 4
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "map4_rows_single",
+    "status": "completed",
+    "baseline_rss_mib": 35.1953125,
+    "runtime_peak_rss_mib": 184.62890625,
+    "after_run_rss_mib": 167.6796875,
+    "after_unload_rss_mib": 44.54296875,
+    "calls": 10,
+    "last_completed_cycles": {
+      "root-0": 2
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "map4_rows_3_invocations_one_cycle",
+    "status": "completed",
+    "baseline_rss_mib": 35.25,
+    "runtime_peak_rss_mib": 335.01953125,
+    "after_run_rss_mib": 264.109375,
+    "after_unload_rss_mib": 45.203125,
+    "calls": 18,
+    "last_completed_cycles": {
+      "root-0": 1,
+      "root-1": 1,
+      "root-2": 1
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "map4_rows_3_invocations",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.28515625,
+    "runtime_peak_rss_mib": 449.4609375,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {
+      "root-0": 1,
+      "root-1": 1,
+      "root-2": 1
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "map8_rows_5_invocations",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.4609375,
+    "runtime_peak_rss_mib": 449.13671875,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {},
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "sequential_new_sessions",
+    "status": "completed",
+    "baseline_rss_mib": 35.28125,
+    "runtime_peak_rss_mib": 188.4921875,
+    "after_run_rss_mib": 188.4921875,
+    "after_unload_rss_mib": 162.6015625,
+    "calls": 160,
+    "last_completed_cycles": {
+      "root-0": 10,
+      "root-1": 10,
+      "root-2": 10,
+      "root-3": 10,
+      "root-4": 10
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "sequential_reused_session",
+    "status": "completed",
+    "baseline_rss_mib": 35.453125,
+    "runtime_peak_rss_mib": 98.98828125,
+    "after_run_rss_mib": 96.3203125,
+    "after_unload_rss_mib": 96.3203125,
+    "calls": 32,
+    "last_completed_cycles": {
+      "reuse": 10
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "trace_text_unload",
+    "status": "completed",
+    "baseline_rss_mib": 35.1328125,
+    "runtime_peak_rss_mib": 100.42578125,
+    "after_run_rss_mib": 100.42578125,
+    "after_unload_rss_mib": 36.93359375,
+    "calls": 32,
+    "last_completed_cycles": {
+      "root-0": 10
+    },
+    "python_live_mib_after_run": 60.101585388183594,
+    "python_live_mib_after_unload": 0.03046131134033203,
+    "python_live_mib_after_close": 0.021427154541015625
+  },
+  {
+    "case": "trace_context_overwrite",
+    "status": "completed",
+    "baseline_rss_mib": 35.80078125,
+    "runtime_peak_rss_mib": 44.390625,
+    "after_run_rss_mib": 44.390625,
+    "after_unload_rss_mib": 44.390625,
+    "calls": 62,
+    "last_completed_cycles": {
+      "root-0": 20
+    },
+    "python_live_mib_after_run": 2.1613693237304688,
+    "python_live_mib_after_unload": 0.029763221740722656,
+    "python_live_mib_after_close": 0.020684242248535156
+  },
+  {
+    "case": "trace_close_only",
+    "status": "completed",
+    "baseline_rss_mib": 35.0859375,
+    "runtime_peak_rss_mib": 100.55859375,
+    "after_run_rss_mib": 100.55859375,
+    "after_unload_rss_mib": null,
+    "calls": 32,
+    "last_completed_cycles": {
+      "root-0": 10
+    },
+    "python_live_mib_after_run": 60.101704597473145,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": 60.0919075012207
+  },
+  {
+    "case": "trace_map_rows",
+    "status": "completed",
+    "baseline_rss_mib": 35.453125,
+    "runtime_peak_rss_mib": 157.97265625,
+    "after_run_rss_mib": 147.16015625,
+    "after_unload_rss_mib": 96.97265625,
+    "calls": 4,
+    "last_completed_cycles": {
+      "root-0": 1
+    },
+    "python_live_mib_after_run": 21.71747875213623,
+    "python_live_mib_after_unload": 0.028352737426757812,
+    "python_live_mib_after_close": 0.019266128540039062
+  },
+  {
+    "case": "mixed_3_invocations_one_cycle",
+    "status": "completed",
+    "baseline_rss_mib": 35.34765625,
+    "runtime_peak_rss_mib": 340.984375,
+    "after_run_rss_mib": 275.66796875,
+    "after_unload_rss_mib": 43.890625,
+    "calls": 24,
+    "last_completed_cycles": {
+      "root-0": 1,
+      "root-1": 1,
+      "root-2": 1
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "mixed_3_invocations_512_limit",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.65625,
+    "runtime_peak_rss_mib": 454.25,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {
+      "root-0": 1,
+      "root-1": 1,
+      "root-2": 1
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "mixed_5_invocations_1g_limit",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.46875,
+    "runtime_peak_rss_mib": 896.63671875,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {
+      "root-0": 2,
+      "root-1": 2,
+      "root-2": 2,
+      "root-3": 2,
+      "root-4": 2
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "growing_prompt_single",
+    "status": "completed",
+    "baseline_rss_mib": 35.41015625,
+    "runtime_peak_rss_mib": 226.12890625,
+    "after_run_rss_mib": 226.12890625,
+    "after_unload_rss_mib": 55.15625,
+    "calls": 20,
+    "last_completed_cycles": {
+      "root-0": 6
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  },
+  {
+    "case": "growing_prompt_5_invocations",
+    "status": "rss_guard_stopped",
+    "baseline_rss_mib": 35.66015625,
+    "runtime_peak_rss_mib": 922.125,
+    "after_run_rss_mib": null,
+    "after_unload_rss_mib": null,
+    "calls": null,
+    "last_completed_cycles": {
+      "root-0": 5,
+      "root-1": 5,
+      "root-2": 5,
+      "root-3": 5,
+      "root-4": 5
+    },
+    "python_live_mib_after_run": null,
+    "python_live_mib_after_unload": null,
+    "python_live_mib_after_close": null
+  }
+]

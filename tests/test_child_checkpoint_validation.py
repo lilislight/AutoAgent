@@ -45,7 +45,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
         try:
             result = app.invoke(parent, {"value": 1}, session_id="parent-session")
             app.join(result.output, timeout=1)
-            checkpoint = app.unload_session(result.ref)
+            checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertEqual(checkpoint.session_id, "parent-session")
             self.assertEqual(checkpoint.state.session.id, "parent-session")
         finally:
@@ -59,7 +59,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
         try:
             parent_result = app.invoke(parent, {"value": 1})
             child_result = app.join(parent_result.output, timeout=1)
-            checkpoint = app.unload_session(parent_result.output)
+            checkpoint = app.unload_session(parent_result.output, capture_checkpoint=True)
             self.assertEqual(checkpoint.session_id, child_result.session_id)
             self.assertEqual(checkpoint.state.invocation.id, child_result.invocation_id)
         finally:
@@ -73,7 +73,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
         try:
             result = source.invoke(parent, {"value": 1})
             source.join(result.output, timeout=1)
-            checkpoint = source.unload_session(result.ref)
+            checkpoint = source.unload_session(result.ref, capture_checkpoint=True)
         finally:
             source.close()
 
@@ -94,8 +94,8 @@ class ChildCheckpointValidationTests(unittest.TestCase):
         try:
             parent_result = source.invoke(parent, {"value": 1})
             source.join(parent_result.output, timeout=1)
-            child_checkpoint = source.unload_session(parent_result.output)
-            parent_checkpoint = source.unload_session(parent_result.ref)
+            child_checkpoint = source.unload_session(parent_result.output, capture_checkpoint=True)
+            parent_checkpoint = source.unload_session(parent_result.ref, capture_checkpoint=True)
         finally:
             source.close()
 
@@ -116,8 +116,8 @@ class ChildCheckpointValidationTests(unittest.TestCase):
         try:
             parent_result = source.invoke(parent, {"value": 1})
             source.join(parent_result.output, timeout=1)
-            child_checkpoint = source.unload_session(parent_result.output)
-            parent_checkpoint = source.unload_session(parent_result.ref)
+            child_checkpoint = source.unload_session(parent_result.output, capture_checkpoint=True)
+            parent_checkpoint = source.unload_session(parent_result.ref, capture_checkpoint=True)
         finally:
             source.close()
 
@@ -149,7 +149,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
                     Workflow("async-checkpoint", nodes=[Node("work", identity)]),
                     {"value": 1},
                 )
-                checkpoint = await app.aunload_session(result.ref)
+                checkpoint = await app.aunload_session(result.ref, capture_checkpoint=True)
                 self.assertEqual(checkpoint.session_id, result.session_id)
             finally:
                 await app.aclose()
@@ -165,7 +165,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
                 Workflow("checkpoint-codec", nodes=[Node("work", identity)]),
                 {"value": 1},
             )
-            checkpoint = app.unload_session(result.ref)
+            checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             record = json.loads(json.dumps(checkpoint.to_record()))
             self.assertEqual(SessionCheckpoint.from_record(record), checkpoint)
         finally:

@@ -1,0 +1,760 @@
+[
+  {
+    "name": "text_1m_10cycles",
+    "case": {
+      "name": "text_1m_10cycles",
+      "payload_mib": 1,
+      "cycles": 10
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 39.5078125,
+      "elapsed_s": 0.0347225500154309,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 39.6953125,
+      "elapsed_s": 0.036630603979574516,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_1m_30cycles",
+    "case": {
+      "name": "text_1m_30cycles",
+      "payload_mib": 1,
+      "cycles": 30
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 40.4375,
+      "elapsed_s": 0.10185368001111783,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 40.08984375,
+      "elapsed_s": 0.09884293499635532,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_1m_60cycles",
+    "case": {
+      "name": "text_1m_60cycles",
+      "payload_mib": 1,
+      "cycles": 60
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 39.87109375,
+      "elapsed_s": 0.21409020997816697,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 40.2421875,
+      "elapsed_s": 0.2097612109791953,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_2m_10cycles",
+    "case": {
+      "name": "text_2m_10cycles",
+      "payload_mib": 2,
+      "cycles": 10
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 43.8046875,
+      "elapsed_s": 0.041422048991080374,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.7421875,
+      "elapsed_s": 0.03998263500398025,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_2m_30cycles",
+    "case": {
+      "name": "text_2m_30cycles",
+      "payload_mib": 2,
+      "cycles": 30
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 43.67578125,
+      "elapsed_s": 0.1106814709783066,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.05859375,
+      "elapsed_s": 0.1132925869897008,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_2m_60cycles",
+    "case": {
+      "name": "text_2m_60cycles",
+      "payload_mib": 2,
+      "cycles": 60
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 44.5625,
+      "elapsed_s": 0.23088370598270558,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.31640625,
+      "elapsed_s": 0.22194545797538012,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_no_context",
+    "case": {
+      "name": "text_no_context",
+      "cycles": 30,
+      "payload_mib": 2,
+      "context": "none"
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 43.76171875,
+      "elapsed_s": 0.1094555840245448,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.2421875,
+      "elapsed_s": 0.10669790100655518,
+      "binding": null
+    }
+  },
+  {
+    "name": "same_text_reference",
+    "case": {
+      "name": "same_text_reference",
+      "cycles": 30,
+      "payload_mib": 2,
+      "shape": "shared_text"
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 40.05078125,
+      "elapsed_s": 0.10002025897847489,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 39.80859375,
+      "elapsed_s": 0.09608423302415758,
+      "binding": null
+    }
+  },
+  {
+    "name": "context_only_overwrite",
+    "case": {
+      "name": "context_only_overwrite",
+      "cycles": 60,
+      "payload_mib": 2,
+      "shape": "context_only"
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 43.9375,
+      "elapsed_s": 0.19937085898709483,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.25390625,
+      "elapsed_s": 0.20554412397905253,
+      "binding": null
+    }
+  },
+  {
+    "name": "growing_prompt_single",
+    "case": {
+      "name": "growing_prompt_single",
+      "cycles": 6,
+      "payload_mib": 1,
+      "context": "growing_prompt"
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 74.7421875,
+      "elapsed_s": 0.07909726302023046,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 74.9375,
+      "elapsed_s": 0.08209987200098112,
+      "binding": null
+    }
+  },
+  {
+    "name": "growing_prompt_5_invocations",
+    "case": {
+      "name": "growing_prompt_5_invocations",
+      "cycles": 6,
+      "payload_mib": 1,
+      "context": "growing_prompt",
+      "invocations": 5,
+      "rss_limit_mib": 896
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 223.42578125,
+      "elapsed_s": 0.4026848899957258,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 223.2109375,
+      "elapsed_s": 0.4061127419990953,
+      "binding": null
+    }
+  },
+  {
+    "name": "context_only_append",
+    "case": {
+      "name": "context_only_append",
+      "cycles": 30,
+      "payload_mib": 2,
+      "shape": "context_only",
+      "context": "append"
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 220.57421875,
+      "elapsed_s": 0.14513660498778336,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 220.2890625,
+      "elapsed_s": 0.14698988798772916,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_3_invocations",
+    "case": {
+      "name": "text_3_invocations",
+      "cycles": 15,
+      "payload_mib": 2,
+      "invocations": 3
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 53.85546875,
+      "elapsed_s": 0.18454764698981307,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 54.140625,
+      "elapsed_s": 0.17857739800820127,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_5_invocations",
+    "case": {
+      "name": "text_5_invocations",
+      "cycles": 10,
+      "payload_mib": 2,
+      "invocations": 5
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 62.03515625,
+      "elapsed_s": 0.19249796902295202,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 62.41796875,
+      "elapsed_s": 0.19843672300339676,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_5_invocations_512_limit",
+    "case": {
+      "name": "text_5_invocations_512_limit",
+      "cycles": 25,
+      "payload_mib": 2,
+      "invocations": 5
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 62.140625,
+      "elapsed_s": 0.5021961980091874,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 62.3359375,
+      "elapsed_s": 0.5009442930168007,
+      "binding": null
+    }
+  },
+  {
+    "name": "text_5_invocations_1g_limit",
+    "case": {
+      "name": "text_5_invocations_1g_limit",
+      "cycles": 40,
+      "payload_mib": 2,
+      "invocations": 5,
+      "rss_limit_mib": 896
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 62.26171875,
+      "elapsed_s": 0.7940658429870382,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 62.1015625,
+      "elapsed_s": 0.8094287140120286,
+      "binding": null
+    }
+  },
+  {
+    "name": "rows_forward",
+    "case": {
+      "name": "rows_forward",
+      "shape": "rows",
+      "cycles": 4
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 105.29296875,
+      "elapsed_s": 3.5154280360147823,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 92.296875,
+      "elapsed_s": 3.257227003981825,
+      "binding": null
+    }
+  },
+  {
+    "name": "rows_strip_input",
+    "case": {
+      "name": "rows_strip_input",
+      "shape": "rows",
+      "cycles": 4,
+      "strip_input": true
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 86.6953125,
+      "elapsed_s": 1.8757212119817268,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 73.4375,
+      "elapsed_s": 1.7579686529934406,
+      "binding": null
+    }
+  },
+  {
+    "name": "map4_rows_single",
+    "case": {
+      "name": "map4_rows_single",
+      "shape": "rows",
+      "cycles": 2,
+      "map_width": 4
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 137.91015625,
+      "elapsed_s": 0.943032701004995,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 112.203125,
+      "elapsed_s": 0.8680236340151168,
+      "binding": null
+    }
+  },
+  {
+    "name": "map4_rows_3_invocations_one_cycle",
+    "case": {
+      "name": "map4_rows_3_invocations_one_cycle",
+      "shape": "rows",
+      "cycles": 1,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 335.01953125,
+      "elapsed_s": 1.4339937190234195,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 257.3359375,
+      "elapsed_s": 1.314682532014558,
+      "binding": null
+    }
+  },
+  {
+    "name": "map4_rows_3_invocations",
+    "case": {
+      "name": "map4_rows_3_invocations",
+      "shape": "rows",
+      "cycles": 3,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 335.3515625,
+      "elapsed_s": 4.210638736985857,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 257.3125,
+      "elapsed_s": 3.9203308800060768,
+      "binding": null
+    }
+  },
+  {
+    "name": "map8_rows_5_invocations",
+    "case": {
+      "name": "map8_rows_5_invocations",
+      "shape": "rows",
+      "cycles": 4,
+      "map_width": 8,
+      "invocations": 5
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 449.3828125,
+      "elapsed_s": null,
+      "binding": null
+    },
+    "after": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 449.625,
+      "elapsed_s": null,
+      "binding": null
+    }
+  },
+  {
+    "name": "mixed_3_invocations_one_cycle",
+    "case": {
+      "name": "mixed_3_invocations_one_cycle",
+      "mixed": true,
+      "cycles": 1,
+      "payload_mib": 2,
+      "query_mib": 1,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 341.33203125,
+      "elapsed_s": 1.436875006009359,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 263.51953125,
+      "elapsed_s": 1.3363585750048514,
+      "binding": null
+    }
+  },
+  {
+    "name": "mixed_3_invocations_512_limit",
+    "case": {
+      "name": "mixed_3_invocations_512_limit",
+      "mixed": true,
+      "cycles": 3,
+      "payload_mib": 2,
+      "query_mib": 1,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 342.08203125,
+      "elapsed_s": 4.286964836996049,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 269.21484375,
+      "elapsed_s": 3.98200554100913,
+      "binding": null
+    }
+  },
+  {
+    "name": "mixed_5_invocations_1g_limit",
+    "case": {
+      "name": "mixed_5_invocations_1g_limit",
+      "mixed": true,
+      "cycles": 3,
+      "payload_mib": 2,
+      "query_mib": 1,
+      "map_width": 4,
+      "invocations": 5,
+      "rss_limit_mib": 896
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 510.62109375,
+      "elapsed_s": 7.050369498989312,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 415.65234375,
+      "elapsed_s": 6.700396560016088,
+      "binding": null
+    }
+  },
+  {
+    "name": "sequential_new_sessions",
+    "case": {
+      "name": "sequential_new_sessions",
+      "cycles": 10,
+      "invocations": 5,
+      "sequential": true
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 43.64453125,
+      "elapsed_s": 0.19526564198895358,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.3046875,
+      "elapsed_s": 0.19521757299662568,
+      "binding": null
+    }
+  },
+  {
+    "name": "sequential_reused_session",
+    "case": {
+      "name": "sequential_reused_session",
+      "cycles": 10,
+      "invocations": 5,
+      "sequential": true,
+      "reuse": true
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 40.6953125,
+      "elapsed_s": 0.1908342720125802,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 41.046875,
+      "elapsed_s": 0.18916452897246927,
+      "binding": null
+    }
+  },
+  {
+    "name": "trace_text_unload",
+    "case": {
+      "name": "trace_text_unload",
+      "cycles": 10,
+      "payload_mib": 2,
+      "trace": true
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 44.21484375,
+      "elapsed_s": 0.12840069600497372,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.921875,
+      "elapsed_s": 0.1264810260036029,
+      "binding": null
+    }
+  },
+  {
+    "name": "trace_context_overwrite",
+    "case": {
+      "name": "trace_context_overwrite",
+      "cycles": 20,
+      "payload_mib": 2,
+      "shape": "context_only",
+      "trace": true
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 44.4296875,
+      "elapsed_s": 0.2349205689970404,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.359375,
+      "elapsed_s": 0.23762003099545836,
+      "binding": null
+    }
+  },
+  {
+    "name": "trace_close_only",
+    "case": {
+      "name": "trace_close_only",
+      "cycles": 10,
+      "payload_mib": 2,
+      "trace": true,
+      "cleanup": "close"
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 44.3359375,
+      "elapsed_s": 0.12572156600072049,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.125,
+      "elapsed_s": 0.1299082009936683,
+      "binding": null
+    }
+  },
+  {
+    "name": "trace_map_rows",
+    "case": {
+      "name": "trace_map_rows",
+      "shape": "rows",
+      "cycles": 1,
+      "map_width": 2,
+      "trace": true
+    },
+    "baseline_source": "previous_payload_retention_run",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 157.84375,
+      "elapsed_s": 1.3522818209894467,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 135.47265625,
+      "elapsed_s": 1.2817939359811135,
+      "binding": null
+    }
+  },
+  {
+    "name": "map_no_aggregate",
+    "case": {
+      "name": "map_no_aggregate",
+      "invocations": 3,
+      "width": 4,
+      "rows": 16000
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 158.7421875,
+      "elapsed_s": 0.8355366149917245,
+      "binding": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 127.640625,
+      "elapsed_s": 0.8046692420030013,
+      "binding": null
+    }
+  },
+  {
+    "name": "aggregate_binding_heap",
+    "case": {
+      "name": "aggregate_binding_heap",
+      "invocations": 1,
+      "width": 4,
+      "rows": 4096,
+      "aggregate": true,
+      "trace": true
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 65.90234375,
+      "elapsed_s": 0.32555320899700746,
+      "binding": {
+        "kind": "point",
+        "stage": "binding",
+        "rss_mib": 64.09765625,
+        "maxrss_mib": 64.09765625,
+        "call_outputs_with_rows": 4,
+        "python_live_mib": 5.3048095703125,
+        "python_peak_mib": 11.628853797912598
+      }
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 60.23046875,
+      "elapsed_s": 0.3119105529913213,
+      "binding": {
+        "kind": "point",
+        "stage": "binding",
+        "rss_mib": 54.3203125,
+        "maxrss_mib": 60.23046875,
+        "call_outputs_with_rows": 0,
+        "python_live_mib": 0.05154895782470703,
+        "python_peak_mib": 8.628006935119629
+      }
+    }
+  }
+]

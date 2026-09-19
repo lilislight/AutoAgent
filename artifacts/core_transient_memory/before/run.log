@@ -1,0 +1,4 @@
+rows_forward completed 105.3 MiB
+rows_strip_input completed 86.7 MiB
+map4_rows_3_invocations_one_cycle completed 335.0 MiB
+mixed_5_invocations_1g_limit completed 510.6 MiB

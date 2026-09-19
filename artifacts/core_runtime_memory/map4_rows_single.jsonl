@@ -1,0 +1,10 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 35.1953125, "maxrss_mib": 37.28125, "row_count": 33822}
+{"kind": "point", "stage": "outputs", "rss_mib": 137.671875, "maxrss_mib": 137.671875, "big_outputs": 4, "events": 16}
+{"kind": "point", "stage": "cycle", "rss_mib": 137.671875, "maxrss_mib": 137.671875, "cycles": {"root-0": 1}, "events": 20}
+{"kind": "point", "stage": "outputs", "rss_mib": 184.62890625, "maxrss_mib": 184.62890625, "big_outputs": 8, "events": 30}
+{"kind": "point", "stage": "cycle", "rss_mib": 184.62890625, "maxrss_mib": 184.62890625, "cycles": {"root-0": 2}, "events": 34}
+{"kind": "point", "stage": "after_run", "rss_mib": 167.6796875, "maxrss_mib": 184.62890625, "elapsed_s": 0.9348773009842262, "resident_sessions": 1, "occurrences": 4, "calls": 10, "big_calls": 8, "call_node_output_same_object": 0, "unique_blob_objects_in_calls": 0, "unique_blob_mib_in_calls": 0.0, "distinct_row_arrays_in_call_inputs_outputs": 8, "pending_events": 0}
+{"kind": "point", "stage": "after_unload", "rss_mib": 44.54296875, "maxrss_mib": 184.62890625, "resident_sessions": 0}
+{"kind": "point", "stage": "after_close", "rss_mib": 44.6796875, "maxrss_mib": 184.62890625, "resident_sessions": 0}
+{"kind": "point", "stage": "after_drop_app", "rss_mib": 44.6796875, "maxrss_mib": 184.62890625}
+{"kind": "done", "case": {"name": "map4_rows_single", "shape": "rows", "cycles": 2, "map_width": 4}}

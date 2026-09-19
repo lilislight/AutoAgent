@@ -408,7 +408,7 @@ class RuntimeClockUnitTests(unittest.TestCase):
             try:
                 result = app.invoke(Workflow('clock-units', nodes=[Node('identity', identity)]), {'value': 2})
                 self.assertEqual(result.status, 'completed')
-                checkpoint = app.unload_session(result.ref)
+                checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
                 self.assertEqual(checkpoint.captured_at_us, timestamp_us)
                 self.assertEqual(checkpoint.state.session.created_at_us, timestamp_us)
                 self.assertEqual(checkpoint.state.invocation.started_at_us, timestamp_us)

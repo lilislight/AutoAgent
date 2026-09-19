@@ -1,0 +1,357 @@
+{
+  "indexed": false,
+  "planner": {
+    "node_occurrence.waiting_100": {
+      "median_ns": 19510.9,
+      "samples_ns": [
+        20399.2,
+        19534.4,
+        19447.3,
+        19397.3,
+        19400.0,
+        20949.4,
+        19510.9
+      ],
+      "retained_bytes": 2040,
+      "peak_bytes": 3864
+    },
+    "child_await.suspended_100": {
+      "median_ns": 19088.7,
+      "samples_ns": [
+        20664.4,
+        18866.7,
+        18879.1,
+        20806.9,
+        19088.7,
+        18758.2,
+        21599.8
+      ],
+      "retained_bytes": 1808,
+      "peak_bytes": 3744
+    },
+    "node_occurrence.completed_100": {
+      "median_ns": 40853.8,
+      "samples_ns": [
+        43339.0,
+        44217.5,
+        40853.8,
+        40585.6,
+        40045.2,
+        42731.8,
+        40239.4
+      ],
+      "retained_bytes": 3048,
+      "peak_bytes": 6776
+    },
+    "node_occurrence.waiting_1000": {
+      "median_ns": 77015.5,
+      "samples_ns": [
+        78191.2,
+        76806.7,
+        77203.2,
+        86379.4,
+        76236.5,
+        77015.5,
+        76494.5
+      ],
+      "retained_bytes": 2040,
+      "peak_bytes": 3864
+    },
+    "child_await.suspended_1000": {
+      "median_ns": 81487.4,
+      "samples_ns": [
+        84756.1,
+        81487.4,
+        79750.4,
+        79476.5,
+        83121.8,
+        80462.9,
+        82780.5
+      ],
+      "retained_bytes": 1808,
+      "peak_bytes": 3744
+    },
+    "node_occurrence.completed_1000": {
+      "median_ns": 159347.4,
+      "samples_ns": [
+        165708.0,
+        159347.4,
+        153518.2,
+        167255.3,
+        158516.9,
+        162113.1,
+        156837.0
+      ],
+      "retained_bytes": 3048,
+      "peak_bytes": 14600
+    },
+    "node_occurrence.waiting_10000": {
+      "median_ns": 655102.7,
+      "samples_ns": [
+        642631.4,
+        655750.0,
+        655915.9,
+        654850.0,
+        646974.6,
+        656258.5,
+        655102.7
+      ],
+      "retained_bytes": 2040,
+      "peak_bytes": 3864
+    },
+    "child_await.suspended_10000": {
+      "median_ns": 699880.1,
+      "samples_ns": [
+        699880.1,
+        729638.6,
+        693595.8,
+        706771.1,
+        690958.3,
+        688193.3,
+        711405.3
+      ],
+      "retained_bytes": 1808,
+      "peak_bytes": 3744
+    },
+    "node_occurrence.completed_10000": {
+      "median_ns": 1336750.2,
+      "samples_ns": [
+        1270934.2,
+        1342467.5,
+        1366239.1,
+        1436459.2,
+        1302216.5,
+        1314112.8,
+        1336750.2
+      ],
+      "retained_bytes": 3048,
+      "peak_bytes": 90920
+    },
+    "node_occurrence.waiting_50000": {
+      "median_ns": 3440260.0,
+      "samples_ns": [
+        3426922.1,
+        3441427.4,
+        3485405.2,
+        3431446.7,
+        3440260.0,
+        3381749.3,
+        3460082.7
+      ],
+      "retained_bytes": 2040,
+      "peak_bytes": 3864
+    },
+    "child_await.suspended_50000": {
+      "median_ns": 3745172.6,
+      "samples_ns": [
+        3736641.3,
+        3846405.0,
+        3745172.6,
+        3812568.4,
+        3732417.6,
+        3739853.2,
+        3800048.2
+      ],
+      "retained_bytes": 1808,
+      "peak_bytes": 3744
+    },
+    "node_occurrence.completed_50000": {
+      "median_ns": 6927035.5,
+      "samples_ns": [
+        6845738.5,
+        6868855.7,
+        6848643.9,
+        6927035.5,
+        7012727.8,
+        7203469.7,
+        7946365.8
+      ],
+      "retained_bytes": 3048,
+      "peak_bytes": 450120
+    }
+  },
+  "topology": {
+    "0": {
+      "four_queries": {
+        "median_ns": 1505.36,
+        "samples_ns": [
+          1500.1,
+          1499.42,
+          1754.32,
+          1697.83,
+          2215.64,
+          1480.31,
+          1505.36
+        ],
+        "retained_bytes": 280,
+        "peak_bytes": 784
+      },
+      "construct_ir": {
+        "median_ns": 5243.0,
+        "samples_ns": [
+          7620.0,
+          5995.0,
+          5243.0,
+          5507.0,
+          5018.0,
+          5119.0,
+          5002.0
+        ],
+        "retained_bytes": 1336,
+        "peak_bytes": 1856
+      }
+    },
+    "10": {
+      "four_queries": {
+        "median_ns": 3269.33,
+        "samples_ns": [
+          3484.64,
+          3243.74,
+          3236.43,
+          3231.51,
+          3674.51,
+          3269.33,
+          3389.68
+        ],
+        "retained_bytes": 264,
+        "peak_bytes": 1231
+      },
+      "construct_ir": {
+        "median_ns": 20973.0,
+        "samples_ns": [
+          23910.0,
+          23510.0,
+          21499.0,
+          20973.0,
+          20609.0,
+          20540.0,
+          20439.0
+        ],
+        "retained_bytes": 10056,
+        "peak_bytes": 13392
+      }
+    },
+    "100": {
+      "four_queries": {
+        "median_ns": 15672.59,
+        "samples_ns": [
+          15227.71,
+          15199.78,
+          16182.91,
+          16913.23,
+          15672.59,
+          15530.58,
+          15679.63
+        ],
+        "retained_bytes": 264,
+        "peak_bytes": 1232
+      },
+      "construct_ir": {
+        "median_ns": 175819.0,
+        "samples_ns": [
+          175819.0,
+          289071.0,
+          182999.0,
+          173343.0,
+          175030.0,
+          207432.0,
+          174282.0
+        ],
+        "retained_bytes": 55928,
+        "peak_bytes": 112912
+      }
+    },
+    "1000": {
+      "four_queries": {
+        "median_ns": 131458.45,
+        "samples_ns": [
+          131458.45,
+          132127.84,
+          130461.54,
+          130543.56,
+          132354.51,
+          131662.33,
+          127650.8
+        ],
+        "retained_bytes": 264,
+        "peak_bytes": 1233
+      },
+      "construct_ir": {
+        "median_ns": 2309741.0,
+        "samples_ns": [
+          1909777.0,
+          2826136.0,
+          2052370.0,
+          2309741.0,
+          2434689.0,
+          2255401.0,
+          2567690.0
+        ],
+        "retained_bytes": 654952,
+        "peak_bytes": 1339072
+      }
+    }
+  },
+  "nested": {
+    "10": {
+      "four_queries": {
+        "median_ns": 4223.09,
+        "samples_ns": [
+          4398.34,
+          4189.06,
+          4146.19,
+          4223.09,
+          4152.0,
+          5142.45,
+          4481.51
+        ],
+        "retained_bytes": 768,
+        "peak_bytes": 1854
+      },
+      "construct_ir": {
+        "median_ns": 19348.0,
+        "samples_ns": [
+          22494.0,
+          22310.0,
+          20344.0,
+          19348.0,
+          18859.0,
+          18630.0,
+          18551.0
+        ],
+        "retained_bytes": 9256,
+        "peak_bytes": 12720
+      }
+    },
+    "50": {
+      "four_queries": {
+        "median_ns": 20827.56,
+        "samples_ns": [
+          21216.29,
+          21439.08,
+          20827.56,
+          22552.39,
+          20676.99,
+          20336.46,
+          20624.36
+        ],
+        "retained_bytes": 3008,
+        "peak_bytes": 5540
+      },
+      "construct_ir": {
+        "median_ns": 68246.0,
+        "samples_ns": [
+          72455.0,
+          76053.0,
+          70035.0,
+          68246.0,
+          67321.0,
+          67384.0,
+          66999.0
+        ],
+        "retained_bytes": 30888,
+        "peak_bytes": 52112
+      }
+    }
+  }
+}

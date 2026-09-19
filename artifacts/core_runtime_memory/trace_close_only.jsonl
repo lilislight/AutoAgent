@@ -1,0 +1,22 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 35.0859375, "maxrss_mib": 38.1953125, "row_count": 67648, "python_live_mib": 0.0014219284057617188, "python_peak_mib": 0.011242866516113281}
+{"kind": "point", "stage": "cycle", "rss_mib": 46.6171875, "maxrss_mib": 46.6171875, "cycles": {"root-0": 1}, "events": 22, "python_live_mib": 6.090424537658691, "python_peak_mib": 8.083922386169434}
+{"kind": "point", "stage": "outputs", "rss_mib": 48.421875, "maxrss_mib": 48.421875, "big_outputs": 4, "events": 25, "python_live_mib": 8.092710494995117, "python_peak_mib": 10.08892822265625}
+{"kind": "point", "stage": "cycle", "rss_mib": 52.546875, "maxrss_mib": 52.546875, "cycles": {"root-0": 2}, "events": 38, "python_live_mib": 12.102237701416016, "python_peak_mib": 14.096132278442383}
+{"kind": "point", "stage": "outputs", "rss_mib": 56.47265625, "maxrss_mib": 56.47265625, "big_outputs": 8, "events": 46, "python_live_mib": 16.106213569641113, "python_peak_mib": 18.102347373962402}
+{"kind": "point", "stage": "cycle", "rss_mib": 58.53515625, "maxrss_mib": 58.53515625, "cycles": {"root-0": 3}, "events": 54, "python_live_mib": 18.11169719696045, "python_peak_mib": 20.105332374572754}
+{"kind": "point", "stage": "outputs", "rss_mib": 64.46484375, "maxrss_mib": 64.46484375, "big_outputs": 12, "events": 67, "python_live_mib": 24.119688034057617, "python_peak_mib": 26.115638732910156}
+{"kind": "point", "stage": "cycle", "rss_mib": 64.46484375, "maxrss_mib": 64.46484375, "cycles": {"root-0": 4}, "events": 70, "python_live_mib": 24.12231159210205, "python_peak_mib": 26.115638732910156}
+{"kind": "point", "stage": "cycle", "rss_mib": 70.65234375, "maxrss_mib": 70.65234375, "cycles": {"root-0": 5}, "events": 86, "python_live_mib": 30.131587982177734, "python_peak_mib": 32.12494087219238}
+{"kind": "point", "stage": "outputs", "rss_mib": 72.71484375, "maxrss_mib": 72.71484375, "big_outputs": 16, "events": 89, "python_live_mib": 32.13247776031494, "python_peak_mib": 34.12842845916748}
+{"kind": "point", "stage": "cycle", "rss_mib": 76.58203125, "maxrss_mib": 76.58203125, "cycles": {"root-0": 6}, "events": 102, "python_live_mib": 36.141042709350586, "python_peak_mib": 38.13437271118164}
+{"kind": "point", "stage": "outputs", "rss_mib": 80.70703125, "maxrss_mib": 80.70703125, "big_outputs": 20, "events": 110, "python_live_mib": 40.144731521606445, "python_peak_mib": 42.140682220458984}
+{"kind": "point", "stage": "cycle", "rss_mib": 82.51171875, "maxrss_mib": 82.51171875, "cycles": {"root-0": 7}, "events": 118, "python_live_mib": 42.15283203125, "python_peak_mib": 44.145437240600586}
+{"kind": "point", "stage": "outputs", "rss_mib": 88.69921875, "maxrss_mib": 88.69921875, "big_outputs": 24, "events": 131, "python_live_mib": 48.15929698944092, "python_peak_mib": 50.15489673614502}
+{"kind": "point", "stage": "cycle", "rss_mib": 88.69921875, "maxrss_mib": 88.69921875, "cycles": {"root-0": 8}, "events": 134, "python_live_mib": 48.16235542297363, "python_peak_mib": 50.15489673614502}
+{"kind": "point", "stage": "cycle", "rss_mib": 94.62890625, "maxrss_mib": 94.62890625, "cycles": {"root-0": 9}, "events": 150, "python_live_mib": 54.1711540222168, "python_peak_mib": 56.1637487411499}
+{"kind": "point", "stage": "outputs", "rss_mib": 96.69140625, "maxrss_mib": 96.69140625, "big_outputs": 28, "events": 153, "python_live_mib": 56.17136287689209, "python_peak_mib": 58.16696262359619}
+{"kind": "point", "stage": "cycle", "rss_mib": 100.55859375, "maxrss_mib": 100.55859375, "cycles": {"root-0": 10}, "events": 166, "python_live_mib": 60.17996883392334, "python_peak_mib": 62.172547340393066}
+{"kind": "point", "stage": "after_run", "rss_mib": 100.55859375, "maxrss_mib": 100.55859375, "elapsed_s": 0.12822623600368388, "resident_sessions": 1, "occurrences": 32, "calls": 32, "big_calls": 30, "call_node_output_same_object": 30, "unique_blob_objects_in_calls": 30, "unique_blob_mib_in_calls": 60.0, "distinct_row_arrays_in_call_inputs_outputs": 0, "pending_events": 0, "python_live_mib": 60.101704597473145, "python_peak_mib": 62.172547340393066}
+{"kind": "point", "stage": "after_close", "rss_mib": 100.92578125, "maxrss_mib": 100.92578125, "resident_sessions": 1, "python_live_mib": 60.0919075012207, "python_peak_mib": 62.172547340393066}
+{"kind": "point", "stage": "after_drop_app", "rss_mib": 37.2421875, "maxrss_mib": 100.92578125, "python_live_mib": 0.017810821533203125, "python_peak_mib": 62.172547340393066}
+{"kind": "done", "case": {"name": "trace_close_only", "cycles": 10, "payload_mib": 2, "trace": true, "cleanup": "close"}}

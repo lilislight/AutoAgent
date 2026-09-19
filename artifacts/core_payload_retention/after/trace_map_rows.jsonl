@@ -1,0 +1,7 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 35.203125, "maxrss_mib": 39.0, "row_count": 33822, "python_live_mib": 0.0014219284057617188, "python_peak_mib": 0.011242866516113281}
+{"kind": "point", "stage": "cycle", "rss_mib": 147.01953125, "maxrss_mib": 157.84375, "cycles": {"root-0": 1}, "events": 16, "python_live_mib": 21.770995140075684, "python_peak_mib": 49.069936752319336}
+{"kind": "point", "stage": "after_run", "rss_mib": 99.71484375, "maxrss_mib": 157.84375, "elapsed_s": 1.3522818209894467, "resident_sessions": 1, "occurrences": 3, "calls": 4, "big_calls": 0, "call_node_output_same_object": 0, "unique_blob_objects_in_calls": 0, "unique_blob_mib_in_calls": 0.0, "distinct_row_arrays_in_call_inputs_outputs": 0, "pending_events": 0, "python_live_mib": 0.049437522888183594, "python_peak_mib": 49.069936752319336}
+{"kind": "point", "stage": "after_unload", "rss_mib": 99.71484375, "maxrss_mib": 157.84375, "resident_sessions": 0, "python_live_mib": 0.03764915466308594, "python_peak_mib": 49.069936752319336}
+{"kind": "point", "stage": "after_close", "rss_mib": 99.9765625, "maxrss_mib": 157.84375, "resident_sessions": 0, "python_live_mib": 0.02861499786376953, "python_peak_mib": 49.069936752319336}
+{"kind": "point", "stage": "after_drop_app", "rss_mib": 99.0078125, "maxrss_mib": 157.84375, "python_live_mib": 0.0250701904296875, "python_peak_mib": 49.069936752319336}
+{"kind": "done", "case": {"name": "trace_map_rows", "shape": "rows", "cycles": 1, "map_width": 2, "trace": true}}

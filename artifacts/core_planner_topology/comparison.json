@@ -1,0 +1,69 @@
+{
+  "planner": {
+    "node_occurrence.waiting_100": {
+      "before_ms": 0.0195109,
+      "after_ms": 0.0126483
+    },
+    "child_await.suspended_100": {
+      "before_ms": 0.0190887,
+      "after_ms": 0.0119281
+    },
+    "node_occurrence.completed_100": {
+      "before_ms": 0.0408538,
+      "after_ms": 0.0266526
+    },
+    "node_occurrence.waiting_1000": {
+      "before_ms": 0.0770155,
+      "after_ms": 0.0129955
+    },
+    "child_await.suspended_1000": {
+      "before_ms": 0.08148739999999999,
+      "after_ms": 0.0115735
+    },
+    "node_occurrence.completed_1000": {
+      "before_ms": 0.1593474,
+      "after_ms": 0.0280005
+    },
+    "node_occurrence.waiting_10000": {
+      "before_ms": 0.6551026999999999,
+      "after_ms": 0.0140741
+    },
+    "child_await.suspended_10000": {
+      "before_ms": 0.6998801,
+      "after_ms": 0.0114778
+    },
+    "node_occurrence.completed_10000": {
+      "before_ms": 1.3367502,
+      "after_ms": 0.0262812
+    },
+    "node_occurrence.waiting_50000": {
+      "before_ms": 3.44026,
+      "after_ms": 0.0129804
+    },
+    "child_await.suspended_50000": {
+      "before_ms": 3.7451726,
+      "after_ms": 0.0114459
+    },
+    "node_occurrence.completed_50000": {
+      "before_ms": 6.9270355,
+      "after_ms": 0.026560900000000002
+    }
+  },
+  "execution": {
+    "chain_50000": {
+      "before": 67.600151,
+      "after": 66.255949,
+      "change_percent": -1.988460055362884
+    },
+    "repeat_100": {
+      "before": 85.554725,
+      "after": 84.164159,
+      "change_percent": -1.6253526617027947
+    },
+    "loop_100": {
+      "before": 104.008152,
+      "after": 105.301816,
+      "change_percent": 1.2438101967238158
+    }
+  }
+}

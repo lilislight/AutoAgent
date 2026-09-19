@@ -1,0 +1,7 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 35.28515625, "maxrss_mib": 37.3671875, "row_count": 33822}
+{"kind": "point", "stage": "outputs", "rss_mib": 335.05078125, "maxrss_mib": 335.05078125, "big_outputs": 4, "events": 40}
+{"kind": "point", "stage": "outputs", "rss_mib": 335.05078125, "maxrss_mib": 335.05078125, "big_outputs": 8, "events": 44}
+{"kind": "point", "stage": "outputs", "rss_mib": 335.05078125, "maxrss_mib": 335.05078125, "big_outputs": 12, "events": 48}
+{"kind": "point", "stage": "cycle", "rss_mib": 335.05078125, "maxrss_mib": 335.05078125, "cycles": {"root-0": 1}, "events": 58}
+{"kind": "point", "stage": "cycle", "rss_mib": 335.05078125, "maxrss_mib": 335.05078125, "cycles": {"root-0": 1, "root-1": 1}, "events": 59}
+{"kind": "point", "stage": "cycle", "rss_mib": 335.05078125, "maxrss_mib": 335.05078125, "cycles": {"root-0": 1, "root-1": 1, "root-2": 1}, "events": 60}

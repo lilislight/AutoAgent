@@ -1125,7 +1125,7 @@ class AppTests(unittest.TestCase):
         source.submit_invoke(old, {"value": 5}, session_id="revision-session")
         self.assertTrue(started.wait(1))
         source.register_workflow(new)
-        checkpoint = source.close().sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).sessions[0]
 
         recovered_journal = RuntimeRepository()
         recovered_app = AutoAgentApp(runtime_repository=recovered_journal)
@@ -1193,7 +1193,7 @@ class AppTests(unittest.TestCase):
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 9}, session_id="recovery-session")
         self.assertTrue(started.wait(1))
-        checkpoint = source.close().sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).sessions[0]
 
         recovered_journal = RuntimeRepository()
         recovered_app = AutoAgentApp(runtime_repository=recovered_journal)
@@ -1231,7 +1231,7 @@ class AppTests(unittest.TestCase):
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 4}, session_id="unsafe-session")
         self.assertTrue(started.wait(1))
-        checkpoint = source.close().sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).sessions[0]
         recovered_app = AutoAgentApp()
         try:
             recovered_app.register_workflow(workflow)
@@ -1268,7 +1268,7 @@ class AppTests(unittest.TestCase):
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 7}, session_id="budget-session")
         self.assertTrue(started.wait(1))
-        checkpoint = source.close().sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).sessions[0]
         state = checkpoint.state
         invocation = state.invocation
         assert invocation is not None

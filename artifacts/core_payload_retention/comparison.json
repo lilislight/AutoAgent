@@ -1,0 +1,760 @@
+[
+  {
+    "name": "text_1m_10cycles",
+    "case": {
+      "name": "text_1m_10cycles",
+      "payload_mib": 1,
+      "cycles": 10
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 67.9375,
+      "after_run_rss_mib": 67.9375,
+      "elapsed_s": 0.04643723802291788,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 39.5078125,
+      "after_run_rss_mib": 39.5078125,
+      "elapsed_s": 0.0347225500154309,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_1m_30cycles",
+    "case": {
+      "name": "text_1m_30cycles",
+      "payload_mib": 1,
+      "cycles": 30
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 127.8203125,
+      "after_run_rss_mib": 127.8203125,
+      "elapsed_s": 0.1340724180045072,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 40.4375,
+      "after_run_rss_mib": 40.4375,
+      "elapsed_s": 0.10185368001111783,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_1m_60cycles",
+    "case": {
+      "name": "text_1m_60cycles",
+      "payload_mib": 1,
+      "cycles": 60
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 218.28125,
+      "after_run_rss_mib": 218.28125,
+      "elapsed_s": 0.2604041189770214,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 39.87109375,
+      "after_run_rss_mib": 39.87109375,
+      "elapsed_s": 0.21409020997816697,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_2m_10cycles",
+    "case": {
+      "name": "text_2m_10cycles",
+      "payload_mib": 2,
+      "cycles": 10
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 99.7109375,
+      "after_run_rss_mib": 99.7109375,
+      "elapsed_s": 0.06075495600816794,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.8046875,
+      "after_run_rss_mib": 43.8046875,
+      "elapsed_s": 0.041422048991080374,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_2m_30cycles",
+    "case": {
+      "name": "text_2m_30cycles",
+      "payload_mib": 2,
+      "cycles": 30
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 219.8203125,
+      "after_run_rss_mib": 219.8203125,
+      "elapsed_s": 0.17337453700019978,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.67578125,
+      "after_run_rss_mib": 43.67578125,
+      "elapsed_s": 0.1106814709783066,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_2m_60cycles",
+    "case": {
+      "name": "text_2m_60cycles",
+      "payload_mib": 2,
+      "cycles": 60
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 400.1640625,
+      "after_run_rss_mib": 400.1640625,
+      "elapsed_s": 0.3328811100218445,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.5625,
+      "after_run_rss_mib": 44.5625,
+      "elapsed_s": 0.23088370598270558,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_no_context",
+    "case": {
+      "name": "text_no_context",
+      "cycles": 30,
+      "payload_mib": 2,
+      "context": "none"
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 219.82421875,
+      "after_run_rss_mib": 219.82421875,
+      "elapsed_s": 0.14548076599021442,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.76171875,
+      "after_run_rss_mib": 36.21484375,
+      "elapsed_s": 0.1094555840245448,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "same_text_reference",
+    "case": {
+      "name": "same_text_reference",
+      "cycles": 30,
+      "payload_mib": 2,
+      "shape": "shared_text"
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 40.15625,
+      "after_run_rss_mib": 40.15625,
+      "elapsed_s": 0.09448930001235567,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 40.05078125,
+      "after_run_rss_mib": 40.05078125,
+      "elapsed_s": 0.10002025897847489,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "context_only_overwrite",
+    "case": {
+      "name": "context_only_overwrite",
+      "cycles": 60,
+      "payload_mib": 2,
+      "shape": "context_only"
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 44.48046875,
+      "after_run_rss_mib": 44.48046875,
+      "elapsed_s": 0.19426720502087846,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.9375,
+      "after_run_rss_mib": 43.9375,
+      "elapsed_s": 0.19937085898709483,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "growing_prompt_single",
+    "case": {
+      "name": "growing_prompt_single",
+      "cycles": 6,
+      "payload_mib": 1,
+      "context": "growing_prompt"
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 225.97265625,
+      "after_run_rss_mib": 225.97265625,
+      "elapsed_s": 0.08720648501184769,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 74.7421875,
+      "after_run_rss_mib": 57.95703125,
+      "elapsed_s": 0.07909726302023046,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "growing_prompt_5_invocations",
+    "case": {
+      "name": "growing_prompt_5_invocations",
+      "cycles": 6,
+      "payload_mib": 1,
+      "context": "growing_prompt",
+      "invocations": 5,
+      "rss_limit_mib": 896
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 922.125,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 223.42578125,
+      "after_run_rss_mib": 138.4765625,
+      "elapsed_s": 0.4026848899957258,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "context_only_append",
+    "case": {
+      "name": "context_only_append",
+      "cycles": 30,
+      "payload_mib": 2,
+      "shape": "context_only",
+      "context": "append"
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 219.76171875,
+      "after_run_rss_mib": 219.76171875,
+      "elapsed_s": 0.1457339439948555,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 220.57421875,
+      "after_run_rss_mib": 220.57421875,
+      "elapsed_s": 0.14513660498778336,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_3_invocations",
+    "case": {
+      "name": "text_3_invocations",
+      "cycles": 15,
+      "payload_mib": 2,
+      "invocations": 3
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 309.72265625,
+      "after_run_rss_mib": 309.72265625,
+      "elapsed_s": 0.2218827340111602,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 53.85546875,
+      "after_run_rss_mib": 53.85546875,
+      "elapsed_s": 0.18454764698981307,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_5_invocations",
+    "case": {
+      "name": "text_5_invocations",
+      "cycles": 10,
+      "payload_mib": 2,
+      "invocations": 5
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 340.5234375,
+      "after_run_rss_mib": 340.5234375,
+      "elapsed_s": 0.25528579798992723,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 62.03515625,
+      "after_run_rss_mib": 52.2890625,
+      "elapsed_s": 0.19249796902295202,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_5_invocations_512_limit",
+    "case": {
+      "name": "text_5_invocations_512_limit",
+      "cycles": 25,
+      "payload_mib": 2,
+      "invocations": 5
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 460.04296875,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 62.140625,
+      "after_run_rss_mib": 60.5546875,
+      "elapsed_s": 0.5021961980091874,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "text_5_invocations_1g_limit",
+    "case": {
+      "name": "text_5_invocations_1g_limit",
+      "cycles": 40,
+      "payload_mib": 2,
+      "invocations": 5,
+      "rss_limit_mib": 896
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 905.15625,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 62.26171875,
+      "after_run_rss_mib": 53.328125,
+      "elapsed_s": 0.7940658429870382,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "rows_forward",
+    "case": {
+      "name": "rows_forward",
+      "shape": "rows",
+      "cycles": 4
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 321.1875,
+      "after_run_rss_mib": 321.1875,
+      "elapsed_s": 3.7225161450041924,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 105.48046875,
+      "after_run_rss_mib": 90.6640625,
+      "elapsed_s": 3.519703400990693,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "rows_strip_input",
+    "case": {
+      "name": "rows_strip_input",
+      "shape": "rows",
+      "cycles": 4,
+      "strip_input": true
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 216.7890625,
+      "after_run_rss_mib": 207.8203125,
+      "elapsed_s": 1.8997601839946583,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 86.63671875,
+      "after_run_rss_mib": 76.12109375,
+      "elapsed_s": 1.8952356970112305,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "map4_rows_single",
+    "case": {
+      "name": "map4_rows_single",
+      "shape": "rows",
+      "cycles": 2,
+      "map_width": 4
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 184.62890625,
+      "after_run_rss_mib": 167.6796875,
+      "elapsed_s": 0.9348773009842262,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 137.91015625,
+      "after_run_rss_mib": 50.50390625,
+      "elapsed_s": 0.943032701004995,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "map4_rows_3_invocations_one_cycle",
+    "case": {
+      "name": "map4_rows_3_invocations_one_cycle",
+      "shape": "rows",
+      "cycles": 1,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "remeasured",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 334.90625,
+      "after_run_rss_mib": 264.99609375,
+      "elapsed_s": 1.4322692979767453,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 334.921875,
+      "after_run_rss_mib": 57.140625,
+      "elapsed_s": 1.4126752390002366,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "map4_rows_3_invocations",
+    "case": {
+      "name": "map4_rows_3_invocations",
+      "shape": "rows",
+      "cycles": 3,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 449.4609375,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 335.3515625,
+      "after_run_rss_mib": 86.78125,
+      "elapsed_s": 4.210638736985857,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "map8_rows_5_invocations",
+    "case": {
+      "name": "map8_rows_5_invocations",
+      "shape": "rows",
+      "cycles": 4,
+      "map_width": 8,
+      "invocations": 5
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 449.13671875,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 449.3828125,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "mixed_3_invocations_one_cycle",
+    "case": {
+      "name": "mixed_3_invocations_one_cycle",
+      "mixed": true,
+      "cycles": 1,
+      "payload_mib": 2,
+      "query_mib": 1,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 340.984375,
+      "after_run_rss_mib": 275.66796875,
+      "elapsed_s": 1.4618906189862173,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 341.33203125,
+      "after_run_rss_mib": 64.13671875,
+      "elapsed_s": 1.436875006009359,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "mixed_3_invocations_512_limit",
+    "case": {
+      "name": "mixed_3_invocations_512_limit",
+      "mixed": true,
+      "cycles": 3,
+      "payload_mib": 2,
+      "query_mib": 1,
+      "map_width": 4,
+      "invocations": 3
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 454.25,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 342.08203125,
+      "after_run_rss_mib": 94.1640625,
+      "elapsed_s": 4.286964836996049,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "mixed_5_invocations_1g_limit",
+    "case": {
+      "name": "mixed_5_invocations_1g_limit",
+      "mixed": true,
+      "cycles": 3,
+      "payload_mib": 2,
+      "query_mib": 1,
+      "map_width": 4,
+      "invocations": 5,
+      "rss_limit_mib": 896
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "rss_guard_stopped",
+      "peak_rss_mib": 896.63671875,
+      "after_run_rss_mib": null,
+      "elapsed_s": null,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 510.5234375,
+      "after_run_rss_mib": 134.6875,
+      "elapsed_s": 7.125982569996268,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "sequential_new_sessions",
+    "case": {
+      "name": "sequential_new_sessions",
+      "cycles": 10,
+      "invocations": 5,
+      "sequential": true
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 188.4921875,
+      "after_run_rss_mib": 188.4921875,
+      "elapsed_s": 0.22134663400356658,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 43.64453125,
+      "after_run_rss_mib": 43.64453125,
+      "elapsed_s": 0.19526564198895358,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "sequential_reused_session",
+    "case": {
+      "name": "sequential_reused_session",
+      "cycles": 10,
+      "invocations": 5,
+      "sequential": true,
+      "reuse": true
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 98.98828125,
+      "after_run_rss_mib": 96.3203125,
+      "elapsed_s": 0.20456881800782867,
+      "python_live_mib": null
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 40.6953125,
+      "after_run_rss_mib": 40.6953125,
+      "elapsed_s": 0.1908342720125802,
+      "python_live_mib": null
+    }
+  },
+  {
+    "name": "trace_text_unload",
+    "case": {
+      "name": "trace_text_unload",
+      "cycles": 10,
+      "payload_mib": 2,
+      "trace": true
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 100.42578125,
+      "after_run_rss_mib": 100.42578125,
+      "elapsed_s": 0.13057240599300712,
+      "python_live_mib": 60.101585388183594
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.21484375,
+      "after_run_rss_mib": 44.21484375,
+      "elapsed_s": 0.12840069600497372,
+      "python_live_mib": 2.0913000106811523
+    }
+  },
+  {
+    "name": "trace_context_overwrite",
+    "case": {
+      "name": "trace_context_overwrite",
+      "cycles": 20,
+      "payload_mib": 2,
+      "shape": "context_only",
+      "trace": true
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 44.390625,
+      "after_run_rss_mib": 44.390625,
+      "elapsed_s": 0.22280741401482373,
+      "python_live_mib": 2.1613693237304688
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.4296875,
+      "after_run_rss_mib": 44.4296875,
+      "elapsed_s": 0.2349205689970404,
+      "python_live_mib": 2.136399269104004
+    }
+  },
+  {
+    "name": "trace_close_only",
+    "case": {
+      "name": "trace_close_only",
+      "cycles": 10,
+      "payload_mib": 2,
+      "trace": true,
+      "cleanup": "close"
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 100.55859375,
+      "after_run_rss_mib": 100.55859375,
+      "elapsed_s": 0.12822623600368388,
+      "python_live_mib": 60.101704597473145
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 44.3359375,
+      "after_run_rss_mib": 44.3359375,
+      "elapsed_s": 0.12572156600072049,
+      "python_live_mib": 2.091641426086426
+    }
+  },
+  {
+    "name": "trace_map_rows",
+    "case": {
+      "name": "trace_map_rows",
+      "shape": "rows",
+      "cycles": 1,
+      "map_width": 2,
+      "trace": true
+    },
+    "baseline_source": "preceding_audit",
+    "before": {
+      "status": "completed",
+      "peak_rss_mib": 157.97265625,
+      "after_run_rss_mib": 147.16015625,
+      "elapsed_s": 1.2866072590113617,
+      "python_live_mib": 21.71747875213623
+    },
+    "after": {
+      "status": "completed",
+      "peak_rss_mib": 157.84375,
+      "after_run_rss_mib": 99.71484375,
+      "elapsed_s": 1.3522818209894467,
+      "python_live_mib": 0.049437522888183594
+    }
+  }
+]

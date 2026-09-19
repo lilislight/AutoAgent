@@ -1,0 +1,25 @@
+{
+  "python": "3.12.13 (main, Jun 23 2026, 15:18:55) [Clang 22.1.3 ]",
+  "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+  "git_head": "849c333ff5101ee496408d61c012e024bed99af9",
+  "baseline": "Pre-refactor source snapshot; existing Planner A retained, B reverted, C unchanged. Not a clean HEAD comparison.",
+  "baseline_snapshot": "/tmp/core-graph-before-ofg0it8n",
+  "timing": "Graph benchmarks: 3 samples per case, median wall time; prepare/close excluded; asyncio.sleep ACK simulation; no tracemalloc during timing. Execution: 3 alternating pairs, each with warmup and 5 samples; allocations measured separately.",
+  "source_sha256": {
+    "before": {
+      "autoagent/core/app/app.py": "b015e101745840ab34d34f766df1bda93d0bcf3a9b489a69cace104a83483eec",
+      "autoagent/core/app/ports.py": "45d49986985712546aa6c9abffb671ec6250b96fcb416447cd17c8cea626e6da",
+      "autoagent/core/executor/workflow_executor.py": "22120d0b1ae686c9b1656fbb9a106024963bf4c7d65841608aba9f9ad4ef2078",
+      "autoagent/core/runtime/repository.py": "e66dfb9369716193fccf99ee42f45377fc649ce6892ee42c24ce360bbdb9a32f",
+      "autoagent/core/runtime/transitions.py": "b6d0437b85c8a51abf77e777ba026eee5365219be560d3f6fb3075e09d40cce5"
+    },
+    "after": {
+      "autoagent/core/app/app.py": "42e1b17706b87f276b8cc175fe4c234e42085c2e931f1b3e13f179ce6e0b0f66",
+      "autoagent/core/app/ports.py": "216820789458b939afcef7325412344103745c56bca94df7247d7ff0d6d0565e",
+      "autoagent/core/app/_graph_gate.py": "cbdec2979e3d0970c878f58f114e641439a01589f9bcdb65842b79ba9d561c2f",
+      "autoagent/core/executor/workflow_executor.py": "9b936e819839ca167b97e78eb3011a32f66e3ca8f8669d9e3fecf0e436025aae",
+      "autoagent/core/runtime/repository.py": "2ffc28312297a12641f01c65046b5bbe5004264530edb254880f92c18714a82e",
+      "autoagent/core/runtime/transitions.py": "b6d0437b85c8a51abf77e777ba026eee5365219be560d3f6fb3075e09d40cce5"
+    }
+  }
+}

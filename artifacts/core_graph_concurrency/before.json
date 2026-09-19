@@ -1,0 +1,402 @@
+{
+  "roots_1_0": {
+    "median_ms": 2.259035,
+    "samples": [
+      {
+        "elapsed_ms": 2.259035,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 2.158038,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 2.296472,
+        "events": 3,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "roots_1_0.0005": {
+    "median_ms": 5.822599,
+    "samples": [
+      {
+        "elapsed_ms": 5.822599,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 5.739411,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 5.827599,
+        "events": 3,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "roots_1_0.002": {
+    "median_ms": 8.839223,
+    "samples": [
+      {
+        "elapsed_ms": 8.813733,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 8.853163,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 8.839223,
+        "events": 3,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "roots_1_0.01": {
+    "median_ms": 33.712335,
+    "samples": [
+      {
+        "elapsed_ms": 33.784818,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 33.337015,
+        "events": 3,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 33.712335,
+        "events": 3,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "roots_32_0": {
+    "median_ms": 68.69234,
+    "samples": [
+      {
+        "elapsed_ms": 68.355973,
+        "events": 96,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 68.69234,
+        "events": 96,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 69.342014,
+        "events": 96,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "roots_32_0.0005": {
+    "median_ms": 73.833765,
+    "samples": [
+      {
+        "elapsed_ms": 96.215655,
+        "events": 96,
+        "peak_inflight_ack": 32
+      },
+      {
+        "elapsed_ms": 66.575528,
+        "events": 96,
+        "peak_inflight_ack": 32
+      },
+      {
+        "elapsed_ms": 73.833765,
+        "events": 96,
+        "peak_inflight_ack": 32
+      }
+    ]
+  },
+  "roots_32_0.002": {
+    "median_ms": 67.168645,
+    "samples": [
+      {
+        "elapsed_ms": 67.168645,
+        "events": 96,
+        "peak_inflight_ack": 32
+      },
+      {
+        "elapsed_ms": 70.08339,
+        "events": 96,
+        "peak_inflight_ack": 32
+      },
+      {
+        "elapsed_ms": 64.819879,
+        "events": 96,
+        "peak_inflight_ack": 32
+      }
+    ]
+  },
+  "roots_32_0.01": {
+    "median_ms": 80.961894,
+    "samples": [
+      {
+        "elapsed_ms": 87.852502,
+        "events": 96,
+        "peak_inflight_ack": 32
+      },
+      {
+        "elapsed_ms": 80.961894,
+        "events": 96,
+        "peak_inflight_ack": 32
+      },
+      {
+        "elapsed_ms": 79.954014,
+        "events": 96,
+        "peak_inflight_ack": 32
+      }
+    ]
+  },
+  "nodes_32_0": {
+    "median_ms": 7.519598,
+    "samples": [
+      {
+        "elapsed_ms": 7.270133,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 7.603628,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 7.519598,
+        "events": 70,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "nodes_32_0.0005": {
+    "median_ms": 105.222948,
+    "samples": [
+      {
+        "elapsed_ms": 105.222948,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 105.097543,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 108.997962,
+        "events": 70,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "nodes_32_0.002": {
+    "median_ms": 177.903011,
+    "samples": [
+      {
+        "elapsed_ms": 177.903011,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 208.634305,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 175.933333,
+        "events": 70,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "nodes_32_0.01": {
+    "median_ms": 785.521588,
+    "samples": [
+      {
+        "elapsed_ms": 809.394304,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 785.521588,
+        "events": 70,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 784.67021,
+        "events": 70,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_32_0": {
+    "median_ms": 66.150261,
+    "samples": [
+      {
+        "elapsed_ms": 66.150261,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 66.759727,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 64.576577,
+        "events": 131,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_32_0.0005": {
+    "median_ms": 199.153188,
+    "samples": [
+      {
+        "elapsed_ms": 200.164532,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 188.098861,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 199.153188,
+        "events": 131,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_32_0.002": {
+    "median_ms": 366.912927,
+    "samples": [
+      {
+        "elapsed_ms": 351.628582,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 366.912927,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 372.366531,
+        "events": 131,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_32_0.01": {
+    "median_ms": 1516.485599,
+    "samples": [
+      {
+        "elapsed_ms": 1500.836939,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 1527.660144,
+        "events": 131,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 1516.485599,
+        "events": 131,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_100_0": {
+    "median_ms": 205.042589,
+    "samples": [
+      {
+        "elapsed_ms": 210.107163,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 201.407321,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 205.042589,
+        "events": 403,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_100_0.0005": {
+    "median_ms": 629.664367,
+    "samples": [
+      {
+        "elapsed_ms": 620.388639,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 629.664367,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 644.341974,
+        "events": 403,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_100_0.002": {
+    "median_ms": 1097.336592,
+    "samples": [
+      {
+        "elapsed_ms": 1097.336592,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 1120.493498,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 1073.162581,
+        "events": 403,
+        "peak_inflight_ack": 1
+      }
+    ]
+  },
+  "children_100_0.01": {
+    "median_ms": 4436.66048,
+    "samples": [
+      {
+        "elapsed_ms": 4436.66048,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 4426.091924,
+        "events": 403,
+        "peak_inflight_ack": 1
+      },
+      {
+        "elapsed_ms": 4471.175621,
+        "events": 403,
+        "peak_inflight_ack": 1
+      }
+    ]
+  }
+}

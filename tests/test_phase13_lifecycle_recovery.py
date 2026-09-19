@@ -58,8 +58,8 @@ def _cross_root_checkpoint_pair() -> tuple[
             parent, {"value": 1}, session_id="cross-root-parent"
         )
         child_ref = source.child_invocations(parent_result.ref)[0]
-        child_bundle = source.unload_session(child_ref)
-        planned = source.unload_session(parent_result.ref)
+        child_bundle = source.unload_session(child_ref, capture_checkpoint=True)
+        planned = source.unload_session(parent_result.ref, capture_checkpoint=True)
     finally:
         source.close()
     parent_state = planned.state
@@ -209,21 +209,21 @@ class _CoordinatedCloseApp(AutoAgentApp):
         self.close_operation_completed = _ThreadSignal()
         self.release_close_operations = _RuntimeGate()
 
-    def _begin_close(self):  # type: ignore[no-untyped-def]
-        future = super()._begin_close()
+    def _begin_close(self, *, capture_checkpoint=False):  # type: ignore[no-untyped-def]
+        future = super()._begin_close(capture_checkpoint=capture_checkpoint)
         with self.close_entries_lock:
             self.begin_close_calls += 1
             if self.begin_close_calls == 2:
                 self.both_close_callers_entered.set()
         return future
 
-    async def _close_operation(self) -> AppCheckpoint:
+    async def _close_operation(self, *, capture_checkpoint=False) -> AppCheckpoint | None:
         with self.close_entries_lock:
             self.close_entries += 1
         self.close_operation_entered.set()
         await self.release_close_operations.wait()
         self.close_gate_released.set()
-        result = await super()._close_operation()
+        result = await super()._close_operation(capture_checkpoint=capture_checkpoint)
         self.close_operation_completed.set()
         return result
 
@@ -266,9 +266,9 @@ class _CloseAttemptApp(AutoAgentApp):
         super().__init__()
         self.close_attempted = _ThreadSignal()
 
-    def _begin_close(self):  # type: ignore[no-untyped-def]
+    def _begin_close(self, *, capture_checkpoint=False):  # type: ignore[no-untyped-def]
         self.close_attempted.set()
-        return super()._begin_close()
+        return super()._begin_close(capture_checkpoint=capture_checkpoint)
 
 
 class LifecycleRecoveryTests(unittest.TestCase):
@@ -686,7 +686,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             handle = parent_result.output
             self.assertTrue(first_started.wait(1))
-            checkpoint = source.close(timeout=1)
+            checkpoint = source.close(timeout=1, capture_checkpoint=True)
         finally:
             _release_runtime_gate_sync(source._runtime_loop, first_gate)
             if not source._closed:
@@ -757,7 +757,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             handle = parent_result.output
             waiting = source.join(handle, timeout=1)
             self.assertEqual(waiting.status, "waiting")
-            checkpoint = source.close(timeout=1)
+            checkpoint = source.close(timeout=1, capture_checkpoint=True)
         finally:
             if not source._closed:
                 source.close(timeout=1)
@@ -806,8 +806,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             handle = parent_result.output
             waiting = source.join(handle, timeout=1)
-            child_checkpoint = source.unload_session(waiting.ref)
-            parent_checkpoint = source.unload_session(parent_result.ref)
+            child_checkpoint = source.unload_session(waiting.ref, capture_checkpoint=True)
+            parent_checkpoint = source.unload_session(parent_result.ref, capture_checkpoint=True)
         finally:
             source.close(timeout=1)
 
@@ -904,7 +904,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             handle = parent_result.output
             self.assertTrue(first_started.wait(1))
-            checkpoint = source.close(timeout=1)
+            checkpoint = source.close(timeout=1, capture_checkpoint=True)
         finally:
             _release_runtime_gate_sync(source._runtime_loop, first_gate)
             if not source._closed:
@@ -1021,7 +1021,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id="cancel-recover-session",
             )
             self.assertTrue(await first_started.wait_async())
-            source_checkpoint = (await source.aclose(timeout=1.0)).sessions[0]
+            source_checkpoint = (await source.aclose(timeout=1.0, capture_checkpoint=True)).sessions[0]
 
             recovered = AutoAgentApp()
             try:
@@ -1127,8 +1127,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 Workflow("concurrent-aclose", nodes=[Node("node", identity)]),
                 {"value": 1},
             )
-            first = asyncio.create_task(app.aclose())
-            second = asyncio.create_task(app.aclose())
+            first = asyncio.create_task(app.aclose(capture_checkpoint=True))
+            second = asyncio.create_task(app.aclose(capture_checkpoint=True))
             try:
                 self.assertTrue(
                     await app.both_close_callers_entered.wait_async()
@@ -1171,7 +1171,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         def close() -> None:
             barrier.wait()
             try:
-                results.append(app.close())
+                results.append(app.close(capture_checkpoint=True))
             except BaseException as error:
                 errors.append(error)
 
@@ -1209,7 +1209,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 Workflow("close-timeout", nodes=[Node("node", identity)]),
                 {"value": 1},
             )
-            first = asyncio.create_task(app.aclose(timeout=0.02))
+            first = asyncio.create_task(app.aclose(timeout=0.02, capture_checkpoint=True))
             self.assertTrue(await app.close_operation_entered.wait_async())
             with self.assertRaises(TimeoutError):
                 await first
@@ -1224,7 +1224,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             await _release_runtime_gate(
                 app._runtime_loop, app.release_close_operations
             )
-            checkpoint = await app.aclose(timeout=1.0)
+            checkpoint = await app.aclose(timeout=1.0, capture_checkpoint=True)
             self.assertIsInstance(checkpoint, AppCheckpoint)
             self.assertTrue(app._closed)
             self.assertEqual(app.close_entries, 1)
@@ -1255,7 +1255,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             {"value": 1},
             session_id="preloaded-close-root",
         )
-        checkpoint = source.close()
+        checkpoint = source.close(capture_checkpoint=True)
         self.assertEqual(len(checkpoint.sessions), 2)
 
         journal = RuntimeRepository()
@@ -1263,7 +1263,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             {item.session_id: item.state for item in checkpoint.sessions}
         )
         restored = AutoAgentApp(runtime_repository=journal)
-        captured = restored.close()
+        captured = restored.close(capture_checkpoint=True)
 
         self.assertEqual(len(captured.sessions), 2)
         self.assertEqual(
@@ -1360,7 +1360,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertEqual(current.id, first.invocation_id)
             self.assertEqual(current.status, "completed")
 
-            closed = app.close(timeout=1)
+            closed = app.close(timeout=1, capture_checkpoint=True)
             self.assertEqual(len(closed.sessions), 1)
             self.assertEqual(closed.sessions[0].session_id, "replacement-sink-root")
         finally:
@@ -1448,7 +1448,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertIn(sink.rejected_event_id, sink.accepted_event_ids)
             self.assertNotIn(handle.session_id, journal.session_ids())
 
-            closed = app.close(timeout=1)
+            closed = app.close(timeout=1, capture_checkpoint=True)
             self.assertEqual(len(closed.sessions), 2)
             self.assertIn(
                 "child-event-retirement-root",
@@ -1731,7 +1731,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 {"value": 1},
                 session_id="immutable-checkpoint-session",
             )
-            checkpoint = source.unload_session(result.ref)
+            checkpoint = source.unload_session(result.ref, capture_checkpoint=True)
         finally:
             source.close()
 

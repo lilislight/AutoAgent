@@ -413,7 +413,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         try:
             source.submit_invoke(parent, {"value": 1}, session_id="root")
             self.assertTrue(entered.wait(1))
-            checkpoint = source.close(timeout=1)
+            checkpoint = source.close(timeout=1, capture_checkpoint=True)
         finally:
             if not source._closed:
                 source.close(timeout=1)
@@ -495,7 +495,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         try:
             source.submit_invoke(workflow, value, session_id="root")
             self.assertTrue(entered.wait(1))
-            return source.close(timeout=1)
+            return source.close(timeout=1, capture_checkpoint=True)
         finally:
             if not source._closed:
                 source.close(timeout=1)

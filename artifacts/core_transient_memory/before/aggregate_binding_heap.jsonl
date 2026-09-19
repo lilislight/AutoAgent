@@ -1,0 +1,4 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 34.60546875, "maxrss_mib": 34.60546875, "python_live_mib": 0.0013074874877929688, "python_peak_mib": 0.011128425598144531}
+{"kind": "point", "stage": "binding", "rss_mib": 64.09765625, "maxrss_mib": 64.09765625, "call_outputs_with_rows": 4, "python_live_mib": 5.3048095703125, "python_peak_mib": 11.628853797912598}
+{"kind": "point", "stage": "after_run", "rss_mib": 59.73828125, "maxrss_mib": 65.90234375, "elapsed_s": 0.32555320899700746, "python_live_mib": 0.040312767028808594, "python_peak_mib": 11.628853797912598}
+{"kind": "done"}

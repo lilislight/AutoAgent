@@ -61,7 +61,7 @@ def _measure(
             len(json.dumps(event.to_record(), separators=(",", ":")))
             for event in collector.events
         )
-        checkpoint = app.unload_session(result.ref)
+        checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
         checkpoint_bytes = len(
             json.dumps(checkpoint.to_record(), separators=(",", ":"))
         )

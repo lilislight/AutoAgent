@@ -207,7 +207,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
         )
         source = AutoAgentApp()
         waiting = source.invoke(workflow, _value())
-        checkpoint = source.unload_session(waiting.ref)
+        checkpoint = source.unload_session(waiting.ref, capture_checkpoint=True)
         source.close()
 
         restored = AutoAgentApp()

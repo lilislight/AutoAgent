@@ -1,0 +1,115 @@
+{
+  "method": "3 alternating before/after pairs; each measure has warmup + 5 timing samples and a separate allocation run",
+  "before": [
+    {
+      "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+      "chain_50000": {
+        "median_ns": 63006834,
+        "retained_bytes": 842983,
+        "peak_bytes": 3271583
+      },
+      "repeat_100": {
+        "median_ns": 80906335,
+        "retained_bytes": 9883,
+        "peak_bytes": 219657
+      },
+      "loop_100": {
+        "median_ns": 96453779,
+        "retained_bytes": 240783,
+        "peak_bytes": 373757
+      }
+    },
+    {
+      "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+      "chain_50000": {
+        "median_ns": 63385829,
+        "retained_bytes": 843359,
+        "peak_bytes": 3271583
+      },
+      "repeat_100": {
+        "median_ns": 79347002,
+        "retained_bytes": 9319,
+        "peak_bytes": 219093
+      },
+      "loop_100": {
+        "median_ns": 95753870,
+        "retained_bytes": 240219,
+        "peak_bytes": 373193
+      }
+    },
+    {
+      "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+      "chain_50000": {
+        "median_ns": 63483788,
+        "retained_bytes": 842842,
+        "peak_bytes": 3271583
+      },
+      "repeat_100": {
+        "median_ns": 80218946,
+        "retained_bytes": 9319,
+        "peak_bytes": 219093
+      },
+      "loop_100": {
+        "median_ns": 95016344,
+        "retained_bytes": 240360,
+        "peak_bytes": 373334
+      }
+    }
+  ],
+  "after": [
+    {
+      "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+      "chain_50000": {
+        "median_ns": 64910216,
+        "retained_bytes": 843162,
+        "peak_bytes": 3271159
+      },
+      "repeat_100": {
+        "median_ns": 80911274,
+        "retained_bytes": 9319,
+        "peak_bytes": 219582
+      },
+      "loop_100": {
+        "median_ns": 98586170,
+        "retained_bytes": 240125,
+        "peak_bytes": 373176
+      }
+    },
+    {
+      "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+      "chain_50000": {
+        "median_ns": 63481951,
+        "retained_bytes": 842974,
+        "peak_bytes": 3271159
+      },
+      "repeat_100": {
+        "median_ns": 83721623,
+        "retained_bytes": 11743,
+        "peak_bytes": 222711
+      },
+      "loop_100": {
+        "median_ns": 99292330,
+        "retained_bytes": 240681,
+        "peak_bytes": 374210
+      }
+    },
+    {
+      "method": "5 timing samples; separate allocation run; same session; non-retaining ACK sink",
+      "chain_50000": {
+        "median_ns": 64486009,
+        "retained_bytes": 843209,
+        "peak_bytes": 3271159
+      },
+      "repeat_100": {
+        "median_ns": 85365515,
+        "retained_bytes": 9648,
+        "peak_bytes": 220616
+      },
+      "loop_100": {
+        "median_ns": 100801720,
+        "retained_bytes": 241057,
+        "peak_bytes": 374539
+      }
+    }
+  ]
+}

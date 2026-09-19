@@ -1,0 +1,189 @@
+{
+  "method": "5 alternating enabled/disabled timing pairs; separate allocation run; preparation excluded",
+  "close_100": {
+    "False": {
+      "median_ms": 0.477085,
+      "samples": [
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.490006
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.477085
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.459861
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.468892
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.568531
+        }
+      ],
+      "allocations": {
+        "capture_calls": 0,
+        "retained_bytes": 1856,
+        "peak_bytes": 14698
+      }
+    },
+    "True": {
+      "median_ms": 2.866262,
+      "samples": [
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 5.006518
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 3.512907
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 2.866262
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 2.834117
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 2.85495
+        }
+      ],
+      "allocations": {
+        "capture_calls": 100,
+        "retained_bytes": 22796,
+        "peak_bytes": 58528
+      }
+    }
+  },
+  "close_1000": {
+    "False": {
+      "median_ms": 0.937474,
+      "samples": [
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.905924
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.929119
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.937474
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 1.078818
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 0.982917
+        }
+      ],
+      "allocations": {
+        "capture_calls": 0,
+        "retained_bytes": 2016,
+        "peak_bytes": 19796
+      }
+    },
+    "True": {
+      "median_ms": 24.02041,
+      "samples": [
+        {
+          "capture_calls": 1000,
+          "elapsed_ms": 24.236291
+        },
+        {
+          "capture_calls": 1000,
+          "elapsed_ms": 25.503011
+        },
+        {
+          "capture_calls": 1000,
+          "elapsed_ms": 24.02041
+        },
+        {
+          "capture_calls": 1000,
+          "elapsed_ms": 23.806613
+        },
+        {
+          "capture_calls": 1000,
+          "elapsed_ms": 23.910931
+        }
+      ],
+      "allocations": {
+        "capture_calls": 1000,
+        "retained_bytes": 210928,
+        "peak_bytes": 291880
+      }
+    }
+  },
+  "unload_100": {
+    "False": {
+      "median_ms": 9.835253,
+      "samples": [
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 9.366593
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 10.458361
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 9.095412
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 10.385333
+        },
+        {
+          "capture_calls": 0,
+          "elapsed_ms": 9.835253
+        }
+      ],
+      "allocations": {
+        "capture_calls": 0,
+        "retained_bytes": 9420,
+        "peak_bytes": 442410
+      }
+    },
+    "True": {
+      "median_ms": 13.78919,
+      "samples": [
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 12.5978
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 14.385183
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 14.085674
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 13.78919
+        },
+        {
+          "capture_calls": 100,
+          "elapsed_ms": 13.408151
+        }
+      ],
+      "allocations": {
+        "capture_calls": 100,
+        "retained_bytes": 21448,
+        "peak_bytes": 193853
+      }
+    }
+  }
+}

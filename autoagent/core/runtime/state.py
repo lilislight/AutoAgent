@@ -47,6 +47,7 @@ class WaitState:
 
 @dataclass(frozen=True, slots=True)
 class OperatorCallState:
+    """Call lifecycle; input/output are released when the owning Node settles."""
     id: str
     occurrence_id: str
     operator_id: str
@@ -98,6 +99,7 @@ class NodeExecutionState:
 
 @dataclass(frozen=True, slots=True)
 class NodeOccurrenceState:
+    """Scheduling identity; output exists only while execution/result consumers need it."""
     id: str
     node_id: str
     scope: ExecutionScope

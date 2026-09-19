@@ -88,7 +88,7 @@ class AppCorrectnessTests(unittest.TestCase):
         try:
             result = app.invoke(workflow, {"value": 1}, session_id="unload-terminal")
             self.assertEqual(app.resident_invocations(), (result.ref,))
-            checkpoint = app.unload_session(result.ref)
+            checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertEqual(checkpoint.session_id, result.session_id)
             self.assertEqual(app.resident_invocations(), ())
             with self.assertRaisesRegex(RuntimeTransitionError, "INVOCATION_REF_STALE"):
@@ -110,7 +110,7 @@ class AppCorrectnessTests(unittest.TestCase):
         app = AutoAgentApp()
         try:
             waiting = app.invoke(workflow, {"value": 1}, session_id="unload-waiting")
-            checkpoint = app.unload_session(waiting.ref)
+            checkpoint = app.unload_session(waiting.ref, capture_checkpoint=True)
             app.load_checkpoint(checkpoint)
             resumed = app.resume(
                 waiting.ref,
@@ -139,7 +139,7 @@ class AppCorrectnessTests(unittest.TestCase):
                     break
                 time.sleep(0.001)
             self.assertFalse(hasattr(app, "_observations"))
-            checkpoint = app.unload_session(submitted.ref)
+            checkpoint = app.unload_session(submitted.ref, capture_checkpoint=True)
             self.assertEqual(checkpoint.session_id, submitted.session_id)
             with self.assertRaisesRegex(RuntimeTransitionError, "INVOCATION_REF_STALE"):
                 app.status(submitted.ref)
@@ -160,7 +160,7 @@ class AppCorrectnessTests(unittest.TestCase):
             child_ref = parent_result.output
             self.assertIsInstance(child_ref, InvocationRef)
             app.join(child_ref, timeout=1)
-            checkpoint = app.unload_session(child_ref)
+            checkpoint = app.unload_session(child_ref, capture_checkpoint=True)
             self.assertEqual(checkpoint.session_id, child_ref.session_id)
             self.assertEqual(app.resident_invocations(), (parent_result.ref,))
         finally:
@@ -281,7 +281,7 @@ class AppCorrectnessTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "completed")
             self.assertEqual(journal.captures, 0)
-            checkpoint = app.unload_session(result.ref)
+            checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertEqual(checkpoint.state.invocation.output, {"value": 1})
             self.assertEqual(journal.captures, 1)
         finally:
@@ -349,8 +349,8 @@ class AppCorrectnessTests(unittest.TestCase):
             self.assertIsInstance(result, InvocationResult)
             handles = app.child_invocations(result.ref)
             self.assertEqual(len(handles), 1)
-            child_checkpoint = app.unload_session(handles[0])
-            parent_checkpoint = app.unload_session(result.ref)
+            child_checkpoint = app.unload_session(handles[0], capture_checkpoint=True)
+            parent_checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertEqual(child_checkpoint.session_id, handles[0].session_id)
             self.assertNotEqual(child_checkpoint.session_id, parent_checkpoint.session_id)
         finally:
@@ -368,8 +368,8 @@ class AppCorrectnessTests(unittest.TestCase):
         try:
             result = app.invoke(parent, {"value": 1}, session_id="recover-spawn-phase-root")
             child_result = app.join(result.output, timeout=1)
-            child_checkpoint = app.unload_session(result.output)
-            parent_checkpoint = app.unload_session(result.ref)
+            child_checkpoint = app.unload_session(result.output, capture_checkpoint=True)
+            parent_checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertEqual(parent_checkpoint.session_id, result.session_id)
             self.assertEqual(child_checkpoint.session_id, child_result.session_id)
             self.assertNotEqual(parent_checkpoint.session_id, child_checkpoint.session_id)
@@ -519,7 +519,7 @@ class AppCorrectnessTests(unittest.TestCase):
 
             consumer = asyncio.create_task(consume())
             await asyncio.wait_for(first_update.wait(), 1)
-            checkpoint = await app.aclose()
+            checkpoint = await app.aclose(capture_checkpoint=True)
             await asyncio.wait_for(consumer, 1)
             self.assertIsInstance(checkpoint, AppCheckpoint)
 
@@ -529,7 +529,7 @@ class AppCorrectnessTests(unittest.TestCase):
         """Verify an idle App close checkpoint is a valid no-op restore input."""
 
         source = AutoAgentApp()
-        checkpoint = source.close()
+        checkpoint = source.close(capture_checkpoint=True)
         self.assertEqual(checkpoint, AppCheckpoint())
         target = AutoAgentApp()
         try:
@@ -550,7 +550,7 @@ class AppCorrectnessTests(unittest.TestCase):
         source = AutoAgentApp()
         try:
             result = source.invoke(workflow, {"value": 1})
-            checkpoint = source.unload_session(result.ref)
+            checkpoint = source.unload_session(result.ref, capture_checkpoint=True)
         finally:
             source.close()
 
@@ -609,8 +609,8 @@ class AppCorrectnessTests(unittest.TestCase):
         try:
             result = source.invoke(parent, {"value": 1}, session_id="root-one")
             source.join(result.output, timeout=1)
-            child_checkpoint = source.unload_session(result.output)
-            parent_checkpoint = source.unload_session(result.ref)
+            child_checkpoint = source.unload_session(result.output, capture_checkpoint=True)
+            parent_checkpoint = source.unload_session(result.ref, capture_checkpoint=True)
         finally:
             source.close()
 
@@ -638,7 +638,7 @@ class AppCorrectnessTests(unittest.TestCase):
             ):
                 target.load_checkpoint(second)
             self.assertEqual(tuple(target._repository.session_ids()), before)
-            self.assertEqual(len(target.close().sessions), 2)
+            self.assertEqual(len(target.close(capture_checkpoint=True).sessions), 2)
         finally:
             target.close()
 
@@ -663,7 +663,7 @@ class AppCorrectnessTests(unittest.TestCase):
                     {"value": 2},
                     session_id=handle.session_id,
                 )
-            checkpoint = app.close()
+            checkpoint = app.close(capture_checkpoint=True)
             self.assertEqual(len(checkpoint.sessions), 2)
             self.assertEqual(
                 {item.session_id for item in checkpoint.sessions},

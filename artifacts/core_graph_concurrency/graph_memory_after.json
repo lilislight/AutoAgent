@@ -1,0 +1,12 @@
+{
+  "32": {
+    "retained_bytes": 211598,
+    "peak_bytes": 956058,
+    "resident_sessions": 33
+  },
+  "100": {
+    "retained_bytes": 660529,
+    "peak_bytes": 2249536,
+    "resident_sessions": 101
+  }
+}

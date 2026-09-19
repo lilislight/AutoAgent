@@ -57,7 +57,7 @@ class ExecutionPerformanceTests(unittest.TestCase):
         try:
             result = app.invoke(build_workflow(), {'order_id':'index','amount':600,'stock':3})
             self.assertEqual(result.status, 'waiting')
-            checkpoint = app.unload_session(result.ref)
+            checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertNotIn(result.session_id, app._repository._execution_indexes)
             loaded = app.load_checkpoint(checkpoint)
             result = app.recover(loaded.invocations[0])

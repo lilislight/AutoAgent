@@ -27,6 +27,8 @@ from .values import freeze
 from ._overlay import PlanningOverlay
 from ._context_index import revision_index, _previews
 from ._chunked import ChunkedUnits, runtime_mapping, child_units
+from ._execution_index import ExecutionIndex
+from ._retention import released_outputs
 
 SCHED = ("invocation", "scheduler")
 
@@ -35,7 +37,8 @@ class TransitionPlanner:
     """Generate explicit mutations for a semantic boundary against current State."""
 
     def plan(self, state, payload, *, occurred_at_us, session_id=None,
-             invocation_id=None, scheduler_delta=None):
+             invocation_id=None, scheduler_delta=None, _execution_index=None,
+             _output_node_ids=None):
         validate_payload(payload)
         operations = []
         def put(path, value, op="replace"):
@@ -111,6 +114,7 @@ class TransitionPlanner:
             for item in delta.revived:
                 occurrence_put(planned.occurrences[item.id])
             put((*SCHED, "ready"), planned.ready)
+            return planned
         if isinstance(payload, NodeStarted):
             require_occ("ready")
             if occ.started_sequence is not None:
@@ -124,7 +128,16 @@ class TransitionPlanner:
             require_occ(); workspace(occ, phase="capability_resolved",
                 resolved_capability_id=payload.capability_id, resolved_operator_id=payload.operator_id)
         elif isinstance(payload, Aggregated):
-            require_occ(); workspace(occ, phase="aggregated", aggregate_output=payload.output)
+            require_occ()
+            call_ids = (_execution_index.calls_by_occurrence.get(oid, ()) if _execution_index is not None
+                        else tuple(c.id for c in sched.operator_calls.values() if c.occurrence_id == oid))
+            if any(sched.operator_calls[key].status == "running" for key in call_ids):
+                raise RuntimeTransitionError("AGGREGATION_CALLS_ACTIVE", "Aggregation requires settled Operator Calls.")
+            workspace(occ, phase="aggregated", aggregate_output=payload.output, mapped_input=None)
+            for key in call_ids:
+                call = sched.operator_calls[key]
+                if call.input is not None or call.output is not None:
+                    put((*SCHED, "operator_calls", key), replace(call, input=None, output=None))
         elif isinstance(payload, OutputBound):
             require_occ(); workspace(occ, phase="output_bound", pending_context_patch=payload.patch)
         elif isinstance(payload, RoutingResolved):
@@ -168,15 +181,36 @@ class TransitionPlanner:
                     if getattr(patch, name):
                         put((name, "context"), updated.context)
                         put((name, "context_path_revisions"), updated.context_path_revisions)
-            graph(scheduler_delta, replace(sched, occurrences=ChainMap({oid: terminal}, sched.occurrences)))
-            remaining = (
-                [item for key, item in sched.occurrences.items() if key != oid]
-                if not scheduler_delta.ready and not scheduler_delta.revived else ()
-            )
-            if not scheduler_delta.ready and not scheduler_delta.revived and remaining and all(
-                item.status in {"waiting", "completed", "failed", "skipped", "cancelled"} for item in remaining
-            ) and any(item.status == "waiting" for item in remaining):
-                put(("invocation", "status"), "waiting")
+            planned = graph(scheduler_delta, replace(sched, occurrences=ChainMap({oid: terminal}, sched.occurrences)))
+            retention_index = _execution_index or ExecutionIndex(state)
+            for key in retention_index.calls_by_occurrence.get(oid, ()):
+                call = sched.operator_calls[key]
+                if call.input is not None or call.output is not None:
+                    put((*SCHED, "operator_calls", key), replace(call, input=None, output=None))
+            for key in retention_index.waits_by_occurrence.get(oid, ()):
+                wait = sched.waits[key]
+                if wait.request is not None or wait.response is not None:
+                    put((*SCHED, "waits", key), replace(wait, request=None, response=None))
+            for key in released_outputs(sched, planned, scheduler_delta, oid,
+                                        _output_node_ids, retention_index):
+                put((*SCHED, "occurrences", key, "output"), None)
+            if _execution_index is not None:
+                # The index describes pre-transition State. Match the original
+                # exclusion of this occurrence; ready/revived work prevents waiting.
+                if (not scheduler_delta.ready and not scheduler_delta.revived
+                        and not _other_active(sched, oid, _execution_index)
+                        and _execution_index.occurrence_counts.get('waiting', 0)
+                            - (occ.status == 'waiting') > 0):
+                    put(("invocation", "status"), "waiting")
+            else:
+                remaining = (
+                    [item for key, item in sched.occurrences.items() if key != oid]
+                    if not scheduler_delta.ready and not scheduler_delta.revived else ()
+                )
+                if not scheduler_delta.ready and not scheduler_delta.revived and remaining and all(
+                    item.status in {"waiting", "completed", "failed", "skipped", "cancelled"} for item in remaining
+                ) and any(item.status == "waiting" for item in remaining):
+                    put(("invocation", "status"), "waiting")
         elif isinstance(payload, WaitRequested):
             require_occ()
             if payload.wait_id in sched.waits:
@@ -184,7 +218,7 @@ class TransitionPlanner:
             occurrence_put(replace(occ, status="waiting"))
             put((*SCHED, "waits", payload.wait_id), WaitState(payload.wait_id, oid, "waiting", payload.request,
                 created_at_us=occurred_at_us), "add")
-            if not any(item.id != oid and item.status in {"ready", "running"} for item in sched.occurrences.values()):
+            if not _other_active(sched, oid, _execution_index):
                 put(("invocation", "status"), "waiting")
         elif isinstance(payload, WaitResumed):
             wait = sched.waits.get(payload.wait_id)
@@ -266,10 +300,28 @@ class TransitionPlanner:
             if resume:
                 
                 put(("invocation", "status"), "running")
-            elif not any(o.id != item.id and o.status in {"ready", "running"} for o in sched.occurrences.values()):
+            elif not _other_active(sched, item.id, _execution_index):
                 put(("invocation", "status"), "waiting")
         else:
             raise RuntimeTransitionError("EVENT_TYPE_UNSUPPORTED", "Unsupported semantic boundary.")
+        if isinstance(payload, (InvocationCompleted, InvocationFailed, InvocationCancelled)):
+            # Terminal Invocations retain their public result and business Context,
+            # not execution payload history. Apply after lifecycle status updates.
+            for item in sched.occurrences.values():
+                if item.output is not None:
+                    put((*SCHED, "occurrences", item.id, "output"), None)
+                if item.execution != NodeExecutionState():
+                    put((*SCHED, "occurrences", item.id, "execution"), NodeExecutionState())
+            for item in sched.operator_calls.values():
+                if item.input is not None:
+                    put((*SCHED, "operator_calls", item.id, "input"), None)
+                if item.output is not None:
+                    put((*SCHED, "operator_calls", item.id, "output"), None)
+            for item in sched.waits.values():
+                if item.request is not None:
+                    put((*SCHED, "waits", item.id, "request"), None)
+                if item.response is not None:
+                    put((*SCHED, "waits", item.id, "response"), None)
         return StateDelta(tuple(operations))
 
     def preview_context_patch(
@@ -551,3 +603,13 @@ def _apply_context_operations(
 def _paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     size = min(len(left), len(right))
     return left[:size] == right[:size]
+
+
+def _other_active(scheduler, occurrence_id, index):
+    """Query committed counts minus the occurrence changed by this transition."""
+    if index is None:
+        return any(item.id != occurrence_id and item.status in {'ready', 'running'}
+                   for item in scheduler.occurrences.values())
+    current = scheduler.occurrences[occurrence_id]
+    active = index.occurrence_counts.get('ready', 0) + index.occurrence_counts.get('running', 0)
+    return active - (current.status in {'ready', 'running'}) > 0

@@ -624,7 +624,7 @@ class QualityTests(unittest.TestCase):
             {"value": 1},
         )
         self.assertTrue(started.wait(1))
-        checkpoint = app.close()
+        checkpoint = app.close(capture_checkpoint=True)
         state = checkpoint.sessions[0].state
         self.assertEqual(state.invocation.status, "running")
         self.assertFalse(
@@ -720,8 +720,8 @@ class QualityTests(unittest.TestCase):
         child_result = first_app.join(handle)
         checkpoint = AppCheckpoint(
             (
-                first_app.unload_session(child_result.ref),
-                first_app.unload_session(result.ref),
+                first_app.unload_session(child_result.ref, capture_checkpoint=True),
+                first_app.unload_session(result.ref, capture_checkpoint=True),
             )
         )
         first_app.close()
@@ -854,7 +854,7 @@ class QualityTests(unittest.TestCase):
             self.assertFalse(hasattr(first, "checkpoint"))
             self.assertFalse(hasattr(app, "checkpoint"))
             self.assertFalse(hasattr(app, "acheckpoint"))
-            checkpoint = app.unload_session(first.ref)
+            checkpoint = app.unload_session(first.ref, capture_checkpoint=True)
             rebuilt = SessionCheckpoint.from_record(
                 checkpoint.to_record()
             )

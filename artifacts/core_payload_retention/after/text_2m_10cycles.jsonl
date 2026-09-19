@@ -1,0 +1,23 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 35.0, "maxrss_mib": 35.2578125, "row_count": 67648}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 1}, "events": 22}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 4, "events": 25}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 2}, "events": 38}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 8, "events": 46}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 3}, "events": 54}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 12, "events": 67}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 4}, "events": 70}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 5}, "events": 86}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 16, "events": 89}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 6}, "events": 102}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 20, "events": 110}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 7}, "events": 118}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 24, "events": 131}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 8}, "events": 134}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 9}, "events": 150}
+{"kind": "point", "stage": "outputs", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "big_outputs": 28, "events": 153}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "cycles": {"root-0": 10}, "events": 166}
+{"kind": "point", "stage": "after_run", "rss_mib": 43.8046875, "maxrss_mib": 43.8046875, "elapsed_s": 0.041422048991080374, "resident_sessions": 1, "occurrences": 32, "calls": 32, "big_calls": 0, "call_node_output_same_object": 0, "unique_blob_objects_in_calls": 0, "unique_blob_mib_in_calls": 0.0, "distinct_row_arrays_in_call_inputs_outputs": 0, "pending_events": 0}
+{"kind": "point", "stage": "after_unload", "rss_mib": 36.14453125, "maxrss_mib": 43.8046875, "resident_sessions": 0}
+{"kind": "point", "stage": "after_close", "rss_mib": 36.28125, "maxrss_mib": 43.8046875, "resident_sessions": 0}
+{"kind": "point", "stage": "after_drop_app", "rss_mib": 36.28125, "maxrss_mib": 43.8046875}
+{"kind": "done", "case": {"name": "text_2m_10cycles", "payload_mib": 2, "cycles": 10}}

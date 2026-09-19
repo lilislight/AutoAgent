@@ -1,0 +1,16 @@
+{"kind": "point", "stage": "baseline", "rss_mib": 35.265625, "maxrss_mib": 35.3984375, "row_count": 33822}
+{"kind": "point", "stage": "cycle", "rss_mib": 43.75390625, "maxrss_mib": 43.75390625, "cycles": {"root-0": 1}, "events": 25}
+{"kind": "point", "stage": "outputs", "rss_mib": 42.66015625, "maxrss_mib": 43.75390625, "big_outputs": 4, "events": 29}
+{"kind": "point", "stage": "cycle", "rss_mib": 50.81640625, "maxrss_mib": 50.81640625, "cycles": {"root-0": 2}, "events": 44}
+{"kind": "point", "stage": "outputs", "rss_mib": 46.890625, "maxrss_mib": 52.84765625, "big_outputs": 8, "events": 54}
+{"kind": "point", "stage": "cycle", "rss_mib": 56.65234375, "maxrss_mib": 56.65234375, "cycles": {"root-0": 3}, "events": 63}
+{"kind": "point", "stage": "outputs", "rss_mib": 50.89453125, "maxrss_mib": 60.71875, "big_outputs": 12, "events": 79}
+{"kind": "point", "stage": "cycle", "rss_mib": 62.80859375, "maxrss_mib": 62.80859375, "cycles": {"root-0": 4}, "events": 82}
+{"kind": "point", "stage": "cycle", "rss_mib": 68.90625, "maxrss_mib": 68.90625, "cycles": {"root-0": 5}, "events": 101}
+{"kind": "point", "stage": "outputs", "rss_mib": 54.95703125, "maxrss_mib": 68.90625, "big_outputs": 16, "events": 105}
+{"kind": "point", "stage": "cycle", "rss_mib": 74.7421875, "maxrss_mib": 74.7421875, "cycles": {"root-0": 6}, "events": 120}
+{"kind": "point", "stage": "after_run", "rss_mib": 57.95703125, "maxrss_mib": 74.7421875, "elapsed_s": 0.07909726302023046, "resident_sessions": 1, "occurrences": 20, "calls": 20, "big_calls": 0, "call_node_output_same_object": 0, "unique_blob_objects_in_calls": 0, "unique_blob_mib_in_calls": 0.0, "distinct_row_arrays_in_call_inputs_outputs": 0, "pending_events": 0}
+{"kind": "point", "stage": "after_unload", "rss_mib": 39.953125, "maxrss_mib": 74.7421875, "resident_sessions": 0}
+{"kind": "point", "stage": "after_close", "rss_mib": 40.08984375, "maxrss_mib": 74.7421875, "resident_sessions": 0}
+{"kind": "point", "stage": "after_drop_app", "rss_mib": 40.08984375, "maxrss_mib": 74.7421875}
+{"kind": "done", "case": {"name": "growing_prompt_single", "cycles": 6, "payload_mib": 1, "context": "growing_prompt"}}

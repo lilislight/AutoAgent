@@ -1,4 +1,5 @@
 """Rebuildable execution lookups containing IDs and counters, never Events."""
+from ._retention import consumer_sources
 
 
 class ExecutionIndex:
@@ -11,6 +12,7 @@ class ExecutionIndex:
         self.occurrences_by_scope = {}
         self.calls_by_occurrence = {}
         self.waits_by_occurrence = {}
+        self.output_consumers = {}
         invocation = state.invocation
         if invocation is not None:
             self.child_remaining = {key: sum(unit.phase != "terminal" for unit in plan.units)
@@ -19,6 +21,17 @@ class ExecutionIndex:
             for collection in ('occurrences', 'operator_calls', 'waits'):
                 for item in getattr(scheduler, collection).values():
                     self._change(collection, item, True)
+            for collection in ('occurrences', 'resolutions', 'boundary_resolutions'):
+                for item in getattr(scheduler, collection).values():
+                    self._consumer_change(collection, item, 1)
+
+    def _consumer_change(self, collection, item, direction):
+        for source in consumer_sources(collection, item):
+            count = self.output_consumers.get(source, 0) + direction
+            if count:
+                self.output_consumers[source] = count
+            else:
+                self.output_consumers.pop(source, None)
 
     def _scope_change(self, item, add):
         for position, frame in enumerate(item.scope):
@@ -66,7 +79,7 @@ class ExecutionIndex:
                     child_plans = set()
                 child_plans.add(path[2])
             if len(path) >= 3 and path[:2] == ('invocation', 'scheduler') and path[2] in (
-                'occurrences', 'operator_calls', 'waits'
+                'occurrences', 'operator_calls', 'waits', 'resolutions', 'boundary_resolutions'
             ):
                 if len(path) == 3:
                     return ExecutionIndex(after)
@@ -85,6 +98,10 @@ class ExecutionIndex:
         for collection, key in touched:
             old = getattr(before.invocation.scheduler, collection).get(key)
             new = getattr(after.invocation.scheduler, collection).get(key)
+            self._consumer_change(collection, old, -1)
+            self._consumer_change(collection, new, 1)
+            if collection in ('resolutions', 'boundary_resolutions'):
+                continue
             # Preserve insertion order for updates to an existing entity.
             if collection == 'occurrences':
                 if old is not None and new is not None:

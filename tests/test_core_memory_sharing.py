@@ -127,7 +127,7 @@ class BatchedPathTests(unittest.TestCase):
 
 class RuntimeSharingTests(unittest.TestCase):
     def test_live_pipeline_shares_values_without_record_conversion(self):
-        """Accepted output is shared by Call, Node, Context and Invocation histories."""
+        """Retained Events share accepted values while terminal State drops Call data."""
         events=[]
         class Sink:
             async def append(self,event):events.append(event)
@@ -143,8 +143,11 @@ class RuntimeSharingTests(unittest.TestCase):
             output_op=next(op for op in completion.delta.operations if op.path[-1]=='output')
             self.assertIs(value,output_op.value)
             call=state.invocation.scheduler.operator_calls[completion.payload.call_id]
-            self.assertIs(call.output,value)
-            self.assertIs(state.invocation.scheduler.occurrences['a@root'].output,value)
+            self.assertIsNone(call.output)
+            self.assertIsNone(call.input)
+            node_event=next(e for e in events if e.event_name=='node_occurrence.completed')
+            self.assertIs(node_event.payload.output,value)
+            self.assertIsNone(state.invocation.scheduler.occurrences['a@root'].output)
             self.assertIs(state.invocation.context['wrapped']['answer'],value)
             self.assertIs(state.invocation.output,value)
             self.assertEqual(app._repository._pending, {})
@@ -168,7 +171,7 @@ class RuntimeSharingTests(unittest.TestCase):
             state=app._repository.state(result.session_id)
             retained['rows'].append(3)
             self.assertEqual(state.invocation.output['rows'],(1,2))
-            checkpoint=app.unload_session(result.ref)
+            checkpoint=app.unload_session(result.ref, capture_checkpoint=True)
             with self.assertRaises(TypeError):checkpoint.state.invocation.output['rows'][0]=42
         finally:app.close()
 
@@ -188,7 +191,7 @@ class RuntimeSharingTests(unittest.TestCase):
             result=app.invoke(workflow,{'rows':[1]})
             self.assertEqual(result.status,'completed',result.error)
             state=app._repository.state(result.session_id)
-            self.assertEqual(state.invocation.scheduler.occurrences['source@root'].output['rows'],(1,))
+            self.assertIsNone(state.invocation.scheduler.occurrences['source@root'].output)
             self.assertEqual(result.output['left']['rows'],[1,2])
             self.assertEqual(result.output['right']['rows'],[1])
         finally:app.close()

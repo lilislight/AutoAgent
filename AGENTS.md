@@ -5,10 +5,9 @@
 The repository root is the AutoAgent V2 project and the only active development
 target.
 
-- `autoagent/` contains the V2 Python package: Core, Host, hosting adapters, CLI,
-  and tracing server.
+- `autoagent/` contains the V2 Core Python package and public exports. External
+  integration protocols, including event sinks, remain in `autoagent/core/`.
 - `tests/` contains the V2 Python test suite.
-- `ui/` contains the V2 tracing UI.
 - `examples/` contains V2 runnable examples.
 - `docs/` contains V2 design notes, plans, testing notes, and the package README.
 - Root packaging files build V2; `AGENTS.md` is the repository instruction file.
@@ -28,8 +27,6 @@ Run V2 commands from the repository root through the root virtual environment:
 - `.venv/bin/python -m unittest discover -s tests -v`
 - `.venv/bin/python -m compileall -q autoagent tests`
 - `.venv/bin/python -m tests.benchmarks.benchmark_full_core`
-- `cd ui && npm test`
-- `cd ui && npm run build`
 
 Run an archived V1 command only when work is explicitly scoped to `v1/`, and
 run it with `cwd=v1` so its same-named `autoagent` package cannot shadow V2.

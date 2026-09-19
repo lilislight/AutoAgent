@@ -5,34 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autoagent"
 version = "2.0.0a1"
-description = "AutoAgent V2 Workflow Core, Host, and local tracing tools"
-readme = "docs/README.md"
+description = "AutoAgent V2 Workflow Core"
+readme = {text = "AutoAgent V2 Workflow Core: workflow compilation, execution, recovery, and external event sink interfaces.", content-type = "text/markdown"}
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.11,<3",
   "typing-extensions>=4.12",
 ]
 
-[project.optional-dependencies]
-http = [
-  "httpx>=0.28,<1",
-]
-server = [
-  "fastapi>=0.115,<1",
-  "uvicorn>=0.34,<1",
-]
-all = [
-  "httpx>=0.28,<1",
-  "fastapi>=0.115,<1",
-  "uvicorn>=0.34,<1",
-]
-
-[project.scripts]
-autoagent = "autoagent.cli:main"
-
 [tool.setuptools.packages.find]
-include = ["autoagent*"]
+include = ["autoagent", "autoagent.core", "autoagent.core.*"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]
-"autoagent.tracing" = ["ui/*", "ui/assets/*"]

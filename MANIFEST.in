@@ -1,4 +1,1 @@
-include .env.example
-recursive-include docs *.md
 include autoagent/py.typed
-recursive-include autoagent/tracing/ui *

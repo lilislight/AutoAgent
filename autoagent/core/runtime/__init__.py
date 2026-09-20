@@ -2,6 +2,7 @@ from .events import (
     RUNTIME_EVENT_SCHEMA_VERSION,
     InvocationCancelled,
     InvocationCompleted,
+    InvocationJoiningChildren,
     InvocationFailed,
     InvocationStarted,
     RecoveryApplied,
@@ -68,6 +69,7 @@ __all__ = [
     "InMemoryUserEventJournal",
     "InvocationCancelled",
     "InvocationCompleted",
+    "InvocationJoiningChildren",
     "InvocationFailed",
     "InvocationStarted",
     "RecoveryApplied",
@@ -121,3 +123,6 @@ from .state import NodeExecutionState
 from .events import InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, EdgeConditionResult, NodeFaulted
 
 __all__ += ["StateDelta", "TransitionPlanner", "NodeExecutionState", "InputMapped", "CapabilityResolved", "Aggregated", "OutputBound", "RoutingResolved", "EdgeConditionResult", "NodeFaulted"]
+
+from .graph_checkpoint import RuntimeGraphCheckpoint
+__all__ += ["RuntimeGraphCheckpoint"]

@@ -65,3 +65,6 @@ __all__ = [
     "workflow_hook",
     "workflow_hook_version",
 ]
+
+from .models import ChildHandle
+__all__ += ["ChildHandle"]

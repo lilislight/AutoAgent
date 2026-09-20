@@ -16,7 +16,7 @@ Executable: TypeAlias = Union[Callable[..., object], Operator, Wait, "Workflow"]
 
 
 class InvocationRef(BaseModel):
-    """Stable identity for any root or Child Workflow Invocation."""
+    """Stable external control identity for a Root Invocation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -32,6 +32,22 @@ class InvocationRef(BaseModel):
     def _non_empty_identity(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("InvocationRef identity fields cannot be empty.")
+        return value
+
+
+class ChildHandle(BaseModel):
+    """Durable identity of an owned Child; never an App control reference."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    child_session_id: str
+    child_invocation_id: str
+    workflow_revision_id: str
+
+    @field_validator("child_session_id", "child_invocation_id", "workflow_revision_id")
+    @classmethod
+    def _non_empty_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("ChildHandle identity fields cannot be empty.")
         return value
 
 

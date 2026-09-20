@@ -11,12 +11,12 @@ from uuid import uuid4
 from .state import RuntimeState, validate_runtime_state
 
 
-SESSION_CHECKPOINT_SCHEMA_VERSION = 3
+SESSION_CHECKPOINT_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
 class SessionCheckpoint:
-    """An immutable snapshot of one Session and its current Invocation."""
+    """An immutable Session snapshot, including an incomplete Child admission."""
 
     session_id: str
     state: RuntimeState
@@ -173,9 +173,7 @@ def _validate_state_identity(session_id: str, state: RuntimeState) -> None:
     session, invocation = state.session, state.invocation
     if session is None or session.id != session_id:
         raise ValueError("Session Checkpoint State has another Session identity.")
-    if invocation is None:
-        raise ValueError("Session Checkpoint State has no current Invocation.")
-    if session.latest_invocation_id != invocation.id:
+    if invocation is not None and session.latest_invocation_id != invocation.id:
         raise ValueError("Session Checkpoint has inconsistent Invocation identity.")
 
 

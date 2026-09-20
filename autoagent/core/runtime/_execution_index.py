@@ -5,6 +5,7 @@ from ._retention import consumer_sources
 class ExecutionIndex:
     def __init__(self, state):
         self.child_remaining = {}
+        self.children_remaining = 0
         self.started_count = 0
         self.occurrence_counts = {}
         self.waiting_count = 0
@@ -15,8 +16,9 @@ class ExecutionIndex:
         self.output_consumers = {}
         invocation = state.invocation
         if invocation is not None:
-            self.child_remaining = {key: sum(unit.phase != "terminal" for unit in plan.units)
+            self.child_remaining = {key: sum(unit.phase not in {'terminal', 'abandoned'} for unit in plan.units)
                                     for key, plan in invocation.child_plans.items()}
+            self.children_remaining = sum(self.child_remaining.values())
             scheduler = invocation.scheduler
             for collection in ('occurrences', 'operator_calls', 'waits'):
                 for item in getattr(scheduler, collection).values():
@@ -85,6 +87,7 @@ class ExecutionIndex:
                     return ExecutionIndex(after)
                 touched[(path[2], path[3])] = None
         for key in child_plans or ():
+            previous_remaining = self.child_remaining.get(key, 0)
             plan = after.invocation.child_plans.get(key)
             if plan is None:
                 self.child_remaining.pop(key, None)
@@ -92,9 +95,10 @@ class ExecutionIndex:
                 unit = child_unit[1]
                 old = before.invocation.child_plans[key].units[unit]
                 new = plan.units[unit]
-                self.child_remaining[key] += (new.phase != 'terminal') - (old.phase != 'terminal')
+                self.child_remaining[key] += (new.phase not in {'terminal', 'abandoned'}) - (old.phase not in {'terminal', 'abandoned'})
             else:
-                self.child_remaining[key] = sum(unit.phase != 'terminal' for unit in plan.units)
+                self.child_remaining[key] = sum(unit.phase not in {'terminal', 'abandoned'} for unit in plan.units)
+            self.children_remaining += self.child_remaining.get(key, 0) - previous_remaining
         for collection, key in touched:
             old = getattr(before.invocation.scheduler, collection).get(key)
             new = getattr(after.invocation.scheduler, collection).get(key)

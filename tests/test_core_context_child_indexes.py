@@ -1,4 +1,8 @@
 """Conflict, preview and ACK boundaries for Context/Child derived lookups."""
+
+from tests.graph_fixtures import (
+    join_observed,
+)
 import asyncio
 import random
 import unittest
@@ -150,8 +154,8 @@ class ContextIndexTests(unittest.TestCase):
                    side_effect=lambda **kwargs: AutoAgentApp(runtime_repository=CheckingRepository(), **kwargs)):
             app, parent, children = child_fixture(12)
         try:
-            self.assertEqual(app.cancel(children[0].ref).status, 'cancelled')
-            self.assertEqual(app.join(parent.ref).status, 'failed')
+            self.assertEqual(app.cancel(parent.ref).status, 'cancelled')
+            self.assertEqual(join_observed(app, parent.ref).status, 'cancelled')
             repository = app._repository
             saved = {sid: repository.state(sid) for sid in repository.session_ids()}
             restored = CheckingRepository()

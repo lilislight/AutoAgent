@@ -12,7 +12,7 @@ from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 5
+RUNTIME_EVENT_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +66,15 @@ class InvocationStarted:
 @dataclass(frozen=True, slots=True)
 class InvocationCompleted:
     kind: ClassVar[str] = "invocation.completed"
+    output: DurableValue
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output", freeze(self.output))
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationJoiningChildren:
+    kind: ClassVar[str] = "invocation.joining_children"
     output: DurableValue
 
     def __post_init__(self) -> None:
@@ -218,7 +227,7 @@ class ChildInvocationPhaseChanged:
     kind: ClassVar[str] = "child_invocation.phase_changed"
     creation_id: str
     unit_index: int
-    phase: Literal["opened", "accepted", "terminal"]
+    phase: Literal["opened", "accepted", "terminal", "abandoned"]
 
     def __post_init__(self) -> None:
         if not isinstance(self.creation_id, str) or not self.creation_id.strip():
@@ -229,7 +238,7 @@ class ChildInvocationPhaseChanged:
             or self.unit_index < 0
         ):
             raise ValueError("Child unit_index must be a non-negative integer.")
-        if self.phase not in {"opened", "accepted", "terminal"}:
+        if self.phase not in {"opened", "accepted", "terminal", "abandoned"}:
             raise ValueError(f"Unknown Child Invocation phase {self.phase!r}.")
 
 
@@ -363,6 +372,7 @@ RuntimeEventPayload: TypeAlias = (
     | NodeFaulted
     | SessionOpened
     | InvocationStarted
+    | InvocationJoiningChildren
     | InvocationCompleted
     | InvocationFailed
     | InvocationCancelled
@@ -385,6 +395,7 @@ _PAYLOAD_TYPES = (
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
     SessionOpened,
     InvocationStarted,
+    InvocationJoiningChildren,
     InvocationCompleted,
     InvocationFailed,
     InvocationCancelled,
@@ -476,7 +487,7 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
         return {
             "context": thaw(payload.context),
         }
-    if isinstance(payload, InvocationCompleted):
+    if isinstance(payload, (InvocationCompleted, InvocationJoiningChildren)):
         return {
             "output": thaw(payload.output),
         }
@@ -547,6 +558,8 @@ def _payload_from_record(
         return SessionOpened(
             _required_value(record, "context"),  # type: ignore[arg-type]
         )
+    if event_name == InvocationJoiningChildren.kind:
+        return InvocationJoiningChildren(_required_value(record, "output"))
     if event_name == InvocationCompleted.kind:
         return InvocationCompleted(_required_value(record, "output"))  # type: ignore[arg-type]
     if event_name == InvocationFailed.kind:
@@ -595,7 +608,7 @@ def _payload_from_record(
         )
     if event_name == ChildInvocationPhaseChanged.kind:
         phase = _required_string(record, "phase")
-        if phase not in {"opened", "accepted", "terminal"}:
+        if phase not in {"opened", "accepted", "terminal", "abandoned"}:
             raise ValueError(f"Unknown Child Invocation phase {phase!r}.")
         return ChildInvocationPhaseChanged(
             _required_string(record, "creation_id"),

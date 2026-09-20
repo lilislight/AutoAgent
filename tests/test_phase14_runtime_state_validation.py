@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    root_snapshot,
+)
+
 import copy
 import unittest
 from dataclasses import replace
@@ -676,7 +680,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
             checkpoint = SessionCheckpoint._from_runtime_state(
                 "session", state, captured_at_us=1
             )
-        self.assertIs(checkpoint.state, state)
+        self.assertIs(root_snapshot(checkpoint).state, state)
 
     def test_checkpoint_rejects_an_invalid_external_state(self) -> None:
         """External checkpoint validation rejects broken durable references."""

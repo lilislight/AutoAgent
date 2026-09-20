@@ -95,3 +95,6 @@ __all__ = [
     "WorkflowDefinitionSnapshot",
     "workflow_hook",
 ]
+
+from .core import RuntimeGraphCheckpoint, ChildHandle
+__all__ += ["RuntimeGraphCheckpoint", "ChildHandle"]

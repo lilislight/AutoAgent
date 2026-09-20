@@ -6,15 +6,15 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 from ..runtime import (
-    SessionCheckpoint,
     RuntimeErrorInfo,
     UserEvent,
 )
 from ..workflow.models import InvocationRef
+from ..runtime.graph_checkpoint import RuntimeGraphCheckpoint
 
 
 InvocationStatus = Literal[
-    "created", "running", "waiting", "completed", "failed", "cancelled"
+    "created", "running", "waiting", "joining_children", "completed", "failed", "cancelled"
 ]
 
 
@@ -71,34 +71,33 @@ class InvocationUpdate:
 
 @dataclass(frozen=True, slots=True)
 class AppCheckpoint:
-    """Clean-shutdown checkpoints for every in-memory Runtime Session."""
-
-    sessions: tuple[SessionCheckpoint, ...] = ()
+    """Complete Root graphs captured at clean process shutdown."""
+    graphs: tuple[RuntimeGraphCheckpoint, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.sessions, tuple) or not all(
-            isinstance(item, SessionCheckpoint) for item in self.sessions
-        ):
-            raise TypeError("AppCheckpoint sessions must be SessionCheckpoint values.")
-        session_ids = tuple(item.session_id for item in self.sessions)
-        if len(session_ids) != len(set(session_ids)):
-            raise ValueError("AppCheckpoint Session ids must be unique.")
+        if not isinstance(self.graphs, tuple) or not all(isinstance(g, RuntimeGraphCheckpoint) for g in self.graphs):
+            raise TypeError("AppCheckpoint graphs must be RuntimeGraphCheckpoint values.")
+        ids = [s.session_id for g in self.graphs for s in g.sessions]
+        claims = [u.session_id for g in self.graphs for s in g.sessions if s.state.invocation is not None
+                  for p in s.state.invocation.child_plans.values() for u in p.units]
+        if len(ids) != len(set(ids)) or len(claims) != len(set(claims)):
+            raise ValueError("AppCheckpoint contains overlapping graphs.")
+        roots = {g.root_session_id for g in self.graphs}
+        if roots.intersection(claims):
+            raise ValueError("A bundled Root cannot be owned by another Graph.")
 
     def to_record(self) -> dict[str, object]:
-        return {"sessions": [item.to_record() for item in self.sessions]}
+        return {"schema_version": 1, "graphs": [g.to_record() for g in self.graphs]}
 
     @classmethod
-    def from_record(cls, record: dict[str, object]) -> "AppCheckpoint":
-        if not isinstance(record, dict) or set(record) != {"sessions"}:
-            raise TypeError("AppCheckpoint record must contain only sessions.")
-        sessions = record.get("sessions")
-        if not isinstance(sessions, list) or not all(
-            isinstance(item, dict) for item in sessions
-        ):
-            raise TypeError("AppCheckpoint sessions must be a list of mappings.")
-        return cls(
-            tuple(SessionCheckpoint.from_record(item) for item in sessions)
-        )
+    def from_record(cls, record: dict[str, object]) -> AppCheckpoint:
+        if not isinstance(record, dict) or set(record) != {"schema_version", "graphs"}:
+            raise TypeError("Invalid AppCheckpoint schema.")
+        if type(record['schema_version']) is not int or record['schema_version'] != 1:
+            raise ValueError("Unsupported AppCheckpoint version.")
+        if not isinstance(record['graphs'], list):
+            raise TypeError("AppCheckpoint graphs must be a list.")
+        return cls(tuple(RuntimeGraphCheckpoint.from_record(g) for g in record['graphs']))
 
 
 @dataclass(frozen=True, slots=True)

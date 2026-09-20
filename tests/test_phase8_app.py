@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    async_join_observed,
+    async_resume_graph_wait,
+    child_refs,
+    join_observed,
+    load_graph,
+    resume_graph_wait,
+    root_snapshot,
+    status_observed,
+)
+
 import asyncio
 import threading
 import time
@@ -269,7 +280,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual([event.kind for event in updates], ["parent.completed"])
         result = items[-1]
         self.assertEqual(result.status, "completed")
-        child_ref = self.app.child_invocations(result.ref)[0]
+        child_ref = child_refs(self.app, result.ref)[0]
         self.assertEqual(
             self.app._user_event_journal.events(child_ref.invocation_id), ()
         )
@@ -417,9 +428,9 @@ class AppTests(unittest.TestCase):
                 ],
             )
             submitted = await self.app.asubmit_invoke(workflow, {})
-            waiting = await self.app.ajoin(submitted.ref, 2)
+            waiting = await async_join_observed(self.app, submitted.ref, 2)
             self.assertEqual(waiting.status, "waiting")
-            completed = await self.app.aresume(
+            completed = await async_resume_graph_wait(self.app,
                 waiting.ref,
                 waiting.waits[0].id,
                 {"answer": "yes"},
@@ -427,7 +438,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(completed.status, "completed")
 
             second = await self.app.asubmit_invoke(workflow, {})
-            waiting_again = await self.app.ajoin(second.ref, 2)
+            waiting_again = await async_join_observed(self.app, second.ref, 2)
             cancelled = await self.app.acancel(waiting_again.ref, "stop")
             self.assertEqual(cancelled.status, "cancelled")
 
@@ -539,11 +550,11 @@ class AppTests(unittest.TestCase):
                 TimeoutError,
                 "Invocation did not reach a stable boundary in time",
             ):
-                self.app.join(submitted.ref, timeout=0.01)
+                join_observed(self.app, submitted.ref, timeout=0.01)
         finally:
             release.set()
         self.assertEqual(
-            self.app.join(submitted.ref, timeout=1).status,
+            join_observed(self.app, submitted.ref, timeout=1).status,
             "completed",
         )
 
@@ -584,7 +595,7 @@ class AppTests(unittest.TestCase):
             "fast branch did not advance while slow sibling was running",
         )
         release_slow.set()
-        result = self.app.join(submitted.ref, timeout=2)
+        result = join_observed(self.app, submitted.ref, timeout=2)
         self.assertEqual(result.status, "completed")
 
     def test_wait_can_resume_while_sibling_operator_is_still_running(self) -> None:
@@ -629,7 +640,7 @@ class AppTests(unittest.TestCase):
         self.assertIsNotNone(wait_id)
 
         resume_thread = threading.Thread(
-            target=lambda: self.app.resume(
+            target=lambda: resume_graph_wait(self.app,
                 submitted.ref, wait_id, {"answer": "yes"}  # type: ignore[arg-type]
             )
         )
@@ -641,7 +652,7 @@ class AppTests(unittest.TestCase):
         release_slow.set()
         resume_thread.join(2)
         self.assertFalse(resume_thread.is_alive())
-        self.assertEqual(self.app.join(submitted.ref, 2).status, "completed")
+        self.assertEqual(join_observed(self.app, submitted.ref, 2).status, "completed")
 
     def test_loop_executes_scoped_occurrences_until_exit(self) -> None:
         """Verify loop executes scoped occurrences until exit."""
@@ -686,7 +697,7 @@ class AppTests(unittest.TestCase):
         waiting = self.app.invoke(workflow, {"value": 1}, session_id="session")
         self.assertEqual(waiting.status, "waiting")
         self.assertEqual(len(waiting.waits), 1)
-        completed = self.app.resume(
+        completed = resume_graph_wait(self.app,
             waiting.ref,
             waiting.waits[0].id,
             {"answer": "yes"},
@@ -723,11 +734,11 @@ class AppTests(unittest.TestCase):
         )
         first = self.app.invoke(workflow, {"value": 0})
         self.assertEqual(first.status, "waiting")
-        second = self.app.resume(first.ref, first.waits[0].id, {"value": 1})
+        second = resume_graph_wait(self.app, first.ref, first.waits[0].id, {"value": 1})
         self.assertEqual(second.status, "waiting")
         waiting = second.waits
         self.assertEqual(len(waiting), 1)
-        final = self.app.resume(first.ref, waiting[0].id, {"value": 2})
+        final = resume_graph_wait(self.app, first.ref, waiting[0].id, {"value": 2})
         self.assertEqual(final.status, "completed")
         self.assertEqual(final.output, {"value": 2})
 
@@ -756,15 +767,15 @@ class AppTests(unittest.TestCase):
         )
         spawned_result = self.app.invoke(spawned, {"value": 4})
         self.assertEqual(spawned_result.status, "completed")
-        self.assertEqual(spawned_result.output.workflow_id, "child")
-        self.assertTrue(spawned_result.output.invocation_id)
-        self.assertTrue(spawned_result.output.session_id)
-        child_result = self.app.join(spawned_result.output, timeout=1)
+        self.assertTrue(spawned_result.output.workflow_revision_id.startswith("child:"))
+        self.assertTrue(spawned_result.output.child_invocation_id)
+        self.assertTrue(spawned_result.output.child_session_id)
+        child_result = join_observed(self.app, spawned_result.output, timeout=1)
         self.assertEqual(child_result.status, "completed")
         self.assertEqual(child_result.output, {"value": 5})
         self.assertEqual(
-            self.app.status(spawned_result.output).invocation_id,
-            spawned_result.output.invocation_id,
+            status_observed(self.app, spawned_result.output).invocation_id,
+            spawned_result.output.child_invocation_id,
         )
 
     def test_map_await_child_workflows_preserves_order_and_parallel_limit(self) -> None:
@@ -804,7 +815,7 @@ class AppTests(unittest.TestCase):
             [{"value": 11}, {"value": 12}, {"value": 13}],
         )
         self.assertEqual(peak, 2)
-        self.assertEqual(len(self.app.child_invocations(result.ref)), 3)
+        self.assertEqual(len(child_refs(self.app, result.ref)), 3)
 
     def test_map_await_child_workflows_supports_aggregation_and_empty_input(self) -> None:
         """Verify Child Map aggregation and empty Map use normal Node outputs."""
@@ -840,7 +851,7 @@ class AppTests(unittest.TestCase):
         )
         empty_result = self.app.invoke(empty, {"items": []})
         self.assertEqual(empty_result.output, [])
-        self.assertEqual(self.app.child_invocations(empty_result.ref), ())
+        self.assertEqual(child_refs(self.app, empty_result.ref), ())
 
     def test_map_spawn_child_workflows_returns_ordered_handles_and_limits_children(self) -> None:
         """Verify mapped Spawn returns stable handles while limiting Child execution."""
@@ -878,10 +889,10 @@ class AppTests(unittest.TestCase):
         handles = result.output
         self.assertEqual(len(handles), 3)
         self.assertEqual(
-            tuple(handles),
-            self.app.child_invocations(result.ref),
+            tuple(h.child_session_id for h in handles),
+            tuple(r.session_id for r in child_refs(self.app, result.ref)),
         )
-        outputs = [self.app.join(handle, timeout=1).output for handle in handles]
+        outputs = [join_observed(self.app, handle, timeout=1).output for handle in handles]
         self.assertEqual(outputs, [{"value": 2}, {"value": 3}, {"value": 4}])
         self.assertEqual(peak, 2)
 
@@ -906,14 +917,14 @@ class AppTests(unittest.TestCase):
             {"items": [{"value": 1}, {"value": 2}]},
         )
         self.assertEqual(result.output, {"count": 2})
-        handles = self.app.child_invocations(result.ref)
+        handles = child_refs(self.app, result.ref)
         self.assertEqual(len(handles), 2)
         for handle in handles:
-            self.assertEqual(self.app.join(handle, timeout=1).status, "completed")
+            self.assertEqual(join_observed(self.app, handle, timeout=1).status, "completed")
 
         empty = self.app.invoke(parent, {"items": []})
         self.assertEqual(empty.output, {"count": 0})
-        self.assertEqual(self.app.child_invocations(empty.ref), ())
+        self.assertEqual(child_refs(self.app, empty.ref), ())
 
     def test_map_await_child_failure_cancels_and_settles_siblings(self) -> None:
         """Verify one failed awaited Child settles every sibling before parent failure."""
@@ -944,11 +955,11 @@ class AppTests(unittest.TestCase):
         )
         self.assertLess(time.monotonic() - started_at, 2)
         self.assertEqual(result.status, "failed")
-        handles = self.app.child_invocations(result.ref)
+        handles = child_refs(self.app, result.ref)
         self.assertEqual(len(handles), 3)
         self.assertTrue(
             all(
-                self.app.status(handle).status in {"failed", "cancelled"}
+                status_observed(self.app, handle).status in {"failed", "cancelled"}
                 for handle in handles
             )
         )
@@ -993,15 +1004,15 @@ class AppTests(unittest.TestCase):
         self.assertTrue(started.wait(1))
         cancelled = self.app.cancel(submitted.ref, "stop mapped children")
         self.assertEqual(cancelled.status, "cancelled")
-        handles = self.app.child_invocations(submitted.ref)
+        handles = child_refs(self.app, submitted.ref)
         # Planning materializes stable handles for every Map unit before work starts.
         self.assertEqual(len(handles), 3)
         self.assertTrue(
-            all(self.app.status(handle).status == "cancelled" for handle in handles)
+            all(status_observed(self.app, handle).status == "cancelled" for handle in handles)
         )
 
-    def test_spawn_handle_can_cancel_a_running_child_invocation(self) -> None:
-        """Verify spawn handle can cancel a running child invocation."""
+    def test_root_cancel_converges_running_spawn_child(self) -> None:
+        """Verify Root cancellation converges its running Spawn Child."""
         started = threading.Event()
 
         async def long_child(value: Value) -> Value:
@@ -1014,12 +1025,12 @@ class AppTests(unittest.TestCase):
             "spawn-cancel",
             nodes=[Node("child", child, execution_mode="spawn")],
         )
-        spawned = self.app.invoke(parent, {"value": 3})
+        spawned = self.app.submit_invoke(parent, {"value": 3})
         self.assertTrue(started.wait(1))
-        cancelled = self.app.cancel(spawned.output, "parent stopped child")
+        cancelled = self.app.cancel(spawned.ref, "parent stopped child")
         self.assertEqual(cancelled.status, "cancelled")
-        self.assertEqual(cancelled.invocation_id, spawned.output.invocation_id)
-        child_state = self.journal.state(spawned.output.session_id)
+        self.assertEqual(cancelled.invocation_id, spawned.invocation_id)
+        child_state = self.journal.state(child_refs(self.app, spawned.ref)[0].session_id)
         self.assertFalse(
             any(
                 call.status == "running"
@@ -1040,10 +1051,10 @@ class AppTests(unittest.TestCase):
         parent = Workflow("await-child-cancel", nodes=[Node("child", child)])
         submitted = self.app.submit_invoke(parent, {"value": 1})
         self.assertTrue(started.wait(1))
-        handle = self.app.child_invocations(submitted.ref)[0]
+        handle = child_refs(self.app, submitted.ref)[0]
         parent_result = self.app.cancel(submitted.ref, "stop parent")
         self.assertEqual(parent_result.status, "cancelled")
-        self.assertEqual(self.app.status(handle).status, "cancelled")
+        self.assertEqual(status_observed(self.app, handle).status, "cancelled")
 
     def test_awaited_child_waits_for_resume_instead_of_failing_parent(self) -> None:
         """Verify awaited child waits for resume instead of failing parent."""
@@ -1056,19 +1067,19 @@ class AppTests(unittest.TestCase):
         deadline = time.monotonic() + 1
         handles = ()
         while time.monotonic() < deadline:
-            handles = self.app.child_invocations(submitted.ref)
-            if handles and self.app.status(handles[0]).status == "waiting":
+            handles = child_refs(self.app, submitted.ref)
+            if handles and status_observed(self.app, handles[0]).status == "waiting":
                 break
             time.sleep(0.001)
         self.assertEqual(len(handles), 1)
-        child_waiting = self.app.status(handles[0])
+        child_waiting = status_observed(self.app, handles[0])
         self.assertEqual(child_waiting.status, "waiting")
-        self.app.resume(
+        resume_graph_wait(self.app,
             handles[0],
             child_waiting.waits[0].id,
             {"value": 8},
         )
-        completed = self.app.join(submitted.ref, 1)
+        completed = join_observed(self.app, submitted.ref, 1)
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.output, {"value": 8})
 
@@ -1125,7 +1136,7 @@ class AppTests(unittest.TestCase):
         source.submit_invoke(old, {"value": 5}, session_id="revision-session")
         self.assertTrue(started.wait(1))
         source.register_workflow(new)
-        checkpoint = source.close(capture_checkpoint=True).sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).graphs[0]
 
         recovered_journal = RuntimeRepository()
         recovered_app = AutoAgentApp(runtime_repository=recovered_journal)
@@ -1135,7 +1146,7 @@ class AppTests(unittest.TestCase):
             self.assertNotEqual(
                 old_ir.workflow_revision_id, new_ir.workflow_revision_id
             )
-            loaded = recovered_app.load_checkpoint(checkpoint)
+            loaded = load_graph(recovered_app, checkpoint)
             recovered = recovered_app.recover(loaded.invocations[0])
             self.assertEqual(recovered.status, "completed")
             self.assertEqual(recovered.output, {"value": 5})
@@ -1169,7 +1180,7 @@ class AppTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeTransitionError, "INVOCATION_STILL_LIVE"):
             self.app.recover(submitted.ref)
         release.set()
-        completed = self.app.join(submitted.ref, 1)
+        completed = join_observed(self.app, submitted.ref, 1)
         self.assertEqual(completed.status, "completed")
         self.assertEqual(calls, 1)
 
@@ -1193,13 +1204,13 @@ class AppTests(unittest.TestCase):
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 9}, session_id="recovery-session")
         self.assertTrue(started.wait(1))
-        checkpoint = source.close(capture_checkpoint=True).sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).graphs[0]
 
         recovered_journal = RuntimeRepository()
         recovered_app = AutoAgentApp(runtime_repository=recovered_journal)
         try:
             recovered_app.register_workflow(workflow)
-            loaded = recovered_app.load_checkpoint(checkpoint)
+            loaded = load_graph(recovered_app, checkpoint)
             recovered = recovered_app.recover(loaded.invocations[0])
             self.assertEqual(recovered.status, "completed")
             self.assertEqual(recovered.output, {"value": 9})
@@ -1231,11 +1242,11 @@ class AppTests(unittest.TestCase):
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 4}, session_id="unsafe-session")
         self.assertTrue(started.wait(1))
-        checkpoint = source.close(capture_checkpoint=True).sessions[0]
+        checkpoint = source.close(capture_checkpoint=True).graphs[0]
         recovered_app = AutoAgentApp()
         try:
             recovered_app.register_workflow(workflow)
-            loaded = recovered_app.load_checkpoint(checkpoint)
+            loaded = load_graph(recovered_app, checkpoint)
             recovered = recovered_app.recover(loaded.invocations[0])
             self.assertEqual(recovered.status, "failed")
             self.assertEqual(recovered.error.type, "RecoveryNotAllowed")
@@ -1268,8 +1279,8 @@ class AppTests(unittest.TestCase):
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 7}, session_id="budget-session")
         self.assertTrue(started.wait(1))
-        checkpoint = source.close(capture_checkpoint=True).sessions[0]
-        state = checkpoint.state
+        checkpoint = source.close(capture_checkpoint=True).graphs[0]
+        state = root_snapshot(checkpoint).state
         invocation = state.invocation
         assert invocation is not None
         occurrence_id = next(
@@ -1278,18 +1289,18 @@ class AppTests(unittest.TestCase):
             if occurrence.status == "running"
         )
         prefix_journal = RuntimeRepository()
-        prefix_journal.install_states({checkpoint.session_id: checkpoint.state})
+        prefix_journal.install_states({root_snapshot(checkpoint).session_id: root_snapshot(checkpoint).state})
         asyncio.run(prefix_journal.commit(
-            session_id=checkpoint.session_id, invocation_id=invocation.id,
+            session_id=root_snapshot(checkpoint).session_id, invocation_id=invocation.id,
             occurred_at_us=state.session.updated_at_us+1, payload=RecoveryApplied(),
         ))
         exhausted_checkpoint = prefix_journal.capture_checkpoint(
-            checkpoint.session_id
+            root_snapshot(checkpoint).session_id
         )
         recovered_app = AutoAgentApp()
         try:
             recovered_app.register_workflow(workflow)
-            loaded = recovered_app.load_checkpoint(exhausted_checkpoint)
+            loaded = load_graph(recovered_app, exhausted_checkpoint)
             result = recovered_app.recover(loaded.invocations[0])
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.error.type, "RecoveryAttemptsExceeded")

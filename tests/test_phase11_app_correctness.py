@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    async_join_observed,
+    join_observed,
+    load_graph,
+    resume_graph_wait,
+    root_snapshot,
+    session_checkpoints,
+    status_observed,
+)
+
 import asyncio
 import threading
 import time
@@ -89,13 +99,13 @@ class AppCorrectnessTests(unittest.TestCase):
             result = app.invoke(workflow, {"value": 1}, session_id="unload-terminal")
             self.assertEqual(app.resident_invocations(), (result.ref,))
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-            self.assertEqual(checkpoint.session_id, result.session_id)
+            self.assertEqual(root_snapshot(checkpoint).session_id, result.session_id)
             self.assertEqual(app.resident_invocations(), ())
             with self.assertRaisesRegex(RuntimeTransitionError, "INVOCATION_REF_STALE"):
-                app.status(result.ref)
-            loaded = app.load_checkpoint(checkpoint)
+                status_observed(app, result.ref)
+            loaded = load_graph(app, checkpoint)
             self.assertEqual(loaded.invocations, (result.ref,))
-            self.assertEqual(app.status(result.ref).status, "completed")
+            self.assertEqual(status_observed(app, result.ref).status, "completed")
         finally:
             app.close()
 
@@ -111,8 +121,8 @@ class AppCorrectnessTests(unittest.TestCase):
         try:
             waiting = app.invoke(workflow, {"value": 1}, session_id="unload-waiting")
             checkpoint = app.unload_session(waiting.ref, capture_checkpoint=True)
-            app.load_checkpoint(checkpoint)
-            resumed = app.resume(
+            load_graph(app, checkpoint)
+            resumed = resume_graph_wait(app,
                 waiting.ref,
                 waiting.waits[0].id,
                 {"value": 2},
@@ -140,31 +150,12 @@ class AppCorrectnessTests(unittest.TestCase):
                 time.sleep(0.001)
             self.assertFalse(hasattr(app, "_observations"))
             checkpoint = app.unload_session(submitted.ref, capture_checkpoint=True)
-            self.assertEqual(checkpoint.session_id, submitted.session_id)
+            self.assertEqual(root_snapshot(checkpoint).session_id, submitted.session_id)
             with self.assertRaisesRegex(RuntimeTransitionError, "INVOCATION_REF_STALE"):
-                app.status(submitted.ref)
+                status_observed(app, submitted.ref)
         finally:
             app.close()
 
-    def test_child_unload_checks_graph_but_removes_only_requested_session(self) -> None:
-        """Require a quiescent Child graph and unload only the selected Child."""
-
-        child = Workflow("unload-child", nodes=[Node("work", identity)])
-        parent = Workflow(
-            "unload-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
-        )
-        app = AutoAgentApp()
-        try:
-            parent_result = app.invoke(parent, {"value": 1}, session_id="unload-parent")
-            child_ref = parent_result.output
-            self.assertIsInstance(child_ref, InvocationRef)
-            app.join(child_ref, timeout=1)
-            checkpoint = app.unload_session(child_ref, capture_checkpoint=True)
-            self.assertEqual(checkpoint.session_id, child_ref.session_id)
-            self.assertEqual(app.resident_invocations(), (parent_result.ref,))
-        finally:
-            app.close()
 
     def test_parent_unload_rejects_a_running_child(self) -> None:
         """Keep a parent resident while any related Child is still running."""
@@ -184,7 +175,7 @@ class AppCorrectnessTests(unittest.TestCase):
         )
         app = AutoAgentApp()
         try:
-            parent_result = app.invoke(
+            parent_result = app.submit_invoke(
                 parent, {"value": 1}, session_id="unload-live-parent"
             )
             self.assertTrue(started.wait(1))
@@ -193,7 +184,7 @@ class AppCorrectnessTests(unittest.TestCase):
             ):
                 app.unload_session(parent_result.ref)
             release.set()
-            app.join(parent_result.output, timeout=1)
+            join_observed(app, parent_result.ref, timeout=1)
         finally:
             release.set()
             app.close()
@@ -282,7 +273,7 @@ class AppCorrectnessTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertEqual(journal.captures, 0)
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-            self.assertEqual(checkpoint.state.invocation.output, {"value": 1})
+            self.assertEqual(root_snapshot(checkpoint).state.invocation.output, {"value": 1})
             self.assertEqual(journal.captures, 1)
         finally:
             app.close()
@@ -337,44 +328,7 @@ class AppCorrectnessTests(unittest.TestCase):
 
 
 
-    def test_parent_and_child_unload_checkpoints_are_independent(self) -> None:
-        """Return an independent checkpoint for each unloaded Session."""
 
-        child = Workflow("recover-child-phases", nodes=[Node("work", identity)])
-        parent = Workflow("recover-parent-phases", nodes=[Node("child", child)])
-        app = AutoAgentApp()
-        try:
-            items = list(app.stream(parent, {"value": 1}, session_id="recover-parent-session"))
-            result = items[-1]
-            self.assertIsInstance(result, InvocationResult)
-            handles = app.child_invocations(result.ref)
-            self.assertEqual(len(handles), 1)
-            child_checkpoint = app.unload_session(handles[0], capture_checkpoint=True)
-            parent_checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-            self.assertEqual(child_checkpoint.session_id, handles[0].session_id)
-            self.assertNotEqual(child_checkpoint.session_id, parent_checkpoint.session_id)
-        finally:
-            app.close()
-
-    def test_spawn_child_unloads_through_its_ref(self) -> None:
-        """Return a spawned Child checkpoint through its generic InvocationRef."""
-
-        child = Workflow("recover-spawn-phase-child", nodes=[Node("work", identity)])
-        parent = Workflow(
-            "recover-spawn-phase-parent",
-            nodes=[Node("child", child, execution_mode="spawn")],
-        )
-        app = AutoAgentApp()
-        try:
-            result = app.invoke(parent, {"value": 1}, session_id="recover-spawn-phase-root")
-            child_result = app.join(result.output, timeout=1)
-            child_checkpoint = app.unload_session(result.output, capture_checkpoint=True)
-            parent_checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-            self.assertEqual(parent_checkpoint.session_id, result.session_id)
-            self.assertEqual(child_checkpoint.session_id, child_result.session_id)
-            self.assertNotEqual(parent_checkpoint.session_id, child_checkpoint.session_id)
-        finally:
-            app.close()
 
 
     def test_terminal_invocation_cannot_be_replaced_before_result_delivery(self) -> None:
@@ -479,7 +433,7 @@ class AppCorrectnessTests(unittest.TestCase):
                     session_id="wait-result-session",
                 )
                 self.assertTrue(started.wait(1))
-                waiter = asyncio.create_task(app.ajoin(submission.ref))
+                waiter = asyncio.create_task(async_join_observed(app, submission.ref))
                 await asyncio.sleep(0)
                 await app._await(app._submit(finish()))
                 self.assertTrue(sink.completed.wait(1))
@@ -534,7 +488,7 @@ class AppCorrectnessTests(unittest.TestCase):
         target = AutoAgentApp()
         try:
             self.assertEqual(
-                target.load_checkpoint(checkpoint).invocations,
+                load_graph(target, checkpoint).invocations,
                 (),
             )
         finally:
@@ -563,7 +517,7 @@ class AppCorrectnessTests(unittest.TestCase):
             try:
                 if registered is not None:
                     target.register_workflow(registered)
-                loaded = target.load_checkpoint(checkpoint)
+                loaded = load_graph(target, checkpoint)
                 self.assertEqual(len(loaded.invocations), 1)
                 with self.assertRaisesRegex(
                     RuntimeTransitionError,
@@ -572,7 +526,7 @@ class AppCorrectnessTests(unittest.TestCase):
                     target.recover(loaded.invocations[0])
                 self.assertEqual(
                     tuple(target._repository.session_ids()),
-                    (checkpoint.session_id,),
+                    (root_snapshot(checkpoint).session_id,),
                 )
             finally:
                 target.close()
@@ -597,50 +551,6 @@ class AppCorrectnessTests(unittest.TestCase):
             stream.close()
             app.close()
 
-    def test_checkpoint_load_rejects_child_shared_by_another_root(self) -> None:
-        """Verify sequential loads cannot assign one Child State to two Roots."""
-
-        child = Workflow("owned-checkpoint-child", nodes=[Node("node", identity)])
-        parent = Workflow(
-            "owned-checkpoint-parent",
-            nodes=[Node("child", child, execution_mode="spawn")],
-        )
-        source = AutoAgentApp()
-        try:
-            result = source.invoke(parent, {"value": 1}, session_id="root-one")
-            source.join(result.output, timeout=1)
-            child_checkpoint = source.unload_session(result.output, capture_checkpoint=True)
-            parent_checkpoint = source.unload_session(result.ref, capture_checkpoint=True)
-        finally:
-            source.close()
-
-        child_session_id = result.output.session_id
-        root_one = parent_checkpoint.state
-        invocation_two = replace(root_one.invocation, id="invocation-two")
-        session_two = replace(
-            root_one.session,
-            id="root-two",
-            latest_invocation_id="invocation-two",
-        )
-        root_two = replace(
-            root_one,
-            session=session_two,
-            invocation=invocation_two,
-        )
-        second = SessionCheckpoint.from_state(root_two)
-        target = AutoAgentApp()
-        try:
-            target.register_workflow(parent)
-            target.load_checkpoint(AppCheckpoint((parent_checkpoint, child_checkpoint)))
-            before = tuple(target._repository.session_ids())
-            with self.assertRaisesRegex(
-                RuntimeTransitionError, "CHECKPOINT_CHILD_OWNERSHIP_CONFLICT"
-            ):
-                target.load_checkpoint(second)
-            self.assertEqual(tuple(target._repository.session_ids()), before)
-            self.assertEqual(len(target.close(capture_checkpoint=True).sessions), 2)
-        finally:
-            target.close()
 
     def test_public_invoke_cannot_replace_a_session_owned_by_child_plan(self) -> None:
         """Verify reusing a Child Session cannot invalidate its parent checkpoint graph."""
@@ -654,20 +564,20 @@ class AppCorrectnessTests(unittest.TestCase):
         try:
             parent_result = app.invoke(parent, {"value": 1})
             handle = parent_result.output
-            app.join(handle, timeout=1)
+            join_observed(app, handle, timeout=1)
             with self.assertRaisesRegex(
                 RuntimeTransitionError, "SESSION_OWNED_BY_CHILD"
             ):
                 app.invoke(
                     child,
                     {"value": 2},
-                    session_id=handle.session_id,
+                    session_id=handle.child_session_id,
                 )
             checkpoint = app.close(capture_checkpoint=True)
-            self.assertEqual(len(checkpoint.sessions), 2)
+            self.assertEqual(len(session_checkpoints(checkpoint)), 2)
             self.assertEqual(
-                {item.session_id for item in checkpoint.sessions},
-                {parent_result.session_id, handle.session_id},
+                {item.session_id for item in session_checkpoints(checkpoint)},
+                {parent_result.session_id, handle.child_session_id},
             )
         finally:
             app.close()

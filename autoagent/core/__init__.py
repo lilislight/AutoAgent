@@ -60,6 +60,7 @@ from .runtime import (
     ChildUnitState,
     InvocationCancelled,
     InvocationCompleted,
+    InvocationJoiningChildren,
     InvocationFailed,
     InvocationStarted,
     RecoveryApplied,
@@ -143,6 +144,7 @@ __all__ = [
     "InMemoryUserEventJournal",
     "InvocationCancelled",
     "InvocationCompleted",
+    "InvocationJoiningChildren",
     "InvocationFailed",
     "InvocationStarted",
     "RecoveryApplied",
@@ -213,3 +215,9 @@ __all__ = [
     "WorkflowIR",
     "workflow_hook",
 ]
+
+from .workflow import ChildHandle
+__all__ += ["ChildHandle"]
+
+from .runtime import RuntimeGraphCheckpoint
+__all__ += ["RuntimeGraphCheckpoint"]

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    load_graph,
+    resume_graph_wait,
+)
+
 import unittest
 from enum import Enum
 
@@ -174,7 +179,7 @@ class DurableContractRoundTripTests(unittest.TestCase):
             )
             self.assertEqual(waiting.status, "waiting")
             self.assertEqual(waiting.waits[0].request, _record())
-            completed = app.resume(
+            completed = resume_graph_wait(app,
                 waiting.ref,
                 waiting.waits[0].id,
                 _value(Mode.SECOND),
@@ -213,8 +218,8 @@ class DurableContractRoundTripTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(workflow)
-            restored.load_checkpoint(checkpoint)
-            completed = restored.resume(
+            load_graph(restored, checkpoint)
+            completed = resume_graph_wait(restored,
                 waiting.ref,
                 waiting.waits[0].id,
                 _value(Mode.SECOND),

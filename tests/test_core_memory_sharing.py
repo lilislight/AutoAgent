@@ -1,6 +1,10 @@
 """Identity, ownership, ordered updates and history safety of the live Core."""
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    root_snapshot,
+)
+
 import asyncio
 import json
 import unittest
@@ -172,7 +176,7 @@ class RuntimeSharingTests(unittest.TestCase):
             retained['rows'].append(3)
             self.assertEqual(state.invocation.output['rows'],(1,2))
             checkpoint=app.unload_session(result.ref, capture_checkpoint=True)
-            with self.assertRaises(TypeError):checkpoint.state.invocation.output['rows'][0]=42
+            with self.assertRaises(TypeError):root_snapshot(checkpoint).state.invocation.output['rows'][0]=42
         finally:app.close()
 
     def test_parallel_operator_inputs_cannot_change_each_other(self):

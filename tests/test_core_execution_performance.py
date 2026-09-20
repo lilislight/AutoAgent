@@ -1,4 +1,11 @@
 """Correctness boundaries for derived indexes and on-demand input views."""
+
+from tests.graph_fixtures import (
+    child_refs,
+    join_observed,
+    load_graph,
+    resume_graph_wait,
+)
 import asyncio
 import unittest
 import threading
@@ -59,12 +66,12 @@ class ExecutionPerformanceTests(unittest.TestCase):
             self.assertEqual(result.status, 'waiting')
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             self.assertNotIn(result.session_id, app._repository._execution_indexes)
-            loaded = app.load_checkpoint(checkpoint)
+            loaded = load_graph(app, checkpoint)
             result = app.recover(loaded.invocations[0])
-            result = app.resume(result.ref, result.waits[0].id, {'approved':True})
+            result = resume_graph_wait(app, result.ref, result.waits[0].id, {'approved':True})
             self.assertEqual(result.status, 'completed', result.error)
-            child = app.child_invocations(result.ref)[0]
-            self.assertEqual(app.join(child, timeout=2).status, 'completed')
+            child = child_refs(app, result.ref)[0]
+            self.assertEqual(join_observed(app, child, timeout=2).status, 'completed')
         finally:
             app.close()
 

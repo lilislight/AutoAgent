@@ -1,4 +1,10 @@
 """Session commit ordering and graph lifecycle cuts under controlled Sink ACKs."""
+
+from tests.graph_fixtures import (
+    child_refs,
+    join_observed,
+    resume_graph_wait_internal,
+)
 import asyncio
 import unittest
 
@@ -100,7 +106,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
         parent = Workflow('graph-root', nodes=[Node('children', child,
             input_mapping=items, map=Map(max_parallelism=count))])
         result = app.invoke(parent, {'value': count}, session_id='root')
-        children = [app.join(ref) for ref in app.child_invocations(result.ref)]
+        children = [join_observed(app, ref) for ref in child_refs(app, result.ref)]
         return app, result, children
 
     def assert_replay(self, app, sink):
@@ -117,15 +123,15 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
         async def run():
             blocked = children[0]
             sink.predicate = lambda e: e.session_id == blocked.ref.session_id and isinstance(e.payload, WaitResumed)
-            first = asyncio.create_task(app._resume(blocked.ref, blocked.waits[0].id,
+            first = asyncio.create_task(resume_graph_wait_internal(app, blocked.ref, blocked.waits[0].id,
                 {'value': 0}, wait_for_boundary=True))
             await sink.entered.wait()
-            others = await asyncio.gather(*(app._resume(c.ref, c.waits[0].id,
+            others = await asyncio.gather(*(resume_graph_wait_internal(app, c.ref, c.waits[0].id,
                 {'value': i}, wait_for_boundary=True) for i, c in enumerate(children[1:])))
             self.assertTrue(all(r.status == 'completed' for r in others))
             self.assertFalse(first.done())
             # A sibling result read also must not queue behind the blocked Child.
-            self.assertEqual((await app._result(children[1].ref)).status, 'completed')
+            self.assertEqual(app._repository.state(children[1].session_id).invocation.status, 'completed')
             checkpoint = asyncio.create_task(app._capture_checkpoint('root'))
             await asyncio.sleep(0)
             self.assertFalse(checkpoint.done())
@@ -134,7 +140,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
             await checkpoint
         try:
             app._runtime_loop.run(asyncio.wait_for(run(), 5))
-            self.assertEqual(app.join(root.ref).status, 'completed')
+            self.assertEqual(join_observed(app, root.ref).status, 'completed')
             self.assertGreater(sink.peak, 1)
             markers = [e for e in sink.events if isinstance(e.payload, ChildInvocationPhaseChanged)
                        and e.payload.phase == 'terminal']
@@ -163,12 +169,12 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
             Node('a_end', identity), Node('b_end', identity)],
             edges=[Edge('start', 'a'), Edge('start', 'b'), Edge('a', 'a_end'), Edge('b', 'b_end')])
         async def run(result):
-            await asyncio.gather(*(app._resume(result.ref, wait.id, {'value': i},
+            await asyncio.gather(*(resume_graph_wait_internal(app, result.ref, wait.id, {'value': i},
                 wait_for_boundary=True) for i, wait in enumerate(result.waits)))
         try:
             result = app.invoke(workflow, {'value': 1})
             app._runtime_loop.run(asyncio.wait_for(run(result), 5))
-            self.assertEqual(app.join(result.ref).status, 'completed')
+            self.assertEqual(join_observed(app, result.ref).status, 'completed')
             self.assert_replay(app, sink)
         finally:
             app.close(timeout=2)
@@ -215,7 +221,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
         sink = BlockingSink()
         app, root, children = self.make_wait_graph(sink, count=1)
         child = children[0]
-        checkpoint = app._runtime_loop.run(app._capture_checkpoint(child.ref.session_id))
+        checkpoint = app._runtime_loop.run(app._capture_graph_locked(root.session_id))
         async def run():
             sink.predicate = lambda e: isinstance(e.payload, WaitResumed)
             commit = asyncio.create_task(app._emit(child.ref.session_id, child.ref.invocation_id,
@@ -261,7 +267,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
                     await app._recover(root.ref)
                 child = children[0]
                 with self.assertRaisesRegex(RuntimeTransitionError, 'INVOCATION_STILL_LIVE'):
-                    await app._resume(child.ref, child.waits[0].id, {'value': 1}, wait_for_boundary=True)
+                    await resume_graph_wait_internal(app, child.ref, child.waits[0].id, {'value': 1}, wait_for_boundary=True)
                 with self.assertRaisesRegex(RuntimeTransitionError, 'INVOCATION_RESULT_PENDING'):
                     await app._unload_session(root.ref)
                 await app._cancel_graph(root.ref, 'stop recovery')
@@ -293,7 +299,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
             recovery = asyncio.create_task(app._recover(root.ref))
             await entered.wait()
             try:
-                result = await app._resume(child.ref, child.waits[0].id,
+                result = await resume_graph_wait_internal(app, child.ref, child.waits[0].id,
                     {'value': 1}, wait_for_boundary=True)
                 self.assertEqual(result.status, 'completed')
             finally:
@@ -322,7 +328,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
             await asyncio.gather(*tasks)
         try:
             app._runtime_loop.run(asyncio.wait_for(run(), 5))
-            self.assertEqual(app.join(root.ref).status, 'failed')
+            self.assertEqual(join_observed(app, root.ref).status, 'failed')
             markers = [e for e in sink.events if isinstance(e.payload, ChildInvocationPhaseChanged)
                        and e.payload.phase == 'terminal']
             self.assertEqual(len(markers), 1)
@@ -351,13 +357,13 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
                 parent = Workflow('failing-parent', nodes=[Node('children', child,
                     input_mapping=items, map=Map(max_parallelism=4))])
                 async def run(children):
-                    return await asyncio.gather(*(app._resume(c.ref, c.waits[0].id,
+                    return await asyncio.gather(*(resume_graph_wait_internal(app, c.ref, c.waits[0].id,
                         {'value': 1}, wait_for_boundary=True) for c in children))
                 try:
                     root = app.invoke(parent, {'value': 4})
-                    children = [app.join(ref) for ref in app.child_invocations(root.ref)]
+                    children = [join_observed(app, ref) for ref in child_refs(app, root.ref)]
                     app._runtime_loop.run(asyncio.wait_for(run(children), 5))
-                    self.assertEqual(app.join(root.ref).status, 'failed')
+                    self.assertEqual(join_observed(app, root.ref).status, 'failed')
                     self.assertTrue(all(not app._task_runtime.is_live(sid)
                                         for sid in app._repository.session_ids()))
                     self.assert_replay(app, sink)

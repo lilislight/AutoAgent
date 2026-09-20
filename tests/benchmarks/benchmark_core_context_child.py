@@ -2,6 +2,13 @@
 
 Run: .venv/bin/python -m tests.benchmarks.benchmark_core_context_child
 """
+
+from tests.graph_fixtures import (
+    child_refs,
+    join_observed,
+    load_graph,
+    resume_graph_wait,
+)
 import gc
 import json
 import platform
@@ -49,7 +56,7 @@ def context_fixture(count, sink=None, empty=False):
         context_path_revisions={(f'old{i}',): 1 for i in range(count)}))
     app = AutoAgentApp(runtime_event_sink=sink)
     app.register_workflow(workflow)
-    app.load_checkpoint(SessionCheckpoint.from_state(state))
+    load_graph(app, SessionCheckpoint.from_state(state))
     return app, workflow, state
 
 
@@ -86,14 +93,14 @@ def child_fixture(count, sink=None):
     app = AutoAgentApp(max_operator_concurrency=32, runtime_event_sink=sink)
     result = app.invoke(parent, {'value': count})
     assert result.status == 'waiting'
-    children = [app.join(ref) for ref in app.child_invocations(result.ref)]
+    children = [join_observed(app, ref) for ref in child_refs(app, result.ref)]
     assert len(children) == count and all(c.status == 'waiting' for c in children)
     return app, result, children
 
 
 def finish_children(app, parent, children):
     for index, child in enumerate(children):
-        result = app.resume(child.ref, child.waits[0].id, {'value': index})
+        result = resume_graph_wait(app, child.ref, child.waits[0].id, {'value': index})
         assert result.status == 'completed' and result.output == {'value': index}
     result = app.join(parent.ref)
     assert result.status == 'completed', result.error
@@ -200,6 +207,7 @@ def main():
         report['children'][count]['settle_child_snapshot_state_reads'] = count_child_scans(count)
         print(f'children {count} finished', file=sys.stderr, flush=True)
     print(json.dumps(report, indent=2))
+
 
 
 if __name__ == '__main__':

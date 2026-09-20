@@ -1,6 +1,13 @@
 """Canonical Event, Delta, Repository and stage recovery boundaries."""
 from __future__ import annotations
 
+from autoagent import RuntimeGraphCheckpoint
+
+from tests.graph_fixtures import (
+    load_graph,
+    root_snapshot,
+)
+
 import asyncio
 import json
 import unittest
@@ -253,7 +260,7 @@ class StageRecoveryTests(unittest.TestCase):
                 restored = AutoAgentApp()
                 try:
                     restored.register_workflow(workflow)
-                    loaded = restored.load_checkpoint(SessionCheckpoint.from_record(checkpoint.to_record()))
+                    loaded = load_graph(restored, SessionCheckpoint.from_record(checkpoint.to_record()))
                     result = restored.recover(loaded.invocations[0])
                     self.assertEqual(result.status, "completed", result.error)
                     self.assertEqual(result.output, {"value":2})
@@ -309,7 +316,7 @@ class StageRecoveryTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(workflow)
-            loaded = restored.load_checkpoint(checkpoint)
+            loaded = load_graph(restored, checkpoint)
             result = restored.recover(loaded.invocations[0])
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(result.output, [{"value": 0}, {"value": 1}])
@@ -339,7 +346,7 @@ class StageRecoveryTests(unittest.TestCase):
         try:
             restored.register_operator(operator, capability_id="choice")
             restored.register_workflow(workflow)
-            loaded = restored.load_checkpoint(checkpoint)
+            loaded = load_graph(restored, checkpoint)
             result = restored.recover(loaded.invocations[0])
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(result.output, {"value": 7})
@@ -387,7 +394,7 @@ class StageRecoveryTests(unittest.TestCase):
         restored = AutoAgentApp()
         try:
             restored.register_workflow(workflow)
-            loaded = restored.load_checkpoint(checkpoint)
+            loaded = load_graph(restored, checkpoint)
             result = restored.recover(loaded.invocations[0])
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.error.message, "known failure")
@@ -409,10 +416,10 @@ class RuntimeClockUnitTests(unittest.TestCase):
                 result = app.invoke(Workflow('clock-units', nodes=[Node('identity', identity)]), {'value': 2})
                 self.assertEqual(result.status, 'completed')
                 checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-                self.assertEqual(checkpoint.captured_at_us, timestamp_us)
-                self.assertEqual(checkpoint.state.session.created_at_us, timestamp_us)
-                self.assertEqual(checkpoint.state.invocation.started_at_us, timestamp_us)
-                self.assertEqual(checkpoint.state.invocation.completed_at_us, timestamp_us)
+                self.assertEqual(root_snapshot(checkpoint).captured_at_us, timestamp_us)
+                self.assertEqual(root_snapshot(checkpoint).state.session.created_at_us, timestamp_us)
+                self.assertEqual(root_snapshot(checkpoint).state.invocation.started_at_us, timestamp_us)
+                self.assertEqual(root_snapshot(checkpoint).state.invocation.completed_at_us, timestamp_us)
                 for event in sink.events:
                     self.assertEqual(event.occurred_at_us, timestamp_us)
                     self.assertEqual(event, RuntimeEvent.from_record(event.to_record()))
@@ -420,7 +427,7 @@ class RuntimeClockUnitTests(unittest.TestCase):
                         'schema_version', 'id', 'session_id', 'invocation_id', 'sequence',
                         'event_name', 'payload', 'delta', 'occurred_at_us',
                     })
-                self.assertEqual(checkpoint, SessionCheckpoint.from_record(checkpoint.to_record()))
+                self.assertEqual(checkpoint, RuntimeGraphCheckpoint.from_record(checkpoint.to_record()))
                 user = UserEvent(result.session_id, result.invocation_id, 1, 'clock', {})
                 self.assertEqual(user.occurred_at_us, timestamp_us)
                 self.assertEqual(user, UserEvent.from_record(user.to_record()))

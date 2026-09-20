@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    join_observed,
+    root_snapshot,
+)
+
 import json
 import unittest
 from dataclasses import replace
@@ -146,8 +151,8 @@ class CoreCheckpointTests(unittest.TestCase):
             "running",
         )
 
-    def test_spawn_child_phase_can_advance_after_parent_is_terminal(self) -> None:
-        """Verify a spawned Child may report terminal after its parent Invocation."""
+    def test_spawn_child_phase_can_advance_after_parent_is_cancelled(self) -> None:
+        """Verify Child ownership settles after its Parent cancellation decision."""
 
         state = self._running_parent_state()
         state = self._apply(
@@ -168,7 +173,7 @@ class CoreCheckpointTests(unittest.TestCase):
             state,
             invocation=replace(
                 state.invocation,
-                status="completed",
+                status="cancelled",
                 completed_at_us=state.session.updated_at_us,
                 scheduler=replace(
                     state.invocation.scheduler,
@@ -211,7 +216,7 @@ class CoreCheckpointTests(unittest.TestCase):
             checkpoint = SessionCheckpoint._from_runtime_state(
                 "root", state, captured_at_us=1
             )
-        self.assertIs(checkpoint.state, state)
+        self.assertIs(root_snapshot(checkpoint).state, state)
 
     def test_session_checkpoints_round_trip_parent_and_child_independently(self) -> None:
         """Verify Parent and Child Runtime Sessions produce independent checkpoints."""
@@ -225,11 +230,11 @@ class CoreCheckpointTests(unittest.TestCase):
                 nodes=[Node("spawn", child, execution_mode="spawn")],
             )
             result = app.invoke(parent, {"value": 1}, session_id="root-session")
-            app.join(result.output, timeout=1)
+            join_observed(app, result.output, timeout=1)
             checkpoint = journal.capture_checkpoint("root-session")
-            child_checkpoint = journal.capture_checkpoint(result.output.session_id)
-            self.assertEqual(checkpoint.session_id, "root-session")
-            self.assertEqual(child_checkpoint.session_id, result.output.session_id)
+            child_checkpoint = journal.capture_checkpoint(result.output.child_session_id)
+            self.assertEqual(root_snapshot(checkpoint).session_id, "root-session")
+            self.assertEqual(root_snapshot(child_checkpoint).session_id, result.output.child_session_id)
             record = json.loads(json.dumps(checkpoint.to_record()))
             self.assertEqual(SessionCheckpoint.from_record(record), checkpoint)
         finally:
@@ -247,9 +252,9 @@ class CoreCheckpointTests(unittest.TestCase):
                 nodes=[Node("spawn", child, execution_mode="spawn")],
             )
             result = app.invoke(parent, {"value": 1}, session_id="graph-root")
-            app.join(result.output, timeout=1)
+            join_observed(app, result.output, timeout=1)
             checkpoint = journal.capture_checkpoint("graph-root")
-            rebuilt = SessionCheckpoint.from_state(checkpoint.state)
+            rebuilt = SessionCheckpoint.from_state(root_snapshot(checkpoint).state)
             self.assertEqual(rebuilt.session_id, "graph-root")
             self.assertNotEqual(rebuilt.id, checkpoint.id)
         finally:

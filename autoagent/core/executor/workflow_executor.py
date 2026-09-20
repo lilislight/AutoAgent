@@ -51,7 +51,7 @@ from ..runtime import (
 from ..workflow import (
     AggregationContext,
     Capability,
-    InvocationRef,
+    ChildHandle,
     ErrorInfo,
     NodeIR,
     OutputBindingContext,
@@ -135,7 +135,7 @@ class WorkflowExecutor:
             while True:
                 state = self._repository.state(session_id)
                 invocation = state.invocation
-                if invocation is None or invocation.terminal:
+                if invocation is None or invocation.terminal or invocation.status == "joining_children":
                     return
                 index = self._execution_index(session_id)
                 execution_count = index.started_count
@@ -527,7 +527,7 @@ class WorkflowExecutor:
                 tasks.append(task)
 
         if node.execution_mode == "spawn":
-            handles = [self._invocation_ref(child, unit) for unit in plan.units]
+            handles = [self._child_handle(child, unit) for unit in plan.units]
             if node.map is None:
                 return handles[0], None
             return await self._aggregate_child_outputs(
@@ -888,11 +888,10 @@ class WorkflowExecutor:
             )
 
     @staticmethod
-    def _invocation_ref(child: WorkflowIR, unit) -> InvocationRef:
-        return InvocationRef(
-            session_id=unit.session_id,
-            invocation_id=unit.invocation_id,
-            workflow_id=child.workflow_id,
+    def _child_handle(child: WorkflowIR, unit) -> ChildHandle:
+        return ChildHandle(
+            child_session_id=unit.session_id,
+            child_invocation_id=unit.invocation_id,
             workflow_revision_id=child.workflow_revision_id,
         )
 

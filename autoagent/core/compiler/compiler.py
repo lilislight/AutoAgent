@@ -13,7 +13,7 @@ from ..operators import Operator, ValueContract, Wait
 from ..workflow import (
     AggregationContext,
     Capability,
-    InvocationRef,
+    ChildHandle,
     ConditionContext,
     ContextPatch,
     Edge,
@@ -689,7 +689,7 @@ class WorkflowCompiler:
             )
         if node.execution_mode == "spawn":
             output_contract = ValueContract.create(
-                InvocationRef,
+                ChildHandle,
                 location=f"Node {node.id} spawn output",
             )
         self._validate_input_mapping(node, input_contract)

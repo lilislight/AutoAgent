@@ -1,4 +1,10 @@
 """Independent Session ACK overlap; preparation and profiling excluded from timings."""
+
+from tests.graph_fixtures import (
+    child_refs,
+    join_observed,
+    resume_graph_wait_internal,
+)
 import asyncio
 import json
 import statistics
@@ -38,7 +44,7 @@ def sample(kind, size, delay):
             parent = Workflow('parent', nodes=[Node('children', waiting,
                 input_mapping=items, map=Map(max_parallelism=100))])
             result = app.invoke(parent, {'value': size})
-            children = [app.join(ref) for ref in app.child_invocations(result.ref)]
+            children = [join_observed(app, ref) for ref in child_refs(app, result.ref)]
         elif kind == 'roots':
             children = [app.invoke(waiting, {'value': i}) for i in range(size)]
         else:
@@ -48,7 +54,7 @@ def sample(kind, size, delay):
         sink.delay = delay
         sink.count = sink.peak = 0
         async def resume():
-            results = await asyncio.gather(*(app._resume(c.ref, c.waits[0].id, {'value': i},
+            results = await asyncio.gather(*(resume_graph_wait_internal(app, c.ref, c.waits[0].id, {'value': i},
                 wait_for_boundary=True) for i, c in enumerate(children)))
             assert all(r.status == 'completed' for r in results)
         start = time.perf_counter_ns()
@@ -105,6 +111,7 @@ def main():
             report[f'{kind}_{size}_{delay}'] = {'median_ms': statistics.median(r['elapsed_ms'] for r in rows), 'samples': rows}
             print(f'{kind} {size} {delay} done', file=__import__('sys').stderr, flush=True)
     print(json.dumps(report, indent=2))
+
 
 
 if __name__ == '__main__':

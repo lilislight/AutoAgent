@@ -1,6 +1,13 @@
 """Payload lifetime across graph consumers, durable recovery and ACK failures."""
 from __future__ import annotations
 
+from autoagent import RuntimeGraphCheckpoint
+
+from tests.graph_fixtures import (
+    load_graph,
+    resume_graph_wait,
+)
+
 import unittest
 from typing_extensions import TypedDict
 
@@ -95,8 +102,8 @@ class PayloadRetentionTests(unittest.TestCase):
         restored = AutoAgentApp()
         self.addCleanup(restored.close)
         restored.register_workflow(workflow)
-        restored.load_checkpoint(SessionCheckpoint.from_record(checkpoint.to_record()))
-        result = restored.resume(waiting.ref, waiting.waits[0].id, {'value': 5, 'blob': 'y' * 65536})
+        load_graph(restored, RuntimeGraphCheckpoint.from_record(checkpoint.to_record()))
+        result = resume_graph_wait(restored, waiting.ref, waiting.waits[0].id, {'value': 5, 'blob': 'y' * 65536})
         self.assertEqual(result.status, 'completed', result.error)
         self.assertEqual(result.output['value'], 6)
         self.assert_payloads_released(restored._repository.state(result.session_id))
@@ -137,7 +144,7 @@ class PayloadRetentionTests(unittest.TestCase):
                 app = AutoAgentApp()
                 try:
                     app.register_workflow(workflow)
-                    loaded = app.load_checkpoint(SessionCheckpoint.from_state(state))
+                    loaded = load_graph(app, SessionCheckpoint.from_state(state))
                     result = app.recover(loaded.invocations[0])
                     self.assertEqual(result.status, 'completed', result.error)
                     self.assertEqual(result.output, {'value': 6, 'blob': ''})
@@ -215,7 +222,7 @@ class PayloadRetentionTests(unittest.TestCase):
         waiting = app.invoke(workflow, {'value': 0, 'blob': ''})
         state = app._repository.state(waiting.session_id)
         self.assertEqual(state.invocation.scheduler.occurrences['early@root'].output['value'], 1)
-        result = app.resume(waiting.ref, waiting.waits[0].id, {'value': 2, 'blob': 'late'})
+        result = resume_graph_wait(app, waiting.ref, waiting.waits[0].id, {'value': 2, 'blob': 'late'})
         self.assertEqual(result.status, 'completed', result.error)
         self.assertEqual(result.output['early']['value'], 1)
         self.assertEqual(result.output['late']['value'], 2)
@@ -262,7 +269,7 @@ class PayloadRetentionTests(unittest.TestCase):
                 app = AutoAgentApp()
                 try:
                     app.register_workflow(workflow)
-                    loaded = app.load_checkpoint(SessionCheckpoint.from_state(state))
+                    loaded = load_graph(app, SessionCheckpoint.from_state(state))
                     resumed = app.recover(loaded.invocations[0])
                     self.assertEqual(resumed.status, 'completed', resumed.error)
                     self.assertEqual(resumed.output['value'], 6)

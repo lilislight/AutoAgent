@@ -1,5 +1,9 @@
 """Safety of transient output discard, plain records and aggregate-stage release."""
 from __future__ import annotations
+
+from tests.graph_fixtures import (
+    load_graph,
+)
 import unittest
 from unittest.mock import patch
 from enum import Enum
@@ -119,7 +123,7 @@ class TransientMemoryTests(unittest.TestCase):
         restored = AutoAgentApp()
         self.addCleanup(restored.close)
         restored.register_workflow(workflow)
-        loaded = restored.load_checkpoint(SessionCheckpoint.from_state(state))
+        loaded = load_graph(restored, SessionCheckpoint.from_state(state))
         result = restored.recover(loaded.invocations[0])
         self.assertEqual(result.status, 'completed', result.error)
         self.assertEqual(result.output, original.output)
@@ -174,7 +178,7 @@ class TransientMemoryTests(unittest.TestCase):
         restored = AutoAgentApp()
         self.addCleanup(restored.close)
         restored.register_workflow(workflow)
-        loaded = restored.load_checkpoint(SessionCheckpoint.from_state(after))
+        loaded = load_graph(restored, SessionCheckpoint.from_state(after))
         result = restored.recover(loaded.invocations[0])
         self.assertEqual(result.status, 'completed', result.error)
         self.assertEqual(result.output, {'value': 6, 'blob': ''})

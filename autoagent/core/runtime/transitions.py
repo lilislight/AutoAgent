@@ -11,7 +11,7 @@ from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
     NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed,
-    WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted,
+    WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationJoiningChildren,
     InvocationFailed, InvocationCancelled, ChildInvocationPlanned,
     ChildInvocationPhaseChanged, ChildAwaitSuspended, ChildAwaitReady,
     validate_payload,
@@ -226,7 +226,7 @@ class TransitionPlanner:
                 raise RuntimeTransitionError("WAIT_NOT_WAITING", "Wait is not waiting.")
             put((*SCHED, "waits", wait.id), replace(wait, status="resumed", response=payload.response, resumed_at_us=occurred_at_us))
             occurrence_put(replace(sched.occurrences[wait.occurrence_id], status="running", ready_at_us=occurred_at_us))
-            
+
             put(("invocation", "status"), "running")
         elif isinstance(payload, RecoveryApplied):
             recovered = []
@@ -239,15 +239,20 @@ class TransitionPlanner:
                         recovery_attempts=item.recovery_attempts+1))
                     recovered.append(item.id)
             if recovered:
-                
+
                 put(("invocation", "status"), "running")
-        elif isinstance(payload, InvocationCompleted):
-            _require_status(inv, {"running"}, payload.kind)
-            put(("invocation", "status"), "completed")
+        elif isinstance(payload, (InvocationCompleted, InvocationJoiningChildren)):
+            joining = isinstance(payload, InvocationJoiningChildren)
+            _require_status(inv, {"running"} if joining else {"running", "joining_children"}, payload.kind)
+            if not joining and any(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units):
+                raise RuntimeTransitionError("CHILDREN_NOT_SETTLED", "Completion requires settled children.")
+            put(("invocation", "status"), "joining_children" if joining else "completed")
             put(("invocation", "output"), payload.output)
-            put(("invocation", "completed_at_us"), occurred_at_us)
+            if not joining:
+                put(("invocation", "completed_at_us"), occurred_at_us)
         elif isinstance(payload, (InvocationFailed, InvocationCancelled)):
-            _require_status(inv, {"created", "running", "waiting"}, payload.kind)
+            _require_status(inv, {"created", "running", "waiting", "joining_children"}, payload.kind)
+            put(("invocation", "output"), None)
             failed = isinstance(payload, InvocationFailed)
             put(("invocation", "status"), "failed" if failed else "cancelled")
             put(("invocation", "error" if failed else "cancel_reason"), payload.error if failed else payload.reason)
@@ -277,7 +282,7 @@ class TransitionPlanner:
             if plan is None or payload.unit_index >= len(plan.units):
                 raise RuntimeTransitionError("CHILD_PLAN_MISSING", "Child plan or unit is missing.")
             unit = plan.units[payload.unit_index]
-            if {"planned":"opened", "opened":"accepted", "accepted":"terminal"}.get(unit.phase) != payload.phase:
+            if {"planned":"opened", "opened":"accepted", "accepted":"terminal"}.get(unit.phase) != payload.phase and not (inv.status in {"failed", "cancelled"} and (payload.phase == "terminal" or (payload.phase == "abandoned" and unit.phase == "planned"))):
                 raise RuntimeTransitionError("CHILD_PHASE_INVALID", "Invalid Child phase transition.")
             updated = replace(unit, phase=payload.phase)
             if isinstance(plan.units, ChunkedUnits) or len(plan.units) >= 512:
@@ -294,17 +299,17 @@ class TransitionPlanner:
                 raise RuntimeTransitionError("CHILD_AWAIT_PLAN_MISMATCH", "Child Await plan mismatch.")
             item = sched.occurrences[payload.parent_occurrence_id]
             resume = isinstance(payload, ChildAwaitReady)
-            if resume and any(unit.phase != "terminal" for unit in plan.units):
+            if resume and any(unit.phase not in {'terminal', 'abandoned'} for unit in plan.units):
                 raise RuntimeTransitionError("CHILD_AWAIT_NOT_TERMINAL", "Child units have not settled.")
             occurrence_put(replace(item, status="running" if resume else "waiting", ready_at_us=occurred_at_us))
             if resume:
-                
+
                 put(("invocation", "status"), "running")
             elif not _other_active(sched, item.id, _execution_index):
                 put(("invocation", "status"), "waiting")
         else:
             raise RuntimeTransitionError("EVENT_TYPE_UNSUPPORTED", "Unsupported semantic boundary.")
-        if isinstance(payload, (InvocationCompleted, InvocationFailed, InvocationCancelled)):
+        if isinstance(payload, (InvocationCompleted, InvocationJoiningChildren, InvocationFailed, InvocationCancelled)):
             # Terminal Invocations retain their public result and business Context,
             # not execution payload history. Apply after lifecycle status updates.
             for item in sched.occurrences.values():

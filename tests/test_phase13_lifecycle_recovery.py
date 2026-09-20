@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from autoagent import ChildHandle
+
+from tests.graph_fixtures import (
+    async_children,
+    async_resume_graph_wait,
+    child_refs,
+    graph_bundle,
+    join_observed,
+    load_graph,
+    resume_graph_wait,
+    root_snapshot,
+    session_checkpoints,
+    status_observed,
+)
+
 import asyncio
 import threading
 import unittest
@@ -57,12 +72,13 @@ def _cross_root_checkpoint_pair() -> tuple[
         parent_result = source.invoke(
             parent, {"value": 1}, session_id="cross-root-parent"
         )
-        child_ref = source.child_invocations(parent_result.ref)[0]
-        child_bundle = source.unload_session(child_ref, capture_checkpoint=True)
-        planned = source.unload_session(parent_result.ref, capture_checkpoint=True)
+        child_ref = child_refs(source, parent_result.ref)[0]
+        graph = source.unload_session(parent_result.ref, capture_checkpoint=True)
+        child_bundle = next(s for s in graph.sessions if s.session_id == child_ref.session_id)
+        planned = root_snapshot(graph)
     finally:
         source.close()
-    parent_state = planned.state
+    parent_state = root_snapshot(planned).state
     assert parent_state.invocation is not None
     unit = next(iter(parent_state.invocation.child_plans.values())).units[0]
     return child, parent, planned, child_bundle, unit.session_id
@@ -254,7 +270,7 @@ class _ChildRefThreadApp(AutoAgentApp):
         super().__init__()
         self.child_ref_threads: list[int] = []
 
-    def _control_ref(self, handle: InvocationRef) -> InvocationRef:
+    def _control_ref(self, handle: ChildHandle) -> InvocationRef:
         self.child_ref_threads.append(threading.get_ident())
         return super()._control_ref(handle)
 
@@ -522,57 +538,39 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
             result = items[-1]
             self.assertEqual(result.status, "completed")
-            child_result = app.join(result.output, timeout=1.0)
+            child_result = join_observed(app, result.output, timeout=1.0)
             self.assertEqual(child_result.status, "completed")
             self.assertEqual(child_result.output, {"value": 1})
         finally:
             app.close()
 
-    def test_final_stream_result_detaches_spawn_child_without_late_observations(self) -> None:
-        """Let a spawned Child finish without retaining updates after Root delivery."""
-
+    def test_final_stream_result_waits_for_spawn_child(self):
+        """Stream cannot deliver its final result while structured work is running."""
         child_started = _ThreadSignal()
         release_child = _RuntimeGate()
-
-        async def child_work(value: Value) -> Value:
+        async def work(value: Value) -> Value:
             child_started.set()
             await release_child.wait()
             return value
-
-        child = Workflow(
-            "stream-break-child",
-            nodes=[Node("work", child_work)],
-        )
-        parent = Workflow(
-            "stream-break-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
-        )
         app = AutoAgentApp()
-        stream = app.stream(
-            parent,
-            {"value": 1},
-            session_id="stream-break-root",
-        )
+        stream = app.stream(Workflow("stream-root", nodes=[Node("spawn",
+            Workflow("stream-child", nodes=[Node("work", work)]), execution_mode="spawn")]), {"value": 1})
+        results = []
+        reader = threading.Thread(target=lambda: results.extend(stream))
         try:
-            result: InvocationResult | None = None
-            for item in stream:
-                if isinstance(item, InvocationResult):
-                    result = item
-                    break
-            self.assertIsNotNone(result)
+            reader.start()
             self.assertTrue(child_started.wait(1))
-
+            self.assertFalse(any(isinstance(item, InvocationResult) for item in results))
             _release_runtime_gate_sync(app._runtime_loop, release_child)
-            child_result = app.join(result.output, timeout=1)  # type: ignore[union-attr]
-            self.assertEqual(child_result.status, "completed")
-            self.assertEqual(child_result.output, {"value": 1})
-            self.assertFalse(hasattr(child_result, "trace_events"))
-            self.assertFalse(hasattr(child_result, "user_events"))
-            stream.close()
+            reader.join(2)
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(results[-1].status, "completed")
         finally:
-            stream.close()
             _release_runtime_gate_sync(app._runtime_loop, release_child)
-            app.close(timeout=1)
+            stream.close()
+            reader.join(2)
+            app.close()
+
 
     def test_result_waits_behind_queued_transitions_before_reading_state(self) -> None:
         """Verify Result State and Checkpoint share one queued lock boundary."""
@@ -643,148 +641,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 result_thread.join(1)
             app.close(timeout=1)
 
-    def test_recover_terminal_root_restarts_spawn_child_without_awaiting_it(self) -> None:
-        """Verify Root recovery preserves immediate-return spawn semantics."""
 
-        first_started = _ThreadSignal()
-        replay_started = _ThreadSignal()
-        first_gate = _RuntimeGate()
-        replay_gate = _RuntimeGate()
-        calls = 0
-
-        async def child_work(value: Value) -> Value:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                first_started.set()
-                await first_gate.wait()
-            else:
-                replay_started.set()
-                await replay_gate.wait()
-            return value
-
-        child = Workflow(
-            "recover-spawn-child",
-            nodes=[
-                Node(
-                    "work",
-                    child_work,
-                    recovery_mode=Recovery("replay_safe"),
-                )
-            ],
-        )
-        parent = Workflow(
-            "recover-spawn-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
-        )
-        source = AutoAgentApp()
-        try:
-            parent_result = source.invoke(
-                parent,
-                {"value": 1},
-                session_id="recover-spawn-root",
-            )
-            handle = parent_result.output
-            self.assertTrue(first_started.wait(1))
-            checkpoint = source.close(timeout=1, capture_checkpoint=True)
-        finally:
-            _release_runtime_gate_sync(source._runtime_loop, first_gate)
-            if not source._closed:
-                source.close(timeout=1)
-
-        recovered = AutoAgentApp()
-        recovery_thread: threading.Thread | None = None
-        try:
-            recovered.register_workflow(parent)
-            loaded = recovered.load_checkpoint(checkpoint)
-            result_box: list[InvocationResult | BaseException] = []
-            recovery_done = _ThreadSignal()
-
-            def recover_root() -> None:
-                try:
-                    root_ref = next(
-                        ref for ref in loaded.invocations
-                        if ref.session_id == "recover-spawn-root"
-                    )
-                    result_box.append(recovered.recover(root_ref))
-                except BaseException as error:
-                    result_box.append(error)
-                finally:
-                    recovery_done.set()
-
-            recovery_thread = threading.Thread(target=recover_root)
-            recovery_thread.start()
-            self.assertTrue(replay_started.wait(1))
-            self.assertTrue(recovery_done.wait(1))
-            recovery_thread.join(1)
-            self.assertEqual(len(result_box), 1)
-            if isinstance(result_box[0], BaseException):
-                raise result_box[0]
-            recovered_root = result_box[0]
-            self.assertEqual(recovered_root.status, "completed")
-            running_child = recovered.status(handle)
-            self.assertEqual(running_child.status, "running")
-            self.assertTrue(recovered._task_runtime.is_live(handle.session_id))
-
-            _release_runtime_gate_sync(recovered._runtime_loop, replay_gate)
-            completed_child = recovered.join(handle, timeout=1)
-            self.assertEqual(completed_child.status, "completed")
-            self.assertEqual(completed_child.output, {"value": 1})
-        finally:
-            _release_runtime_gate_sync(recovered._runtime_loop, replay_gate)
-            if recovery_thread is not None:
-                recovery_thread.join(1)
-            recovered.close(timeout=1)
-
-    def test_recover_terminal_root_leaves_spawn_child_waiting(self) -> None:
-        """Verify a waiting spawn Child does not delay recovered Root delivery."""
-
-        child = Workflow(
-            "recover-spawn-wait-child",
-            nodes=[Node("approval", Wait(Value, Value))],
-        )
-        parent = Workflow(
-            "recover-spawn-wait-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
-        )
-        source = AutoAgentApp()
-        try:
-            parent_result = source.invoke(
-                parent,
-                {"value": 1},
-                session_id="recover-spawn-wait-root",
-            )
-            handle = parent_result.output
-            waiting = source.join(handle, timeout=1)
-            self.assertEqual(waiting.status, "waiting")
-            checkpoint = source.close(timeout=1, capture_checkpoint=True)
-        finally:
-            if not source._closed:
-                source.close(timeout=1)
-
-        recovered = AutoAgentApp()
-        try:
-            recovered.register_workflow(parent)
-            loaded = recovered.load_checkpoint(checkpoint)
-            root_ref = next(
-                ref for ref in loaded.invocations
-                if ref.session_id == "recover-spawn-wait-root"
-            )
-            recovered_root = recovered.recover(root_ref)
-            self.assertEqual(recovered_root.status, "completed")
-            waiting = recovered.status(handle)
-            self.assertEqual(waiting.status, "waiting")
-            self.assertFalse(recovered._task_runtime.is_live(handle.session_id))
-
-            completed = recovered.resume(
-                waiting.ref,
-                waiting.waits[0].id,
-                {"value": 2},
-            )
-            self.assertEqual(completed.status, "completed")
-            self.assertEqual(completed.output, {"value": 2})
-        finally:
-            recovered.close(timeout=1)
 
     def test_recover_accepts_opened_spawn_child_already_waiting(self) -> None:
         """Verify opened Child admission is reconciled before waiting recovery."""
@@ -805,13 +662,14 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id="recover-opened-wait-root",
             )
             handle = parent_result.output
-            waiting = source.join(handle, timeout=1)
-            child_checkpoint = source.unload_session(waiting.ref, capture_checkpoint=True)
-            parent_checkpoint = source.unload_session(parent_result.ref, capture_checkpoint=True)
+            waiting = join_observed(source, handle, timeout=1)
+            graph = source.unload_session(parent_result.ref, capture_checkpoint=True)
+            child_checkpoint = next(s for s in graph.sessions if s.session_id == waiting.session_id)
+            parent_checkpoint = root_snapshot(graph)
         finally:
             source.close(timeout=1)
 
-        root_state = parent_checkpoint.state
+        root_state = root_snapshot(parent_checkpoint).state
         assert root_state.invocation is not None
         creation_id, plan = next(iter(root_state.invocation.child_plans.items()))
         opened_plan = replace(
@@ -830,24 +688,24 @@ class LifecycleRecoveryTests(unittest.TestCase):
         recovered = AutoAgentApp()
         try:
             recovered.register_workflow(parent)
-            loaded = recovered.load_checkpoint(
-                AppCheckpoint((opened_checkpoint, child_checkpoint))
+            loaded = load_graph(recovered,
+                graph_bundle((opened_checkpoint, child_checkpoint))
             )
             root_ref = next(
                 ref for ref in loaded.invocations
                 if ref.session_id == "recover-opened-wait-root"
             )
             root_result = recovered.recover(root_ref)
-            self.assertEqual(root_result.status, "completed")
+            self.assertEqual(root_result.status, "joining_children")
             root_after_recovery = recovered._repository.state(root_result.session_id)
             recovered_plan = next(
                 iter(root_after_recovery.invocation.child_plans.values())
             )
             self.assertEqual(recovered_plan.units[0].phase, "accepted")
 
-            child_waiting = recovered.status(handle)
+            child_waiting = status_observed(recovered, handle)
             self.assertEqual(child_waiting.status, "waiting")
-            completed = recovered.resume(
+            completed = resume_graph_wait(recovered,
                 child_waiting.ref,
                 child_waiting.waits[0].id,
                 {"value": 2},
@@ -861,91 +719,6 @@ class LifecycleRecoveryTests(unittest.TestCase):
         finally:
             recovered.close(timeout=1)
 
-    def test_recover_exact_spawn_child_waits_for_its_boundary(self) -> None:
-        """Verify exact Child recovery waits despite a spawn ancestor edge."""
-
-        first_started = _ThreadSignal()
-        replay_started = _ThreadSignal()
-        first_gate = _RuntimeGate()
-        replay_gate = _RuntimeGate()
-        calls = 0
-
-        async def child_work(value: Value) -> Value:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                first_started.set()
-                await first_gate.wait()
-            else:
-                replay_started.set()
-                await replay_gate.wait()
-            return value
-
-        child = Workflow(
-            "recover-exact-spawn-child",
-            nodes=[
-                Node(
-                    "work",
-                    child_work,
-                    recovery_mode=Recovery("replay_safe"),
-                )
-            ],
-        )
-        parent = Workflow(
-            "recover-exact-spawn-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
-        )
-        source = AutoAgentApp()
-        try:
-            parent_result = source.invoke(
-                parent,
-                {"value": 1},
-                session_id="recover-exact-spawn-root",
-            )
-            handle = parent_result.output
-            self.assertTrue(first_started.wait(1))
-            checkpoint = source.close(timeout=1, capture_checkpoint=True)
-        finally:
-            _release_runtime_gate_sync(source._runtime_loop, first_gate)
-            if not source._closed:
-                source.close(timeout=1)
-
-        recovered = AutoAgentApp()
-        recovery_thread: threading.Thread | None = None
-        try:
-            recovered.register_workflow(parent)
-            recovered.load_checkpoint(checkpoint)
-            result_box: list[InvocationResult | BaseException] = []
-            recovery_done = _ThreadSignal()
-
-            def recover_child() -> None:
-                try:
-                    result_box.append(
-                        recovered.recover(handle)
-                    )
-                except BaseException as error:
-                    result_box.append(error)
-                finally:
-                    recovery_done.set()
-
-            recovery_thread = threading.Thread(target=recover_child)
-            recovery_thread.start()
-            self.assertTrue(replay_started.wait(1))
-            self.assertFalse(recovery_done.wait(0.05))
-            _release_runtime_gate_sync(recovered._runtime_loop, replay_gate)
-            self.assertTrue(recovery_done.wait(1))
-            recovery_thread.join(1)
-            self.assertEqual(len(result_box), 1)
-            if isinstance(result_box[0], BaseException):
-                raise result_box[0]
-            child_result = result_box[0]
-            self.assertEqual(child_result.status, "completed")
-            self.assertEqual(child_result.output, {"value": 1})
-        finally:
-            _release_runtime_gate_sync(recovered._runtime_loop, replay_gate)
-            if recovery_thread is not None:
-                recovery_thread.join(1)
-            recovered.close(timeout=1)
 
 
     def test_cancelled_aresume_does_not_leave_running_state_without_task(self) -> None:
@@ -971,7 +744,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(waiting.status, "waiting")
                 resume = asyncio.create_task(
-                    app.aresume(waiting.ref, waiting.waits[0].id, {"value": 2})
+                    async_resume_graph_wait(app, waiting.ref, waiting.waits[0].id, {"value": 2})
                 )
                 self.assertTrue(await started.wait_async())
                 resume.cancel()
@@ -1021,7 +794,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id="cancel-recover-session",
             )
             self.assertTrue(await first_started.wait_async())
-            source_checkpoint = (await source.aclose(timeout=1.0, capture_checkpoint=True)).sessions[0]
+            source_checkpoint = (await source.aclose(timeout=1.0, capture_checkpoint=True)).graphs[0]
 
             recovered = AutoAgentApp()
             try:
@@ -1062,8 +835,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     child_cancelled.set()
 
             async def parent_block(
-                handle: InvocationRef,
-            ) -> InvocationRef:
+                handle: ChildHandle,
+            ) -> ChildHandle:
                 parent_started.set()
                 try:
                     await asyncio.Event().wait()
@@ -1090,7 +863,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 )
                 self.assertTrue(await child_started.wait_async())
                 self.assertTrue(await parent_started.wait_async())
-                handles = await app.achild_invocations(submitted.ref)
+                handles = await async_children(app, submitted.ref)
                 self.assertEqual(len(handles), 1)
 
                 sink.target_session_id = submitted.session_id
@@ -1256,19 +1029,19 @@ class LifecycleRecoveryTests(unittest.TestCase):
             session_id="preloaded-close-root",
         )
         checkpoint = source.close(capture_checkpoint=True)
-        self.assertEqual(len(checkpoint.sessions), 2)
+        self.assertEqual(len(session_checkpoints(checkpoint)), 2)
 
         journal = RuntimeRepository()
         journal.install_states(
-            {item.session_id: item.state for item in checkpoint.sessions}
+            {item.session_id: item.state for item in session_checkpoints(checkpoint)}
         )
         restored = AutoAgentApp(runtime_repository=journal)
         captured = restored.close(capture_checkpoint=True)
 
-        self.assertEqual(len(captured.sessions), 2)
+        self.assertEqual(len(session_checkpoints(captured)), 2)
         self.assertEqual(
-            {item.session_id: item.state for item in captured.sessions},
-            {item.session_id: item.state for item in checkpoint.sessions},
+            {item.session_id: item.state for item in session_checkpoints(captured)},
+            {item.session_id: item.state for item in session_checkpoints(checkpoint)},
         )
 
     def test_public_invocation_status_includes_child_creation(self) -> None:
@@ -1282,31 +1055,9 @@ class LifecycleRecoveryTests(unittest.TestCase):
         _child, _parent, planned, child_bundle, _child_session_id = (
             _cross_root_checkpoint_pair()
         )
-        checkpoint = AppCheckpoint((planned, child_bundle))
-        self.assertEqual(len(checkpoint.sessions), 2)
+        checkpoint = graph_bundle((planned, child_bundle))
+        self.assertEqual(len(session_checkpoints(checkpoint)), 2)
 
-    def test_checkpoint_load_can_attach_a_preloaded_child_to_its_parent(self) -> None:
-        """Verify related Session checkpoints may be loaded in either order."""
-
-        _child, parent, planned, child_bundle, child_session_id = (
-            _cross_root_checkpoint_pair()
-        )
-        target = AutoAgentApp()
-        try:
-            target.register_workflow(parent)
-            loaded_child = target.load_checkpoint(child_bundle)
-            child_ref = loaded_child.invocations[0]
-            state_before = target._repository.state(child_session_id)
-
-            target.load_checkpoint(planned)
-
-            self.assertEqual(set(target._repository.session_ids()), {child_session_id, "cross-root-parent"})
-            self.assertEqual(target._repository.state(child_session_id), state_before)
-            self.assertEqual(target._root_session_id(child_session_id), "cross-root-parent")
-            self.assertIsNotNone(state_before.invocation)
-            self.assertEqual(state_before.invocation.id, child_ref.invocation_id)
-        finally:
-            target.close()
 
     def test_replacement_sink_failure_retires_superseded_child_graph(self) -> None:
         """Verify durable root replacement retires old Children despite sink failure."""
@@ -1342,8 +1093,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 {"value": 1},
                 session_id="replacement-sink-root",
             )
-            handle = app.child_invocations(first.ref)[0]
-            self.assertEqual(app.join(handle, timeout=1).status, "completed")
+            handle = child_refs(app, first.ref)[0]
+            self.assertEqual(join_observed(app, handle, timeout=1).status, "completed")
 
             sink.enabled = True
             with self.assertRaises(RuntimeInfrastructureError):
@@ -1361,8 +1112,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertEqual(current.status, "completed")
 
             closed = app.close(timeout=1, capture_checkpoint=True)
-            self.assertEqual(len(closed.sessions), 1)
-            self.assertEqual(closed.sessions[0].session_id, "replacement-sink-root")
+            self.assertEqual(len(session_checkpoints(closed)), 1)
+            self.assertEqual(session_checkpoints(closed)[0].session_id, "replacement-sink-root")
         finally:
             sink.enabled = False
             if not app._closed:
@@ -1412,18 +1163,18 @@ class LifecycleRecoveryTests(unittest.TestCase):
         )
         app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         try:
-            first = app.invoke(
+            first = app.submit_invoke(
                 parent,
                 {"value": 1},
                 session_id="child-event-retirement-root",
             )
-            self.assertEqual(first.status, "completed")
+            self.assertEqual(first.status, "running")
             self.assertTrue(child_started.wait(1))
-            handle = app.child_invocations(first.ref)[0]
+            handle = child_refs(app, first.ref)[0]
             _release_runtime_gate_sync(app._runtime_loop, release_child)
             self.assertTrue(sink.rejected.wait(1))
 
-            with self.assertRaises(RuntimeInfrastructureError):
+            with self.assertRaisesRegex(RuntimeTransitionError, "SESSION_INVOCATION_ACTIVE"):
                 app.invoke(
                     parent,
                     {"value": 2},
@@ -1439,6 +1190,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertNotIn(sink.rejected_event_id, sink.accepted_event_ids)
 
             sink.enabled = False
+            self.assertEqual(app.recover(first.ref).status, "completed")
             second = app.invoke(
                 parent,
                 {"value": 2},
@@ -1449,10 +1201,10 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertNotIn(handle.session_id, journal.session_ids())
 
             closed = app.close(timeout=1, capture_checkpoint=True)
-            self.assertEqual(len(closed.sessions), 2)
+            self.assertEqual(len(session_checkpoints(closed)), 2)
             self.assertIn(
                 "child-event-retirement-root",
-                {item.session_id for item in closed.sessions},
+                {item.session_id for item in session_checkpoints(closed)},
             )
         finally:
             sink.enabled = False
@@ -1525,14 +1277,14 @@ class LifecycleRecoveryTests(unittest.TestCase):
 
         replacement = threading.Thread(target=replace_root)
         try:
-            first = app.invoke(
+            first = app.submit_invoke(
                 parent,
                 {"value": 1},
                 session_id=root_session_id,
             )
-            self.assertEqual(first.status, "completed")
+            self.assertEqual(first.status, "running")
             self.assertTrue(child_started.wait(1))
-            handle = app.child_invocations(first.ref)[0]
+            handle = child_refs(app, first.ref)[0]
 
             _release_runtime_gate_sync(app._runtime_loop, child_release)
             self.assertTrue(sink.entered.wait(1))
@@ -1554,7 +1306,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertIsInstance(replacement_errors[0], RuntimeTransitionError)
             self.assertEqual(
                 cast(RuntimeTransitionError, replacement_errors[0]).code,
-                "SESSION_CHILDREN_ACTIVE",
+                "SESSION_INVOCATION_ACTIVE",
             )
             self.assertEqual(
                 journal.state(root_session_id).invocation.id,  # type: ignore[union-attr]
@@ -1562,7 +1314,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             )
 
             _release_runtime_gate_sync(app._runtime_loop, sink.release)
-            settled = app.join(handle, timeout=1)
+            settled = join_observed(app, handle, timeout=1)
             self.assertEqual(settled.status, "completed")
             parent_state = journal.state(root_session_id).invocation
             assert parent_state is not None
@@ -1586,9 +1338,9 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 session_id=root_session_id,
             )
             self.assertEqual(second.status, "completed")
-            second_handle = app.child_invocations(second.ref)[0]
+            second_handle = child_refs(app, second.ref)[0]
             self.assertEqual(
-                app.join(second_handle, timeout=1).status,
+                join_observed(app, second_handle, timeout=1).status,
                 "completed",
             )
         finally:
@@ -1735,7 +1487,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         finally:
             source.close()
 
-        state = checkpoint.state
+        state = root_snapshot(checkpoint).state
         self.assertIsNotNone(state.invocation)
         mutable_context: dict[str, object] = {}
         external_state = replace(
@@ -1754,7 +1506,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         target = AutoAgentApp()
         try:
             target.register_workflow(workflow)
-            target.load_checkpoint(external_bundle)
+            load_graph(target, external_bundle)
             mutable_context["changed"] = 2
             installed = target._repository.state("immutable-checkpoint-session")
             self.assertNotIn("changed", installed.invocation.context)

@@ -27,6 +27,9 @@ from ..runtime import (
     InMemoryUserEventJournal,
     InvocationCancelled,
     InvocationFailed,
+    InvocationCompleted,
+    InvocationJoiningChildren,
+    RuntimeGraphCheckpoint,
     RecoveryApplied,
     InvocationState,
     InvocationStarted,
@@ -43,7 +46,7 @@ from ..runtime import (
     thaw,
 )
 from ..scheduler import Scheduler
-from ..workflow import Capability, InvocationRef, Workflow, WorkflowIR
+from ..workflow import Capability, InvocationRef, ChildHandle, Workflow, WorkflowIR
 from .models import (
     AppCheckpoint,
     CheckpointLoadResult,
@@ -141,6 +144,9 @@ class AutoAgentApp:
         self._graph_gates: dict[str, GraphGate] = {}
         self._session_transition_locks: dict[str, asyncio.Lock] = {}
         self._recovering: dict[str, set[str]] = {}
+        self._graph_controls: dict[str, int] = {}
+        self._boundary_events: dict[str, asyncio.Event] = {}
+        self._drive_errors: dict[str, BaseException] = {}
         self._child_capacities: dict[tuple[str, str], asyncio.Semaphore] = {}
         # Durable ownership remains in parent Runtime State.  This transient
         # reverse index makes the hot Child -> Root lookup proportional to
@@ -547,24 +553,14 @@ class AutoAgentApp:
     # Checkpoints and Child relationships
 
     def load_checkpoint(
-        self, checkpoint: SessionCheckpoint | AppCheckpoint
+        self, checkpoint: RuntimeGraphCheckpoint | AppCheckpoint
     ) -> CheckpointLoadResult:
         return self._run(self._load_checkpoint(checkpoint))
 
     async def aload_checkpoint(
-        self, checkpoint: SessionCheckpoint | AppCheckpoint
+        self, checkpoint: RuntimeGraphCheckpoint | AppCheckpoint
     ) -> CheckpointLoadResult:
         return await self._await(self._submit(self._load_checkpoint(checkpoint)))
-
-    def child_invocations(
-        self, parent: InvocationRef
-    ) -> tuple[InvocationRef, ...]:
-        return self._run(self._list_child_invocations(parent))
-
-    async def achild_invocations(
-        self, parent: InvocationRef
-    ) -> tuple[InvocationRef, ...]:
-        return await self._await(self._submit(self._list_child_invocations(parent)))
 
     def resident_invocations(self) -> tuple[InvocationRef, ...]:
         """Return a stable snapshot of Invocations currently resident in Core."""
@@ -578,15 +574,15 @@ class AutoAgentApp:
 
     def unload_session(
         self, ref: InvocationRef, *, capture_checkpoint: bool = False
-    ) -> SessionCheckpoint | None:
-        """Release one quiescent Session, optionally returning its checkpoint."""
+    ) -> RuntimeGraphCheckpoint | None:
+        """Release a quiescent Root graph, optionally returning its checkpoint."""
 
         return self._run(self._unload_session(ref, capture_checkpoint=capture_checkpoint))
 
     async def aunload_session(
         self, ref: InvocationRef, *, capture_checkpoint: bool = False
-    ) -> SessionCheckpoint | None:
-        """Asynchronously release a Session, optionally returning its checkpoint."""
+    ) -> RuntimeGraphCheckpoint | None:
+        """Asynchronously release a Root graph, optionally returning its checkpoint."""
 
         return await self._await(self._submit(
             self._unload_session(ref, capture_checkpoint=capture_checkpoint)))
@@ -950,7 +946,7 @@ class AutoAgentApp:
                 task = self._start_drive(compiled, session_id, invocation_id, None, None)
             if not wait_for_boundary:
                 return InvocationSubmission(ref)
-            await task
+            await self._await_graph_boundary(ref)
             return await self._result(ref)
         except asyncio.CancelledError:
             current = self._repository.state(session_id).invocation
@@ -1011,9 +1007,6 @@ class AutoAgentApp:
         ref = self._control_ref(ref)
         state = self._state_for_ref(ref, active=True)
         root = self._root_session_id(ref.session_id)
-        if root in self._recovering and ref.session_id not in self._recovering[root]:
-            raise RuntimeTransitionError(
-                "INVOCATION_STILL_LIVE", "Session recovery admission is in progress.")
         current_channel = self._attached_streams.get(ref.session_id)
         if attached_channel is None:
             self._ensure_attached_result_boundary_delivered(ref.session_id)
@@ -1024,6 +1017,14 @@ class AutoAgentApp:
             )
         self._acquire_result_lease(root)
         try:
+            matches = [(sid, self._repository.state(sid)) for sid in (root, *self._descendant_sessions(root))
+                       if (inv := self._repository.state(sid).invocation) is not None
+                       and wait_id in inv.scheduler.waits and inv.scheduler.waits[wait_id].status == "waiting"]
+            if len(matches) != 1:
+                raise RuntimeTransitionError("WAIT_NOT_WAITING", "Wait must identify exactly one active graph Wait.")
+            target, state = matches[0]
+            if root in self._recovering and target not in self._recovering[root]:
+                raise RuntimeTransitionError("INVOCATION_STILL_LIVE", "Child recovery admission is in progress.")
             invocation = state.invocation
             assert invocation is not None
             wait_state = invocation.scheduler.waits.get(wait_id)
@@ -1040,18 +1041,18 @@ class AutoAgentApp:
                 )
             validated = node.executable.output_contract.to_record(response)
             await self._emit(
-                ref.session_id, ref.invocation_id, WaitResumed(wait_id, validated)
+                target, invocation.id, WaitResumed(wait_id, validated)
             )
-            task = self._task_runtime.task(ref.session_id)
+            task = self._task_runtime.task(target)
             if task is None:
                 task = self._start_drive(
-                    workflow, ref.session_id, ref.invocation_id, None, None
+                    workflow, target, invocation.id, None, None
                 )
             else:
-                self._task_runtime.wake(ref.session_id)
+                self._task_runtime.wake(target)
             if not wait_for_boundary:
                 return InvocationSubmission(ref)
-            await task
+            await self._await_graph_boundary(ref)
             return await self._result(ref)
         except asyncio.CancelledError:
             if self._drive_cancelled_at_terminal_boundary(ref):
@@ -1074,6 +1075,47 @@ class AutoAgentApp:
         finally:
             self._release_result_lease(root)
 
+    def _remaining_children(self, session_id: str) -> int:
+        if hasattr(self._repository, 'execution_index'):
+            return self._repository.execution_index(session_id).children_remaining
+        inv = self._repository.state(session_id).invocation
+        return sum(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units) if inv else 0
+
+    def _notify_boundary(self, root: str) -> None:
+        event = self._boundary_events.get(root)
+        if event is not None:
+            event.set()
+
+    def _graph_waits(self, root: str) -> tuple[InvocationWait, ...]:
+        return tuple(InvocationWait(w.id, thaw(w.request))
+                     for sid in (root, *self._descendant_sessions(root))
+                     if (inv := self._repository.state(sid).invocation) is not None
+                     for w in inv.scheduler.waits.values() if w.status == 'waiting')
+
+    async def _await_graph_boundary(self, ref: InvocationRef) -> None:
+        """Wait without polling; external Child Waits remain resumable through Root."""
+        root = ref.session_id
+        event = self._boundary_events.setdefault(root, asyncio.Event())
+        while True:
+            event.clear()
+            current = self._state_for_ref(ref).invocation
+            sessions = (root, *self._descendant_sessions(root))
+            for sid in sessions:
+                error = self._drive_errors.get(sid)
+                if error is not None:
+                    raise error
+            live = any(self._task_runtime.is_live(sid) for sid in sessions)
+            if current.terminal and not live and not self._graph_controls.get(root) and self._child_graph_settled(root, sessions[1:]):
+                return
+            if not current.terminal and not self._task_runtime.is_live(root) and any(
+                (inv := self._repository.state(sid).invocation) is not None
+                and any(w.status == "waiting" for w in inv.scheduler.waits.values()) for sid in sessions
+            ):
+                return
+            if not live and not self._graph_controls.get(root):
+                raise RuntimeTransitionError("INVOCATION_NOT_LIVE", "Graph needs recover() before it can reach a boundary.")
+            await event.wait()
+
     async def _join(
         self,
         ref: InvocationRef,
@@ -1084,25 +1126,10 @@ class AutoAgentApp:
         root = self._root_session_id(ref.session_id)
         self._acquire_result_lease(root)
         try:
-            task = self._task_runtime.task(ref.session_id)
-            if task is not None:
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout)
-                except TimeoutError as error:
-                    raise TimeoutError(
-                        "Invocation did not reach a stable boundary in time."
-                    ) from error
-                except asyncio.CancelledError:
-                    if not self._drive_cancelled_at_terminal_boundary(ref):
-                        raise
-            current = self._state_for_ref(ref).invocation
-            assert current is not None
-            if current.status in {"created", "running"}:
-                raise RuntimeTransitionError(
-                    "INVOCATION_NOT_LIVE",
-                    "Invocation is runnable but this App owns no live task; "
-                    "load its checkpoint and call recover().",
-                )
+            try:
+                await asyncio.wait_for(self._await_graph_boundary(ref), timeout)
+            except TimeoutError as error:
+                raise TimeoutError("Invocation did not reach a stable boundary in time.") from error
             return await self._result(ref)
         finally:
             self._release_result_lease(root)
@@ -1128,6 +1155,17 @@ class AutoAgentApp:
             self._release_result_lease(root)
 
     async def _cancel_graph(self, ref: InvocationRef, reason: str | None) -> None:
+        root = self._root_session_id(ref.session_id)
+        self._graph_controls[root] = self._graph_controls.get(root, 0) + 1
+        try:
+            await self._cancel_graph_operation(ref, reason)
+        finally:
+            self._graph_controls[root] -= 1
+            if not self._graph_controls[root]:
+                self._graph_controls.pop(root)
+            self._notify_boundary(root)
+
+    async def _cancel_graph_operation(self, ref: InvocationRef, reason: str | None) -> None:
         root = self._root_session_id(ref.session_id)
         async with self._graph_gate(root):
             target = ref.session_id
@@ -1158,13 +1196,16 @@ class AutoAgentApp:
                 *(task for task in tasks if task is not None),
                 return_exceptions=True,
             )
-        for session_id in reversed(session_ids[1:]):
+        for session_id in reversed(session_ids):
+            await self._settle_unopened_children(session_id)
             invocation = self._repository.state(session_id).invocation
             if invocation is not None and invocation.terminal:
                 await self._settle_child(session_id, invocation.id)
         target_invocation = self._repository.state(target).invocation
         if target_invocation is not None and target_invocation.terminal:
             await self._settle_child(target, target_invocation.id)
+        for session_id in session_ids:
+            self._drive_errors.pop(session_id, None)
 
     async def _recover(self, ref):
         ref = self._control_ref(ref)
@@ -1213,9 +1254,10 @@ class AutoAgentApp:
             await self._recover_session(
                 root,
                 set(),
-                wait_for_boundary=True,
+                wait_for_boundary=False,
                 target_path=frozenset(target_path),
             )
+            await self._await_graph_boundary(ref)
             return await self._result(ref)
         except asyncio.CancelledError:
             if self._drive_cancelled_at_terminal_boundary(ref):
@@ -1256,6 +1298,7 @@ class AutoAgentApp:
         invocation = state.invocation
         if invocation is None:
             return
+        self._drive_errors.pop(session_id, None)
         await self._accept_recovered_child_invocations(session_id, invocation.id)
         state = self._repository.state(session_id)
         invocation = state.invocation
@@ -1345,6 +1388,8 @@ class AutoAgentApp:
             # The handshake/preflight is complete. External Waits may resume
             # while recovery is still awaiting other running graph branches.
             admitted.add(session_id)
+        if invocation.status == "joining_children" and not self._remaining_children(session_id):
+            await self._emit(session_id, invocation.id, InvocationCompleted(invocation.output))
         if invocation.status == "running":
             task = self._task_runtime.task(session_id) or self._start_drive(
                 workflow, session_id, invocation.id, None, None
@@ -1429,136 +1474,108 @@ class AutoAgentApp:
 
     async def _resident_invocations(self) -> tuple[InvocationRef, ...]:
         refs: list[InvocationRef] = []
-        for session_id in sorted(self._repository.session_ids()):
+        for session_id in self._root_session_ids():
             invocation = self._repository.state(session_id).invocation
             if invocation is not None:
                 refs.append(self._ref_for_invocation(session_id, invocation))
         return tuple(refs)
 
-    async def _unload_session(
-        self, ref: InvocationRef, *, capture_checkpoint: bool = False
-    ) -> SessionCheckpoint | None:
+    async def _capture_graph_locked(self, root: str) -> RuntimeGraphCheckpoint:
+        sessions = (root, *self._descendant_sessions(root))
+        await self._settle_runtime_commits(sessions)
+        # ACK settlement may publish previously pending ownership.
+        sessions = (root, *self._descendant_sessions(root))
+        await self._settle_runtime_commits(sessions)
+        captured_at = self._clock_us()
+        return RuntimeGraphCheckpoint(root, tuple(
+            self._repository.capture_checkpoint(sid, captured_at_us=captured_at)
+            for sid in sessions if self._repository.state(sid).session is not None))
+
+    async def _unload_session(self, ref: InvocationRef, *, capture_checkpoint: bool = False) -> RuntimeGraphCheckpoint | None:
         ref = self._control_ref(ref)
-        state = self._state_for_ref(ref)
-        root = self._root_session_id(ref.session_id)
+        self._state_for_ref(ref)
+        root = ref.session_id
         async with self._graph_gate(root):
-            state = self._state_for_ref(ref)
-            related = self._resident_related_sessions(ref.session_id)
-            allowed = {"waiting", "completed", "failed", "cancelled"}
-            for session_id in related:
-                invocation = self._repository.state(session_id).invocation
-                if (
-                    invocation is None
-                    or invocation.status not in allowed
-                    or self._task_runtime.is_live(session_id)
-                ):
-                    raise RuntimeTransitionError(
-                        "RELATED_INVOCATION_NOT_UNLOADABLE",
-                        "Every resident parent and Child Invocation must be "
-                        "waiting or terminal before one Session can unload.",
-                    )
-            related_roots = {
-                self._root_session_id(session_id) for session_id in related
-            }
-            if any(session_id in self._attached_streams for session_id in related) or any(
-                self._result_leases.get(root_id, 0) for root_id in related_roots
-            ):
-                raise RuntimeTransitionError(
-                    "INVOCATION_RESULT_PENDING",
-                    "An attached stream or active result reader must finish before "
-                    "unloading a Session.",
-                )
-            if capture_checkpoint:
-                checkpoint = await self._capture_checkpoint_locked(ref.session_id)
-            else:
-                await self._settle_runtime_commits((ref.session_id,))
-                checkpoint = None
-            invocation = state.invocation
-            assert invocation is not None
-            self._repository.discard_states((ref.session_id,))
-            self._task_runtime.release_wake_event(ref.session_id)
-            self._retire_session_coordination(ref.session_id)
-            self._result_leases.pop(ref.session_id, None)
-            self._user_event_journal.discard(invocation.id)
-            self._user_event_sink_errors.pop(invocation.id, None)
-            self._child_capacities = {
-                key: value
-                for key, value in self._child_capacities.items()
-                if key[0] != ref.session_id
-            }
-            resident = set(self._repository.session_ids())
-            self._child_owners = {
-                child: owner
-                for child, owner in self._child_owners.items()
-                if child in resident or owner[0] in resident
-            }
+            self._state_for_ref(ref)
+            sessions = (root, *self._descendant_sessions(root))
+            if any(self._task_runtime.is_live(sid) for sid in sessions):
+                raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Graph has live tasks.")
+            await self._settle_runtime_commits(sessions)
+            sessions = (root, *self._descendant_sessions(root))
+            if root in self._recovering or self._result_leases.get(root, 0) or any(sid in self._attached_streams for sid in sessions):
+                raise RuntimeTransitionError("INVOCATION_RESULT_PENDING", "Graph still has an active reader or recovery.")
+            for sid in sessions:
+                inv = self._repository.state(sid).invocation
+                if inv is not None and (inv.status not in {'waiting', 'joining_children', 'completed', 'failed', 'cancelled'} or self._task_runtime.is_live(sid)):
+                    raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Graph is not quiescent.")
+                if inv is not None and inv.terminal and self._remaining_children(sid):
+                    raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Terminal graph has unsettled ownership.")
+            # A joining Root with external Child Waits is a valid quiescent handoff.
+            checkpoint = await self._capture_graph_locked(root) if capture_checkpoint else None
+            self._discard_graph_sessions(sessions)
             return checkpoint
 
-    async def _load_checkpoint(
-        self, checkpoint: SessionCheckpoint | AppCheckpoint
-    ) -> CheckpointLoadResult:
-        checkpoints = (
-            checkpoint.sessions
-            if isinstance(checkpoint, AppCheckpoint)
-            else (checkpoint,)
-            if isinstance(checkpoint, SessionCheckpoint)
-            else None
-        )
-        if checkpoints is None:
-            raise TypeError("checkpoint must be SessionCheckpoint or AppCheckpoint.")
-        if not checkpoints:
-            return CheckpointLoadResult(())
-        all_states = {item.session_id: item.state for item in checkpoints}
-        if len(all_states) != len(checkpoints):
-            raise RuntimeTransitionError(
-                "CHECKPOINT_SESSION_DUPLICATE",
-                "A Session can appear only once in one checkpoint load.",
-            )
-        existing_ids = set(self._repository.session_ids())
-        for session_id, state in all_states.items():
-            if session_id in existing_ids and self._repository.state(session_id) != state:
-                raise RuntimeTransitionError(
-                    "CHECKPOINT_SESSION_CONFLICT",
-                    "Checkpoint conflicts with the current Runtime Session.",
-                )
-        combined = {
-            session_id: self._repository.state(session_id)
-            for session_id in existing_ids
+    def _discard_graph_sessions(self, sessions: tuple[str, ...]) -> None:
+        retired = set(sessions)
+        invocation_ids = {
+            sid: inv.id for sid in sessions
+            if (inv := self._repository.state(sid).invocation) is not None
         }
+        # Repository validates all pending commits before discarding any State.
+        # Retire transient resources only after that atomic operation succeeds.
+        self._repository.discard_states(sessions)
+        for sid in sessions:
+            if (invocation_id := invocation_ids.get(sid)) is not None:
+                self._user_event_journal.discard(invocation_id)
+                self._user_event_sink_errors.pop(invocation_id, None)
+            self._task_runtime.release_wake_event(sid)
+            self._retire_session_coordination(sid)
+            self._result_leases.pop(sid, None)
+            self._boundary_events.pop(sid, None)
+            self._drive_errors.pop(sid, None)
+        self._child_capacities = {k: v for k, v in self._child_capacities.items() if k[0] not in retired}
+        self._child_owners = {k: v for k, v in self._child_owners.items() if k not in retired and v[0] not in retired}
+
+    async def _load_checkpoint(self, checkpoint: RuntimeGraphCheckpoint | AppCheckpoint) -> CheckpointLoadResult:
+        graphs = checkpoint.graphs if isinstance(checkpoint, AppCheckpoint) else (checkpoint,) if isinstance(checkpoint, RuntimeGraphCheckpoint) else None
+        if graphs is None:
+            raise TypeError("checkpoint must be RuntimeGraphCheckpoint or AppCheckpoint.")
+        if not graphs:
+            return CheckpointLoadResult(())
+        # Revalidate the public boundary before any repository mutation.
+        from ..runtime.graph_checkpoint import validate_graph
+        AppCheckpoint(tuple(graphs))
+        all_states = {}
+        for graph in graphs:
+            states = {item.session_id: item.state for item in graph.sessions}
+            validate_graph(graph.root_session_id, states)
+            all_states.update(states)
+        existing = set(self._repository.session_ids())
+        for sid, state in all_states.items():
+            if sid in existing and self._repository.state(sid) != state:
+                raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Checkpoint conflicts with resident State.")
+        for graph in graphs:
+            root = graph.root_session_id
+            if any(item.session_id in existing and self._root_session_id(item.session_id) != root
+                   for item in graph.sessions):
+                raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Loading cannot adopt another resident Root graph.")
+            if root in self._child_owners:
+                raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Graph root is already owned.")
+            if root in existing:
+                resident = {root, *self._descendant_sessions(root)} & existing
+                if resident != {item.session_id for item in graph.sessions}:
+                    raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Checkpoint cannot replace part of a resident graph.")
+        affected = {self._root_session_id(sid) for sid in all_states}
+        if any(self._task_runtime.is_live(sid) or sid in self._attached_streams for sid in all_states) or any(
+            self._result_leases.get(root, 0) or root in self._recovering or (root in self._graph_gates and not self._graph_gates[root].idle)
+            for root in affected):
+            raise RuntimeTransitionError("CHECKPOINT_SESSION_LIVE", "Checkpoint cannot replace a live graph.")
+        combined = {sid: self._repository.state(sid) for sid in existing}
         combined.update(all_states)
         self._validate_checkpoint_relationships(combined)
-        affected_roots = {
-            self._root_session_id(session_id)
-            if session_id in existing_ids or session_id in self._child_owners
-            else session_id
-            for session_id in all_states
-        }
-        if any(
-            self._task_runtime.is_live(session_id)
-            or session_id in self._attached_streams
-            for session_id in all_states
-        ) or any(
-            self._result_leases.get(root, 0)
-            or root in self._recovering
-            or (root in self._graph_gates and not self._graph_gates[root].idle)
-            for root in affected_roots
-        ):
-            raise RuntimeTransitionError(
-                "CHECKPOINT_SESSION_LIVE",
-                "Checkpoint loading cannot replace a live Runtime Session.",
-            )
         self._repository.install_states(all_states)
         self._rebuild_child_owners()
-        refs = tuple(
-            InvocationRef(
-                session_id=session_id,
-                invocation_id=state.invocation.id,
-                workflow_id=state.invocation.workflow_id,
-                workflow_revision_id=state.invocation.workflow_revision_id,
-            )
-            for session_id, state in sorted(all_states.items())
-        )
-        return CheckpointLoadResult(refs)
+        return CheckpointLoadResult(tuple(self._ref_for_invocation(g.root_session_id, all_states[g.root_session_id].invocation) for g in graphs))
 
     @staticmethod
     def _validate_checkpoint_relationships(
@@ -1603,32 +1620,6 @@ class AutoAgentApp:
                             "Child Session checkpoint does not match its parent plan.",
                         )
 
-    async def _list_child_invocations(
-        self, parent: InvocationRef
-    ) -> tuple[InvocationRef, ...]:
-        parent = self._control_ref(parent)
-        parent_state = self._state_for_ref(parent)
-        invocation = parent_state.invocation
-        assert invocation is not None
-        handles: list[InvocationRef] = []
-        for unit in (
-            unit
-            for plan in invocation.child_plans.values()
-            for unit in plan.units
-        ):
-            child = self._repository.state(unit.session_id).invocation
-            if child is None or child.id != unit.invocation_id:
-                continue
-            handles.append(
-                InvocationRef(
-                    session_id=unit.session_id,
-                    invocation_id=unit.invocation_id,
-                    workflow_id=child.workflow_id,
-                    workflow_revision_id=child.workflow_revision_id,
-                )
-            )
-        return tuple(handles)
-
     async def _close(self, *, capture_checkpoint: bool = False) -> AppCheckpoint | None:
         return await self._close_operation(capture_checkpoint=capture_checkpoint)
 
@@ -1654,11 +1645,13 @@ class AutoAgentApp:
         await self._discard_incomplete_sessions()
         if not capture_checkpoint:
             return None
-        session_ids = self._repository.session_ids()
-        checkpoints = tuple(
-            [await self._capture_checkpoint(session_id) for session_id in session_ids]
-        )
-        return AppCheckpoint(checkpoints)
+        graphs = []
+        for root in self._root_session_ids():
+            async with self._graph_gate(root):
+                graphs.append(await self._capture_graph_locked(root))
+        if sum(len(graph.sessions) for graph in graphs) != len(self._repository.session_ids()):
+            raise RuntimeTransitionError("CHILD_GRAPH_CYCLE", "Resident Sessions do not form complete Root graphs.")
+        return AppCheckpoint(tuple(graphs))
 
     # ------------------------------------------------------------------
     # Task, Event, Trace and Checkpoint coordination
@@ -1677,7 +1670,7 @@ class AutoAgentApp:
 
         capacity = self._child_capacity(session_id, capacity)
 
-        async def run() -> None:
+        async def drive() -> None:
             if gate is not None:
                 await gate.wait()
             if capacity is None:
@@ -1693,8 +1686,22 @@ class AutoAgentApp:
                 )
             await self._settle_child(session_id, invocation_id)
 
+        async def run() -> None:
+            try:
+                await drive()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:
+                # Publish failure before Task completion can be observed by a waiter.
+                self._drive_errors[session_id] = error
+                raise
+
         task = asyncio.create_task(run())
+        self._drive_errors.pop(session_id, None)
         self._task_runtime.track(session_id, task)
+        def finished(done):
+            self._notify_boundary(self._root_session_id(session_id))
+        task.add_done_callback(finished)
         return task
 
     async def _settle_child(self, session_id: str, invocation_id: str) -> None:
@@ -1703,7 +1710,7 @@ class AutoAgentApp:
             return
         parent_session_id, creation_id, unit_index = parent_info
         child_invocation = self._repository.state(session_id).invocation
-        if child_invocation is None or not child_invocation.terminal:
+        if child_invocation is None or not child_invocation.terminal or self._remaining_children(session_id):
             return
         parent = self._repository.state(parent_session_id).invocation
         if parent is None:
@@ -1712,7 +1719,7 @@ class AutoAgentApp:
         if plan is None:
             return
         unit = plan.units[unit_index]
-        if unit.phase == "accepted":
+        if unit.phase == "accepted" or (unit.phase not in {'terminal', 'abandoned'} and parent.status in {"failed", "cancelled"}):
             await self._ensure_child_durable(session_id)
             await self._emit_child_transition(
                 parent_session_id,
@@ -1722,6 +1729,9 @@ class AutoAgentApp:
             parent = self._repository.state(parent_session_id).invocation
             assert parent is not None
             plan = parent.child_plans[creation_id]
+        if parent.status == "joining_children" and not self._remaining_children(parent_session_id):
+            await self._emit(parent_session_id, parent.id, InvocationCompleted(parent.output))
+            await self._settle_child(parent_session_id, parent.id)
         if plan.mode != "await":
             return
         occurrence = parent.scheduler.occurrences.get(plan.parent_occurrence_id)
@@ -1758,6 +1768,16 @@ class AutoAgentApp:
                     workflow, parent_session_id, parent.id, None, None
                 )
 
+    async def _settle_unopened_children(self, session_id: str) -> None:
+        inv = self._repository.state(session_id).invocation
+        if inv is None or inv.status not in {'failed', 'cancelled'}:
+            return
+        for creation, plan in inv.child_plans.items():
+            for unit in plan.units:
+                if unit.phase not in {'terminal', 'abandoned'} and self._repository.state(unit.session_id).invocation is None:
+                    await self._emit_child_transition(session_id, inv.id,
+                        ChildInvocationPhaseChanged(creation, unit.unit_index, 'abandoned'))
+
     async def _cancel_descendants(
         self, root_session_id: str, reason: str
     ) -> None:
@@ -1780,7 +1800,8 @@ class AutoAgentApp:
             await asyncio.gather(
                 *(task for task in tasks if task is not None), return_exceptions=True,
             )
-        for session_id in reversed(descendants):
+        for session_id in reversed((root_session_id, *descendants)):
+            await self._settle_unopened_children(session_id)
             invocation = self._repository.state(session_id).invocation
             if invocation is not None and invocation.terminal:
                 await self._settle_child(session_id, invocation.id)
@@ -1844,6 +1865,14 @@ class AutoAgentApp:
                 return settled
         state = self._repository.state(session_id)
         graph_delta = None
+        if isinstance(payload, InvocationCompleted):
+            if (state.invocation.status == 'completed' and state.invocation.id == invocation_id
+                    and state.invocation.output == payload.output):
+                return None
+            if self._remaining_children(session_id):
+                if state.invocation.status == 'joining_children':
+                    return None
+                payload = InvocationJoiningChildren(payload.output)
         if isinstance(payload, RecoveryApplied):
             payload = RecoveryApplied(
                 tuple(item.id for item in state.invocation.scheduler.occurrences.values() if item.status == "running"),
@@ -1883,12 +1912,19 @@ class AutoAgentApp:
         return transition
 
     def _publish_ownership(self, event):
+        self._notify_boundary(self._root_session_id(event.session_id))
         if isinstance(event.payload, ChildInvocationPlanned):
             for unit in event.payload.units:
                 self._child_owners[unit.child_session_id] = (
                     event.session_id, event.payload.creation_id, unit.unit_index, unit.child_invocation_id)
 
     async def _emit_executor_event(self, session_id, invocation_id, payload):
+        if isinstance(payload, ChildInvocationPhaseChanged) and payload.phase == 'terminal':
+            parent = self._repository.state(session_id).invocation
+            unit = parent.child_plans[payload.creation_id].units[payload.unit_index]
+            child = self._repository.state(unit.session_id).invocation
+            if child is not None and child.status in {'failed', 'cancelled'} and self._remaining_children(unit.session_id):
+                await self._cancel_descendants(unit.session_id, "Ancestor Invocation failed or cancelled.")
         if isinstance(payload, (ChildInvocationPhaseChanged, ChildAwaitReady)):
             return await self._emit_child_transition(session_id, invocation_id, payload)
         return await self._emit(session_id, invocation_id, payload)
@@ -1908,14 +1944,21 @@ class AutoAgentApp:
                 if plan is None:
                     return None
                 if isinstance(payload, ChildInvocationPhaseChanged):
-                    ranks = {'planned': 0, 'opened': 1, 'accepted': 2, 'terminal': 3}
+                    if payload.phase == 'abandoned' and self._repository.state(plan.units[payload.unit_index].session_id).invocation is not None:
+                        raise RuntimeTransitionError('CHILD_ALREADY_CREATED', 'An existing Child cannot be abandoned.')
+                    if payload.phase == 'terminal':
+                        unit = plan.units[payload.unit_index]
+                        child = self._repository.state(unit.session_id).invocation
+                        if child is not None and (not child.terminal or self._remaining_children(unit.session_id)):
+                            raise RuntimeTransitionError("CHILDREN_NOT_SETTLED", "Child subtree has not converged.")
+                    ranks = {'planned': 0, 'opened': 1, 'accepted': 2, 'terminal': 3, 'abandoned': 3}
                     if ranks[plan.units[payload.unit_index].phase] >= ranks[payload.phase]:
                         return None
                 else:
                     occurrence = parent.scheduler.occurrences.get(plan.parent_occurrence_id)
                     if parent.terminal or occurrence is None or occurrence.status != 'waiting':
                         return None
-                    if any(unit.phase != 'terminal' for unit in plan.units):
+                    if any(unit.phase not in {'terminal', 'abandoned'} for unit in plan.units):
                         return None
                 return await self._emit_locked(session_id, invocation_id, payload)
 
@@ -2082,22 +2125,18 @@ class AutoAgentApp:
             state = self._state_for_ref(ref)
             invocation = state.invocation
             assert invocation is not None
-            waits = tuple(
-                InvocationWait(item.id, thaw(item.request))
-                for item in invocation.scheduler.waits.values()
-                if item.status == "waiting"
-            )
+            waits = self._graph_waits(ref.session_id)
             output = thaw(invocation.output)
             workflow = self._workflows.get(invocation.workflow_revision_id)
             if (
-                invocation.status == "completed"
+                invocation.status in {"completed", "joining_children"}
                 and workflow is not None
                 and len(workflow.exit_node_ids) == 1
             ):
                 contract = workflow.node(workflow.exit_node_ids[0]).output_contract
                 if (
                     contract is not None
-                    and _contains_invocation_ref(contract.annotation)
+                    and _contains_identity_value(contract.annotation)
                 ):
                     output = contract.restore(output)
             return InvocationResult(
@@ -2134,14 +2173,19 @@ class AutoAgentApp:
             for child_session_id in child_session_ids:
                 self._child_owners.pop(child_session_id, None)
                 self._retire_session_coordination(child_session_id)
+                self._task_runtime.release_wake_event(child_session_id)
+                self._boundary_events.pop(child_session_id, None)
+                self._drive_errors.pop(child_session_id, None)
             retired_sessions = {root_session_id, *child_session_ids}
             self._child_capacities = {
                 key: capacity
                 for key, capacity in self._child_capacities.items()
                 if key[0] not in retired_sessions
             }
+        self._drive_errors.pop(root_session_id, None)
         for invocation_id in invocation_ids:
             self._user_event_journal.discard(invocation_id)
+            self._user_event_sink_errors.pop(invocation_id, None)
 
     def _control_ref(
         self, ref: InvocationRef
@@ -2155,6 +2199,8 @@ class AutoAgentApp:
     ) -> RuntimeState:
         if not isinstance(ref, InvocationRef):
             raise TypeError("Control operations require an InvocationRef.")
+        if ref.session_id in self._child_owners:
+            raise RuntimeTransitionError("CHILD_CONTROL_FORBIDDEN", "Control operations require a Root Invocation.")
         state = self._repository.state(ref.session_id)
         invocation = state.invocation
         if (
@@ -2167,7 +2213,7 @@ class AutoAgentApp:
                 "INVOCATION_REF_STALE",
                 "InvocationRef does not identify the Session's current Invocation.",
             )
-        if active and invocation.status not in {"running", "waiting"}:
+        if active and invocation.status not in {"running", "waiting", "joining_children"}:
             raise RuntimeTransitionError(
                 "INVOCATION_NOT_RUNNING", "Invocation is not running."
             )
@@ -2298,11 +2344,17 @@ class AutoAgentApp:
         for session_id in (root_session_id, *descendant_session_ids):
             invocation = self._repository.state(session_id).invocation
             if invocation is None:
-                return False
+                owner = self._parent_plan(session_id)
+                if owner is None:
+                    return False
+                parent_sid, creation, index = owner
+                if self._repository.state(parent_sid).invocation.child_plans[creation].units[index].phase not in {'terminal', 'abandoned'}:
+                    return False
+                continue
             if session_id != root_session_id and not invocation.terminal:
                 return False
             if any(
-                unit.phase != "terminal"
+                unit.phase not in {'terminal', 'abandoned'}
                 for plan in invocation.child_plans.values()
                 for unit in plan.units
             ):
@@ -2328,7 +2380,7 @@ class AutoAgentApp:
         incomplete = tuple(
             session_id
             for session_id in self._repository.session_ids()
-            if self._repository.state(session_id).invocation is None
+            if self._repository.state(session_id).invocation is None and session_id not in self._child_owners
         )
         if not incomplete:
             return
@@ -2500,10 +2552,10 @@ def _positive_integer(value: object, name: str) -> None:
         raise ValueError(f"{name} must be positive.")
 
 
-def _contains_invocation_ref(annotation: object) -> bool:
-    if annotation is InvocationRef:
+def _contains_identity_value(annotation: object) -> bool:
+    if annotation in (InvocationRef, ChildHandle):
         return True
-    return any(_contains_invocation_ref(item) for item in get_args(annotation))
+    return any(_contains_identity_value(item) for item in get_args(annotation))
 
 
 def _close_timeout(value: float | None) -> None:

@@ -1,11 +1,16 @@
 """Optional lifecycle capture must bypass checkpoint construction, not cleanup."""
+
+from tests.graph_fixtures import (
+    load_graph,
+    resume_graph_wait,
+)
 import asyncio
 import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
 from autoagent import AutoAgentApp, Node, Wait, Workflow
-from autoagent.core import AppCheckpoint, SessionCheckpoint
+from autoagent.core import AppCheckpoint, SessionCheckpoint, RuntimeGraphCheckpoint
 from autoagent.core.errors import RuntimeInfrastructureError
 from tests.benchmarks.benchmark_core_audit import Value, identity
 from tests.test_phase13_lifecycle_recovery import _CoordinatedCloseApp, _release_runtime_gate
@@ -68,10 +73,10 @@ class CheckpointOptInTests(unittest.TestCase):
         try:
             result = app.invoke(workflow, {'value': 1})
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-            self.assertIsInstance(checkpoint, SessionCheckpoint)
+            self.assertIsInstance(checkpoint, RuntimeGraphCheckpoint)
             restored.register_workflow(workflow)
-            ref = restored.load_checkpoint(checkpoint).invocations[0]
-            self.assertEqual(restored.resume(ref, result.waits[0].id, {'value': 2}).output, {'value': 2})
+            ref = load_graph(restored, checkpoint).invocations[0]
+            self.assertEqual(resume_graph_wait(restored, ref, result.waits[0].id, {'value': 2}).output, {'value': 2})
         finally:
             app.close()
             restored.close()
@@ -83,7 +88,7 @@ class CheckpointOptInTests(unittest.TestCase):
         with patch.object(app._repository, 'capture_checkpoint', wraps=app._repository.capture_checkpoint) as capture:
             checkpoint = app.close(capture_checkpoint=True)
             self.assertIsInstance(checkpoint, AppCheckpoint)
-            self.assertEqual(len(checkpoint.sessions), 1)
+            self.assertEqual(len(checkpoint.graphs), 1)
             self.assertIs(app.close(), checkpoint)
             self.assertIs(app.close(capture_checkpoint=True), checkpoint)
             self.assertEqual(capture.call_count, 1)

@@ -22,16 +22,16 @@ from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 5
+RUNTIME_STATE_SCHEMA_VERSION = 6
 InvocationStatus = Literal[
-    "created", "running", "waiting", "completed", "failed", "cancelled"
+    "created", "running", "waiting", "joining_children", "completed", "failed", "cancelled"
 ]
 NodeOccurrenceStatus = Literal[
     "ready", "running", "waiting", "completed", "failed", "skipped", "cancelled"
 ]
 OperatorCallStatus = Literal["running", "completed", "failed", "lost", "cancelled"]
 ChildInvocationMode = Literal["await", "spawn"]
-ChildUnitPhase = Literal["planned", "opened", "accepted", "terminal"]
+ChildUnitPhase = Literal["planned", "opened", "accepted", "terminal", "abandoned"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +273,7 @@ def validate_runtime_state(state: RuntimeState) -> None:
         "created",
         "running",
         "waiting",
+        "joining_children",
         "completed",
         "failed",
         "cancelled",
@@ -659,7 +660,7 @@ def _validate_child_plans(
                 raise ValueError("Child Invocation identities must be unique.")
             session_ids.add(unit.session_id)
             invocation_ids.add(unit.invocation_id)
-            if unit.phase not in {"planned", "opened", "accepted", "terminal"}:
+            if unit.phase not in {"planned", "opened", "accepted", "terminal", "abandoned"}:
                 raise ValueError(f"Unsupported Child Invocation phase {unit.phase!r}.")
 
 
@@ -695,15 +696,28 @@ def _validate_activation(
 
 
 def _validate_invocation_lifecycle(invocation: InvocationState) -> None:
+    if invocation.status not in {"failed", "cancelled"} and any(
+        u.phase == "abandoned" for p in invocation.child_plans.values() for u in p.units
+    ):
+        raise ValueError("Only a failed or cancelled Parent may abandon a Child plan.")
     terminal = invocation.status in {"completed", "failed", "cancelled"}
     if terminal != (invocation.completed_at_us is not None):
         raise ValueError(
             "Invocation completed_at_us must exist exactly for terminal status."
         )
+    if invocation.status == "completed" and any(
+        u.phase not in {'terminal', 'abandoned'} for plan in invocation.child_plans.values() for u in plan.units
+    ):
+        raise ValueError("Completed Invocation requires settled Child ownership.")
+    if invocation.status == "joining_children" and (
+        invocation.scheduler.ready or any(o.status in {"ready", "running", "waiting"}
+        for o in invocation.scheduler.occurrences.values())
+    ):
+        raise ValueError("Joining Invocation cannot retain unfinished body work.")
     if invocation.status == "created":
         if invocation.started_at_us is not None:
             raise ValueError("A created Invocation cannot have started_at_us.")
-    elif invocation.status in {"running", "waiting", "completed"}:
+    elif invocation.status in {"running", "waiting", "joining_children", "completed"}:
         if invocation.started_at_us is None:
             raise ValueError(
                 f"A {invocation.status} Invocation requires started_at_us."
@@ -1041,7 +1055,7 @@ def _invocation_from_record(value: object) -> InvocationState | None:
     child_plans_record = _mapping(record.get("child_plans"), "Child Invocation Plans")
     scheduler = _scheduler_from_record(record.get("scheduler"))
     status = _string(record, "status")
-    if status not in {"created", "running", "waiting", "completed", "failed", "cancelled"}:
+    if status not in {"created", "running", "waiting", "joining_children", "completed", "failed", "cancelled"}:
         raise ValueError(f"Unsupported Invocation status {status!r}.")
     return InvocationState(
         id=_string(record, "id"),
@@ -1110,6 +1124,7 @@ def _occurrence_from_record(value: object) -> NodeOccurrenceState:
         "ready",
         "running",
         "waiting",
+        "joining_children",
         "completed",
         "failed",
         "skipped",
@@ -1255,7 +1270,7 @@ def _child_plan_from_record(value: object) -> ChildInvocationPlan:
 def _child_unit_from_record(value: object) -> ChildUnitState:
     record = _mapping(value, "Child Invocation Unit")
     phase = _string(record, "phase")
-    if phase not in {"planned", "opened", "accepted", "terminal"}:
+    if phase not in {"planned", "opened", "accepted", "terminal", "abandoned"}:
         raise ValueError(f"Unsupported Child Invocation phase {phase!r}.")
     return ChildUnitState(
         unit_index=_integer(record, "unit_index"),

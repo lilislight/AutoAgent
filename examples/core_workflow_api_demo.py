@@ -28,7 +28,7 @@ from autoagent import (
     Node,
     OutputBindingContext,
     Recovery,
-    SessionCheckpoint,
+    RuntimeGraphCheckpoint,
     SubWorkflow,
     UserEventMapping,
     Wait,
@@ -37,7 +37,7 @@ from autoagent import (
 
 
 PARENT_CHECKPOINT_PATH = Path("core_workflow_checkpoint.json")
-CHILD_CHECKPOINT_PATH = Path("core_workflow_child_checkpoint.json")
+COMPLETED_CHECKPOINT_PATH = Path("core_workflow_completed_checkpoint.json")
 
 
 # Core requires durable Operator boundaries. TypedDict and strict Pydantic models
@@ -317,7 +317,7 @@ def print_result(label: str, result: InvocationResult) -> None:
     print(f"waits={result.waits}")
 
 
-def save_checkpoint(path: Path, checkpoint: SessionCheckpoint) -> None:
+def save_checkpoint(path: Path, checkpoint: RuntimeGraphCheckpoint) -> None:
     path.write_text(
         json.dumps(checkpoint.to_record(), indent=2, sort_keys=True),
         encoding="utf-8",
@@ -325,9 +325,9 @@ def save_checkpoint(path: Path, checkpoint: SessionCheckpoint) -> None:
     print(f"\nsaved checkpoint to {path.resolve()}")
 
 
-def load_checkpoint(path: Path) -> SessionCheckpoint:
+def load_checkpoint(path: Path) -> RuntimeGraphCheckpoint:
     record = json.loads(path.read_text(encoding="utf-8"))
-    return SessionCheckpoint.from_record(record)
+    return RuntimeGraphCheckpoint.from_record(record)
 
 
 def main() -> None:
@@ -391,15 +391,10 @@ def main() -> None:
     assert completed is not None
     print_result("parent completed", completed)
 
-    # The approved path returns after spawning the audit Child. Observe and join
-    # for it through the parent's durable InvocationRef.
-    child_ref = recovered.child_invocations(completed.ref)[0]
-    print("\nspawned child ref:", child_ref)
-    child = recovered.join(child_ref, timeout=2.0)
-    print_result("spawned audit child", child)
-
-    # Explicitly capture and unload the quiescent Child independently.
-    save_checkpoint(CHILD_CHECKPOINT_PATH, recovered.unload_session(child_ref, capture_checkpoint=True))
+    # Root completion includes the spawned audit Child's completion.
+    # Ownership is transferred as one complete graph, never as separate Sessions.
+    save_checkpoint(COMPLETED_CHECKPOINT_PATH,
+                    recovered.unload_session(completed.ref, capture_checkpoint=True))
     recovered.close()
 
 

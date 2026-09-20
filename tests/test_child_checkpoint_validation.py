@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from autoagent import RuntimeGraphCheckpoint
+
+from tests.graph_fixtures import (
+    join_observed,
+    load_graph,
+    root_snapshot,
+)
+
 import asyncio
 import json
 import unittest
@@ -37,33 +45,20 @@ def definitions() -> tuple[Workflow, Workflow]:
 
 
 class ChildCheckpointValidationTests(unittest.TestCase):
-    def test_parent_unload_checkpoint_contains_only_parent_session(self) -> None:
-        """Keep an unloaded Parent checkpoint independent from its spawned Child."""
+    def test_parent_unload_checkpoint_contains_complete_graph(self) -> None:
+        """Keep every owned Child in the Root graph checkpoint."""
 
         _child, parent = definitions()
         app = AutoAgentApp()
         try:
             result = app.invoke(parent, {"value": 1}, session_id="parent-session")
-            app.join(result.output, timeout=1)
+            join_observed(app, result.output, timeout=1)
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
-            self.assertEqual(checkpoint.session_id, "parent-session")
-            self.assertEqual(checkpoint.state.session.id, "parent-session")
+            self.assertEqual(root_snapshot(checkpoint).session_id, "parent-session")
+            self.assertEqual(root_snapshot(checkpoint).state.session.id, "parent-session")
         finally:
             app.close()
 
-    def test_child_unload_checkpoint_uses_generic_ref(self) -> None:
-        """Unload the Child Session through its durable InvocationRef."""
-
-        _child, parent = definitions()
-        app = AutoAgentApp()
-        try:
-            parent_result = app.invoke(parent, {"value": 1})
-            child_result = app.join(parent_result.output, timeout=1)
-            checkpoint = app.unload_session(parent_result.output, capture_checkpoint=True)
-            self.assertEqual(checkpoint.session_id, child_result.session_id)
-            self.assertEqual(checkpoint.state.invocation.id, child_result.invocation_id)
-        finally:
-            app.close()
 
     def test_load_does_not_require_registered_workflow(self) -> None:
         """Install Session State before its executable Workflow is registered."""
@@ -72,72 +67,21 @@ class ChildCheckpointValidationTests(unittest.TestCase):
         source = AutoAgentApp()
         try:
             result = source.invoke(parent, {"value": 1})
-            source.join(result.output, timeout=1)
+            join_observed(source, result.output, timeout=1)
             checkpoint = source.unload_session(result.ref, capture_checkpoint=True)
         finally:
             source.close()
 
         target = AutoAgentApp()
         try:
-            loaded = target.load_checkpoint(checkpoint)
-            self.assertEqual(loaded.invocations[0].session_id, checkpoint.session_id)
+            loaded = load_graph(target, checkpoint)
+            self.assertEqual(loaded.invocations[0].session_id, root_snapshot(checkpoint).session_id)
             with self.assertRaisesRegex(RuntimeTransitionError, "WORKFLOW_NOT_REGISTERED"):
                 target.recover(loaded.invocations[0])
         finally:
             target.close()
 
-    def test_separate_parent_and_child_checkpoints_load_together(self) -> None:
-        """Install related Sessions atomically without aggregating their snapshots."""
 
-        _child, parent = definitions()
-        source = AutoAgentApp()
-        try:
-            parent_result = source.invoke(parent, {"value": 1})
-            source.join(parent_result.output, timeout=1)
-            child_checkpoint = source.unload_session(parent_result.output, capture_checkpoint=True)
-            parent_checkpoint = source.unload_session(parent_result.ref, capture_checkpoint=True)
-        finally:
-            source.close()
-
-        target = AutoAgentApp()
-        try:
-            loaded = target.load_checkpoint(
-                AppCheckpoint((parent_checkpoint, child_checkpoint))
-            )
-            self.assertEqual(len(loaded.invocations), 2)
-        finally:
-            target.close()
-
-    def test_load_rejects_child_identity_that_conflicts_with_parent_plan(self) -> None:
-        """Reject independently stored Child State with another durable identity."""
-
-        _child, parent = definitions()
-        source = AutoAgentApp()
-        try:
-            parent_result = source.invoke(parent, {"value": 1})
-            source.join(parent_result.output, timeout=1)
-            child_checkpoint = source.unload_session(parent_result.output, capture_checkpoint=True)
-            parent_checkpoint = source.unload_session(parent_result.ref, capture_checkpoint=True)
-        finally:
-            source.close()
-
-        child_state = child_checkpoint.state
-        assert child_state.invocation is not None
-        forged = SessionCheckpoint.from_state(
-            replace(
-                child_state,
-                invocation=replace(child_state.invocation, workflow_id="another"),
-            )
-        )
-        target = AutoAgentApp()
-        try:
-            with self.assertRaisesRegex(
-                RuntimeTransitionError, "CHECKPOINT_CHILD_IDENTITY_MISMATCH"
-            ):
-                target.load_checkpoint(AppCheckpoint((parent_checkpoint, forged)))
-            self.assertEqual(target._repository.session_ids(), ())
-        finally:
-            target.close()
 
     def test_async_unload_returns_the_requested_session_checkpoint(self) -> None:
         """Return one Session checkpoint through the async unload facade."""
@@ -150,7 +94,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
                     {"value": 1},
                 )
                 checkpoint = await app.aunload_session(result.ref, capture_checkpoint=True)
-                self.assertEqual(checkpoint.session_id, result.session_id)
+                self.assertEqual(root_snapshot(checkpoint).session_id, result.session_id)
             finally:
                 await app.aclose()
 
@@ -167,7 +111,7 @@ class ChildCheckpointValidationTests(unittest.TestCase):
             )
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             record = json.loads(json.dumps(checkpoint.to_record()))
-            self.assertEqual(SessionCheckpoint.from_record(record), checkpoint)
+            self.assertEqual(RuntimeGraphCheckpoint.from_record(record), checkpoint)
         finally:
             app.close()
 

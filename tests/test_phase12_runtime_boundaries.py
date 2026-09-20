@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    async_resume_graph_wait,
+    child_refs,
+    join_observed,
+    resume_graph_wait,
+    status_observed,
+)
+
 import asyncio
 import threading
 import time
@@ -217,13 +225,13 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             submitted = app.submit_invoke(parent, {"value": 1})
 
             def child_is_waiting() -> bool:
-                handles = app.child_invocations(submitted.ref)
-                return bool(handles) and app.status(handles[0]).status == "waiting"
+                handles = child_refs(app, submitted.ref)
+                return bool(handles) and status_observed(app, handles[0]).status == "waiting"
 
             self.assertTrue(slow_started.wait(1))
             self.assertTrue(_wait_until(child_is_waiting))
             release_slow.set()
-            result = app.join(submitted.ref, timeout=1)
+            result = join_observed(app, submitted.ref, timeout=1)
             self.assertEqual(result.status, "waiting")
         finally:
             release_slow.set()
@@ -268,17 +276,17 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             submitted = app.submit_invoke(parent, {"value": 1})
 
             def waiting_child():  # type: ignore[no-untyped-def]
-                handles = app.child_invocations(submitted.ref)
+                handles = child_refs(app, submitted.ref)
                 if not handles:
                     return None
-                result = app.status(handles[0])
+                result = status_observed(app, handles[0])
                 return result if result.status == "waiting" else None
 
             self.assertTrue(slow_started.wait(1))
             self.assertTrue(_wait_until(lambda: waiting_child() is not None))
             child_result = waiting_child()
             assert child_result is not None
-            app.resume(
+            resume_graph_wait(app,
                 child_result.ref,
                 child_result.waits[0].id,
                 {"value": 2},
@@ -288,7 +296,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 "Parent did not run Child continuation while its sibling was active.",
             )
             release_slow.set()
-            self.assertEqual(app.join(submitted.ref, timeout=1).status, "completed")
+            self.assertEqual(join_observed(app, submitted.ref, timeout=1).status, "completed")
         finally:
             release_slow.set()
             app.close()
@@ -333,12 +341,12 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 session_id="quiescence-race-root",
             )
             self.assertTrue(finish_entered.wait(1))
-            handles = app.child_invocations(submitted.ref)
+            handles = child_refs(app, submitted.ref)
             self.assertEqual(len(handles), 1)
-            child_result = app.status(handles[0])
+            child_result = status_observed(app, handles[0])
             self.assertEqual(child_result.status, "waiting")
 
-            resumed = app.resume(
+            resumed = resume_graph_wait(app,
                 child_result.ref,
                 child_result.waits[0].id,
                 {"value": 2},
@@ -346,7 +354,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             self.assertEqual(resumed.status, "completed")
             app._runtime_loop.run(release_gate())
 
-            result = app.join(submitted.ref, timeout=1)
+            result = join_observed(app, submitted.ref, timeout=1)
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.output, {"value": 2})
         finally:
@@ -392,11 +400,11 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
         try:
             result = app.invoke(parent, {"value": 1})
             self.assertEqual(result.status, "failed")
-            handles = app.child_invocations(result.ref)
+            handles = child_refs(app, result.ref)
             self.assertEqual(len(handles), 1)
             self.assertTrue(
                 _wait_until(
-                    lambda: app.status(handles[0]).status == "cancelled"
+                    lambda: status_observed(app, handles[0]).status == "cancelled"
                 )
             )
             self.assertTrue(child_cancelled.wait(0.5))
@@ -416,7 +424,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 {"value": 1},
             )
             self.assertEqual(waiting.status, "waiting")
-            resumed = app.resume(
+            resumed = resume_graph_wait(app,
                 waiting.ref,
                 waiting.waits[0].id,
                 ModelValue(value=2),
@@ -480,15 +488,15 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 {"items": [{"value": 1}, {"value": 2}]},
             )
             self.assertEqual(root.status, "waiting")
-            handles = app.child_invocations(root.ref)
+            handles = child_refs(app, root.ref)
             self.assertEqual(len(handles), 2)
-            children = [app.status(handle) for handle in handles]
+            children = [status_observed(app, handle) for handle in handles]
             self.assertTrue(all(item.status == "waiting" for item in children))
 
             async def resume_both() -> None:
                 await asyncio.gather(
                     *(
-                        app.aresume(
+                        async_resume_graph_wait(app,
                             item.ref,
                             item.waits[0].id,
                             {"value": index + 10},
@@ -498,7 +506,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 )
 
             asyncio.run(resume_both())
-            self.assertEqual(app.join(root.ref, timeout=1).status, "completed")
+            self.assertEqual(join_observed(app, root.ref, timeout=1).status, "completed")
             self.assertEqual(peak, 1)
         finally:
             app.close()
@@ -670,92 +678,30 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 {"items": [{"value": 1}, {"value": 2}]},
             )
             self.assertEqual(root.status, "waiting")
-            handles = app.child_invocations(root.ref)
-            children = [app.status(handle) for handle in handles]
+            handles = child_refs(app, root.ref)
+            children = [status_observed(app, handle) for handle in handles]
             self.assertEqual(len(children), 2)
             self.assertTrue(all(item.status == "waiting" for item in children))
 
-            failed_child = app.resume(
+            failed_child = resume_graph_wait(app,
                 children[0].ref,
                 children[0].waits[0].id,
                 {"value": 1},
             )
             self.assertEqual(failed_child.status, "failed")
-            parent_result = app.join(root.ref, timeout=1)
+            parent_result = join_observed(app, root.ref, timeout=1)
             self.assertEqual(parent_result.status, "failed")
             self.assertCountEqual(
-                [app.status(handle).status for handle in handles],
+                [status_observed(app, handle).status for handle in handles],
                 ["failed", "cancelled"],
             )
         finally:
             app.close()
 
-    def test_cancel_only_cancels_target_subtree(self) -> None:
-        """Verify cancel leaves its parent and sibling Child untouched."""
 
-        child = Workflow(
-            "targeted-cancel-child",
-            nodes=[Node("approval", Wait(Value, Value))],
-        )
-        parent = Workflow(
-            "targeted-cancel-parent",
-            nodes=[
-                Node(
-                    "children",
-                    child,
-                    input_mapping=map_items,
-                    map=Map(max_parallelism=2),
-                    execution_mode="spawn",
-                )
-            ],
-        )
-        app = AutoAgentApp()
-        sibling = None
-        try:
-            root = app.invoke(
-                parent,
-                {"items": [{"value": 1}, {"value": 2}]},
-            )
-            self.assertEqual(root.status, "completed")
-            handles = app.child_invocations(root.ref)
-            self.assertEqual(len(handles), 2)
-            self.assertTrue(
-                all(app.join(handle, timeout=1).status == "waiting" for handle in handles)
-            )
-
-            target, sibling = handles
-            cancelled = app.cancel(target, "cancel one child")
-            self.assertEqual(cancelled.status, "cancelled")
-            self.assertEqual(app.status(sibling).status, "waiting")
-            self.assertEqual(app.join(root.ref).status, "completed")
-        finally:
-            if sibling is not None and app.status(sibling).status == "waiting":
-                app.cancel(sibling, "test cleanup")
-            app.close()
-
-    def test_cancel_awaited_child_converges_parent_failure(self) -> None:
-        """Verify cancelling one awaited Child wakes and fails its parent Node."""
-
-        child = Workflow(
-            "cancel-awaited-child",
-            nodes=[Node("approval", Wait(Value, Value))],
-        )
-        parent = Workflow(
-            "cancel-awaited-parent",
-            nodes=[Node("child", child)],
-        )
-        app = AutoAgentApp()
-        try:
-            root = app.invoke(parent, {"value": 1})
-            self.assertEqual(root.status, "waiting")
-            handle = app.child_invocations(root.ref)[0]
-            self.assertEqual(app.cancel(handle).status, "cancelled")
-            self.assertEqual(app.join(root.ref, timeout=1).status, "failed")
-        finally:
-            app.close()
 
     def test_cancel_awaited_child_map_converges_every_unit(self) -> None:
-        """Verify one cancelled awaited Map Child cancels siblings before parent failure."""
+        """Verify Root cancellation converges every awaited Map unit."""
 
         child = Workflow(
             "cancel-awaited-map-child",
@@ -778,12 +724,12 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 parent,
                 {"items": [{"value": 1}, {"value": 2}]},
             )
-            handles = app.child_invocations(root.ref)
+            handles = child_refs(app, root.ref)
             self.assertEqual(len(handles), 2)
-            app.cancel(handles[0])
-            self.assertEqual(app.join(root.ref, timeout=1).status, "failed")
+            app.cancel(root.ref)
+            self.assertEqual(join_observed(app, root.ref, timeout=1).status, "cancelled")
             self.assertEqual(
-                [app.status(handle).status for handle in handles],
+                [status_observed(app, handle).status for handle in handles],
                 ["cancelled", "cancelled"],
             )
         finally:

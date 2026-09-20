@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from autoagent import RuntimeGraphCheckpoint
+
+from tests.graph_fixtures import (
+    child_refs,
+    join_observed,
+    load_graph,
+    root_snapshot,
+    session_checkpoints,
+)
+
 import json
 import itertools
 import asyncio
@@ -190,7 +200,7 @@ class QualityTests(unittest.TestCase):
             time.sleep(0.03)
             self.assertEqual(peak, 2)
             release.set()
-            results = [app.join(item.ref, 2) for item in submitted]
+            results = [join_observed(app, item.ref, 2) for item in submitted]
             self.assertTrue(all(item.status == "completed" for item in results))
             self.assertEqual(peak, 2)
         finally:
@@ -273,7 +283,7 @@ class QualityTests(unittest.TestCase):
             time.sleep(0.03)
             self.assertFalse(async_started.is_set())
             release_sync.set()
-            self.assertEqual(app.join(second.ref, 2).status, "completed")
+            self.assertEqual(join_observed(app, second.ref, 2).status, "completed")
             self.assertTrue(async_started.is_set())
         finally:
             release_sync.set()
@@ -625,7 +635,7 @@ class QualityTests(unittest.TestCase):
         )
         self.assertTrue(started.wait(1))
         checkpoint = app.close(capture_checkpoint=True)
-        state = checkpoint.sessions[0].state
+        state = session_checkpoints(checkpoint)[0].state
         self.assertEqual(state.invocation.status, "running")
         self.assertFalse(
             any(
@@ -717,25 +727,16 @@ class QualityTests(unittest.TestCase):
         first_app = AutoAgentApp()
         result = first_app.invoke(parent, {"value": 1})
         handle = result.output
-        child_result = first_app.join(handle)
-        checkpoint = AppCheckpoint(
-            (
-                first_app.unload_session(child_result.ref, capture_checkpoint=True),
-                first_app.unload_session(result.ref, capture_checkpoint=True),
-            )
-        )
+        checkpoint = first_app.unload_session(result.ref, capture_checkpoint=True)
         first_app.close()
 
         second_app = AutoAgentApp()
         try:
             second_app.register_workflow(parent)
-            second_app.load_checkpoint(checkpoint)
-            status = second_app.status(handle)
+            load_graph(second_app, checkpoint)
+            status = second_app.status(result.ref)
             self.assertEqual(status.status, "completed")
-            self.assertEqual(
-                second_app.child_invocations(result.ref),
-                (handle,),
-            )
+            self.assertEqual(child_refs(second_app, result.ref)[0].session_id, handle.child_session_id)
         finally:
             second_app.close()
 
@@ -834,7 +835,7 @@ class QualityTests(unittest.TestCase):
                     session_id="cursor-session",
                     session_context={"version": 2},
                 )
-            incremental = app.join(first.ref)
+            incremental = join_observed(app, first.ref)
             self.assertFalse(hasattr(incremental, "trace_events"))
             self.assertFalse(hasattr(incremental, "user_events"))
         finally:
@@ -855,9 +856,9 @@ class QualityTests(unittest.TestCase):
             self.assertFalse(hasattr(app, "checkpoint"))
             self.assertFalse(hasattr(app, "acheckpoint"))
             checkpoint = app.unload_session(first.ref, capture_checkpoint=True)
-            rebuilt = SessionCheckpoint.from_record(
+            rebuilt = root_snapshot(RuntimeGraphCheckpoint.from_record(
                 checkpoint.to_record()
-            )
+            ))
             self.assertEqual(
             rebuilt.state.invocation.output,
                 {"value": 1},
@@ -865,7 +866,7 @@ class QualityTests(unittest.TestCase):
             recovered_app = AutoAgentApp()
             try:
                 recovered_app.register_workflow(workflow)
-                loaded = recovered_app.load_checkpoint(checkpoint)
+                loaded = load_graph(recovered_app, checkpoint)
                 recovered = recovered_app.join(loaded.invocations[0])
                 self.assertEqual(recovered.output, {"value": 1})
             finally:
@@ -892,7 +893,7 @@ class QualityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeTransitionError, "INVOCATION_REF_STALE"
             ):
-                app.join(first.ref)
+                join_observed(app, first.ref)
         finally:
             app.close()
 

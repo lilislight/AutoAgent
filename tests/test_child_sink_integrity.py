@@ -1,6 +1,13 @@
 """Core Child admission and completion integrity at the external Sink boundary."""
 from __future__ import annotations
 
+from tests.graph_fixtures import (
+    graph_bundle,
+    join_observed,
+    load_graph,
+    session_checkpoints,
+)
+
 import asyncio
 import unittest
 from typing_extensions import TypedDict
@@ -37,7 +44,7 @@ class Collector:
 
 
 def checkpoint_from_events(events):
-    return AppCheckpoint(tuple(SessionCheckpoint.from_state(StateReducer().reduce(tuple(
+    return graph_bundle(tuple(SessionCheckpoint.from_state(StateReducer().reduce(tuple(
         RuntimeEvent.from_record(event.to_record()) for event in events if event.session_id == sid)))
         for sid in dict.fromkeys(event.session_id for event in events)))
 
@@ -72,11 +79,12 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         parent = Workflow('handle-parent', nodes=[Node('spawn', child, execution_mode='spawn')])
         result = app.invoke(parent, {'value': 1})
         self.assertEqual(result.status, 'completed', result.error)
-        child_result = app.join(result.output, timeout=2)
+        child_result = join_observed(app, result.output, timeout=2)
         self.assertEqual(child_result.output, {'value': 1})
-        checkpoint = app.unload_session(result.output, capture_checkpoint=True)
+        graph = app.unload_session(result.ref, capture_checkpoint=True)
+        checkpoint = next(s for s in graph.sessions if s.session_id == result.output.child_session_id)
         restored = SessionCheckpoint.from_record(checkpoint.to_record())
-        self.assertEqual(restored.state.invocation.id, result.output.invocation_id)
+        self.assertEqual(restored.state.invocation.id, result.output.child_invocation_id)
         self.assertTrue(restored.state.invocation.scheduler.initialized)
 
     def test_spawn_map_admits_children_before_parent_acceptance(self):
@@ -90,7 +98,7 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         result = app.invoke(parent, {'items': [{'value': i} for i in range(3)]}, session_id='parent')
         self.assertEqual(result.status, 'completed', result.error)
         for handle in result.output:
-            self.assertEqual(app.join(handle, timeout=2).status, 'completed')
+            self.assertEqual(join_observed(app, handle, timeout=2).status, 'completed')
         states = {}
         accepted = 0
         from autoagent.core.runtime import RuntimeState
@@ -121,7 +129,7 @@ class ChildSinkIntegrityTests(unittest.TestCase):
             with self.assertRaises(RuntimeInfrastructureError):
                 source.invoke(parent, {'value': 1}, session_id='parent')
             checkpoint = checkpoint_from_events(tuple(sink.events))
-            root = next(s.state.invocation for s in checkpoint.sessions if s.session_id == 'parent')
+            root = next(s.state.invocation for s in session_checkpoints(checkpoint) if s.session_id == 'parent')
             self.assertNotEqual(root.status, 'completed')
             self.assertNotEqual(next(iter(root.child_plans.values())).units[0].phase, 'terminal')
         finally:
@@ -130,7 +138,7 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         restored = AutoAgentApp()
         self.addCleanup(restored.close)
         restored.register_workflow(parent)
-        ref = next(ref for ref in restored.load_checkpoint(checkpoint).invocations if ref.session_id == 'parent')
+        ref = next(ref for ref in load_graph(restored, checkpoint).invocations if ref.session_id == 'parent')
         result = restored.recover(ref)
         self.assertEqual(result.status, 'completed', result.error)
         self.assertEqual(result.output, {'value': 1})

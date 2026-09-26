@@ -135,7 +135,7 @@ class WorkflowExecutor:
             while True:
                 state = self._repository.state(session_id)
                 invocation = state.invocation
-                if invocation is None or invocation.terminal or invocation.status == "joining_children":
+                if invocation is None or invocation.terminal or invocation.status == "settling":
                     return
                 index = self._execution_index(session_id)
                 execution_count = index.started_count
@@ -556,7 +556,7 @@ class WorkflowExecutor:
         if any(item is None for item in child_states):
             raise RuntimeError("Child Invocation state is missing.")
         if any(
-            item.status in {"created", "running", "waiting"}
+            item.status in {"created", "running", "waiting", "settling"}
             for item in child_states  # type: ignore[union-attr]
         ):
             occurrence = parent.scheduler.occurrences[occurrence_id]
@@ -622,7 +622,7 @@ class WorkflowExecutor:
     ) -> InvocationState | None:
         for unit in plan.units:
             invocation = self._repository.state(unit.session_id).invocation
-            if invocation is not None and invocation.status in {"failed", "cancelled"}:
+            if invocation is not None and invocation.stopping:
                 return invocation
         return None
 
@@ -658,7 +658,7 @@ class WorkflowExecutor:
                     raise
 
         for task in live_tasks:
-            if not task.done():
+            if not task.done() and not task.cancelling():
                 task.cancel()
         if live_tasks:
             await asyncio.gather(*live_tasks, return_exceptions=True)
@@ -669,6 +669,7 @@ class WorkflowExecutor:
             unit = current_plan.units[unit_index]
             if unit.phase == "terminal":
                 continue
+            await self._ensure_child_durable(unit.session_id)
             child = self._repository.state(unit.session_id).invocation
             if child is None or not child.terminal:
                 raise RuntimeError(

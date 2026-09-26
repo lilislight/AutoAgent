@@ -11,14 +11,14 @@ from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
     NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed,
-    WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationJoiningChildren,
+    WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationSettling,
     InvocationFailed, InvocationCancelled, ChildInvocationPlanned,
     ChildInvocationPhaseChanged, ChildAwaitSuspended, ChildAwaitReady,
-    validate_payload,
+    validate_payload, ChildCompacted,
 )
 from .operations import StateDelta, StateOperation
 from .state import (
-    RuntimeState, SessionState, InvocationState, SchedulerState,
+    RuntimeState, SessionState, InvocationState, SchedulerState, ChildResult, child_input_digest, release_child_inputs,
     NodeOccurrenceState, NodeExecutionState, OperatorCallState, WaitState,
     ChildInvocationPlan, ChildUnitState, _validate_scope,
 )
@@ -85,6 +85,19 @@ class TransitionPlanner:
             return StateDelta(tuple(operations))
         if inv is None or inv.id != invocation_id:
             raise RuntimeTransitionError("INVOCATION_MISMATCH", "Event targets another Invocation.")
+        if isinstance(payload, ChildCompacted):
+            if isinstance(inv, ChildResult) or not inv.terminal or any(
+                u.phase not in {"terminal", "abandoned"} for p in inv.child_plans.values() for u in p.units
+            ):
+                raise RuntimeTransitionError("CHILD_NOT_COMPACTABLE", "Child must be terminal with settled descendants.")
+            result = ChildResult(inv.id, inv.workflow_id, inv.workflow_revision_id, inv.entry_node_id,
+                inv.status, inv.output, inv.error, inv.cancel_reason, inv.created_at_us,
+                inv.started_at_us, inv.completed_at_us, payload.parent_session_id,
+                payload.parent_invocation_id, payload.creation_id, payload.unit_index,
+                child_input_digest(inv.input), release_child_inputs(inv.child_plans))
+            put(("invocation",), result)
+            put(("session",), replace(session, context=freeze({}), context_path_revisions=MappingProxyType({}), updated_at_us=occurred_at_us))
+            return StateDelta(tuple(operations))
         if inv.terminal and not isinstance(payload, ChildInvocationPhaseChanged):
             raise RuntimeTransitionError("INVOCATION_TRANSITION_INVALID", "Invocation is already terminal.")
         sched = inv.scheduler
@@ -241,32 +254,44 @@ class TransitionPlanner:
             if recovered:
 
                 put(("invocation", "status"), "running")
-        elif isinstance(payload, (InvocationCompleted, InvocationJoiningChildren)):
-            joining = isinstance(payload, InvocationJoiningChildren)
-            _require_status(inv, {"running"} if joining else {"running", "joining_children"}, payload.kind)
-            if not joining and any(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units):
-                raise RuntimeTransitionError("CHILDREN_NOT_SETTLED", "Completion requires settled children.")
-            put(("invocation", "status"), "joining_children" if joining else "completed")
-            put(("invocation", "output"), payload.output)
-            if not joining:
+        elif isinstance(payload, (InvocationCompleted, InvocationSettling, InvocationFailed, InvocationCancelled)):
+            settling = isinstance(payload, InvocationSettling)
+            outcome = (payload.outcome if settling else "completed" if isinstance(payload, InvocationCompleted)
+                       else "failed" if isinstance(payload, InvocationFailed) else "cancelled")
+            _require_status(inv, {"running", "settling"} if outcome == "completed"
+                            else {"created", "running", "waiting", "settling"}, payload.kind)
+            if inv.status == "settling" and inv.pending_outcome != outcome:
+                if not (settling and inv.pending_outcome == "completed" and outcome in {"failed", "cancelled"}):
+                    raise RuntimeTransitionError("OUTCOME_CONFLICT", "Settling outcome is already decided.")
+            if inv.status == "settling" and inv.pending_outcome == outcome:
+                actual = payload.output if outcome == "completed" else payload.error if outcome == "failed" else payload.reason
+                expected = inv.output if outcome == "completed" else inv.error if outcome == "failed" else inv.cancel_reason
+                if actual is not expected and actual != expected:
+                    raise RuntimeTransitionError("OUTCOME_CONFLICT", "Settling result is already decided.")
+            if not settling and any(u.phase not in {"terminal", "abandoned"} for p in inv.child_plans.values() for u in p.units):
+                raise RuntimeTransitionError("CHILDREN_NOT_SETTLED", "Terminal status requires settled children.")
+            put(("invocation", "status"), "settling" if settling else outcome)
+            if settling or inv.pending_outcome is not None:
+                put(("invocation", "pending_outcome"), outcome if settling else None)
+            if inv.status != "settling" or inv.pending_outcome != outcome:
+                put(("invocation", "output"), payload.output if outcome == "completed" else None)
+                if outcome == "failed" or inv.error is not None:
+                    put(("invocation", "error"), payload.error if outcome == "failed" else None)
+                if outcome == "cancelled" or inv.cancel_reason is not None:
+                    put(("invocation", "cancel_reason"), payload.reason if outcome == "cancelled" else None)
+            if not settling:
                 put(("invocation", "completed_at_us"), occurred_at_us)
-        elif isinstance(payload, (InvocationFailed, InvocationCancelled)):
-            _require_status(inv, {"created", "running", "waiting", "joining_children"}, payload.kind)
-            put(("invocation", "output"), None)
-            failed = isinstance(payload, InvocationFailed)
-            put(("invocation", "status"), "failed" if failed else "cancelled")
-            put(("invocation", "error" if failed else "cancel_reason"), payload.error if failed else payload.reason)
-            put(("invocation", "completed_at_us"), occurred_at_us)
-            put((*SCHED, "ready"), ())
-            for item in sched.occurrences.values():
-                if item.status in {"ready", "running", "waiting"}:
-                    occurrence_put(replace(item, status="cancelled", completed_at_us=occurred_at_us))
-            for item in sched.operator_calls.values():
-                if item.status == "running":
-                    put((*SCHED, "operator_calls", item.id), replace(item, status="cancelled", completed_at_us=occurred_at_us))
-            for item in sched.waits.values():
-                if item.status == "waiting":
-                    put((*SCHED, "waits", item.id), replace(item, status="cancelled"))
+            if outcome != "completed" and inv.status != "settling":
+                put((*SCHED, "ready"), ())
+                for item in sched.occurrences.values():
+                    if item.status in {"ready", "running", "waiting"}:
+                        occurrence_put(replace(item, status="cancelled", completed_at_us=occurred_at_us))
+                for item in sched.operator_calls.values():
+                    if item.status == "running":
+                        put((*SCHED, "operator_calls", item.id), replace(item, status="cancelled", completed_at_us=occurred_at_us))
+                for item in sched.waits.values():
+                    if item.status == "waiting":
+                        put((*SCHED, "waits", item.id), replace(item, status="cancelled"))
         elif isinstance(payload, ChildInvocationPlanned):
             if payload.creation_id in inv.child_plans:
                 raise RuntimeTransitionError("CHILD_PLAN_DUPLICATE", "Child plan already exists.")
@@ -282,7 +307,7 @@ class TransitionPlanner:
             if plan is None or payload.unit_index >= len(plan.units):
                 raise RuntimeTransitionError("CHILD_PLAN_MISSING", "Child plan or unit is missing.")
             unit = plan.units[payload.unit_index]
-            if {"planned":"opened", "opened":"accepted", "accepted":"terminal"}.get(unit.phase) != payload.phase and not (inv.status in {"failed", "cancelled"} and (payload.phase == "terminal" or (payload.phase == "abandoned" and unit.phase == "planned"))):
+            if {"planned":"opened", "opened":"accepted", "accepted":"terminal"}.get(unit.phase) != payload.phase and not (inv.stopping and (payload.phase == "terminal" or (payload.phase == "abandoned" and unit.phase == "planned"))):
                 raise RuntimeTransitionError("CHILD_PHASE_INVALID", "Invalid Child phase transition.")
             updated = replace(unit, phase=payload.phase)
             if isinstance(plan.units, ChunkedUnits) or len(plan.units) >= 512:
@@ -309,7 +334,7 @@ class TransitionPlanner:
                 put(("invocation", "status"), "waiting")
         else:
             raise RuntimeTransitionError("EVENT_TYPE_UNSUPPORTED", "Unsupported semantic boundary.")
-        if isinstance(payload, (InvocationCompleted, InvocationJoiningChildren, InvocationFailed, InvocationCancelled)):
+        if inv.status != "settling" and isinstance(payload, (InvocationCompleted, InvocationSettling, InvocationFailed, InvocationCancelled)):
             # Terminal Invocations retain their public result and business Context,
             # not execution payload history. Apply after lifecycle status updates.
             for item in sched.occurrences.values():
@@ -327,6 +352,13 @@ class TransitionPlanner:
                     put((*SCHED, "waits", item.id, "request"), None)
                 if item.response is not None:
                     put((*SCHED, "waits", item.id, "response"), None)
+        if isinstance(payload, NodeCompleted):
+            for key, plan in inv.child_plans.items():
+                if plan.parent_occurrence_id == payload.occurrence_id and any(not u.input_released for u in plan.units):
+                    put(("invocation", "child_plans", key), release_child_inputs({key: plan})[key])
+        elif isinstance(payload, (InvocationCompleted, InvocationSettling, InvocationFailed, InvocationCancelled)):
+            if any(not u.input_released for p in inv.child_plans.values() for u in p.units):
+                put(("invocation", "child_plans"), release_child_inputs(inv.child_plans))
         return StateDelta(tuple(operations))
 
     def preview_context_patch(

@@ -12,12 +12,16 @@ import threading
 from unittest.mock import patch
 
 from autoagent import AutoAgentApp, Edge, InputMappingContext, Map, Node, Workflow
-from autoagent.core.runtime import RuntimeRepository
+from autoagent.core.runtime import RuntimeRepository, ChildResult
 from autoagent.core.runtime._execution_index import ExecutionIndex
 from tests.benchmarks.benchmark_core_execution import Value, identity, shrink, loop_workflow
 
 
 def assert_index(repository, session_id):
+    if isinstance(repository.state(session_id).invocation, ChildResult):
+        assert session_id not in repository._execution_indexes
+        assert session_id not in repository._context_indexes
+        return
     actual = repository.execution_index(session_id)
     expected = ExecutionIndex(repository.state(session_id))
     assert actual.child_remaining == expected.child_remaining
@@ -136,7 +140,8 @@ class ExecutionPerformanceTests(unittest.TestCase):
                     await asyncio.sleep(0.01)
                 for sid in app._repository.session_ids():
                     assert_index(app._repository,sid)
-                    self.assertFalse(app._repository.execution_index(sid).running)
+                    if not isinstance(app._repository.state(sid).invocation, ChildResult):
+                        self.assertFalse(app._repository.execution_index(sid).running)
             finally:
                 await app.aclose()
         asyncio.run(run())

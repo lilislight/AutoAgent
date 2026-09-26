@@ -148,7 +148,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             waiting = source.invoke(parent, {"value": 1}, session_id="root")
             self.assertEqual(waiting.status, "waiting")
             self.assertTrue(child_started.wait(1))
-            sink.fail_event_name = "invocation.cancelled"
+            sink.fail_event_name = "invocation.settling"
             with self.assertRaises(RuntimeInfrastructureError):
                 source.cancel(waiting.ref, "stop")
             prefix = tuple(sink.events)
@@ -160,7 +160,8 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         root = _state(checkpoint, "root").invocation
         assert root is not None
         child_session_id = next(iter(root.child_plans.values())).units[0].session_id
-        self.assertEqual(root.status, "cancelled")
+        self.assertEqual(root.status, "settling")
+        self.assertEqual(root.pending_outcome, "cancelled")
         self.assertEqual(
             _state(checkpoint, child_session_id).invocation.status,  # type: ignore[union-attr]
             "running",
@@ -218,7 +219,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         sink = _CommitThenFailSink()
         source = AutoAgentApp(runtime_event_sink=sink)
         try:
-            sink.fail_event_name = "invocation.failed"
+            sink.fail_event_name = "invocation.settling"
             with self.assertRaises(RuntimeInfrastructureError):
                 source.invoke(parent, {"value": 1}, session_id="root")
             prefix = tuple(sink.events)
@@ -230,7 +231,8 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         root = _state(checkpoint, "root").invocation
         assert root is not None
         child_session_id = next(iter(root.child_plans.values())).units[0].session_id
-        self.assertEqual(root.status, "failed")
+        self.assertEqual(root.status, "settling")
+        self.assertEqual(root.pending_outcome, "failed")
         self.assertEqual(
             _state(checkpoint, child_session_id).invocation.status,  # type: ignore[union-attr]
             "running",

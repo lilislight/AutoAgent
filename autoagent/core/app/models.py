@@ -14,7 +14,7 @@ from ..runtime.graph_checkpoint import RuntimeGraphCheckpoint
 
 
 InvocationStatus = Literal[
-    "created", "running", "waiting", "joining_children", "completed", "failed", "cancelled"
+    "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
 
 
@@ -52,6 +52,7 @@ class InvocationResult:
     output: object = None
     error: RuntimeErrorInfo | None = None
     waits: tuple[InvocationWait, ...] = ()
+    pending_outcome: Literal["completed", "failed", "cancelled"] | None = None
 
     @property
     def session_id(self) -> str:

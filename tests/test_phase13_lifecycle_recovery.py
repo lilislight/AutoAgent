@@ -696,7 +696,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 if ref.session_id == "recover-opened-wait-root"
             )
             root_result = recovered.recover(root_ref)
-            self.assertEqual(root_result.status, "joining_children")
+            self.assertEqual(root_result.status, "settling")
             root_after_recovery = recovered._repository.state(root_result.session_id)
             recovered_plan = next(
                 iter(root_after_recovery.invocation.child_plans.values())

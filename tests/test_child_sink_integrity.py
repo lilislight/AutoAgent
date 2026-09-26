@@ -72,7 +72,7 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         asyncio.run(exercise())
 
     def test_child_handle_has_self_contained_checkpoint(self):
-        """Every returned Child handle identifies a fully initialized standalone Session."""
+        """A completed Handle retains its result in a compact Session checkpoint."""
         app = AutoAgentApp()
         self.addCleanup(app.close)
         child = Workflow('handle-child', nodes=[Node('work', identity)])
@@ -85,7 +85,9 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         checkpoint = next(s for s in graph.sessions if s.session_id == result.output.child_session_id)
         restored = SessionCheckpoint.from_record(checkpoint.to_record())
         self.assertEqual(restored.state.invocation.id, result.output.child_invocation_id)
-        self.assertTrue(restored.state.invocation.scheduler.initialized)
+        from autoagent.core import ChildResult
+        self.assertIsInstance(restored.state.invocation, ChildResult)
+        self.assertEqual(restored.state.invocation.output, {"value": 1})
 
     def test_spawn_map_admits_children_before_parent_acceptance(self):
         """Each accepted parent unit has a Child Invocation in the acknowledged Event prefix."""

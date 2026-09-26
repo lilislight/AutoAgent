@@ -7,7 +7,7 @@ from ._context_index import ContextRevisionIndex, planning_indexes
 from collections.abc import Mapping
 
 from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated
-from .state import RuntimeState
+from .state import RuntimeState, ChildResult
 from ._execution_index import ExecutionIndex
 from .checkpoint import SessionCheckpoint
 from .reducer import StateReducer
@@ -121,14 +121,18 @@ class RuntimeRepository:
             raise
         except BaseException as error:
             raise RuntimeInfrastructureError("Runtime Event append failed.") from error
-        index = self._execution_indexes.get(session_id)
-        self._execution_indexes[session_id] = (
-            ExecutionIndex(candidate) if index is None
-            else index.advance(self._states[session_id], candidate, event.delta,
-                child_unit=(event.payload.creation_id, event.payload.unit_index)
-                if type(self.planner) is TransitionPlanner and isinstance(event.payload, ChildInvocationPhaseChanged)
-                else None)
-        )
+        if isinstance(candidate.invocation, ChildResult):
+            self._execution_indexes.pop(session_id, None)
+            self._context_indexes.pop(session_id, None)
+        else:
+            index = self._execution_indexes.get(session_id)
+            self._execution_indexes[session_id] = (
+                ExecutionIndex(candidate) if index is None
+                else index.advance(self._states[session_id], candidate, event.delta,
+                    child_unit=(event.payload.creation_id, event.payload.unit_index)
+                    if type(self.planner) is TransitionPlanner and isinstance(event.payload, ChildInvocationPhaseChanged)
+                    else None)
+            )
         before = self._states.get(session_id)
         lookups = self._context_indexes.get(session_id, {})
         for name, lookup in tuple(lookups.items()):
@@ -231,11 +235,15 @@ class RuntimeRepository:
             if sid in self._pending or (sid in self._states and self._states[sid] != state):
                 raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Session already exists.")
             candidates[sid] = state
-        indexes = {sid: ExecutionIndex(state) for sid, state in candidates.items()}
+        indexes = {sid: ExecutionIndex(state) for sid, state in candidates.items()
+                   if not isinstance(state.invocation, ChildResult)}
         for sid, state in candidates.items():
             self._context_indexes.pop(sid, None)
             self._update_failure(sid, state)
         self._states.update(candidates)
+        for sid, state in candidates.items():
+            if isinstance(state.invocation, ChildResult):
+                self._execution_indexes.pop(sid, None)
         self._execution_indexes.update(indexes)
 
     def capture_checkpoint(

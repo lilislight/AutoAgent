@@ -1,0 +1,26 @@
+{
+  "text_64x1MiB_small_output": {
+    "retained_bytes": 1270151,
+    "peak_bytes": 69897399,
+    "after_unload_bytes": 72820,
+    "compacted_children": 63,
+    "traced_elapsed_ms": 507.42485700175166,
+    "events": 712
+  },
+  "rows_32x2048_small_output": {
+    "retained_bytes": 2110375,
+    "peak_bytes": 82889948,
+    "after_unload_bytes": 28031,
+    "compacted_children": 31,
+    "traced_elapsed_ms": 6740.069774969015,
+    "events": 360
+  },
+  "text_32x1MiB_retained_output": {
+    "retained_bytes": 33667743,
+    "peak_bytes": 36032282,
+    "after_unload_bytes": 27303,
+    "compacted_children": 31,
+    "traced_elapsed_ms": 272.89078501053154,
+    "events": 360
+  }
+}

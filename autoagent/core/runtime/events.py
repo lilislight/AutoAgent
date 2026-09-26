@@ -12,7 +12,7 @@ from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 6
+RUNTIME_EVENT_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,11 +73,22 @@ class InvocationCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class InvocationJoiningChildren:
-    kind: ClassVar[str] = "invocation.joining_children"
-    output: DurableValue
+class InvocationSettling:
+    kind: ClassVar[str] = "invocation.settling"
+    outcome: Literal["completed", "failed", "cancelled"]
+    output: DurableValue = None
+    error: RuntimeErrorInfo | None = None
+    reason: str | None = None
 
     def __post_init__(self) -> None:
+        if self.outcome not in {"completed", "failed", "cancelled"}:
+            raise ValueError("Invalid settling outcome.")
+        if (self.outcome == "failed") != (self.error is not None):
+            raise ValueError("Only failed settling requires an error.")
+        if self.outcome != "completed" and self.output is not None:
+            raise ValueError("Only successful settling may retain output.")
+        if self.outcome != "cancelled" and self.reason is not None:
+            raise ValueError("Only cancelled settling may carry a reason.")
         object.__setattr__(self, "output", freeze(self.output))
 
 
@@ -91,6 +102,15 @@ class InvocationFailed:
 class InvocationCancelled:
     kind: ClassVar[str] = "invocation.cancelled"
     reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChildCompacted:
+    kind: ClassVar[str] = "child_invocation.compacted"
+    parent_session_id: str
+    parent_invocation_id: str
+    creation_id: str
+    unit_index: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,7 +392,8 @@ RuntimeEventPayload: TypeAlias = (
     | NodeFaulted
     | SessionOpened
     | InvocationStarted
-    | InvocationJoiningChildren
+    | InvocationSettling
+    | ChildCompacted
     | InvocationCompleted
     | InvocationFailed
     | InvocationCancelled
@@ -395,7 +416,8 @@ _PAYLOAD_TYPES = (
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
     SessionOpened,
     InvocationStarted,
-    InvocationJoiningChildren,
+    InvocationSettling,
+    ChildCompacted,
     InvocationCompleted,
     InvocationFailed,
     InvocationCancelled,
@@ -481,13 +503,18 @@ class RuntimeEvent:
 
 
 def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
+    if isinstance(payload, ChildCompacted):
+        return {item.name: getattr(payload, item.name) for item in fields(payload)}
     if isinstance(payload, (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
         return {item.name: _encode_payload_value(getattr(payload, item.name)) for item in fields(payload)}
     if isinstance(payload, SessionOpened):
         return {
             "context": thaw(payload.context),
         }
-    if isinstance(payload, (InvocationCompleted, InvocationJoiningChildren)):
+    if isinstance(payload, InvocationSettling):
+        return {"outcome": payload.outcome, "output": thaw(payload.output),
+                "error": _error_to_record(payload.error) if payload.error is not None else None, "reason": payload.reason}
+    if isinstance(payload, InvocationCompleted):
         return {
             "output": thaw(payload.output),
         }
@@ -554,12 +581,17 @@ def _payload_from_record(
             if "conditions" in values:
                 values["conditions"] = tuple(EdgeConditionResult(**item) for item in values["conditions"])
             return cls(**values)
+    if event_name == ChildCompacted.kind:
+        return ChildCompacted(_required_string(record, "parent_session_id"),
+            _required_string(record, "parent_invocation_id"), _required_string(record, "creation_id"),
+            _required_value(record, "unit_index"))
     if event_name == SessionOpened.kind:
         return SessionOpened(
             _required_value(record, "context"),  # type: ignore[arg-type]
         )
-    if event_name == InvocationJoiningChildren.kind:
-        return InvocationJoiningChildren(_required_value(record, "output"))
+    if event_name == InvocationSettling.kind:
+        return InvocationSettling(_required_value(record, "outcome"), _required_value(record, "output"),
+                                  (_error_from_record(record["error"]) if record.get("error") is not None else None), (_required_string(record, "reason") if record.get("reason") is not None else None))
     if event_name == InvocationCompleted.kind:
         return InvocationCompleted(_required_value(record, "output"))  # type: ignore[arg-type]
     if event_name == InvocationFailed.kind:
@@ -788,8 +820,10 @@ def validate_payload(payload: RuntimeEventPayload) -> None:
                 raise ValueError(f"{item.name} must be a non-empty string.")
         if item.name.endswith("duration_ns") and value is not None:
             _duration(value)
-        if item.name == "error" and not isinstance(value, RuntimeErrorInfo):
+        if item.name == "error" and not (isinstance(payload, InvocationSettling) and value is None) and not isinstance(value, RuntimeErrorInfo):
             raise TypeError("Event error must be RuntimeErrorInfo.")
+    if isinstance(payload, ChildCompacted):
+        _duration(payload.unit_index)
     if isinstance(payload, OperatorCallStarted):
         _duration(payload.unit_index)
     if isinstance(payload, RoutingResolved):

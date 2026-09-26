@@ -37,7 +37,7 @@ class RuntimeGraphTests(unittest.TestCase):
             async def inspect():
                 for _ in range(1000):
                     inv = app._repository.state(ref.session_id).invocation
-                    if inv.status == 'joining_children':
+                    if inv.status == 'settling':
                         self.assertTrue(all(o.output is None for o in inv.scheduler.occurrences.values()))
                         return
                     await asyncio.sleep(.001)
@@ -45,7 +45,7 @@ class RuntimeGraphTests(unittest.TestCase):
             app._runtime_loop.run(inspect())
             with self.assertRaises(TimeoutError):
                 app.join(ref, timeout=.01)
-            self.assertEqual(app.status(ref).status, 'joining_children')
+            self.assertEqual(app.status(ref).status, 'settling')
             release.set()
             result = app.join(ref, timeout=2)
             self.assertEqual(result.status, 'completed')
@@ -62,7 +62,7 @@ class RuntimeGraphTests(unittest.TestCase):
             child = Workflow('child', nodes=[Node('spawn', leaf, execution_mode='spawn')])
             root = Workflow('root', nodes=[Node('spawn', child, execution_mode='spawn')])
             result = app.invoke(root, {'value': 1})
-            self.assertEqual(result.status, 'joining_children')
+            self.assertEqual(result.status, 'settling')
             self.assertEqual(len(result.waits), 1)
             self.assertEqual(app.resident_invocations(), (result.ref,))
             cp = app.unload_session(result.ref, capture_checkpoint=True)
@@ -208,7 +208,7 @@ class RuntimeGraphTests(unittest.TestCase):
 
     def test_cancel_planned_child_without_running_operator(self):
         """Cancellation abandons an unopened plan without fabricating a terminal Child."""
-        from autoagent.core import RuntimeRepository, InvocationCancelled
+        from autoagent.core import RuntimeRepository, InvocationSettling
         sink = Collector()
         root = Workflow('cancel-planned-root', nodes=[Node('child', Workflow('cancel-planned-child', nodes=[Node('work', identity)]))])
         app = AutoAgentApp(runtime_event_sink=sink)
@@ -220,7 +220,7 @@ class RuntimeGraphTests(unittest.TestCase):
             if e.payload.kind == 'child_invocation.planned': break
         repository = RuntimeRepository()
         repository.install_states({'root': state})
-        asyncio.run(repository.commit(session_id='root', invocation_id=state.invocation.id, payload=InvocationCancelled('stop')))
+        asyncio.run(repository.commit(session_id='root', invocation_id=state.invocation.id, payload=InvocationSettling('cancelled', reason='stop')))
         saved = RuntimeGraphCheckpoint('root', (repository.capture_checkpoint('root'),))
         restored = AutoAgentApp()
         try:
@@ -255,12 +255,22 @@ class RuntimeGraphTests(unittest.TestCase):
 
     def test_load_cannot_adopt_an_existing_root_as_child(self):
         """Loading a second graph cannot silently change a resident Root's ownership."""
-        source = AutoAgentApp()
+        sink = Collector()
+        source = AutoAgentApp(runtime_event_sink=sink)
         try:
             r = source.invoke(Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', identity)]))]), {'value': 1})
             graph = source.unload_session(r.ref, capture_checkpoint=True)
         finally: source.close()
         child = next(s for s in graph.sessions if s.session_id != graph.root_session_id)
+        full = RuntimeState()
+        for event in sink.events:
+            if event.session_id == child.session_id:
+                if event.payload.kind == "child_invocation.compacted":
+                    break
+                full = StateReducer().apply(full, event)
+        child = SessionCheckpoint.from_state(full)
+        graph = RuntimeGraphCheckpoint(graph.root_session_id, tuple(
+            child if item.session_id == child.session_id else item for item in graph.sessions))
         target = AutoAgentApp()
         try:
             standalone = RuntimeGraphCheckpoint(child.session_id, (child,))

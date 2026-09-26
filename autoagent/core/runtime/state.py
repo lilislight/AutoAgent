@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Literal
 
@@ -22,9 +22,9 @@ from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 6
+RUNTIME_STATE_SCHEMA_VERSION = 8
 InvocationStatus = Literal[
-    "created", "running", "waiting", "joining_children", "completed", "failed", "cancelled"
+    "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
 NodeOccurrenceStatus = Literal[
     "ready", "running", "waiting", "completed", "failed", "skipped", "cancelled"
@@ -69,6 +69,7 @@ class ChildUnitState:
     invocation_id: str
     input: DurableValue
     phase: ChildUnitPhase = "planned"
+    input_released: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,9 +173,88 @@ class InvocationState:
         default_factory=lambda: MappingProxyType({})
     )
 
+    pending_outcome: Literal["completed", "failed", "cancelled"] | None = None
+
+    @property
+    def stopping(self) -> bool:
+        return self.status in {"failed", "cancelled"} or (
+            self.status == "settling" and self.pending_outcome in {"failed", "cancelled"}
+        )
+
     @property
     def terminal(self) -> bool:
         return self.status in {"completed", "failed", "cancelled"}
+
+
+_EMPTY_SCHEDULER = SchedulerState()
+_EMPTY_CONTEXT = freeze({})
+
+
+@dataclass(frozen=True, slots=True)
+class ChildResult:
+    """Terminal Child identity and result, without an execution workspace."""
+    id: str
+    workflow_id: str
+    workflow_revision_id: str
+    entry_node_id: str
+    status: Literal["completed", "failed", "cancelled"]
+    output: DurableValue
+    error: RuntimeErrorInfo | None
+    cancel_reason: str | None
+    created_at_us: int
+    started_at_us: int | None
+    completed_at_us: int
+    parent_session_id: str
+    parent_invocation_id: str
+    creation_id: str
+    unit_index: int
+    input_digest: str
+    child_plans: Mapping[str, ChildInvocationPlan]
+    kind: Literal["child_result"] = field(default="child_result", init=False)
+
+    # Common read-only view used by graph traversal and result consumers.
+    @property
+    def terminal(self) -> bool:
+        return True
+    @property
+    def stopping(self) -> bool:
+        return self.status in {"failed", "cancelled"}
+    @property
+    def pending_outcome(self) -> None:
+        return None
+    @property
+    def scheduler(self) -> SchedulerState:
+        return _EMPTY_SCHEDULER
+    @property
+    def context(self) -> DurableValue:
+        return _EMPTY_CONTEXT
+    @property
+    def context_path_revisions(self) -> Mapping[tuple[str, ...], int]:
+        return _EMPTY_CONTEXT
+    @property
+    def input(self) -> None:
+        return None
+
+
+def child_input_digest(value: DurableValue) -> str:
+    """A bounded-size admission proof for input-free terminal results."""
+    import hashlib
+    import json
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True, separators=(",", ":"), allow_nan=False).iterencode(thaw(value)):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
+
+
+def release_child_inputs(plans: Mapping[str, ChildInvocationPlan]) -> Mapping[str, ChildInvocationPlan]:
+    """Drop plan payloads after the owning Node no longer needs its input list."""
+    changed = {}
+    for key, plan in plans.items():
+        if any(not unit.input_released for unit in plan.units):
+            changed[key] = replace(plan, units=child_units(tuple(
+                replace(unit, input=None, input_released=True) if not unit.input_released else unit
+                for unit in plan.units)))
+    return runtime_mapping({**plans, **changed}) if changed else plans
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +262,7 @@ class RuntimeState:
     """The state reconstructed from one Session's Runtime Event prefix."""
 
     session: SessionState | None = None
-    invocation: InvocationState | None = None
+    invocation: InvocationState | ChildResult | None = None
     sequence: int = 0
     last_event_id: str | None = None
     schema_version: int = RUNTIME_STATE_SCHEMA_VERSION
@@ -273,7 +353,7 @@ def validate_runtime_state(state: RuntimeState) -> None:
         "created",
         "running",
         "waiting",
-        "joining_children",
+        "settling",
         "completed",
         "failed",
         "cancelled",
@@ -306,6 +386,20 @@ def validate_runtime_state(state: RuntimeState) -> None:
         state.sequence,
         "Invocation context_path_revisions",
     )
+    if isinstance(invocation, ChildResult):
+        if invocation.status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("ChildResult must be terminal.")
+        for name in ("parent_session_id", "parent_invocation_id", "creation_id"):
+            _non_empty_string_value(getattr(invocation, name), name)
+        _non_negative(invocation.unit_index, "ChildResult unit_index")
+        if len(invocation.input_digest) != 64 or any(c not in "0123456789abcdef" for c in invocation.input_digest):
+            raise ValueError("Invalid ChildResult input digest.")
+        if session.context or session.context_path_revisions:
+            raise ValueError("Compacted Child cannot retain Session Context.")
+        _validate_child_plans(invocation.child_plans, None)
+        if any(not u.input_released for p in invocation.child_plans.values() for u in p.units):
+            raise ValueError("Compacted Child cannot retain plan input.")
+        return
     _validate_scheduler(
         invocation.scheduler,
         invocation.child_plans,
@@ -617,7 +711,7 @@ def _validate_waits(
 
 def _validate_child_plans(
     plans: Mapping[str, ChildInvocationPlan],
-    occurrences: Mapping[str, NodeOccurrenceState],
+    occurrences: Mapping[str, NodeOccurrenceState] | None,
 ) -> None:
     if not isinstance(plans, Mapping):
         raise TypeError("Invocation child_plans must be a mapping.")
@@ -636,7 +730,7 @@ def _validate_child_plans(
             (plan.workflow_revision_id, "Child Invocation Plan workflow_revision_id"),
         ):
             _non_empty_string_value(value, label)
-        if plan.parent_occurrence_id not in occurrences:
+        if occurrences is not None and plan.parent_occurrence_id not in occurrences:
             raise ValueError(
                 "Child Invocation Plan references an unknown parent Node Occurrence."
             )
@@ -647,6 +741,12 @@ def _validate_child_plans(
         for expected_index, unit in enumerate(plan.units):
             if not isinstance(unit, ChildUnitState):
                 raise TypeError("Child Invocation Plan units must be ChildUnitState.")
+            if type(unit.input_released) is not bool or (unit.input_released and unit.input is not None):
+                raise ValueError("Released Child input must be absent.")
+            if unit.input_released and occurrences is not None:
+                occurrence = occurrences[plan.parent_occurrence_id]
+                if occurrence.status not in {"completed", "cancelled", "failed"}:
+                    raise ValueError("Child input is still needed by its Parent Node.")
             _non_negative(unit.unit_index, "Child Invocation unit_index")
             if unit.unit_index != expected_index:
                 raise ValueError(
@@ -696,38 +796,44 @@ def _validate_activation(
 
 
 def _validate_invocation_lifecycle(invocation: InvocationState) -> None:
-    if invocation.status not in {"failed", "cancelled"} and any(
+    if not invocation.stopping and any(
         u.phase == "abandoned" for p in invocation.child_plans.values() for u in p.units
     ):
         raise ValueError("Only a failed or cancelled Parent may abandon a Child plan.")
+    if invocation.status == "settling":
+        if invocation.pending_outcome not in {"completed", "failed", "cancelled"}:
+            raise ValueError("Settling requires a pending outcome.")
+    elif invocation.pending_outcome is not None:
+        raise ValueError("Only settling may carry a pending outcome.")
+    outcome = invocation.pending_outcome if invocation.status == "settling" else invocation.status
     terminal = invocation.status in {"completed", "failed", "cancelled"}
     if terminal != (invocation.completed_at_us is not None):
         raise ValueError(
             "Invocation completed_at_us must exist exactly for terminal status."
         )
-    if invocation.status == "completed" and any(
+    if terminal and any(
         u.phase not in {'terminal', 'abandoned'} for plan in invocation.child_plans.values() for u in plan.units
     ):
-        raise ValueError("Completed Invocation requires settled Child ownership.")
-    if invocation.status == "joining_children" and (
+        raise ValueError("Terminal Invocation requires settled Child ownership.")
+    if invocation.status == "settling" and (
         invocation.scheduler.ready or any(o.status in {"ready", "running", "waiting"}
         for o in invocation.scheduler.occurrences.values())
     ):
-        raise ValueError("Joining Invocation cannot retain unfinished body work.")
+        raise ValueError("Settling Invocation cannot retain unfinished body work.")
     if invocation.status == "created":
         if invocation.started_at_us is not None:
             raise ValueError("A created Invocation cannot have started_at_us.")
-    elif invocation.status in {"running", "waiting", "joining_children", "completed"}:
+    elif invocation.status in {"running", "waiting", "settling", "completed"}:
         if invocation.started_at_us is None:
             raise ValueError(
                 f"A {invocation.status} Invocation requires started_at_us."
             )
-    if invocation.status == "failed":
+    if outcome == "failed":
         if invocation.error is None:
             raise ValueError("A failed Invocation requires error details.")
     elif invocation.error is not None:
         raise ValueError("Only a failed Invocation may carry error details.")
-    if invocation.status != "cancelled" and invocation.cancel_reason is not None:
+    if outcome != "cancelled" and invocation.cancel_reason is not None:
         raise ValueError("Only a cancelled Invocation may carry cancel_reason.")
 
 
@@ -841,7 +947,47 @@ def _session_record(value: SessionState | None) -> dict[str, object] | None:
     }
 
 
-def _invocation_record(value: InvocationState | None) -> dict[str, object] | None:
+def _child_plans_record(plans):
+    return {
+        creation_id: {
+            "creation_id": plan.creation_id,
+            "parent_occurrence_id": plan.parent_occurrence_id,
+            "mode": plan.mode,
+            "workflow_id": plan.workflow_id,
+            "workflow_revision_id": plan.workflow_revision_id,
+            "units": [
+                {
+                    "unit_index": unit.unit_index,
+                    "session_id": unit.session_id,
+                    "invocation_id": unit.invocation_id,
+                    "input": thaw(unit.input),
+                    "phase": unit.phase,
+                    "input_released": unit.input_released,
+                }
+                for unit in plan.units
+            ],
+        }
+        for creation_id, plan in plans.items()
+    }
+
+def _child_result_record(value):
+    return {
+        "kind": "child_result", "id": value.id,
+        "workflow_id": value.workflow_id, "workflow_revision_id": value.workflow_revision_id,
+        "entry_node_id": value.entry_node_id, "status": value.status,
+        "output": thaw(value.output), "error": _error_record(value.error),
+        "cancel_reason": value.cancel_reason,
+        "created_at_us": value.created_at_us, "started_at_us": value.started_at_us,
+        "completed_at_us": value.completed_at_us,
+        "parent_session_id": value.parent_session_id, "parent_invocation_id": value.parent_invocation_id,
+        "creation_id": value.creation_id, "unit_index": value.unit_index,
+        "input_digest": value.input_digest, "child_plans": _child_plans_record(value.child_plans),
+    }
+
+
+def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str, object] | None:
+    if isinstance(value, ChildResult):
+        return _child_result_record(value)
     if value is None:
         return None
     if not isinstance(value.context, Mapping):
@@ -857,6 +1003,7 @@ def _invocation_record(value: InvocationState | None) -> dict[str, object] | Non
         "output": thaw(value.output),
         "error": _error_record(value.error),
         "cancel_reason": value.cancel_reason,
+        "pending_outcome": value.pending_outcome,
         "created_at_us": value.created_at_us,
         "started_at_us": value.started_at_us,
         "completed_at_us": value.completed_at_us,
@@ -864,26 +1011,7 @@ def _invocation_record(value: InvocationState | None) -> dict[str, object] | Non
             _context_path_key(path): revision
             for path, revision in value.context_path_revisions.items()
         },
-        "child_plans": {
-            creation_id: {
-                "creation_id": plan.creation_id,
-                "parent_occurrence_id": plan.parent_occurrence_id,
-                "mode": plan.mode,
-                "workflow_id": plan.workflow_id,
-                "workflow_revision_id": plan.workflow_revision_id,
-                "units": [
-                    {
-                        "unit_index": unit.unit_index,
-                        "session_id": unit.session_id,
-                        "invocation_id": unit.invocation_id,
-                        "input": thaw(unit.input),
-                        "phase": unit.phase,
-                    }
-                    for unit in plan.units
-                ],
-            }
-            for creation_id, plan in value.child_plans.items()
-        },
+        "child_plans": _child_plans_record(value.child_plans),
         "scheduler": {
             "initialized": value.scheduler.initialized,
             "ready": list(value.scheduler.ready),
@@ -1045,17 +1173,31 @@ def _session_from_record(value: object) -> SessionState | None:
     )
 
 
-def _invocation_from_record(value: object) -> InvocationState | None:
+def _invocation_from_record(value: object) -> InvocationState | ChildResult | None:
     if value is None:
         return None
     record = _mapping(value, "Invocation State")
+    if record.get("kind") == "child_result":
+        return ChildResult(
+            id=_string(record, "id"), workflow_id=_string(record, "workflow_id"),
+            workflow_revision_id=_string(record, "workflow_revision_id"),
+            entry_node_id=_string(record, "entry_node_id"), status=_string(record, "status"),
+            output=freeze(record.get("output")), error=_error_from_record(record.get("error")),
+            cancel_reason=_optional_string(record, "cancel_reason"),
+            created_at_us=_integer(record, "created_at_us"), started_at_us=_optional_integer(record, "started_at_us"),
+            completed_at_us=_integer(record, "completed_at_us"),
+            parent_session_id=_string(record, "parent_session_id"), parent_invocation_id=_string(record, "parent_invocation_id"),
+            creation_id=_string(record, "creation_id"), unit_index=_integer(record, "unit_index"),
+            input_digest=_string(record, "input_digest"),
+            child_plans=runtime_mapping(_child_plans_from_record(_mapping(record.get("child_plans"), "Child plans"))),
+        )
     context = record.get("context")
     if not isinstance(context, dict):
         raise TypeError("Invocation Context must be a mapping.")
     child_plans_record = _mapping(record.get("child_plans"), "Child Invocation Plans")
     scheduler = _scheduler_from_record(record.get("scheduler"))
     status = _string(record, "status")
-    if status not in {"created", "running", "waiting", "joining_children", "completed", "failed", "cancelled"}:
+    if status not in {"created", "running", "waiting", "settling", "completed", "failed", "cancelled"}:
         raise ValueError(f"Unsupported Invocation status {status!r}.")
     return InvocationState(
         id=_string(record, "id"),
@@ -1068,6 +1210,7 @@ def _invocation_from_record(value: object) -> InvocationState | None:
         output=freeze(record.get("output")),
         error=_error_from_record(record.get("error")),
         cancel_reason=_optional_string(record, "cancel_reason"),
+        pending_outcome=_optional_string(record, "pending_outcome"),
         created_at_us=_integer(record, "created_at_us"),
         started_at_us=_optional_integer(record, "started_at_us"),
         completed_at_us=_optional_integer(record, "completed_at_us"),
@@ -1124,7 +1267,6 @@ def _occurrence_from_record(value: object) -> NodeOccurrenceState:
         "ready",
         "running",
         "waiting",
-        "joining_children",
         "completed",
         "failed",
         "skipped",
@@ -1278,6 +1420,7 @@ def _child_unit_from_record(value: object) -> ChildUnitState:
         invocation_id=_string(record, "invocation_id"),
         input=freeze(record.get("input")),
         phase=phase,  # type: ignore[arg-type]
+        input_released=record.get("input_released", False),
     )
 
 

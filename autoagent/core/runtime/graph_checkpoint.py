@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from .checkpoint import SessionCheckpoint
-from .state import RuntimeState
+from .state import RuntimeState, ChildResult, child_input_digest
 
 
 def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> None:
@@ -14,6 +14,8 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
     if not isinstance(root_session_id, str) or not root_session_id.strip() or root_session_id not in states:
         raise ValueError("Graph root must identify a bundled Session.")
     owners = {}
+    if isinstance(states[root_session_id].invocation, ChildResult):
+        raise ValueError("A compacted Child cannot become a Root.")
     if states[root_session_id].invocation is None:
         raise ValueError("Graph root requires an Invocation.")
     waits = set()
@@ -38,18 +40,26 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
                 if child is None:
                     if unit.phase == 'planned':
                         continue
-                    if unit.phase == 'abandoned' and inv.status in {'failed', 'cancelled'}:
+                    if unit.phase == 'abandoned' and inv.stopping:
                         continue  # A cancelled plan need never create its Child.
                     raise ValueError("Graph is missing an admitted Child.")
                 if unit.phase == "abandoned":
                     raise ValueError("An abandoned plan cannot have a Child Session.")
                 if (child.id != unit.invocation_id or child.workflow_id != plan.workflow_id
-                        or child.workflow_revision_id != plan.workflow_revision_id or child.input != unit.input):
+                        or child.workflow_revision_id != plan.workflow_revision_id):
                     raise ValueError("Child identity does not match its ownership plan.")
+                if isinstance(child, ChildResult):
+                    if (child.parent_session_id != sid or child.parent_invocation_id != inv.id
+                            or child.creation_id != plan.creation_id or child.unit_index != unit.unit_index):
+                        raise ValueError("ChildResult ownership does not match Parent.")
+                    if not unit.input_released and child.input_digest != child_input_digest(unit.input):
+                        raise ValueError("ChildResult input does not match Parent admission.")
+                elif not unit.input_released and child.input != unit.input:
+                    raise ValueError("Child input does not match its ownership plan.")
                 if unit.phase == 'terminal' and (not child.terminal or any(
                         u.phase not in {'terminal', 'abandoned'} for p in child.child_plans.values() for u in p.units)):
                     raise ValueError("Parent terminal marker precedes Child subtree settlement.")
-        if inv.status == 'completed' and any(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units):
+        if inv.terminal and any(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units):
             raise ValueError("Completed Invocation contains unsettled Children.")
     if root_session_id in owners:
         raise ValueError("Graph root is owned by another Session.")

@@ -53,9 +53,9 @@ def child_refs(app, parent):
 
 def inspect_result(app, ref):
     """Read a Child's immutable State for assertions without a public Child API."""
-    from autoagent import ChildHandle, InvocationResult, InvocationWait
+    from autoagent import InvocationResult, InvocationWait
     from autoagent.core.runtime import thaw
-    sid = ref.child_session_id if isinstance(ref, ChildHandle) else ref.session_id
+    sid = ref.session_id
     async def run():
         inv = app._repository.state(sid).invocation
         return InvocationResult(app._ref_for_invocation(sid, inv), inv.status, thaw(inv.output), inv.error,
@@ -66,8 +66,7 @@ def inspect_result(app, ref):
 def join_observed(app, ref, timeout=None):
     """Root uses its public join; Child assertions wait only on its internal Task."""
     import asyncio
-    from autoagent import ChildHandle
-    sid = ref.child_session_id if isinstance(ref, ChildHandle) else ref.session_id
+    sid = ref.session_id
     if sid not in app._child_owners:
         return app.join(ref, timeout=timeout)
     async def wait():
@@ -89,8 +88,7 @@ def resume_graph_wait(app, ref, wait_id, response):
 
 
 def status_observed(app, ref):
-    from autoagent import ChildHandle
-    sid = ref.child_session_id if isinstance(ref, ChildHandle) else ref.session_id
+    sid = ref.session_id
     return inspect_result(app, ref) if sid in app._child_owners else app.status(ref)
 
 
@@ -105,9 +103,9 @@ async def async_children(app, ref):
 
 async def async_join_observed(app, ref, timeout=None):
     import asyncio
-    from autoagent import ChildHandle, InvocationResult, InvocationWait
+    from autoagent import InvocationResult, InvocationWait
     from autoagent.core.runtime import thaw
-    sid = ref.child_session_id if isinstance(ref, ChildHandle) else ref.session_id
+    sid = ref.session_id
     if sid not in app._child_owners:
         return await app.ajoin(ref, timeout=timeout)
     async def inspect():

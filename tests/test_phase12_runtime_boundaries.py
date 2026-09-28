@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Await, RuntimeObservation
 from tests.graph_fixtures import (
     async_resume_graph_wait,
     child_refs,
@@ -215,7 +216,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             "await-sibling-parent",
             nodes=[
                 Node("start", identity),
-                Node("child", child),
+                Node("child", Await(child, child.nodes[0].id)),
                 Node("slow", slow),
             ],
             edges=[Edge("start", "child"), Edge("start", "slow")],
@@ -232,13 +233,13 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             self.assertTrue(_wait_until(child_is_waiting))
             release_slow.set()
             result = join_observed(app, submitted.ref, timeout=1)
-            self.assertEqual(result.status, "waiting")
+            self.assertEqual(result.status, "settling")
         finally:
             release_slow.set()
             app.close()
 
-    def test_child_completion_wakes_parent_before_unrelated_sibling(self) -> None:
-        """Verify Child completion wakes its parent without waiting for a sibling."""
+    def test_child_wait_boundary_continues_parent_before_unrelated_sibling(self) -> None:
+        """Verify a Child Wait boundary continues its Parent while another Node runs."""
 
         slow_started = threading.Event()
         release_slow = threading.Event()
@@ -249,7 +250,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             release_slow.wait(2)
             return value
 
-        def after(value: Value) -> Value:
+        def after(value: RuntimeObservation) -> RuntimeObservation:
             after_started.set()
             return value
 
@@ -261,7 +262,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             "wake-parent",
             nodes=[
                 Node("start", identity),
-                Node("child", child),
+                Node("child", Await(child, child.nodes[0].id)),
                 Node("slow", slow),
                 Node("after", after),
             ],
@@ -286,6 +287,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             self.assertTrue(_wait_until(lambda: waiting_child() is not None))
             child_result = waiting_child()
             assert child_result is not None
+            self.assertTrue(after_started.wait(0.5))
             resume_graph_wait(app,
                 child_result.ref,
                 child_result.waits[0].id,
@@ -310,7 +312,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
         )
         parent = Workflow(
             "quiescence-race-parent",
-            nodes=[Node("child", child)],
+            nodes=[Node("child", Await(child, child.nodes[0].id))],
         )
         app = AutoAgentApp()
         finish_entered = threading.Event()
@@ -356,7 +358,8 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
 
             result = join_observed(app, submitted.ref, timeout=1)
             self.assertEqual(result.status, "completed")
-            self.assertEqual(result.output, {"value": 2})
+            self.assertEqual(result.output.status, "waiting")
+            self.assertEqual(status_observed(app, handles[0]).output, {"value": 2})
         finally:
             gate = gate_holder.get("gate")
             if gate is not None and not gate.is_set():
@@ -391,7 +394,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             "fail-fast-cancel-parent",
             nodes=[
                 Node("start", identity),
-                Node("child", child),
+                Node("child", Await(child, child.nodes[0].id)),
                 Node("failure", fail_after_child_started),
             ],
             edges=[Edge("start", "child"), Edge("start", "failure")],
@@ -438,11 +441,11 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             )
             parent = Workflow(
                 "pydantic-parent",
-                nodes=[Node("child", child, input_mapping=map_model)],
+                nodes=[Node("child", Await(child, child.nodes[0].id), input_mapping=map_model)],
             )
             result = app.invoke(parent, {"value": 3})
             self.assertEqual(result.status, "completed")
-            self.assertEqual(result.output, {"value": 4})
+            self.assertEqual(result.output.output, {"value": 4})
         finally:
             app.close()
 
@@ -475,7 +478,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=1),
                 )
@@ -487,7 +490,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 parent,
                 {"items": [{"value": 1}, {"value": 2}]},
             )
-            self.assertEqual(root.status, "waiting")
+            self.assertEqual(root.status, "settling")
             handles = child_refs(app, root.ref)
             self.assertEqual(len(handles), 2)
             children = [status_observed(app, handle) for handle in handles]
@@ -644,8 +647,8 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_child_wait_failure_cancels_sibling_and_converges_parent(self) -> None:
-        """Verify a resumed Child failure settles a waiting Child Map sibling."""
+    def test_child_wait_failure_preserves_sibling_and_parent_observation(self) -> None:
+        """Verify failure after observation leaves a sibling Wait available to resume."""
 
         def work(value: Value) -> Value:
             if value["value"] == 1:
@@ -665,7 +668,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=2),
                 )
@@ -677,7 +680,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 parent,
                 {"items": [{"value": 1}, {"value": 2}]},
             )
-            self.assertEqual(root.status, "waiting")
+            self.assertEqual(root.status, "settling")
             handles = child_refs(app, root.ref)
             children = [status_observed(app, handle) for handle in handles]
             self.assertEqual(len(children), 2)
@@ -690,11 +693,14 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             )
             self.assertEqual(failed_child.status, "failed")
             parent_result = join_observed(app, root.ref, timeout=1)
-            self.assertEqual(parent_result.status, "failed")
+            self.assertEqual(parent_result.status, "settling")
             self.assertCountEqual(
                 [status_observed(app, handle).status for handle in handles],
-                ["failed", "cancelled"],
+                ["failed", "waiting"],
             )
+            completed = app.resume(root.ref, parent_result.waits[0].id, {"value": 2})
+            self.assertEqual(completed.status, "completed")
+            self.assertTrue(all(item.status == "waiting" for item in completed.output))
         finally:
             app.close()
 
@@ -712,7 +718,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=2),
                 )

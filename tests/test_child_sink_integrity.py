@@ -1,6 +1,7 @@
 """Core Child admission and completion integrity at the external Sink boundary."""
 from __future__ import annotations
 
+from autoagent import Spawn, Await
 from tests.graph_fixtures import (
     graph_bundle,
     join_observed,
@@ -76,15 +77,15 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         app = AutoAgentApp()
         self.addCleanup(app.close)
         child = Workflow('handle-child', nodes=[Node('work', identity)])
-        parent = Workflow('handle-parent', nodes=[Node('spawn', child, execution_mode='spawn')])
+        parent = Workflow('handle-parent', nodes=[Node('spawn', Spawn(child, child.nodes[0].id))])
         result = app.invoke(parent, {'value': 1})
         self.assertEqual(result.status, 'completed', result.error)
         child_result = join_observed(app, result.output, timeout=2)
         self.assertEqual(child_result.output, {'value': 1})
         graph = app.unload_session(result.ref, capture_checkpoint=True)
-        checkpoint = next(s for s in graph.sessions if s.session_id == result.output.child_session_id)
+        checkpoint = next(s for s in graph.sessions if s.session_id == result.output.session_id)
         restored = SessionCheckpoint.from_record(checkpoint.to_record())
-        self.assertEqual(restored.state.invocation.id, result.output.child_invocation_id)
+        self.assertEqual(restored.state.invocation.id, result.output.invocation_id)
         from autoagent.core import ChildResult
         self.assertIsInstance(restored.state.invocation, ChildResult)
         self.assertEqual(restored.state.invocation.output, {"value": 1})
@@ -95,7 +96,7 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         app = AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close)
         child = Workflow('map-child', nodes=[Node('work', identity)])
-        parent = Workflow('map-parent', nodes=[Node('spawn', child, execution_mode='spawn',
+        parent = Workflow('map-parent', nodes=[Node('spawn', Spawn(child, child.nodes[0].id),
             input_mapping=map_items, map=Map(max_parallelism=2))])
         result = app.invoke(parent, {'items': [{'value': i} for i in range(3)]}, session_id='parent')
         self.assertEqual(result.status, 'completed', result.error)
@@ -125,7 +126,7 @@ class ChildSinkIntegrityTests(unittest.TestCase):
                 await super().append(event)
         sink = Sink()
         child = Workflow('terminal-child', nodes=[Node('work', identity, recovery_mode=Recovery('replay_safe'))])
-        parent = Workflow('terminal-parent', nodes=[Node('child', child)])
+        parent = Workflow('terminal-parent', nodes=[Node('child', Await(child, child.nodes[0].id))])
         source = AutoAgentApp(runtime_event_sink=sink)
         try:
             with self.assertRaises(RuntimeInfrastructureError):
@@ -143,4 +144,4 @@ class ChildSinkIntegrityTests(unittest.TestCase):
         ref = next(ref for ref in load_graph(restored, checkpoint).invocations if ref.session_id == 'parent')
         result = restored.recover(ref)
         self.assertEqual(result.status, 'completed', result.error)
-        self.assertEqual(result.output, {'value': 1})
+        self.assertEqual(result.output.output, {'value': 1})

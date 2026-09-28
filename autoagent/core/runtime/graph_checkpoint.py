@@ -46,7 +46,8 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
                 if unit.phase == "abandoned":
                     raise ValueError("An abandoned plan cannot have a Child Session.")
                 if (child.id != unit.invocation_id or child.workflow_id != plan.workflow_id
-                        or child.workflow_revision_id != plan.workflow_revision_id):
+                        or child.workflow_revision_id != plan.workflow_revision_id
+                        or child.entry_node_id != plan.entry_node_id):
                     raise ValueError("Child identity does not match its ownership plan.")
                 if isinstance(child, ChildResult):
                     if (child.parent_session_id != sid or child.parent_invocation_id != inv.id
@@ -61,6 +62,87 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
                     raise ValueError("Parent terminal marker precedes Child subtree settlement.")
         if inv.terminal and any(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units):
             raise ValueError("Completed Invocation contains unsettled Children.")
+    # Receipt retirement is causally after the caller's acknowledged result.
+    # Independent Session prefixes must not erase that acknowledgement while
+    # retaining the target's later retirement or compaction.
+    from .waits import validate_wait_graph
+    validate_wait_graph(states, owners)
+    for target, state in states.items():
+        inv = state.invocation
+        if inv is None:
+            continue
+        for sid, dependency in inv.signals['frontiers'].items():
+            caller_state = states.get(sid)
+            caller = caller_state.invocation if caller_state else None
+            if caller is None or caller.id != dependency['invocation_id'] or caller_state.sequence < dependency['sequence']:
+                raise ValueError('Signal receipt retirement precedes caller acknowledgement.')
+        for call_id, proof in inv.signals['receipts'].items():
+            origin = proof['origin']
+            caller_state = states.get(origin['session_id'])
+            caller = caller_state.invocation if caller_state else None
+            if caller is None or caller.id != origin['invocation_id']:
+                raise ValueError('Signal receipt references a missing caller.')
+            if not isinstance(caller, ChildResult):
+                call = caller.scheduler.operator_calls.get(call_id)
+                if call is None or call.operator_id != 'system_command:send_signal':
+                    raise ValueError('Signal receipt references a missing SendSignal Call.')
+                if call.input is not None:
+                    request = call.input
+                    handle = request.get('handle', {})
+                    if (handle.get('session_id') != target or handle.get('invocation_id') != inv.id
+                            or handle.get('workflow_id') != inv.workflow_id
+                            or handle.get('workflow_revision_id') != inv.workflow_revision_id
+                            or child_input_digest({'endpoint': request.get('endpoint'), 'payload': request.get('payload')}) != origin['digest']):
+                        raise ValueError('Signal receipt does not match its Command input.')
+        for entry in inv.signals['messages'].values():
+            if entry['message']['accepted_sequence'] > state.sequence:
+                raise ValueError('Signal message is ahead of its target state.')
+        for receipt in [p['receipt'] for p in inv.signals['receipts'].values()] + [p['receipt'] for p in inv.signals['sources'].values()]:
+            if receipt['accepted_sequence'] > state.sequence:
+                raise ValueError('Signal receipt is ahead of its target state.')
+        if inv.cancel_origin is not None:
+            origin = inv.cancel_origin
+            caller_state = states.get(origin['session_id'])
+            caller = caller_state.invocation if caller_state else None
+            if caller is None or caller.id != origin['invocation_id']:
+                raise ValueError('Cancellation origin references a missing caller.')
+            if not isinstance(caller, ChildResult):
+                call = caller.scheduler.operator_calls.get(origin['call_id'])
+                if call is None or call.operator_id != 'system_command:cancel':
+                    raise ValueError('Cancellation origin references a missing Cancel Call.')
+                if call.input is not None:
+                    request = call.input
+                    handle = request.get('handle', {})
+                    if (handle.get('session_id') != target or handle.get('invocation_id') != inv.id
+                            or handle.get('workflow_id') != inv.workflow_id
+                            or handle.get('workflow_revision_id') != inv.workflow_revision_id
+                            or child_input_digest(request.get('reason')) != origin['reason_digest']):
+                        raise ValueError('Cancellation origin does not match its Command input.')
+        for sid, dependency in inv.resume_receipt_frontiers.items():
+            caller_state = states.get(sid)
+            caller = caller_state.invocation if caller_state else None
+            if (caller is None or caller.id != dependency['invocation_id']
+                    or caller_state.sequence < dependency['sequence']):
+                raise ValueError("Resume receipt retirement precedes caller acknowledgement.")
+        for call_id, receipt in inv.resume_receipts.items():
+            caller_state = states.get(receipt['session_id'])
+            caller = caller_state.invocation if caller_state else None
+            if caller is None or caller.id != receipt['invocation_id']:
+                raise ValueError("Resume receipt references a missing caller Invocation.")
+            if isinstance(caller, ChildResult):
+                continue
+            call = caller.scheduler.operator_calls.get(call_id)
+            if call is None or call.operator_id != 'system_command:resume':
+                raise ValueError("Resume receipt references a missing Command Call.")
+            if call.input is not None:
+                request = call.input
+                handle = request.get('handle', {})
+                if (handle.get('session_id') != target or handle.get('invocation_id') != inv.id
+                        or handle.get('workflow_id') != inv.workflow_id
+                        or handle.get('workflow_revision_id') != inv.workflow_revision_id
+                        or request.get('wait_id') != receipt['wait_id']
+                        or child_input_digest(request.get('response')) != receipt['response_digest']):
+                    raise ValueError("Resume receipt does not match its Command input.")
     if root_session_id in owners:
         raise ValueError("Graph root is owned by another Session.")
     visited = set()

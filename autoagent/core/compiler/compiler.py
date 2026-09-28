@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import inspect
 import json
+from ..commands import Wait
 from collections.abc import Callable
 from dataclasses import replace
 from typing import get_args, get_origin
 
 from ..errors import WorkflowCompileError
-from ..operators import Operator, ValueContract, Wait
+from ..operators import Operator, ValueContract
+from ..commands import SelfHandle, OwnerHandle
+from ..commands import AwaitSignal, Select, SelectResult, ChildCase
+from ..commands import SignalEndpoint, SignalLimits, SendSignal, SignalReceipt, ReceiveSignal, SignalBatch
+from ..commands import Cancel, CancelRequest, CancelReceipt, AwaitAny, AwaitAnyRequest, Timer, TimerRequest, TimerResult
+from ..commands import Resume, ResumeRequest, ResumeReceipt, Status, SystemCommand, Spawn, Await, CommandIR, RuntimeHandle, RuntimeObservation
 from ..workflow import (
     AggregationContext,
     Capability,
-    ChildHandle,
     ConditionContext,
     ContextPatch,
     Edge,
@@ -444,6 +449,8 @@ class WorkflowCompiler:
         }
         for target, values in incoming.items():
             target_node = node_index[target]
+            if isinstance(target_node.executable, CommandIR) and target_node.executable.id in {'system_command:receive_signal', 'system_command:await_signal', 'system_command:select'}:
+                continue
             # A Loop Header is reached once from outside its region and later
             # once per Back Edge selection. Those activations belong to
             # different occurrences; they are not one ordinary Fan-in. Only
@@ -465,6 +472,8 @@ class WorkflowCompiler:
                 for edge in values:
                     if edge.on != "complete":
                         continue
+                    if isinstance(target_node.executable, CommandIR) and target_node.executable.id == 'system_command:send_signal' and target_node.input_contract is None:
+                        continue
                     source_contract = node_index[edge.source].output_contract
                     target_contract = target_node.input_contract
                     if (
@@ -477,6 +486,16 @@ class WorkflowCompiler:
                             f"{edge.source!r} output and {target!r} input must use the same declared contract.",
                         )
 
+        if not isinstance(workflow.signal_limits, SignalLimits):
+            raise _error('SIGNAL_LIMITS_INVALID', 'Workflow requires SignalLimits.')
+        endpoints = []
+        names = set()
+        for endpoint in workflow.signal_endpoints:
+            if not isinstance(endpoint, SignalEndpoint) or endpoint.name in names:
+                raise _error('SIGNAL_ENDPOINT_INVALID', 'Signal Endpoints must have unique names.')
+            names.add(endpoint.name)
+            endpoints.append((endpoint.name, ValueContract.create(endpoint.payload_type, location='Signal payload')))
+        endpoints = tuple(sorted(endpoints, key=lambda item: item[0]))
         definition = workflow_semantic_definition(
             workflow_id=workflow.id,
             workflow_version=workflow_version,
@@ -484,6 +503,8 @@ class WorkflowCompiler:
             nodes=node_ir,
             edges=tuple(edge_ir),
             loops=loops,
+            signal_endpoints=endpoints,
+            signal_limits=workflow.signal_limits,
             entry_node_ids=entries,
             exit_node_ids=exits,
         )
@@ -499,6 +520,8 @@ class WorkflowCompiler:
             exit_node_ids=exits,
             failure_mode=workflow.failure_mode,
             loop_regions=loops,
+            signal_endpoints=endpoints,
+            signal_limits=workflow.signal_limits,
         )
 
     def _flatten(
@@ -509,6 +532,8 @@ class WorkflowCompiler:
         *,
         validate_workflow: bool = True,
     ) -> tuple[list[Node], list[Edge]]:
+        if prefix and workflow.signal_endpoints:
+            raise _error('INLINE_SIGNAL_ENDPOINT_UNSUPPORTED', 'Declare Signal Endpoints on the owning Workflow or use Spawn/Await.')
         if validate_workflow:
             if not isinstance(workflow.id, str) or not workflow.id.strip():
                 raise _error("WORKFLOW_ID_EMPTY", "Workflow id cannot be empty.")
@@ -628,20 +653,69 @@ class WorkflowCompiler:
             )
         executable = node.executable
         if isinstance(executable, Workflow):
+            raise _error("WORKFLOW_EXECUTABLE_UNSUPPORTED", "Use Spawn or Await with an explicit entry_node_id.")
+        if type(executable) in (SendSignal, ReceiveSignal, AwaitSignal):
             if node.stream is not None:
-                raise _error(
-                    "STREAM_OPERATOR_REQUIRED",
-                    f"Child Workflow Node {node.id!r} cannot define Stream.",
-                )
-            compiled_child = self._compile(executable, parent_workflows)
-            if len(compiled_child.entry_node_ids) != 1 or len(compiled_child.exit_node_ids) != 1:
-                raise _error(
-                    "CHILD_WORKFLOW_BOUNDARY_AMBIGUOUS",
-                    f"Child Workflow Node {node.id!r} requires one Entry and one Exit.",
-                )
-            input_contract = compiled_child.node(compiled_child.entry_node_ids[0]).input_contract
-            output_contract = compiled_child.node(compiled_child.exit_node_ids[0]).output_contract
-            compiled_executable: object = compiled_child
+                raise _error('STREAM_OPERATOR_REQUIRED', 'Signal Commands cannot define Stream.')
+            input_contract = None
+            if type(executable) is SendSignal:
+                if callable(executable.handle):
+                    returned = self._validate_hook(executable.handle, (InputMappingContext,),
+                        code='SIGNAL_HANDLE_SIGNATURE', label='Signal Handle resolver')
+                    if returned is not RuntimeHandle:
+                        raise _error('SIGNAL_HANDLE_SIGNATURE', 'Signal Handle resolver must return RuntimeHandle.')
+                if node.input_mapping is not None:
+                    returned = self._validate_hook(node.input_mapping, (InputMappingContext,),
+                        code='INPUT_MAPPING_SIGNATURE', label='Signal payload mapping')
+                    if node.map is not None:
+                        if get_origin(returned) is not list:
+                            raise _error('MAP_INPUT_MAPPING_RETURN', 'Map payload mapping must return a list.')
+                        returned = get_args(returned)[0]
+                    input_contract = ValueContract.create(returned, location='Signal payload mapping')
+                output_contract = ValueContract.create(SignalReceipt, location='Signal receipt')
+                compiled_executable = CommandIR(executable.id, handle=executable.handle, endpoint=executable.endpoint)
+            else:
+                if node.input_mapping is not None or node.map is not None:
+                    raise _error('SIGNAL_RECEIVE_CONFIGURATION', 'ReceiveSignal takes endpoint and limit on the Command, without Input Mapping or Map.')
+                output_contract = ValueContract.create(SignalBatch, location='Signal batch')
+                compiled_executable = CommandIR(executable.id, endpoint=executable.endpoint, limit=executable.limit)
+        elif type(executable) is Select:
+            if node.input_mapping is not None or node.map is not None or node.stream is not None:
+                raise _error('SELECT_CONFIGURATION', 'Select takes cases on the Command, without Input Mapping, Map or Stream.')
+            for case in executable.cases.values():
+                if isinstance(case, ChildCase):
+                    for hook, expected in ((case.handle, RuntimeHandle), (case.after, str)):
+                        if callable(hook) and self._validate_hook(hook, (InputMappingContext,), code='SELECT_RESOLVER_SIGNATURE', label='Select resolver') is not expected:
+                            raise _error('SELECT_RESOLVER_SIGNATURE', 'Select resolver has an invalid return type.')
+            input_contract = None
+            output_contract = ValueContract.create(SelectResult, location='Select result')
+            compiled_executable = CommandIR(executable.id, cases=executable.cases)
+        elif type(executable) in (Resume, Status, Cancel, AwaitAny, Timer):
+            if node.stream is not None:
+                raise _error("STREAM_OPERATOR_REQUIRED", "System Commands cannot define Stream.")
+            input_type, output_type = {Resume: (ResumeRequest, ResumeReceipt), Status: (RuntimeHandle, RuntimeObservation),
+                Cancel: (CancelRequest, CancelReceipt), AwaitAny: (AwaitAnyRequest, RuntimeObservation),
+                Timer: (TimerRequest, TimerResult)}[type(executable)]
+            input_contract = ValueContract.create(input_type, location="Command input")
+            output_contract = ValueContract.create(output_type, location="Command output")
+            compiled_executable = CommandIR(executable.id)
+        elif type(executable) in (Spawn, Await):
+            if node.stream is not None:
+                raise _error("STREAM_OPERATOR_REQUIRED", "System Commands cannot define Stream.")
+            compiled_child = None
+            if executable.workflow is not None:
+                if not isinstance(executable.workflow, Workflow):
+                    raise _error("COMMAND_WORKFLOW_INVALID", "Creating Command requires a Workflow definition.")
+                compiled_child = self._compile(executable.workflow, parent_workflows)
+                if executable.entry_node_id not in compiled_child.entry_node_ids:
+                    raise _error("COMMAND_ENTRY_INVALID", "Command entry_node_id must identify a Workflow Entry.")
+                input_contract = compiled_child.node(executable.entry_node_id).input_contract
+            else:
+                input_contract = ValueContract.create(RuntimeHandle, location="Await target")
+            output_contract = ValueContract.create(RuntimeHandle if type(executable) is Spawn else RuntimeObservation, location="Command output")
+            compiled_executable = CommandIR(executable.id, compiled_child, executable.entry_node_id)
+        elif isinstance(executable, SystemCommand) and type(executable) is not Wait:
+            raise _error("SYSTEM_COMMAND_UNSUPPORTED", "Only Core-provided System Commands may execute.")
         elif isinstance(executable, Capability):
             contract = executable.contract
             input_contract = contract.input
@@ -677,21 +751,6 @@ class WorkflowCompiler:
             )
             compiled_executable = operator
 
-        if not isinstance(node.execution_mode, str) or node.execution_mode not in {
-            "await",
-            "spawn",
-        }:
-            raise _error("EXECUTION_MODE_INVALID", f"Node {node.id!r} has invalid execution_mode.")
-        if node.execution_mode != "await" and not isinstance(compiled_executable, WorkflowIR):
-            raise _error(
-                "EXECUTION_MODE_NOT_WORKFLOW",
-                f"Node {node.id!r} execution_mode only applies to Workflow executable.",
-            )
-        if node.execution_mode == "spawn":
-            output_contract = ValueContract.create(
-                ChildHandle,
-                location=f"Node {node.id} spawn output",
-            )
         self._validate_input_mapping(node, input_contract)
         self._validate_output_binding(node)
         if node.map is not None:
@@ -747,7 +806,6 @@ class WorkflowCompiler:
             output_contract=output_contract,
             input_mapping=node.input_mapping,
             output_binding=node.output_binding,
-            execution_mode=node.execution_mode,
             map=node.map,
             stream=node.stream,
             user_events=tuple(user_events),

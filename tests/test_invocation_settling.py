@@ -1,4 +1,5 @@
 """Observable terminal boundaries include cancellation cleanup and owned children."""
+from autoagent import Spawn
 import asyncio
 import json
 import threading
@@ -32,7 +33,7 @@ class InvocationSettlingTests(unittest.TestCase):
                 await asyncio.sleep(.001)
             raise ValueError('original failure')
 
-        work = Node('slow', Workflow('child', nodes=[Node('slow', slow)]), execution_mode='spawn') if child else Node('slow', slow)
+        work = Node('slow', Spawn(Workflow('child', nodes=[Node('slow', slow)]), 'slow')) if child else Node('slow', slow)
         if outcome == 'failed':
             workflow = Workflow('root', nodes=[Node('start', identity), work, Node('fail', fail)],
                                 edges=[Edge('start', 'slow'), Edge('start', 'fail')])
@@ -132,8 +133,8 @@ class InvocationSettlingTests(unittest.TestCase):
         """Every stop/terminal prefix resumes convergence without replaying business work."""
         sink = Collector()
         leaf = Workflow('leaf-wait', nodes=[Node('wait', Wait(Value, Value))])
-        child = Workflow('child-wait', nodes=[Node('spawn', leaf, execution_mode='spawn')])
-        root = Workflow('root-wait', nodes=[Node('spawn', child, execution_mode='spawn')])
+        child = Workflow('child-wait', nodes=[Node('spawn', Spawn(leaf, leaf.nodes[0].id))])
+        root = Workflow('root-wait', nodes=[Node('spawn', Spawn(child, child.nodes[0].id))])
         app = AutoAgentApp(runtime_event_sink=sink)
         try:
             result = app.invoke(root, {'value': 1}, session_id='root')
@@ -177,7 +178,7 @@ class InvocationSettlingTests(unittest.TestCase):
         app = AutoAgentApp(runtime_event_sink=sink)
         try:
             child = Workflow('wait-child', nodes=[Node('wait', Wait(Value, Value))])
-            root = Workflow('wait-root', nodes=[Node('spawn', child, execution_mode='spawn')])
+            root = Workflow('wait-root', nodes=[Node('spawn', Spawn(child, child.nodes[0].id))])
             result = app.invoke(root, {'value': 1}, session_id='root')
             with self.assertRaises(RuntimeInfrastructureError):
                 app.cancel(result.ref)

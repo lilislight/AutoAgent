@@ -79,7 +79,7 @@ def micro():
         report[f'empty_patch_revisions_{count}']=measure(lambda:_apply_context_operations(context,revisions,(),2,3))
         report[f'one_patch_revisions_{count}']=measure(lambda:_apply_context_operations(context,revisions,(ContextOperation.set('0',-1),),2,3))
         units=tuple(ChildUnitState(i,f's{i}',f'i{i}',None) for i in range(count))
-        plan=ChildInvocationPlan('p',occ.id,'await','child','revision',units)
+        plan=ChildInvocationPlan('p',occ.id,'entry','child','revision',units)
         state=replace(seed,invocation=replace(inv,child_plans=MappingProxyType({'p':plan})))
         report[f'child_phase_units_{count}']=measure(lambda:planner.plan(state,ChildInvocationPhaseChanged('p',0,'opened'),
             occurred_at_us=999,session_id=seed.session.id,invocation_id=inv.id))

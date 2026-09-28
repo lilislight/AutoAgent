@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+from ._signals import SignalRuntime
+from ._waits import WaitRuntime
+from ..runtime.events import WaitRequested, CommandAwakened
+from ..commands import SignalReceipt, SignalBatch, SelectResult
+from ..commands.signals import SendSignalRequest
+from ..runtime.signals import SignalAccepted, SignalReceiptReleased, validate_signal_workflow
+from ..commands import Wait
+from ..commands import CancelRequest, CancelReceipt, AwaitAnyRequest, TimerResult
+from ..runtime.events import CancellationRequested
+from ..commands import CommandIR, RuntimeHandle, RuntimeObservation, RuntimeWait, ResumeRequest, ResumeReceipt
+from ..runtime.events import ResumeReceiptReleased
+from ..runtime.state import child_input_digest
+from ..commands.models import SYSTEM_COMMAND_IDS
+from dataclasses import asdict
+
 import asyncio
 from contextlib import asynccontextmanager
 import math
@@ -17,10 +32,9 @@ from ..compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from ..errors import RuntimeTransitionError
 from ..executor import CapabilityResolver, NodeExecutor, WorkflowExecutor
 from ..hosting import RuntimeEventSink, UserEventSink
-from ..operators import Operator, OperatorRegistry, Wait
+from ..operators import Operator, OperatorRegistry
 from ..runtime.clocks import unix_time_us
 from ..runtime import (
-    ChildAwaitReady,
     ChildInvocationPhaseChanged,
     ChildInvocationPlanned,
     RuntimeRepository,
@@ -48,7 +62,7 @@ from ..runtime import (
     thaw,
 )
 from ..scheduler import Scheduler
-from ..workflow import Capability, InvocationRef, ChildHandle, Workflow, WorkflowIR
+from ..workflow import Capability, InvocationRef, Workflow, WorkflowIR
 from .models import (
     AppCheckpoint,
     CheckpointLoadResult,
@@ -72,7 +86,7 @@ from ._graph_gate import GraphGate
 from .stream import AttachedStream, InvocationStream, is_stream_end
 
 
-class AutoAgentApp:
+class AutoAgentApp(SignalRuntime, WaitRuntime):
     """Compile and execute Workflows while retaining only current Runtime State."""
 
     def __init__(
@@ -125,6 +139,7 @@ class AutoAgentApp:
         self._clock_us = clock_us or unix_time_us
         self._operator_registry = operator_registry or OperatorRegistry()
         self._task_runtime = TaskRuntime()
+        self._init_wait_runtime()
         self._workflow_executor = WorkflowExecutor(
             journal=self._repository,
             scheduler=self._scheduler,
@@ -138,6 +153,16 @@ class AutoAgentApp:
             ensure_child_durable=self._ensure_child_durable,
             max_node_executions_per_invocation=max_node_executions_per_invocation,
             capability_resolver=capability_resolver,
+            suspend_command=self._suspend_command,
+            clock_us=self._clock_us,
+            status_runtime=self._status_runtime,
+            send_signal_runtime=self._send_signal_runtime,
+            receive_signal_runtime=self._receive_signal_runtime,
+            release_signal=self._release_signal,
+            cancel_runtime=self._cancel_runtime,
+            resume_runtime=self._resume_runtime,
+            release_resume=self._release_resume,
+            runtime_identity=self._runtime_identity,
         )
         self._runtime_loop = RuntimeLoop()
         self._attached_streams: dict[str, AttachedStream] = {}
@@ -147,6 +172,7 @@ class AutoAgentApp:
         self._session_transition_locks: dict[str, asyncio.Lock] = {}
         self._recovering: dict[str, set[str]] = {}
         self._graph_controls: dict[str, int] = {}
+        self._command_cancel_tasks = {}
         self._boundary_events: dict[str, asyncio.Event] = {}
         self._drive_errors: dict[str, BaseException] = {}
         self._child_capacities: dict[tuple[str, str], asyncio.Semaphore] = {}
@@ -540,6 +566,17 @@ class AutoAgentApp:
         reason: str | None = None,
     ) -> InvocationResult:
         return await self._await(self._submit(self._cancel(ref, reason)))
+
+    def signal(self, ref: InvocationRef, endpoint: str, payload: object, *, source_id: str, sequence: int) -> SignalReceipt:
+        """Deliver to a Root; matching Signal waits wake, external Waits do not."""
+        self._control_ref(ref)
+        request = SendSignalRequest(handle=RuntimeHandle(**ref.model_dump()), endpoint=endpoint, payload=payload)
+        return self._run(self._signal(ref, request, source_id, sequence))
+
+    async def asignal(self, ref: InvocationRef, endpoint: str, payload: object, *, source_id: str, sequence: int) -> SignalReceipt:
+        self._control_ref(ref)
+        request = SendSignalRequest(handle=RuntimeHandle(**ref.model_dump()), endpoint=endpoint, payload=payload)
+        return await self._await(self._submit(self._signal(ref, request, source_id, sequence)))
 
     def recover(
         self, ref: InvocationRef
@@ -1087,7 +1124,184 @@ class AutoAgentApp:
         inv = self._repository.state(session_id).invocation
         return sum(u.phase not in {'terminal', 'abandoned'} for p in inv.child_plans.values() for u in p.units) if inv else 0
 
+    def _runtime_identity(self, session_id):
+        inv = self._repository.state(session_id).invocation
+        handle = RuntimeHandle(session_id=session_id, invocation_id=inv.id,
+            workflow_id=inv.workflow_id, workflow_revision_id=inv.workflow_revision_id)
+        owner = self._parent_plan(session_id, inv.id)
+        if owner is None:
+            return handle, None
+        parent = self._repository.state(owner[0]).invocation
+        return handle, RuntimeHandle(session_id=owner[0], invocation_id=parent.id,
+            workflow_id=parent.workflow_id, workflow_revision_id=parent.workflow_revision_id)
+
+    async def _resume_runtime(self, caller_session_id, caller_invocation_id, call_id, request):
+        """Consume one exact Wait, acknowledging its effect before starting execution."""
+        request = ResumeRequest.model_validate(request)
+        target = request.handle.session_id
+        root = self._root_session_id(caller_session_id)
+        async with self._graph_gate(root).shared(), self._session_transition_lock(target):
+            caller = self._repository.state(caller_session_id).invocation
+            call = caller.scheduler.operator_calls.get(call_id) if caller is not None else None
+            if (caller is None or caller.id != caller_invocation_id or call is None
+                    or call.operator_id != 'system_command:resume' or call.status != 'running'
+                    or thaw(call.input) != request.model_dump(mode='python')):
+                raise RuntimeTransitionError('RESUME_CALL_MISMATCH', 'Resume requires its active recorded Command Call.')
+            state = self._repository.state(target)
+            inv = state.invocation
+            if (inv is None or self._root_session_id(target) != root
+                    or self._runtime_identity(target)[0] != request.handle):
+                raise RuntimeTransitionError('RUNTIME_HANDLE_MISMATCH', 'Resume requires an exact Handle in the caller graph.')
+            await self._settle_runtime_commits((target,))
+            state = self._repository.state(target)
+            inv = state.invocation
+            origin = {'session_id': caller_session_id, 'invocation_id': caller_invocation_id,
+                      'call_id': call_id, 'response_digest': child_input_digest(request.response)}
+            existing = inv.resume_receipts.get(call_id)
+            if existing is not None:
+                if dict(existing) != {**origin, 'wait_id': request.wait_id}:
+                    raise RuntimeTransitionError('RESUME_CALL_MISMATCH', 'Resume Call was reused with another request.')
+            else:
+                if self._branch_stopping(caller_session_id) or self._branch_stopping(target) or inv.terminal:
+                    raise RuntimeTransitionError('INVOCATION_STOPPING', 'Resume target or caller is stopping or terminal.')
+                wait = inv.scheduler.waits.get(request.wait_id)
+                if wait is None or wait.status != 'waiting':
+                    raise RuntimeTransitionError('WAIT_NOT_WAITING', 'Wait does not belong to the target or was already consumed.')
+                workflow = self._workflow_for_state(state)
+                node = workflow.node(inv.scheduler.occurrences[wait.occurrence_id].node_id)
+                if not isinstance(node.executable, Wait):
+                    raise RuntimeTransitionError('WAIT_NODE_INVALID', 'Resume requires a Wait Node.')
+                response = node.executable.output_contract.to_record(request.response)
+                await self._emit_locked(target, inv.id, WaitResumed(request.wait_id, response, origin))
+            # A replay can find an already completed/compacted target. Only still
+            # runnable targets need a wake; this never joins the target or Root.
+            inv = self._repository.state(target).invocation
+            if not inv.terminal and not self._branch_stopping(target) and inv.status != 'settling':
+                if self._task_runtime.task(target) is None:
+                    self._start_drive(self._workflow_for_state(self._repository.state(target)), target, inv.id, None, None)
+                else:
+                    self._task_runtime.wake(target)
+            return ResumeReceipt(handle=request.handle, wait_id=request.wait_id)
+
+    async def _release_resume(self, caller_session_id, caller_invocation_id, call_id, target):
+        """Retire the target proof only after the caller's result is acknowledged."""
+        root = self._root_session_id(caller_session_id)
+        async with self._graph_gate(root).shared(), self._session_transition_lock(target):
+            await self._settle_runtime_commits((target,))
+            caller_state = self._repository.state(caller_session_id)
+            caller = caller_state.invocation
+            inv = self._repository.state(target).invocation
+            if inv is None or call_id not in inv.resume_receipts:
+                return
+            receipt = inv.resume_receipts[call_id]
+            call = caller.scheduler.operator_calls.get(call_id) if caller is not None else None
+            if (caller is None or caller.id != caller_invocation_id
+                    or receipt['session_id'] != caller_session_id or receipt['invocation_id'] != caller_invocation_id
+                    or not (caller.terminal or (call is not None and call.status in {'completed', 'failed', 'cancelled'}))):
+                raise RuntimeTransitionError('RESUME_RECEIPT_ACTIVE', 'Resume Call has not settled.')
+            await self._emit_locked(target, inv.id, ResumeReceiptReleased(call_id, caller_state.sequence))
+
+    async def _collect_resume_receipts(self, root):
+        """Retire proofs abandoned by cancellation, without scanning ordinary graphs."""
+        for target in tuple(self._resume_receipt_targets):
+            if self._root_session_id(target) != root:
+                continue
+            inv = self._repository.state(target).invocation
+            for call_id, receipt in tuple(inv.resume_receipts.items()):
+                caller = self._repository.state(receipt['session_id']).invocation
+                call = caller.scheduler.operator_calls.get(call_id) if caller is not None else None
+                if caller is not None and (caller.terminal or (call is not None and call.status in {'completed', 'failed', 'cancelled'})):
+                    await self._release_resume(receipt['session_id'], receipt['invocation_id'], call_id, target)
+
+        await self._collect_signal_receipts(root)
+
+    async def _cancel_runtime(self, caller_session_id, caller_invocation_id, call_id, request):
+        request = CancelRequest.model_validate(request)
+        target = request.handle.session_id
+        root = self._root_session_id(caller_session_id)
+        async with self._graph_gate(root).shared(), self._session_transition_lock(target):
+            caller = self._repository.state(caller_session_id).invocation
+            call = caller.scheduler.operator_calls.get(call_id) if caller else None
+            inv = self._repository.state(target).invocation
+            if (caller is None or caller.id != caller_invocation_id or call is None
+                    or call.status != 'running' or call.operator_id != 'system_command:cancel'
+                    or thaw(call.input) != request.model_dump(mode='python')):
+                raise RuntimeTransitionError('CANCEL_CALL_MISMATCH', 'Cancel requires its active recorded Call.')
+            if (inv is None or self._root_session_id(target) != root
+                    or self._runtime_identity(target)[0] != request.handle):
+                raise RuntimeTransitionError('RUNTIME_HANDLE_MISMATCH', 'Cancel requires an exact Handle in the caller graph.')
+            await self._settle_runtime_commits((target,))
+            inv = self._repository.state(target).invocation
+            origin = {'session_id': caller_session_id, 'invocation_id': caller_invocation_id,
+                      'call_id': call_id, 'reason_digest': child_input_digest(request.reason)}
+            if inv.cancel_origin == origin:
+                disposition = 'requested'
+            elif inv.terminal:
+                disposition = 'already_terminal'
+            elif self._branch_stopping(target):
+                disposition = 'already_stopping'
+            else:
+                await self._emit_locked(target, inv.id, CancellationRequested(request.reason, origin))
+                disposition = 'requested'
+            inv = self._repository.state(target).invocation
+            if not inv.terminal and inv.stopping:
+                self._schedule_command_cancellation(root, target, inv)
+            if self._branch_stopping(caller_session_id):
+                # The caller is part of the cancelled subtree. Its Call may
+                # already be cancelled by the durable stop intent.
+                raise asyncio.CancelledError()
+            return CancelReceipt(handle=request.handle, disposition=disposition)
+
+    def _schedule_command_cancellation(self, root, target, invocation):
+        if target in self._command_cancel_tasks:
+            return
+        self._graph_controls[root] = self._graph_controls.get(root, 0) + 1
+        ref = self._ref_for_invocation(target, invocation)
+        async def finish():
+            try:
+                await self._cancel_graph_operation(ref, invocation.cancel_reason)
+            except Exception as error:
+                self._drive_errors[root] = error
+            finally:
+                self._graph_controls[root] -= 1
+                if not self._graph_controls[root]:
+                    self._graph_controls.pop(root)
+                self._command_cancel_tasks.pop(target, None)
+                self._notify_boundary(root)
+        self._command_cancel_tasks[target] = asyncio.create_task(finish())
+
+    async def _status_runtime(self, caller_session_id, handle):
+        """Read one same-graph snapshot without driving or settling the target.
+
+        No suspension occurs between validation and projection: all repository
+        publication runs on the Runtime loop and follows Sink acknowledgement.
+        """
+        handle = RuntimeHandle.model_validate(handle)
+        inv = self._repository.state(handle.session_id).invocation
+        caller = self._repository.state(caller_session_id).invocation
+        if (caller is None or inv is None
+                or self._root_session_id(caller_session_id) != self._root_session_id(handle.session_id)
+                or self._runtime_identity(handle.session_id)[0] != handle):
+            raise RuntimeTransitionError('RUNTIME_HANDLE_MISMATCH', 'Status requires an exact Handle in the caller graph.')
+        sessions = (handle.session_id, *self._descendant_sessions(handle.session_id))
+        return self._runtime_observation(handle, sessions)
+
+    def _runtime_observation(self, handle, sessions):
+        inv = self._repository.state(handle.session_id).invocation
+        waits = self._runtime_waits(sessions)
+        return RuntimeObservation(handle=handle, status=inv.status, pending_outcome=inv.pending_outcome,
+            output=thaw(inv.output), error=asdict(inv.error) if inv.error else None,
+            cancel_reason=inv.cancel_reason, waits=waits, version=self._observation_version(handle, inv, waits))
+
+    def _runtime_waits(self, sessions):
+        return [RuntimeWait(handle=self._runtime_identity(sid)[0], wait_id=w.id,
+            request=thaw(w.request) if w.kind == "external" else None, kind=w.kind,
+            condition=thaw(w.request) if w.kind != "external" else None)
+            for sid in sessions for w in self._repository.state(sid).invocation.scheduler.waits.values()
+            if w.status == 'waiting' and not self._branch_stopping(sid)]
+
     def _notify_boundary(self, root: str) -> None:
+        self._schedule_waits(root)
         event = self._boundary_events.get(root)
         if event is not None:
             event.set()
@@ -1103,7 +1317,7 @@ class AutoAgentApp:
             session_id = parent[0]
 
     def _graph_waits(self, root: str) -> tuple[InvocationWait, ...]:
-        return tuple(InvocationWait(w.id, thaw(w.request))
+        return tuple(InvocationWait(w.id, thaw(w.request) if w.kind == "external" else None, w.kind, thaw(w.request) if w.kind != "external" else None)
                      for sid in (root, *self._descendant_sessions(root))
                      if (inv := self._repository.state(sid).invocation) is not None
                      for w in inv.scheduler.waits.values() if w.status == 'waiting' and not self._branch_stopping(sid))
@@ -1123,13 +1337,13 @@ class AutoAgentApp:
             live = any(self._task_runtime.is_live(sid) for sid in sessions)
             if current.terminal and not live and not self._graph_controls.get(root) and self._child_graph_settled(root, sessions[1:]):
                 return
-            if not current.terminal and not current.stopping and not self._graph_controls.get(root) and not self._task_runtime.is_live(root) and any(
+            if not current.terminal and not current.stopping and root not in self._wait_pumps and not self._graph_controls.get(root) and not self._task_runtime.is_live(root) and any(
                 (inv := self._repository.state(sid).invocation) is not None
-                and any(w.status == "waiting" for w in inv.scheduler.waits.values())
+                and any(w.status == "waiting" and (not live or w.kind not in {"child", "any"} or w.kind == "any" and any(c["kind"] != "child" for c in w.request["cases"])) for w in inv.scheduler.waits.values())
                 and not self._branch_stopping(sid) for sid in sessions
             ):
                 return
-            if not live and not self._graph_controls.get(root):
+            if not live and root not in self._wait_pumps and not self._graph_controls.get(root):
                 raise RuntimeTransitionError("INVOCATION_NOT_LIVE", "Graph needs recover() before it can reach a boundary.")
             await event.wait()
 
@@ -1188,8 +1402,10 @@ class AutoAgentApp:
             target = ref.session_id
             session_ids = (target, *self._descendant_sessions(target))
             await self._settle_runtime_commits(session_ids)
-            root_state = self._state_for_ref(ref)
+            root_state = self._repository.state(target)
             root_invocation = root_state.invocation
+            if root_invocation is None or self._ref_for_invocation(target, root_invocation) != ref:
+                raise RuntimeTransitionError('INVOCATION_REF_STALE', 'Cancellation target changed.')
             if root_invocation is not None and not root_invocation.terminal:
                 await self._emit(
                     target, root_invocation.id, InvocationCancelled(reason)
@@ -1223,6 +1439,7 @@ class AutoAgentApp:
         target_invocation = self._repository.state(target).invocation
         if target_invocation is not None and target_invocation.terminal:
             await self._settle_child(target, target_invocation.id)
+        await self._collect_resume_receipts(self._root_session_id(target))
         for session_id in session_ids:
             self._drive_errors.pop(session_id, None)
 
@@ -1262,7 +1479,7 @@ class AutoAgentApp:
             target_path.add(current_session_id)
         self._acquire_result_lease(root)
         try:
-            if any(
+            if self._graph_controls.get(root) or any(
                 self._task_runtime.is_live(session_id)
                 for session_id in (root, *self._descendant_sessions(root))
             ):
@@ -1277,6 +1494,7 @@ class AutoAgentApp:
                 target_path=frozenset(target_path),
             )
             await self._await_graph_boundary(ref)
+            await self._collect_resume_receipts(root)
             return await self._result(ref)
         except asyncio.CancelledError:
             if self._drive_cancelled_at_terminal_boundary(ref):
@@ -1313,6 +1531,10 @@ class AutoAgentApp:
         if session_id in seen:
             return
         seen.add(session_id)
+        # A result may have reached the Sink while its ACK was lost. Publish
+        # that exact pending event before deciding which work needs recovery.
+        async with self._graph_gate(self._root_session_id(session_id)).shared(), self._session_transition_lock(session_id):
+            await self._settle_runtime_commits((session_id,))
         state = self._repository.state(session_id)
         invocation = state.invocation
         if invocation is None:
@@ -1336,12 +1558,16 @@ class AutoAgentApp:
             await self._settle_child(session_id, invocation.id)
             return
         workflow = self._workflow_for_state(state)
+        validate_signal_workflow(invocation, workflow)
+        for wait in invocation.scheduler.waits.values():
+            if wait.status == "waiting" and wait.kind != "external":
+                self._validate_wait_target(session_id, wait.kind, wait.request)
         preflight_error = self._workflow_executor.recovery_preflight_error(
             workflow,
             state,
         )
-        if preflight_error is None and invocation.status == "running" and any(
-            item.status == "running"
+        if preflight_error is None and invocation.status in {"running", "waiting"} and any(
+            item.status in {"running", "waiting"}
             for item in invocation.scheduler.occurrences.values()
         ):
             preflight_error = self._recovery_error(workflow, state)
@@ -1361,7 +1587,7 @@ class AutoAgentApp:
             await self._settle_child(session_id, invocation.id)
             return
         child_sessions = tuple(
-            (unit.session_id, plan.mode)
+            unit.session_id
             for plan in invocation.child_plans.values()
             for unit in plan.units
             if self._repository.state(unit.session_id).invocation is not None
@@ -1374,15 +1600,15 @@ class AutoAgentApp:
                         seen,
                         wait_for_boundary=(
                             wait_for_boundary
-                            and (mode == "await" or child in target_path)
+                            and child in target_path
                         ),
                         target_path=target_path,
                     )
-                    for child, mode in child_sessions
+                    for child in child_sessions
                 ),
                 return_exceptions=True,
             )
-            for (child_session_id, _mode), outcome in zip(
+            for child_session_id, outcome in zip(
                 child_sessions, recovered, strict=True
             ):
                 if not isinstance(outcome, BaseException):
@@ -1406,6 +1632,8 @@ class AutoAgentApp:
             # The handshake/preflight is complete. External Waits may resume
             # while recovery is still awaiting other running graph branches.
             admitted.add(session_id)
+        self._refresh_wait_session(session_id)
+        self._schedule_waits(self._root_session_id(session_id))
         if invocation.status == "settling":
             await self._finish_settling(session_id)
         if invocation.status == "running":
@@ -1457,7 +1685,7 @@ class AutoAgentApp:
         if invocation is None:
             return RuntimeErrorInfo("RecoveryStateInvalid", "Invocation is missing.")
         for occurrence in invocation.scheduler.occurrences.values():
-            if occurrence.status != "running":
+            if occurrence.status not in {"running", "waiting"}:
                 continue
             node = workflow.node(occurrence.node_id)
             if occurrence.execution.fault is not None or any(
@@ -1467,10 +1695,10 @@ class AutoAgentApp:
             ):
                 continue
             unknown_calls = [call for call in invocation.scheduler.operator_calls.values()
-                if call.occurrence_id == occurrence.id and (call.status in {"running", "lost"}
+                if call.occurrence_id == occurrence.id and not (isinstance(node.executable, (CommandIR, Wait)) and call.operator_id == node.executable.id) and (call.status in {"running", "lost"}
                     or (call.status == "failed" and call.error is not None and call.error.type == "CancelledError"))]
             stages = occurrence.execution.completed_stages
-            child_hooks_pending = isinstance(node.executable, WorkflowIR) and (
+            child_hooks_pending = isinstance(node.executable, CommandIR) and (
                 (node.map is not None and node.map.aggregate is not None and "aggregated" not in stages)
                 or (node.output_binding is not None and "output_bound" not in stages)
                 or (any(edge.condition is not None for edge in workflow.outgoing(node.id)) and "routing_resolved" not in stages)
@@ -1504,6 +1732,7 @@ class AutoAgentApp:
         # ACK settlement may publish previously pending ownership.
         sessions = (root, *self._descendant_sessions(root))
         await self._settle_runtime_commits(sessions)
+        await self._collect_resume_receipts(root)
         captured_at = self._clock_us()
         return RuntimeGraphCheckpoint(root, tuple(
             self._repository.capture_checkpoint(sid, captured_at_us=captured_at)
@@ -1516,8 +1745,8 @@ class AutoAgentApp:
         async with self._graph_gate(root):
             self._state_for_ref(ref)
             sessions = (root, *self._descendant_sessions(root))
-            if any(self._task_runtime.is_live(sid) for sid in sessions):
-                raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Graph has live tasks.")
+            if self._graph_controls.get(root) or any(self._task_runtime.is_live(sid) for sid in sessions):
+                raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Graph has live tasks or control operations.")
             await self._settle_runtime_commits(sessions)
             sessions = (root, *self._descendant_sessions(root))
             if root in self._recovering or self._result_leases.get(root, 0) or any(sid in self._attached_streams for sid in sessions):
@@ -1542,6 +1771,7 @@ class AutoAgentApp:
         # Repository validates all pending commits before discarding any State.
         # Retire transient resources only after that atomic operation succeeds.
         self._repository.discard_states(sessions)
+        self._forget_wait_sessions(sessions)
         for sid in sessions:
             if (invocation_id := invocation_ids.get(sid)) is not None:
                 self._user_event_journal.discard(invocation_id)
@@ -1553,6 +1783,8 @@ class AutoAgentApp:
             self._drive_errors.pop(sid, None)
         self._child_capacities = {k: v for k, v in self._child_capacities.items() if k[0] not in retired}
         self._child_owners = {k: v for k, v in self._child_owners.items() if k not in retired and v[0] not in retired}
+        self._resume_receipt_targets.difference_update(retired)
+        self._signal_receipt_targets.difference_update(retired)
 
     async def _load_checkpoint(self, checkpoint: RuntimeGraphCheckpoint | AppCheckpoint) -> CheckpointLoadResult:
         graphs = checkpoint.graphs if isinstance(checkpoint, AppCheckpoint) else (checkpoint,) if isinstance(checkpoint, RuntimeGraphCheckpoint) else None
@@ -1568,6 +1800,11 @@ class AutoAgentApp:
             states = {item.session_id: item.state for item in graph.sessions}
             validate_graph(graph.root_session_id, states)
             all_states.update(states)
+        for state in all_states.values():
+            if state.invocation is not None:
+                workflow = self._workflows.get(state.invocation.workflow_revision_id)
+                if workflow is not None:
+                    validate_signal_workflow(state.invocation, workflow)
         existing = set(self._repository.session_ids())
         for sid, state in all_states.items():
             if sid in existing and self._repository.state(sid) != state:
@@ -1643,6 +1880,14 @@ class AutoAgentApp:
 
     async def _close_operation(self, *, capture_checkpoint: bool = False) -> AppCheckpoint | None:
         """Quiesce owners and settle Events, optionally capturing resident Sessions."""
+        for timer in self._wait_timers.values():
+            timer.cancel()
+        self._wait_timers.clear()
+        pumps = tuple(self._wait_pumps.values())
+        for task in pumps:
+            task.cancel()
+        if pumps:
+            await asyncio.gather(*pumps, return_exceptions=True)
 
         for channel in tuple(self._attached_streams.values()):
             channel.abandon()
@@ -1655,6 +1900,8 @@ class AutoAgentApp:
         if stream_tasks:
             await asyncio.gather(*stream_tasks, return_exceptions=True)
         await self._task_runtime.cancel_all()
+        if self._command_cancel_tasks:
+            await asyncio.gather(*tuple(self._command_cancel_tasks.values()), return_exceptions=True)
         for session_id in self._repository.session_ids():
             settled = await self._repository.settle(session_id)
             if isinstance(settled, RuntimeEvent):
@@ -1704,6 +1951,7 @@ class AutoAgentApp:
                 )
             await self._finish_settling(session_id, body_stopped=True)
             await self._settle_child(session_id, invocation_id)
+            await self._collect_resume_receipts(self._root_session_id(session_id))
 
         async def run() -> None:
             try:
@@ -1789,42 +2037,6 @@ class AutoAgentApp:
         if parent.status == "settling":
             await self._finish_settling(parent_session_id)
             await self._settle_child(parent_session_id, parent.id)
-        if plan.mode != "await":
-            return
-        occurrence = parent.scheduler.occurrences.get(plan.parent_occurrence_id)
-        if occurrence is None or occurrence.status != "waiting":
-            return
-        if self._repository.has_failed_child(plan):
-            # Once an awaited parent has suspended, a terminal failure is
-            # enough to decide the whole Map.  Converge every remaining unit
-            # before waking the parent so its failure boundary is recoverable
-            # and no sibling remains indefinitely waiting.
-            await self._workflow_executor.converge_failed_child_plan(
-                parent_session_id,
-                parent.id,
-                creation_id,
-            )
-            parent = self._repository.state(parent_session_id).invocation
-            assert parent is not None
-            plan = parent.child_plans[creation_id]
-        if self._repository.execution_index(parent_session_id).child_remaining[creation_id]:
-            return
-        await self._emit_child_transition(
-            parent_session_id,
-            parent.id,
-            ChildAwaitReady(creation_id, plan.parent_occurrence_id),
-        )
-        parent_state = self._repository.state(parent_session_id)
-        parent = parent_state.invocation
-        if parent is not None and not parent.terminal and parent.status != "settling" and not self._closing:
-            workflow = self._workflow_for_state(parent_state)
-            if self._task_runtime.task(parent_session_id) is not None:
-                self._task_runtime.wake(parent_session_id)
-            else:
-                self._start_drive(
-                    workflow, parent_session_id, parent.id, None, None
-                )
-
     async def _settle_unopened_children(self, session_id: str) -> None:
         inv = self._repository.state(session_id).invocation
         if inv is None or not inv.stopping:
@@ -1943,7 +2155,7 @@ class AutoAgentApp:
         if isinstance(payload, RecoveryApplied):
             payload = RecoveryApplied(
                 tuple(item.id for item in state.invocation.scheduler.occurrences.values() if item.status == "running"),
-                tuple(item.id for item in state.invocation.scheduler.operator_calls.values() if item.status == "running"),
+                tuple(item.id for item in state.invocation.scheduler.operator_calls.values() if item.status == "running" and item.operator_id not in SYSTEM_COMMAND_IDS),
             )
         if isinstance(payload, InvocationStarted):
             workflow = self._workflows[payload.workflow_revision_id]
@@ -1979,6 +2191,18 @@ class AutoAgentApp:
         return transition
 
     def _publish_ownership(self, event):
+        if isinstance(event.payload, (WaitRequested, CommandAwakened, InvocationCancelled, InvocationFailed, InvocationSettling)):
+            self._refresh_wait_session(event.session_id)
+        if isinstance(event.payload, SignalAccepted) and event.payload.origin is not None:
+            self._signal_receipt_targets.add(event.session_id)
+        elif isinstance(event.payload, SignalReceiptReleased):
+            if not self._repository.state(event.session_id).invocation.signals['receipts']:
+                self._signal_receipt_targets.discard(event.session_id)
+        if isinstance(event.payload, WaitResumed) and event.payload.origin is not None:
+            self._resume_receipt_targets.add(event.session_id)
+        elif isinstance(event.payload, ResumeReceiptReleased):
+            if not self._repository.state(event.session_id).invocation.resume_receipts:
+                self._resume_receipt_targets.discard(event.session_id)
         self._notify_boundary(self._root_session_id(event.session_id))
         if isinstance(event.payload, ChildInvocationPlanned):
             for unit in event.payload.units:
@@ -1993,7 +2217,7 @@ class AutoAgentApp:
             if child is not None and child.stopping and self._remaining_children(unit.session_id):
                 await self._cancel_descendants(unit.session_id, "Ancestor Invocation failed or cancelled.")
             await self._compact_child(unit.session_id)
-        if isinstance(payload, (ChildInvocationPhaseChanged, ChildAwaitReady)):
+        if isinstance(payload, ChildInvocationPhaseChanged):
             return await self._emit_child_transition(session_id, invocation_id, payload)
         return await self._emit(session_id, invocation_id, payload)
 
@@ -2011,23 +2235,16 @@ class AutoAgentApp:
                 plan = parent.child_plans.get(payload.creation_id)
                 if plan is None:
                     return None
-                if isinstance(payload, ChildInvocationPhaseChanged):
-                    if payload.phase == 'abandoned' and self._repository.state(plan.units[payload.unit_index].session_id).invocation is not None:
-                        raise RuntimeTransitionError('CHILD_ALREADY_CREATED', 'An existing Child cannot be abandoned.')
-                    if payload.phase == 'terminal':
-                        unit = plan.units[payload.unit_index]
-                        child = self._repository.state(unit.session_id).invocation
-                        if child is not None and (not child.terminal or self._remaining_children(unit.session_id)):
-                            raise RuntimeTransitionError("CHILDREN_NOT_SETTLED", "Child subtree has not converged.")
-                    ranks = {'planned': 0, 'opened': 1, 'accepted': 2, 'terminal': 3, 'abandoned': 3}
-                    if ranks[plan.units[payload.unit_index].phase] >= ranks[payload.phase]:
-                        return None
-                else:
-                    occurrence = parent.scheduler.occurrences.get(plan.parent_occurrence_id)
-                    if parent.terminal or occurrence is None or occurrence.status != 'waiting':
-                        return None
-                    if any(unit.phase not in {'terminal', 'abandoned'} for unit in plan.units):
-                        return None
+                if payload.phase == 'abandoned' and self._repository.state(plan.units[payload.unit_index].session_id).invocation is not None:
+                    raise RuntimeTransitionError('CHILD_ALREADY_CREATED', 'An existing Child cannot be abandoned.')
+                if payload.phase == 'terminal':
+                    unit = plan.units[payload.unit_index]
+                    child = self._repository.state(unit.session_id).invocation
+                    if child is not None and (not child.terminal or self._remaining_children(unit.session_id)):
+                        raise RuntimeTransitionError("CHILDREN_NOT_SETTLED", "Child subtree has not converged.")
+                ranks = {'planned': 0, 'opened': 1, 'accepted': 2, 'terminal': 3, 'abandoned': 3}
+                if ranks[plan.units[payload.unit_index].phase] >= ranks[payload.phase]:
+                    return None
                 return await self._emit_locked(session_id, invocation_id, payload)
 
     @asynccontextmanager
@@ -2372,6 +2589,10 @@ class AutoAgentApp:
                         )
                     owners[unit.session_id] = owner
         self._child_owners = owners
+        self._signal_receipt_targets = {sid for sid in self._repository.session_ids()
+            if (inv := self._repository.state(sid).invocation) is not None and inv.signals['receipts']}
+        self._resume_receipt_targets = {sid for sid in self._repository.session_ids()
+            if (inv := self._repository.state(sid).invocation) is not None and inv.resume_receipts}
 
     def _root_session_id(self, session_id: str) -> str:
         current = session_id
@@ -2499,11 +2720,9 @@ class AutoAgentApp:
                 continue
             seen[current.workflow_revision_id] = current.definition_hash
             closure.append(current)
-            pending.extend(
-                cast(WorkflowIR, node.executable)
-                for node in reversed(current.nodes)
-                if isinstance(node.executable, WorkflowIR)
-            )
+            pending.extend(node.executable.workflow for node in reversed(current.nodes)
+                if isinstance(node.executable, CommandIR) and node.executable.workflow is not None)
+
 
         snapshots: dict[str, WorkflowDefinitionSnapshot] = {}
         capabilities: list[Capability] = []
@@ -2627,7 +2846,7 @@ def _positive_integer(value: object, name: str) -> None:
 
 
 def _contains_identity_value(annotation: object) -> bool:
-    if annotation in (InvocationRef, ChildHandle):
+    if annotation in (InvocationRef, RuntimeHandle, RuntimeObservation, ResumeReceipt, CancelReceipt, TimerResult, SignalReceipt, SignalBatch, SelectResult):
         return True
     return any(_contains_identity_value(item) for item in get_args(annotation))
 

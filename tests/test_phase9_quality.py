@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn, Await
 from autoagent import RuntimeGraphCheckpoint
 
 from tests.graph_fixtures import (
@@ -237,7 +238,7 @@ class QualityTests(unittest.TestCase):
                 nodes=[
                     Node(
                         "children",
-                        child,
+                        Await(child, child.nodes[0].id),
                         input_mapping=child_inputs,
                         map=Map(max_parallelism=4),
                     )
@@ -722,7 +723,7 @@ class QualityTests(unittest.TestCase):
         child = Workflow("durable-child", nodes=[Node("node", identity)])
         parent = Workflow(
             "durable-parent",
-            nodes=[Node("child", child, execution_mode="spawn")],
+            nodes=[Node("child", Spawn(child, child.nodes[0].id))],
         )
         first_app = AutoAgentApp()
         result = first_app.invoke(parent, {"value": 1})
@@ -736,7 +737,7 @@ class QualityTests(unittest.TestCase):
             load_graph(second_app, checkpoint)
             status = second_app.status(result.ref)
             self.assertEqual(status.status, "completed")
-            self.assertEqual(child_refs(second_app, result.ref)[0].session_id, handle.child_session_id)
+            self.assertEqual(child_refs(second_app, result.ref)[0].session_id, handle.session_id)
         finally:
             second_app.close()
 

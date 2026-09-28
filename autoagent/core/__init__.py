@@ -1,5 +1,6 @@
 """Public surface of the standalone AutoAgent V2 Core rewrite."""
 
+from .commands import Wait
 from .app import (
     AppCheckpoint,
     AutoAgentApp,
@@ -39,7 +40,6 @@ from .operators import (
     OperatorRegistry,
     StreamReducer,
     ValueContract,
-    Wait,
 )
 from .executor import (
     ExecutionMetrics,
@@ -70,6 +70,7 @@ from .runtime import (
     NodeCompleted,
     NodeFailed,
     NodeStarted,
+    CommandAwakened,
     WaitRequested,
     NodeOccurrenceState,
     OperatorCallCompleted,
@@ -167,6 +168,7 @@ __all__ = [
     "NodeCompleted",
     "NodeFailed",
     "NodeStarted",
+    "CommandAwakened",
     "WaitRequested",
     "NodeOccurrenceState",
     "NodeExecutionResult",
@@ -220,8 +222,24 @@ __all__ = [
     "workflow_hook",
 ]
 
-from .workflow import ChildHandle
-__all__ += ["ChildHandle"]
 
 from .runtime import RuntimeGraphCheckpoint
 __all__ += ["RuntimeGraphCheckpoint"]
+
+from .commands import SystemCommand, Spawn, Await, RuntimeHandle, RuntimeObservation, RuntimeWait
+__all__ += ["SystemCommand", "Spawn", "Await", "RuntimeHandle", "RuntimeObservation", "RuntimeWait"]
+
+from .commands import Resume, ResumeRequest, ResumeReceipt, Status
+__all__ += ["Resume", "ResumeRequest", "ResumeReceipt", "Status"]
+
+from .commands import Cancel, CancelRequest, CancelReceipt, AwaitAny, AwaitAnyRequest, Timer, TimerRequest, TimerResult
+__all__ += ["Cancel", "CancelRequest", "CancelReceipt", "AwaitAny", "AwaitAnyRequest", "Timer", "TimerRequest", "TimerResult"]
+
+from .commands import SignalEndpoint, SignalLimits, SendSignal, SignalReceipt, SignalMessage, ReceiveSignal, SignalBatch
+__all__ += ['SignalEndpoint', 'SignalLimits', 'SendSignal', 'SignalReceipt', 'SignalMessage', 'ReceiveSignal', 'SignalBatch']
+
+from .commands import SelfHandle, OwnerHandle
+__all__ += ["SelfHandle", "OwnerHandle"]
+
+from .commands import AwaitSignal, SignalCase, TimerCase, ChildCase, Select, SelectResult, SuspensionInfo
+__all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "SelectResult", "SuspensionInfo"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn, Await, RuntimeHandle
 import json
 import unittest
 from typing import Iterator
@@ -8,7 +9,7 @@ from typing_extensions import TypedDict
 from autoagent.core import (
     AggregationContext,
     Capability,
-    ChildHandle,
+    RuntimeHandle,
     CompileResult,
     ConditionContext,
     ContextPatch,
@@ -595,19 +596,19 @@ class CompilerTests(unittest.TestCase):
             self.compiler.compile_or_raise(inline)
 
         child = Workflow("child")
-        child.nodes.append(Node("self", child))
+        child.nodes.append(Node("self", Await(child, "self")))
         with self.assertRaisesRegex(WorkflowCompileError, "CHILD_WORKFLOW_RECURSION"):
             self.compiler.compile_or_raise(child)
 
     def test_child_workflow_executable_requires_unambiguous_boundary(self) -> None:
         """Verify child workflow executable requires unambiguous boundary."""
         child = Workflow("child", nodes=[Node("only", identity)])
-        ir = self.compiler.compile_or_raise(Workflow("parent", nodes=[Node("child", child)]))
-        self.assertEqual(ir.node("child").executable.workflow_id, "child")
+        ir = self.compiler.compile_or_raise(Workflow("parent", nodes=[Node("child", Await(child, child.nodes[0].id))]))
+        self.assertEqual(ir.node("child").executable.workflow.workflow_id, "child")
         ambiguous = Workflow("ambiguous", nodes=[Node("a", identity), Node("b", identity)])
-        with self.assertRaisesRegex(WorkflowCompileError, "CHILD_WORKFLOW_BOUNDARY_AMBIGUOUS"):
+        with self.assertRaisesRegex(WorkflowCompileError, "COMMAND_ENTRY_INVALID"):
             self.compiler.compile_or_raise(
-                Workflow("bad-parent", nodes=[Node("child", ambiguous)])
+                Workflow("bad-parent", nodes=[Node("child", Await(ambiguous, "missing"))])
             )
 
     def test_spawn_child_has_durable_handle_contract(self) -> None:
@@ -616,11 +617,11 @@ class CompilerTests(unittest.TestCase):
         ir = self.compiler.compile_or_raise(
             Workflow(
                 "parent",
-                nodes=[Node("child", child, execution_mode="spawn")],
+                nodes=[Node("child", Spawn(child, child.nodes[0].id))],
             )
         )
-        self.assertIs(ir.node("child").output_contract.annotation, ChildHandle)
-        with self.assertRaisesRegex(WorkflowCompileError, "EXECUTION_MODE_NOT_WORKFLOW"):
+        self.assertIs(ir.node("child").output_contract.annotation, RuntimeHandle)
+        with self.assertRaisesRegex(TypeError, "execution_mode"):
             self.compiler.compile_or_raise(
                 Workflow("bad-spawn", nodes=[Node("node", identity, execution_mode="spawn")])
             )

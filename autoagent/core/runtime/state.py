@@ -1,6 +1,7 @@
 """Canonical immutable Runtime State for one Session."""
 
 from __future__ import annotations
+from .signals import empty_signals, validate_signal_state
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -16,13 +17,14 @@ from .scheduling import (
     LoopBoundaryResolution,
     occurrence_key,
 )
+from ..commands.models import SYSTEM_COMMAND_IDS
 from .values import DurableValue, freeze, thaw
 from ._chunked import ChunkedUnits, runtime_mapping, child_units
 from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 8
+RUNTIME_STATE_SCHEMA_VERSION = 14
 InvocationStatus = Literal[
     "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
@@ -30,7 +32,6 @@ NodeOccurrenceStatus = Literal[
     "ready", "running", "waiting", "completed", "failed", "skipped", "cancelled"
 ]
 OperatorCallStatus = Literal["running", "completed", "failed", "lost", "cancelled"]
-ChildInvocationMode = Literal["await", "spawn"]
 ChildUnitPhase = Literal["planned", "opened", "accepted", "terminal", "abandoned"]
 
 
@@ -43,6 +44,8 @@ class WaitState:
     response: DurableValue = None
     created_at_us: int = 0
     resumed_at_us: int | None = None
+    kind: str = "external"
+    registered_sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +79,7 @@ class ChildUnitState:
 class ChildInvocationPlan:
     creation_id: str
     parent_occurrence_id: str
-    mode: ChildInvocationMode
+    entry_node_id: str
     workflow_id: str
     workflow_revision_id: str
     units: tuple[ChildUnitState, ...] | ChunkedUnits = ()
@@ -173,6 +176,10 @@ class InvocationState:
         default_factory=lambda: MappingProxyType({})
     )
 
+    signals: DurableValue = field(default_factory=empty_signals)
+    cancel_origin: DurableValue = None
+    resume_receipts: DurableValue = field(default_factory=lambda: freeze({}))
+    resume_receipt_frontiers: DurableValue = field(default_factory=lambda: freeze({}))
     pending_outcome: Literal["completed", "failed", "cancelled"] | None = None
 
     @property
@@ -210,6 +217,10 @@ class ChildResult:
     unit_index: int
     input_digest: str
     child_plans: Mapping[str, ChildInvocationPlan]
+    signals: DurableValue = field(default_factory=empty_signals)
+    cancel_origin: DurableValue = None
+    resume_receipts: DurableValue = field(default_factory=lambda: freeze({}))
+    resume_receipt_frontiers: DurableValue = field(default_factory=lambda: freeze({}))
     kind: Literal["child_result"] = field(default="child_result", init=False)
 
     # Common read-only view used by graph traversal and result consumers.
@@ -300,6 +311,40 @@ class RuntimeState:
         return state
 
 
+def _validate_resume_metadata(invocation):
+    if invocation.cancel_origin is not None:
+        from .events import CancellationRequested
+        CancellationRequested(invocation.cancel_reason, invocation.cancel_origin)
+        if not invocation.stopping or child_input_digest(invocation.cancel_reason) != invocation.cancel_origin['reason_digest']:
+            raise ValueError('Cancellation origin requires its stopping outcome and reason.')
+
+    receipts, frontiers = invocation.resume_receipts, invocation.resume_receipt_frontiers
+    if not isinstance(receipts, Mapping) or not isinstance(frontiers, Mapping):
+        raise ValueError("Resume metadata must be mappings.")
+    for key, receipt in receipts.items():
+        if not isinstance(receipt, Mapping) or set(receipt) != {
+            'session_id', 'invocation_id', 'call_id', 'wait_id', 'response_digest'
+        }:
+            raise ValueError("Invalid Resume receipt fields.")
+        for value in (key, *receipt.values()):
+            _non_empty_string_value(value, "Resume receipt identity")
+        if key != receipt['call_id'] or len(receipt['response_digest']) != 64 or any(
+            c not in '0123456789abcdef' for c in receipt['response_digest']
+        ):
+            raise ValueError("Invalid Resume receipt identity or response digest.")
+        if not isinstance(invocation, ChildResult):
+            wait = invocation.scheduler.waits.get(receipt['wait_id'])
+            if wait is None or wait.status != 'resumed':
+                raise ValueError("Resume receipt requires its consumed Wait.")
+    for key, dependency in frontiers.items():
+        _non_empty_string_value(key, "Resume dependency Session")
+        if not isinstance(dependency, Mapping) or set(dependency) != {'invocation_id', 'sequence'}:
+            raise ValueError("Invalid Resume dependency fields.")
+        _non_empty_string_value(dependency['invocation_id'], "Resume dependency Invocation")
+        if type(dependency['sequence']) is not int or dependency['sequence'] < 1:
+            raise ValueError("Resume dependency sequence must be positive.")
+
+
 def validate_runtime_state(state: RuntimeState) -> None:
     """Validate one complete Runtime State and every durable internal reference."""
 
@@ -339,6 +384,8 @@ def validate_runtime_state(state: RuntimeState) -> None:
                 "Session latest_invocation_id requires a current Invocation."
             )
         return
+    _validate_resume_metadata(invocation)
+    validate_signal_state(invocation)
     if session.latest_invocation_id != invocation.id:
         raise ValueError("Session and Invocation identities are inconsistent.")
 
@@ -512,8 +559,12 @@ def _validate_scheduler(
     _validate_boundary_resolution_map(
         scheduler.boundary_resolutions, occurrences
     )
-    _validate_operator_calls(scheduler.operator_calls, occurrences, session)
+    _validate_operator_calls(scheduler.operator_calls, occurrences, session, scheduler.waits)
     _validate_waits(scheduler.waits, occurrences, session)
+    from .waits import validate_wait_call
+    for wait in scheduler.waits.values():
+        if wait.kind != "external":
+            validate_wait_call(wait, scheduler.operator_calls)
     _validate_child_plans(child_plans, occurrences)
 
 
@@ -592,6 +643,7 @@ def _validate_operator_calls(
     calls: Mapping[str, OperatorCallState],
     occurrences: Mapping[str, NodeOccurrenceState],
     session: SessionState,
+    waits: Mapping[str, WaitState],
 ) -> None:
     if not isinstance(calls, Mapping):
         raise TypeError("Scheduler operator_calls must be a mapping.")
@@ -645,7 +697,9 @@ def _validate_operator_calls(
         if occurrence.status == "skipped":
             raise ValueError("Operator Call cannot belong to a skipped Node Occurrence.")
         if call.status == "running":
-            if occurrence.status != "running":
+            suspended_wait = (call.operator_id in SYSTEM_COMMAND_IDS and occurrence.status == "waiting"
+                and any(w.status == "waiting" and w.occurrence_id == call.occurrence_id for w in waits.values()))
+            if occurrence.status != "running" and not suspended_wait:
                 raise ValueError(
                     "A running Operator Call requires a running Node Occurrence."
                 )
@@ -675,6 +729,12 @@ def _validate_waits(
         occurrence = occurrences.get(wait.occurrence_id)
         if occurrence is None:
             raise ValueError("Wait references an unknown Node Occurrence.")
+        if wait.kind not in {'external', 'signal', 'timer', 'child', 'any'}:
+            raise ValueError('Invalid Wait kind.')
+        _non_negative(wait.registered_sequence, "Wait registered_sequence")
+        if wait.kind != 'external' and wait.request is not None:
+            from .waits import validate_condition
+            validate_condition(wait.kind, wait.request)
         _non_negative(wait.created_at_us, "Wait created_at_us")
         _optional_non_negative(wait.resumed_at_us, "Wait resumed_at_us")
         _timestamp_within_session(wait.created_at_us, session, "Wait created_at_us")
@@ -734,8 +794,7 @@ def _validate_child_plans(
             raise ValueError(
                 "Child Invocation Plan references an unknown parent Node Occurrence."
             )
-        if plan.mode not in {"await", "spawn"}:
-            raise ValueError(f"Unsupported Child Invocation mode {plan.mode!r}.")
+        _non_empty_string_value(plan.entry_node_id, "Child Invocation Plan entry_node_id")
         if not isinstance(plan.units, (tuple, ChunkedUnits)) or not plan.units:
             raise ValueError("Child Invocation Plan units must be a non-empty tuple.")
         for expected_index, unit in enumerate(plan.units):
@@ -952,9 +1011,9 @@ def _child_plans_record(plans):
         creation_id: {
             "creation_id": plan.creation_id,
             "parent_occurrence_id": plan.parent_occurrence_id,
-            "mode": plan.mode,
             "workflow_id": plan.workflow_id,
             "workflow_revision_id": plan.workflow_revision_id,
+            "entry_node_id": plan.entry_node_id,
             "units": [
                 {
                     "unit_index": unit.unit_index,
@@ -982,6 +1041,10 @@ def _child_result_record(value):
         "parent_session_id": value.parent_session_id, "parent_invocation_id": value.parent_invocation_id,
         "creation_id": value.creation_id, "unit_index": value.unit_index,
         "input_digest": value.input_digest, "child_plans": _child_plans_record(value.child_plans),
+        "signals": thaw(value.signals),
+        "cancel_origin": thaw(value.cancel_origin),
+        "resume_receipts": thaw(value.resume_receipts),
+        "resume_receipt_frontiers": thaw(value.resume_receipt_frontiers),
     }
 
 
@@ -1004,6 +1067,10 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
         "error": _error_record(value.error),
         "cancel_reason": value.cancel_reason,
         "pending_outcome": value.pending_outcome,
+        "signals": thaw(value.signals),
+        "cancel_origin": thaw(value.cancel_origin),
+        "resume_receipts": thaw(value.resume_receipts),
+        "resume_receipt_frontiers": thaw(value.resume_receipt_frontiers),
         "created_at_us": value.created_at_us,
         "started_at_us": value.started_at_us,
         "completed_at_us": value.completed_at_us,
@@ -1081,6 +1148,7 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
                     "response": thaw(item.response),
                     "created_at_us": item.created_at_us,
                     "resumed_at_us": item.resumed_at_us,
+                    "kind": item.kind, "registered_sequence": item.registered_sequence,
                 }
                 for key, item in value.scheduler.waits.items()
             },
@@ -1189,6 +1257,10 @@ def _invocation_from_record(value: object) -> InvocationState | ChildResult | No
             parent_session_id=_string(record, "parent_session_id"), parent_invocation_id=_string(record, "parent_invocation_id"),
             creation_id=_string(record, "creation_id"), unit_index=_integer(record, "unit_index"),
             input_digest=_string(record, "input_digest"),
+            signals=freeze(record.get("signals", empty_signals())),
+            cancel_origin=freeze(record.get("cancel_origin")),
+            resume_receipts=freeze(record.get("resume_receipts", {})),
+            resume_receipt_frontiers=freeze(record.get("resume_receipt_frontiers", {})),
             child_plans=runtime_mapping(_child_plans_from_record(_mapping(record.get("child_plans"), "Child plans"))),
         )
     context = record.get("context")
@@ -1211,6 +1283,10 @@ def _invocation_from_record(value: object) -> InvocationState | ChildResult | No
         error=_error_from_record(record.get("error")),
         cancel_reason=_optional_string(record, "cancel_reason"),
         pending_outcome=_optional_string(record, "pending_outcome"),
+        signals=freeze(record.get("signals", empty_signals())),
+        cancel_origin=freeze(record.get("cancel_origin")),
+        resume_receipts=freeze(record.get("resume_receipts", {})),
+        resume_receipt_frontiers=freeze(record.get("resume_receipt_frontiers", {})),
         created_at_us=_integer(record, "created_at_us"),
         started_at_us=_optional_integer(record, "started_at_us"),
         completed_at_us=_optional_integer(record, "completed_at_us"),
@@ -1361,6 +1437,7 @@ def _wait_from_record(value: object) -> WaitState:
         response=freeze(record.get("response")),
         created_at_us=_integer(record, "created_at_us"),
         resumed_at_us=_optional_integer(record, "resumed_at_us"),
+        kind=_string(record, "kind"), registered_sequence=_integer(record, "registered_sequence"),
     )
 
 
@@ -1385,9 +1462,6 @@ def _child_plans_from_record(
 
 def _child_plan_from_record(value: object) -> ChildInvocationPlan:
     record = _mapping(value, "Child Invocation Plan")
-    mode = _string(record, "mode")
-    if mode not in {"await", "spawn"}:
-        raise ValueError(f"Unsupported Child Invocation mode {mode!r}.")
     units_record = record.get("units")
     if not isinstance(units_record, list) or not units_record:
         raise TypeError("Child Invocation Plan units must be a non-empty list.")
@@ -1402,10 +1476,10 @@ def _child_plan_from_record(value: object) -> ChildInvocationPlan:
     return ChildInvocationPlan(
         creation_id=_string(record, "creation_id"),
         parent_occurrence_id=_string(record, "parent_occurrence_id"),
-        mode=mode,  # type: ignore[arg-type]
         workflow_id=_string(record, "workflow_id"),
         workflow_revision_id=_string(record, "workflow_revision_id"),
         units=child_units(tuple(units)),
+        entry_node_id=_string(record, "entry_node_id"),
     )
 
 

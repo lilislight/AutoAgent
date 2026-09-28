@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Await
 from tests.graph_fixtures import (
     load_graph,
     resume_graph_wait,
@@ -193,12 +194,12 @@ class DurableContractRoundTripTests(unittest.TestCase):
         """Verify Child admission and output restore one canonical contract value."""
 
         child = Workflow("rich-child", nodes=[Node("child", identity)])
-        parent = Workflow("rich-parent", nodes=[Node("child", child)])
+        parent = Workflow("rich-parent", nodes=[Node("child", Await(child, child.nodes[0].id))])
         app = AutoAgentApp()
         try:
             result = app.invoke(parent, _value())
             self.assertEqual(result.status, "completed")
-            self.assertEqual(result.output, _record())
+            self.assertEqual(result.output.output, _record())
             self.assertIn(result.ref, app.resident_invocations())
         finally:
             app.close()

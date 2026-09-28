@@ -1,4 +1,5 @@
 """Measure cancellation after every leaf starts; compatible with the baseline Core."""
+from autoagent import Spawn
 import asyncio
 import json
 import statistics
@@ -34,9 +35,9 @@ def sample(count, depth):
             return value
         workflow = Workflow('leaf', nodes=[Node('slow', slow)])
         for level in range(depth):
-            workflow = Workflow(f'level-{level}', nodes=[Node('spawn', workflow, execution_mode='spawn')])
+            workflow = Workflow(f'level-{level}', nodes=[Node('spawn', Spawn(workflow, workflow.nodes[0].id))])
         if count > 1:
-            workflow = Workflow('mapped', nodes=[Node('spawn', workflow, execution_mode='spawn',
+            workflow = Workflow('mapped', nodes=[Node('spawn', Spawn(workflow, workflow.nodes[0].id),
                 input_mapping=items, map=Map(max_parallelism=count))])
         sink = CountingSink()
         app = AutoAgentApp(runtime_event_sink=sink)

@@ -157,7 +157,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
                         "creation": ChildInvocationPlan(
                             creation_id="creation",
                             parent_occurrence_id=worker.id,
-                            mode="spawn",
+                            entry_node_id="entry",
                             workflow_id="child-workflow",
                             workflow_revision_id="child-revision",
                             units=(

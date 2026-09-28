@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn
 from tests.graph_fixtures import (
     async_children,
     async_join_observed,
@@ -379,11 +380,11 @@ class DefinitionBoundaryTests(unittest.TestCase):
                     nodes=[
                         Node(
                             "spawn",
-                            Workflow(
+                            Spawn(Workflow(
                                 "codec-child",
                                 nodes=[Node("child", identity)],
-                            ),
-                            execution_mode="spawn",
+                            ), "child"),
+
                         )
                     ],
                 ),
@@ -484,7 +485,7 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
             child_workflow = Workflow("async-child", nodes=[Node("child", child)])
             parent = Workflow(
                 "async-parent",
-                nodes=[Node("spawn", child_workflow, execution_mode="spawn")],
+                nodes=[Node("spawn", Spawn(child_workflow, child_workflow.nodes[0].id))],
             )
             parent_result = await app.ainvoke(parent, {"value": 3})
             handles = await async_children(app, parent_result.ref)
@@ -503,11 +504,11 @@ class RuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 nodes=[
                     Node(
                         "spawn",
-                        Workflow(
+                        Spawn(Workflow(
                             "async-child-cancel",
                             nodes=[Node("child", blocked_child)],
-                        ),
-                        execution_mode="spawn",
+                        ), "child"),
+
                     )
                 ],
             )

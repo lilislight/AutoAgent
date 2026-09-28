@@ -11,7 +11,7 @@ from autoagent import AutoAgentApp, Node, Workflow
 from autoagent.core.compiler.compiler import WorkflowCompiler
 from autoagent.core.runtime import TransitionPlanner, SchedulerDelta
 from autoagent.core.runtime._execution_index import ExecutionIndex
-from autoagent.core.runtime.events import WaitRequested, NodeCompleted, ChildAwaitSuspended
+from autoagent.core.runtime.events import WaitRequested, NodeCompleted
 from autoagent.core.runtime.state import ChildInvocationPlan, ChildUnitState, NodeExecutionState
 from tests.benchmarks.benchmark_core_execution import identity, loop_workflow
 
@@ -49,7 +49,7 @@ def retained_state(seed, count):
     occurrences = {f'{i}@root': replace(old, id=f'{i}@root', status='completed') for i in range(count)}
     occurrences['0@root'] = replace(occurrences['0@root'], status='running', execution=NodeExecutionState())
     occurrences[f'{count-1}@root'] = replace(occurrences[f'{count-1}@root'], status='waiting')
-    plan = ChildInvocationPlan('p', '0@root', 'await', 'w', 'r',
+    plan = ChildInvocationPlan('p', '0@root', 'entry', 'w', 'r',
                                (ChildUnitState(0, 'child', 'child-i', None, phase='accepted'),))
     return replace(seed, invocation=replace(seed.invocation, status='running',
         child_plans=MappingProxyType({'p': plan}), scheduler=replace(seed.invocation.scheduler,
@@ -111,7 +111,7 @@ def main():
     for count in (100, 1000, 10000, 50000):
         state = retained_state(seed, count)
         index = ExecutionIndex(state)
-        for payload in (WaitRequested('0@root', 'wait', {}), ChildAwaitSuspended('p', '0@root'), NodeCompleted('0@root', {})):
+        for payload in (WaitRequested('0@root', 'wait', {})('p', '0@root'), NodeCompleted('0@root', {})):
             kwargs = {'_execution_index': index} if indexed else {}
             action = lambda: planner.plan(state, payload, occurred_at_us=999,
                 invocation_id=state.invocation.id, session_id=state.session.id,

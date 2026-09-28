@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn
 from tests.graph_fixtures import (
     join_observed,
     root_snapshot,
@@ -17,8 +18,6 @@ from autoagent.core import RuntimeRepository, SessionOpened
 from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import (
     TransitionPlanner,
-    ChildAwaitReady,
-    ChildAwaitSuspended,
     ChildInvocationPhaseChanged,
     ChildInvocationPlanned,
     ChildUnitSpec,
@@ -118,13 +117,13 @@ class CoreCheckpointTests(unittest.TestCase):
 
 
     def test_child_plan_and_await_boundaries_are_durable_state_transitions(self) -> None:
-        """Verify planned Child work can suspend and later ready the parent occurrence."""
+        """Verify planned Child work advances ownership without suspending the parent occurrence."""
 
         state = self._running_parent_state()
         plan = ChildInvocationPlanned(
             creation_id="creation",
             parent_occurrence_id="child-node@root",
-            mode="await",
+            entry_node_id="entry",
             workflow_id="child-workflow",
             workflow_revision_id="child-revision",
             units=(ChildUnitSpec(0, "child-session", "child-invocation", {"v": 1}),),
@@ -133,18 +132,16 @@ class CoreCheckpointTests(unittest.TestCase):
             plan,
             ChildInvocationPhaseChanged("creation", 0, "opened"),
             ChildInvocationPhaseChanged("creation", 0, "accepted"),
-            ChildAwaitSuspended("creation", "child-node@root"),
         ):
             state = self._apply(state, payload)
-        self.assertEqual(state.invocation.status, "waiting")
+        self.assertEqual(state.invocation.status, "running")
         self.assertEqual(
             state.invocation.scheduler.occurrences["child-node@root"].status,
-            "waiting",
+            "running",
         )
         state = self._apply(
             state, ChildInvocationPhaseChanged("creation", 0, "terminal")
         )
-        state = self._apply(state, ChildAwaitReady("creation", "child-node@root"))
         self.assertEqual(state.invocation.status, "running")
         self.assertEqual(
             state.invocation.scheduler.occurrences["child-node@root"].status,
@@ -227,14 +224,14 @@ class CoreCheckpointTests(unittest.TestCase):
             child = Workflow("checkpoint-child", nodes=[Node("work", identity)])
             parent = Workflow(
                 "checkpoint-parent",
-                nodes=[Node("spawn", child, execution_mode="spawn")],
+                nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
             )
             result = app.invoke(parent, {"value": 1}, session_id="root-session")
             join_observed(app, result.output, timeout=1)
             checkpoint = journal.capture_checkpoint("root-session")
-            child_checkpoint = journal.capture_checkpoint(result.output.child_session_id)
+            child_checkpoint = journal.capture_checkpoint(result.output.session_id)
             self.assertEqual(root_snapshot(checkpoint).session_id, "root-session")
-            self.assertEqual(root_snapshot(child_checkpoint).session_id, result.output.child_session_id)
+            self.assertEqual(root_snapshot(child_checkpoint).session_id, result.output.session_id)
             record = json.loads(json.dumps(checkpoint.to_record()))
             self.assertEqual(SessionCheckpoint.from_record(record), checkpoint)
         finally:
@@ -249,7 +246,7 @@ class CoreCheckpointTests(unittest.TestCase):
             child = Workflow("graph-child", nodes=[Node("work", identity)])
             parent = Workflow(
                 "graph-parent",
-                nodes=[Node("spawn", child, execution_mode="spawn")],
+                nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
             )
             result = app.invoke(parent, {"value": 1}, session_id="graph-root")
             join_observed(app, result.output, timeout=1)

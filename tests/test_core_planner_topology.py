@@ -5,7 +5,7 @@ from dataclasses import replace
 from types import MappingProxyType
 from autoagent.core.runtime import TransitionPlanner, SchedulerDelta
 from autoagent.core.runtime._execution_index import ExecutionIndex
-from autoagent.core.runtime.events import WaitRequested, NodeCompleted, ChildAwaitSuspended, NodeFailed, RuntimeErrorInfo
+from autoagent.core.runtime.events import WaitRequested, NodeCompleted, NodeFailed, RuntimeErrorInfo
 from autoagent.core.runtime.scheduling import OccurrencePlan
 from tests.benchmarks.benchmark_core_planner_topology import seed_state, retained_state
 
@@ -29,8 +29,7 @@ class PlannerIndexTests(unittest.TestCase):
             if rng.random() < .3:
                 scheduler_delta = SchedulerDelta(ready=(OccurrencePlan('new@root', 'new', ()),))
             for payload in (WaitRequested('0@root', 'wait', {}), NodeCompleted('0@root', {}),
-                            NodeFailed('0@root', RuntimeErrorInfo('test', 'failure')),
-                            ChildAwaitSuspended('p', '0@root')):
+                            NodeFailed('0@root', RuntimeErrorInfo('test', 'failure'))):
                 kwargs = dict(occurred_at_us=123, session_id=state.session.id,
                               invocation_id=state.invocation.id, scheduler_delta=scheduler_delta)
                 expected = planner.plan(state, payload, **kwargs)

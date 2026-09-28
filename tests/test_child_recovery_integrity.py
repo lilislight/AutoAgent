@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn, Await
 from tests.graph_fixtures import (
     child_refs,
     graph_bundle,
@@ -42,6 +43,10 @@ class Batch(TypedDict):
 
 def identity(value: Value) -> Value:
     return value
+
+
+def child_output(context: InputMappingContext) -> Value:
+    return context.incoming["child"]["output"]
 
 
 def map_items(context: InputMappingContext) -> list[Value]:
@@ -137,7 +142,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             "cancel-spawn-parent",
             nodes=[
                 Node("start", identity),
-                Node("spawn", child, execution_mode="spawn"),
+                Node("spawn", Spawn(child, child.nodes[0].id)),
                 Node("approval", Wait(Value, Value)),
             ],
             edges=[Edge("start", "spawn"), Edge("start", "approval")],
@@ -211,7 +216,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             "fail-spawn-parent",
             nodes=[
                 Node("start", identity),
-                Node("spawn", child, execution_mode="spawn"),
+                Node("spawn", Spawn(child, child.nodes[0].id)),
                 Node("fail", fail_after_child_started),
             ],
             edges=[Edge("start", "spawn"), Edge("start", "fail")],
@@ -282,7 +287,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             "fail-fast-prefix-parent",
             nodes=[
                 Node("start", identity),
-                Node("spawn", child, execution_mode="spawn"),
+                Node("spawn", Spawn(child, child.nodes[0].id)),
                 Node("fail", fail_after_child_started),
             ],
             edges=[Edge("start", "spawn"), Edge("start", "fail")],
@@ -325,12 +330,12 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             "cancel-await-child",
             nodes=[Node("approval", Wait(Value, Value))],
         )
-        parent = Workflow("cancel-await-parent", nodes=[Node("child", child)])
+        parent = Workflow("cancel-await-parent", nodes=[Node("child", Await(child, child.nodes[0].id))])
         sink = _CommitThenFailSink()
         source = AutoAgentApp(runtime_event_sink=sink)
         try:
             waiting = source.invoke(parent, {"value": 1}, session_id="root")
-            self.assertEqual(waiting.status, "waiting")
+            self.assertEqual(waiting.status, "settling")
             sink.fail_event_name = "invocation.cancelled"
             with self.assertRaises(RuntimeInfrastructureError):
                 source.cancel(waiting.ref, "stop")
@@ -375,7 +380,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(aggregate=aggregate),
                 )
@@ -417,7 +422,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         )
         parent = Workflow(
             "preflight-parent",
-            nodes=[Node("child", child, output_binding=bind_output)],
+            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output)],
         )
         source = AutoAgentApp()
         try:
@@ -462,7 +467,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         child = Workflow("policy-binding-child", nodes=[Node("work", identity)])
         parent = Workflow(
             "policy-binding-parent",
-            nodes=[Node("child", child, output_binding=bind_output)],
+            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output)],
         )
         checkpoint = self._close_during_hook(parent, {"value": 1}, entered)
         result = self._recover(parent, checkpoint)
@@ -486,7 +491,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         child = Workflow("policy-condition-child", nodes=[Node("work", identity)])
         parent = Workflow(
             "policy-condition-parent",
-            nodes=[Node("child", child), Node("done", identity)],
+            nodes=[Node("child", Await(child, child.nodes[0].id)), Node("done", identity, input_mapping=child_output)],
             edges=[Edge("child", "done", condition=route)],
         )
         checkpoint = self._close_during_hook(parent, {"value": 1}, entered)

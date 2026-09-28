@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+from ..commands.signals import SignalEndpoint, SignalLimits
+
+from ..commands import Wait
+from ..commands import SystemCommand, RuntimeHandle, CommandIR
+from ..commands.models import runtime_handles
+
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal, TypeAlias, Union
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ..operators import Operator, OperatorContract, StreamReducer, ValueContract, Wait
+from ..operators import Operator, OperatorContract, StreamReducer, ValueContract
 from ..context import ContextOperation, ContextPatch
 
 
-Executable: TypeAlias = Union[Callable[..., object], Operator, Wait, "Workflow"]
+Executable: TypeAlias = Union[Callable[..., object], Operator, SystemCommand]
 
 
 class InvocationRef(BaseModel):
@@ -35,26 +41,12 @@ class InvocationRef(BaseModel):
         return value
 
 
-class ChildHandle(BaseModel):
-    """Durable identity of an owned Child; never an App control reference."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    child_session_id: str
-    child_invocation_id: str
-    workflow_revision_id: str
-
-    @field_validator("child_session_id", "child_invocation_id", "workflow_revision_id")
-    @classmethod
-    def _non_empty_identity(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("ChildHandle identity fields cannot be empty.")
-        return value
-
-
 @dataclass(frozen=True, slots=True)
 class Context:
     invocation_context: Mapping[str, object]
     session_context: Mapping[str, object]
+    self_handle: RuntimeHandle | None = field(default_factory=lambda: runtime_handles.get()[0], kw_only=True)
+    owner_handle: RuntimeHandle | None = field(default_factory=lambda: runtime_handles.get()[1], kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +162,6 @@ class Node:
     executable: Executable | Capability
     input_mapping: InputMapping | None = None
     output_binding: OutputBinding | None = None
-    execution_mode: Literal["await", "spawn"] = "await"
     map: Map | None = None
     stream: Stream | None = None
     user_events: tuple[UserEventMapping, ...] = ()
@@ -198,6 +189,8 @@ class Workflow:
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
     sub_workflows: list[SubWorkflow] = field(default_factory=list)
+    signal_endpoints: list[SignalEndpoint] = field(default_factory=list)
+    signal_limits: SignalLimits = field(default_factory=SignalLimits)
     version: str | int = "1"
     failure_mode: Literal["fail_fast", "continue_active_branches"] = "fail_fast"
 
@@ -213,12 +206,11 @@ class Workflow:
 @dataclass(frozen=True, slots=True)
 class NodeIR:
     id: str
-    executable: Operator | Wait | Capability | "WorkflowIR"
+    executable: Operator | Wait | CommandIR | Capability
     input_contract: ValueContract | None
     output_contract: ValueContract | None
     input_mapping: InputMapping | None = field(default=None, compare=False)
     output_binding: OutputBinding | None = field(default=None, compare=False)
-    execution_mode: Literal["await", "spawn"] = "await"
     map: Map | None = field(default=None, compare=False)
     stream: Stream | None = field(default=None, compare=False)
     user_events: tuple[UserEventMappingIR, ...] = field(
@@ -267,6 +259,8 @@ class WorkflowIR:
     exit_node_ids: tuple[str, ...]
     failure_mode: Literal["fail_fast", "continue_active_branches"] = "fail_fast"
     loop_regions: tuple[LoopRegionIR, ...] = ()
+    signal_endpoints: tuple[tuple[str, ValueContract], ...] = ()
+    signal_limits: SignalLimits = field(default_factory=SignalLimits)
     _nodes: Mapping[str, NodeIR] = field(init=False, repr=False, compare=False)
     _edges: Mapping[str, EdgeIR] = field(init=False, repr=False, compare=False)
     _incoming: Mapping[str, tuple[EdgeIR, ...]] = field(init=False, repr=False, compare=False)

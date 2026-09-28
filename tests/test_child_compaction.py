@@ -1,11 +1,12 @@
 """Terminal Child results survive execution workspace reclamation and graph recovery."""
+from autoagent import Spawn, Await, RuntimeObservation
 import asyncio
 import json
 import unittest
 from dataclasses import replace
 from typing_extensions import TypedDict
 
-from autoagent import (AutoAgentApp, ChildHandle, Map, Node, Workflow, Wait, RuntimeInfrastructureError,
+from autoagent import (AutoAgentApp, RuntimeHandle, Map, Node, Workflow, Wait, RuntimeInfrastructureError,
                        RuntimeGraphCheckpoint, AggregationContext, ContextPatch, ContextOperation, OutputBindingContext)
 from autoagent.core import ChildResult, RuntimeState, StateReducer, RuntimeEvent, SessionCheckpoint
 from tests.benchmarks.benchmark_core_audit import Value, identity, items
@@ -21,9 +22,9 @@ class ChildCompactionTests(unittest.TestCase):
     def mapped_wait(self, mode):
         child = Workflow('child', nodes=[Node('wait', Wait(Value, Value))])
         def aggregate(ctx: AggregationContext) -> AggregatedValues:
-            return {"items": [{'value': original['value'] + output['value']}
+            return {"items": [{'value': original['value'] + output.waits[0].request['value']}
                     for original, output in zip(ctx.inputs, ctx.outputs)]}
-        return Workflow('root', nodes=[Node('children', child, execution_mode=mode,
+        return Workflow('root', nodes=[Node('children', (Spawn if mode == 'spawn' else Await)(child, child.nodes[0].id),
             input_mapping=items, map=Map(aggregate=aggregate if mode == 'await' else None, max_parallelism=4))])
 
     def test_spawn_keeps_waits_and_reclaims_finished_inputs(self):
@@ -58,8 +59,8 @@ class ChildCompactionTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_await_map_preserves_unconsumed_inputs_and_compact_outputs(self):
-        """A partial await Map keeps aggregation inputs while completed Child State shrinks."""
+    def test_await_map_releases_inputs_after_wait_observations(self):
+        """Observed Waits finish aggregation and release inputs while Child results compact."""
         app = AutoAgentApp()
         try:
             result = app.invoke(self.mapped_wait('await'), {'value': 3})
@@ -67,7 +68,7 @@ class ChildCompactionTests(unittest.TestCase):
             first = app._repository.state(refs[0].session_id).invocation
             resume_graph_wait(app, refs[0], next(iter(first.scheduler.waits)), {'value': 10})
             plan = next(iter(app._repository.state(result.session_id).invocation.child_plans.values()))
-            self.assertTrue(all(not u.input_released for u in plan.units))
+            self.assertTrue(all(u.input_released and u.input is None for u in plan.units))
             self.assertIsInstance(app._repository.state(refs[0].session_id).invocation, ChildResult)
             cp = app.unload_session(result.ref, capture_checkpoint=True)
             app.load_checkpoint(RuntimeGraphCheckpoint.from_record(json.loads(json.dumps(cp.to_record()))))
@@ -76,7 +77,7 @@ class ChildCompactionTests(unittest.TestCase):
                 inv = app._repository.state(ref.session_id).invocation
                 resume_graph_wait(app, ref, next(iter(inv.scheduler.waits)), {'value': i})
             final = app.join(result.ref, timeout=2)
-            self.assertEqual(final.output, {'items': [{'value': 10}, {'value': 12}, {'value': 14}]})
+            self.assertEqual(final.output, {'items': [{'value': 0}, {'value': 2}, {'value': 4}]})
             plan = next(iter(app._repository.state(result.session_id).invocation.child_plans.values()))
             self.assertTrue(all(u.input_released and u.input is None for u in plan.units))
         finally:
@@ -87,19 +88,19 @@ class ChildCompactionTests(unittest.TestCase):
         app = AutoAgentApp()
         try:
             leaf = Workflow('leaf', nodes=[Node('n', identity)])
-            child = Workflow('child', nodes=[Node('spawn', leaf, execution_mode='spawn')])
-            root = Workflow('root', nodes=[Node('spawn', child, execution_mode='spawn')])
+            child = Workflow('child', nodes=[Node('spawn', Spawn(leaf, leaf.nodes[0].id))])
+            root = Workflow('root', nodes=[Node('spawn', Spawn(child, child.nodes[0].id))])
             result = app.invoke(root, {'value': 7})
-            child_state = app._repository.state(result.output.child_session_id).invocation
+            child_state = app._repository.state(result.output.session_id).invocation
             self.assertIsInstance(child_state, ChildResult)
-            handle = ChildHandle.model_validate(dict(child_state.output))
-            leaf_result = app._repository.state(handle.child_session_id).invocation
+            handle = RuntimeHandle.model_validate(dict(child_state.output))
+            leaf_result = app._repository.state(handle.session_id).invocation
             self.assertIsInstance(leaf_result, ChildResult)
             self.assertEqual(leaf_result.output, {'value': 7})
             checkpoint = app.unload_session(result.ref, capture_checkpoint=True)
             app.load_checkpoint(RuntimeGraphCheckpoint.from_record(checkpoint.to_record()))
-            self.assertEqual(app._root_session_id(handle.child_session_id), result.session_id)
-            self.assertEqual(app._repository.state(handle.child_session_id).invocation.output, {'value': 7})
+            self.assertEqual(app._root_session_id(handle.session_id), result.session_id)
+            self.assertEqual(app._repository.state(handle.session_id).invocation.output, {'value': 7})
             self.assertEqual(app.recover(result.ref).status, 'completed')
         finally:
             app.close()
@@ -116,7 +117,7 @@ class ChildCompactionTests(unittest.TestCase):
         app = AutoAgentApp(runtime_event_sink=sink)
         try:
             child = Workflow('child', nodes=[Node('n', identity)])
-            root = Workflow('root', nodes=[Node('child', child)])
+            root = Workflow('root', nodes=[Node('child', Await(child, child.nodes[0].id))])
             with self.assertRaises(RuntimeInfrastructureError):
                 app.invoke(root, {'value': 3}, session_id='root')
             ref = app.resident_invocations()[0]
@@ -124,7 +125,7 @@ class ChildCompactionTests(unittest.TestCase):
             self.assertNotIsInstance(app._repository.state(sid).invocation, ChildResult)
             self.assertEqual(app._repository.state(sid).invocation.input, {'value': 3})
             sink.fail = False
-            self.assertEqual(app.recover(ref).output, {'value': 3})
+            self.assertEqual(app.recover(ref).output.output, {'value': 3})
             events = [e for e in sink.events if e.payload.kind == 'child_invocation.compacted']
             self.assertGreaterEqual(len(events), 2)
             self.assertEqual(len({e.id for e in events}), 1)
@@ -140,7 +141,7 @@ class ChildCompactionTests(unittest.TestCase):
             nonlocal calls
             calls += 1
             return value
-        root = Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', work)]))])
+        root = Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('n', work)]), 'n'))])
         sink = Collector()
         source = AutoAgentApp(runtime_event_sink=sink)
         try:
@@ -160,7 +161,7 @@ class ChildCompactionTests(unittest.TestCase):
                 app.register_workflow(root)
                 checkpoint = graph_bundle(tuple(SessionCheckpoint.from_state(s) for s in prefix.values()))
                 ref = app.load_checkpoint(checkpoint).invocations[0]
-                self.assertEqual(app.recover(ref).output, {'value': 4})
+                self.assertEqual(app.recover(ref).output.output, {'value': 4})
                 self.assertEqual(calls, 1)
             finally:
                 app.close()
@@ -169,7 +170,7 @@ class ChildCompactionTests(unittest.TestCase):
         """Compact results remain mandatory and cannot be transferred to a different owner."""
         app = AutoAgentApp()
         try:
-            r = app.invoke(Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', identity)]))]), {'value': 1})
+            r = app.invoke(Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('n', identity)]), 'n'))]), {'value': 1})
             cp = app.unload_session(r.ref, capture_checkpoint=True)
             parent = next(s for s in cp.sessions if s.session_id == cp.root_session_id)
             child = next(s for s in cp.sessions if s.session_id != cp.root_session_id)
@@ -194,8 +195,8 @@ class ChildCompactionTests(unittest.TestCase):
         app = AutoAgentApp(runtime_event_sink=sink)
         try:
             child = Workflow('context-child', nodes=[Node('n', identity, output_binding=bind)])
-            r = app.invoke(Workflow('context-root', nodes=[Node('spawn', child, execution_mode='spawn')]), {'value': 1})
-            sid = r.output.child_session_id
+            r = app.invoke(Workflow('context-root', nodes=[Node('spawn', Spawn(child, child.nodes[0].id))]), {'value': 1})
+            sid = r.output.session_id
             result = app._repository.state(sid)
             self.assertIsInstance(result.invocation, ChildResult)
             self.assertEqual(dict(result.session.context), {})
@@ -214,8 +215,8 @@ class ChildCompactionTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_partial_await_result_rejects_forged_input(self):
-        """The compact admission digest validates inputs still needed by an await Node."""
+    def test_observed_await_plan_rejects_reintroduced_input(self):
+        """Released plan inputs cannot be reintroduced by a forged checkpoint."""
         app = AutoAgentApp()
         try:
             r = app.invoke(self.mapped_wait('await'), {'value': 2})
@@ -227,11 +228,9 @@ class ChildCompactionTests(unittest.TestCase):
             inv = parent.state.invocation
             plan = next(iter(inv.child_plans.values()))
             units = tuple(replace(u, input={'value': 999}) if u.unit_index == 0 else u for u in plan.units)
-            forged = SessionCheckpoint.from_state(replace(parent.state, invocation=replace(
-                inv, child_plans={plan.creation_id: replace(plan, units=units)})))
-            with self.assertRaisesRegex(ValueError, 'input does not match'):
-                RuntimeGraphCheckpoint(cp.root_session_id, tuple(
-                    forged if s.session_id == cp.root_session_id else s for s in cp.sessions))
+            with self.assertRaisesRegex(ValueError, "Released"):
+                forged = SessionCheckpoint.from_state(replace(parent.state, invocation=replace(
+                    inv, child_plans={plan.creation_id: replace(plan, units=units)})))
         finally:
             app.close()
 
@@ -240,10 +239,10 @@ class ChildCompactionTests(unittest.TestCase):
         app = AutoAgentApp()
         try:
             leaf = Workflow('wait-leaf', nodes=[Node('wait', Wait(Value, Value))])
-            child = Workflow('spawn-child', nodes=[Node('spawn', leaf, execution_mode='spawn')])
-            root = Workflow('await-root', nodes=[Node('await', child)])
+            child = Workflow('spawn-child', nodes=[Node('spawn', Spawn(leaf, leaf.nodes[0].id))])
+            root = Workflow('await-root', nodes=[Node('await', Await(child, child.nodes[0].id))])
             result = app.invoke(root, {'value': 1})
-            self.assertEqual(result.status, 'waiting')
+            self.assertEqual(result.status, 'settling')
             self.assertEqual(len(result.waits), 1)
             child_ref = child_refs(app, result.ref)[0]
             pending = app._repository.state(child_ref.session_id).invocation
@@ -255,7 +254,9 @@ class ChildCompactionTests(unittest.TestCase):
             final = app.resume(result.ref, waiting.waits[0].id, {'value': 9})
             self.assertEqual(final.status, 'completed')
             self.assertIsInstance(app._repository.state(child_ref.session_id).invocation, ChildResult)
-            self.assertIsInstance(final.output, ChildHandle)
-            self.assertEqual(app._repository.state(final.output.child_session_id).invocation.output, {'value': 9})
+            self.assertIsInstance(final.output, RuntimeObservation)
+            self.assertEqual(final.output.status, "settling")
+            leaf_handle = RuntimeHandle.model_validate(final.output.output)
+            self.assertEqual(app._repository.state(leaf_handle.session_id).invocation.output, {'value': 9})
         finally:
             app.close()

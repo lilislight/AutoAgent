@@ -5,14 +5,18 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from ..commands import Wait
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from ..commands.signals import SignalLimits
 from types import MappingProxyType
 from typing import get_args, get_origin
 
 from pydantic import TypeAdapter
 
-from ..operators import Operator, Wait
+from ..operators import Operator
+from ..commands import SignalCase, TimerCase, ChildCase
+from ..commands import CommandIR, SelfHandle, OwnerHandle, RuntimeHandle
 from ..workflow import Capability, WorkflowIR, workflow_hook_version
 from ._hooks import resolve_hook_contract
 
@@ -70,6 +74,8 @@ class WorkflowDefinitionSnapshot:
             nodes=workflow.nodes,
             edges=workflow.edges,
             loops=workflow.loop_regions,
+            signal_endpoints=workflow.signal_endpoints,
+            signal_limits=workflow.signal_limits,
             entry_node_ids=workflow.entry_node_ids,
             exit_node_ids=workflow.exit_node_ids,
         )
@@ -141,6 +147,8 @@ def workflow_semantic_definition(
     loops: tuple[object, ...],
     entry_node_ids: tuple[str, ...],
     exit_node_ids: tuple[str, ...],
+    signal_endpoints: tuple = (),
+    signal_limits: SignalLimits = SignalLimits(),
 ) -> dict[str, object]:
     """Build the single canonical definition used by revision and snapshot."""
 
@@ -148,6 +156,8 @@ def workflow_semantic_definition(
         "workflow_id": workflow_id,
         "workflow_version": workflow_version,
         "failure_mode": failure_mode,
+        "signal_endpoints": [{"name": name, "payload_contract": _contract_definition(contract)} for name, contract in signal_endpoints],
+        "signal_limits": asdict(signal_limits),
         "nodes": [
             {
                 "id": node.id,
@@ -156,7 +166,6 @@ def workflow_semantic_definition(
                 "output_contract": _contract_definition(node.output_contract),
                 "input_mapping": _hook_definition(node.input_mapping),
                 "output_binding": _hook_definition(node.output_binding),
-                "execution_mode": node.execution_mode,
                 "map": (
                     {
                         "aggregate": _hook_definition(node.map.aggregate),
@@ -236,12 +245,17 @@ def _contract_definition(contract: object | None) -> object | None:
 
 
 def _executable_definition(executable: object) -> dict[str, object]:
-    if isinstance(executable, WorkflowIR):
-        return {
-            "kind": "workflow",
-            "id": executable.workflow_id,
-            "definition_hash": executable.definition_hash,
-        }
+    if isinstance(executable, CommandIR):
+        return {"kind": "system_command", "id": executable.id,
+                "workflow": ({"kind": "workflow", "id": executable.workflow.workflow_id,
+                    "definition_hash": executable.workflow.definition_hash} if executable.workflow is not None else None),
+                "entry_node_id": executable.entry_node_id,
+                "endpoint": executable.endpoint, "limit": executable.limit,
+                "cases": ([{"name": name, **_case_definition(case)} for name, case in executable.cases.items()] if executable.cases is not None else None),
+                "handle": ({"kind": "self"} if isinstance(executable.handle, SelfHandle) else
+                    {"kind": "owner"} if isinstance(executable.handle, OwnerHandle) else
+                    {"kind": "literal", "value": executable.handle.model_dump(mode='json')} if isinstance(executable.handle, RuntimeHandle) else
+                    {"kind": "resolver", "hook": _hook_definition(executable.handle)} if callable(executable.handle) else None)}
     if isinstance(executable, Operator):
         return {
             "kind": "operator",
@@ -265,7 +279,7 @@ def _executable_definition(executable: object) -> dict[str, object]:
         }
     if isinstance(executable, Wait):
         return {
-            "kind": "wait",
+            "kind": "system_command",
             "id": executable.id,
             "request_contract": _contract_definition(executable.input_contract),
             "response_contract": _contract_definition(executable.output_contract),
@@ -356,3 +370,15 @@ __all__ = [
     "definition_digest",
     "workflow_semantic_definition",
 ]
+
+
+def _case_definition(case):
+    if isinstance(case, SignalCase):
+        return {'kind': 'signal', 'endpoint': case.endpoint, 'limit': case.limit}
+    if isinstance(case, TimerCase):
+        return {'kind': 'timer', 'delay_us': case.delay_us, 'deadline_at_us': case.deadline_at_us}
+    def value(v):
+        if callable(v):
+            return {'resolver': _hook_definition(v)}
+        return v.model_dump(mode='json') if isinstance(v, RuntimeHandle) else v
+    return {'kind': 'child', 'handle': value(case.handle), 'after': value(case.after)}

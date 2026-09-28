@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from .clocks import unix_time_us
 from dataclasses import dataclass, field, fields
 from typing import ClassVar, Literal, TypeAlias
 from uuid import uuid4
 
+from .signals import SignalAccepted, SignalsReceived, SignalReceiptReleased
 from .operations import StateDelta
 from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 8
+RUNTIME_EVENT_SCHEMA_VERSION = 14
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +107,25 @@ class InvocationCancelled:
 
 
 @dataclass(frozen=True, slots=True)
+class CancellationRequested:
+    kind: ClassVar[str] = "invocation.cancellation_requested"
+    reason: str | None
+    origin: DurableValue
+
+    def __post_init__(self):
+        object.__setattr__(self, 'origin', freeze(self.origin))
+        if (not isinstance(self.origin, Mapping) or set(self.origin) != {
+                'session_id', 'invocation_id', 'call_id', 'reason_digest'}
+                or any(not isinstance(v, str) or not v.strip() for v in self.origin.values())):
+            raise ValueError('Invalid cancellation origin.')
+        digest = self.origin['reason_digest']
+        if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+            raise ValueError('Invalid cancellation reason digest.')
+        if self.reason is not None and not isinstance(self.reason, str):
+            raise ValueError('Cancellation reason must be a string or None.')
+
+
+@dataclass(frozen=True, slots=True)
 class ChildCompacted:
     kind: ClassVar[str] = "child_invocation.compacted"
     parent_session_id: str
@@ -160,9 +181,23 @@ class WaitRequested:
     occurrence_id: str
     wait_id: str
     request: DurableValue
+    wait_kind: str = "external"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request", freeze(self.request))
+
+
+@dataclass(frozen=True, slots=True)
+class CommandAwakened:
+    kind: ClassVar[str] = "command.awakened"
+    wait_id: str
+    output: DurableValue
+    message_ids: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "output", freeze(self.output))
+        if not self.wait_id or len(set(self.message_ids)) != len(self.message_ids):
+            raise ValueError("Invalid command awakening.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,9 +205,30 @@ class WaitResumed:
     kind: ClassVar[str] = "wait.resumed"
     wait_id: str
     response: DurableValue
+    origin: DurableValue = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "response", freeze(self.response))
+        object.__setattr__(self, "origin", freeze(self.origin))
+        if self.origin is not None:
+            if not isinstance(self.origin, Mapping) or set(self.origin) != {'session_id', 'invocation_id', 'call_id', 'response_digest'} or any(
+                not isinstance(v, str) or not v.strip() for v in self.origin.values()
+            ):
+                raise ValueError("Invalid Resume origin.")
+            digest = self.origin['response_digest']
+            if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+                raise ValueError("Invalid Resume response digest.")
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeReceiptReleased:
+    kind: ClassVar[str] = "resume_receipt.released"
+    call_id: str
+    caller_sequence: int
+
+    def __post_init__(self) -> None:
+        if type(self.caller_sequence) is not int or self.caller_sequence < 1:
+            raise ValueError("Resume receipt release requires a positive caller sequence.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +267,7 @@ class ChildInvocationPlanned:
     kind: ClassVar[str] = "child_invocation.planned"
     creation_id: str
     parent_occurrence_id: str
-    mode: Literal["await", "spawn"]
+    entry_node_id: str
     workflow_id: str
     workflow_revision_id: str
     units: tuple[ChildUnitSpec, ...]
@@ -227,8 +283,6 @@ class ChildInvocationPlanned:
             )
         ):
             raise ValueError("Child Invocation plan fields cannot be empty.")
-        if self.mode not in {"await", "spawn"}:
-            raise ValueError(f"Unknown Child Invocation mode {self.mode!r}.")
         if not isinstance(self.units, tuple) or not self.units:
             raise ValueError("Child Invocation plan units cannot be empty.")
         if not all(isinstance(unit, ChildUnitSpec) for unit in self.units):
@@ -260,34 +314,6 @@ class ChildInvocationPhaseChanged:
             raise ValueError("Child unit_index must be a non-negative integer.")
         if self.phase not in {"opened", "accepted", "terminal", "abandoned"}:
             raise ValueError(f"Unknown Child Invocation phase {self.phase!r}.")
-
-
-@dataclass(frozen=True, slots=True)
-class ChildAwaitSuspended:
-    kind: ClassVar[str] = "child_await.suspended"
-    creation_id: str
-    parent_occurrence_id: str
-
-    def __post_init__(self) -> None:
-        if not all(
-            isinstance(value, str) and value.strip()
-            for value in (self.creation_id, self.parent_occurrence_id)
-        ):
-            raise ValueError("Child Await identities cannot be empty.")
-
-
-@dataclass(frozen=True, slots=True)
-class ChildAwaitReady:
-    kind: ClassVar[str] = "child_await.ready"
-    creation_id: str
-    parent_occurrence_id: str
-
-    def __post_init__(self) -> None:
-        if not all(
-            isinstance(value, str) and value.strip()
-            for value in (self.creation_id, self.parent_occurrence_id)
-        ):
-            raise ValueError("Child Await identities cannot be empty.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,13 +427,17 @@ RuntimeEventPayload: TypeAlias = (
     | OperatorCallStarted
     | OperatorCallCompleted
     | OperatorCallFailed
+    | CommandAwakened
     | WaitRequested
     | WaitResumed
+    | SignalAccepted
+    | SignalsReceived
+    | SignalReceiptReleased
+    | CancellationRequested
+    | ResumeReceiptReleased
     | RecoveryApplied
     | ChildInvocationPlanned
     | ChildInvocationPhaseChanged
-    | ChildAwaitSuspended
-    | ChildAwaitReady
     | NodeCompleted
     | NodeFailed
 )
@@ -425,13 +455,15 @@ _PAYLOAD_TYPES = (
     OperatorCallStarted,
     OperatorCallCompleted,
     OperatorCallFailed,
+    CommandAwakened,
     WaitRequested,
     WaitResumed,
+    SignalAccepted, SignalsReceived, SignalReceiptReleased,
+    CancellationRequested,
+    ResumeReceiptReleased,
     RecoveryApplied,
     ChildInvocationPlanned,
     ChildInvocationPhaseChanged,
-    ChildAwaitSuspended,
-    ChildAwaitReady,
     NodeCompleted,
     NodeFailed,
 )
@@ -526,21 +558,35 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
         }
     if isinstance(payload, NodeStarted):
         return {"occurrence_id": payload.occurrence_id}
+    if isinstance(payload, CommandAwakened):
+        return {"wait_id": payload.wait_id, "output": thaw(payload.output), "message_ids": list(payload.message_ids)}
     if isinstance(payload, WaitRequested):
         return {
             "occurrence_id": payload.occurrence_id,
             "wait_id": payload.wait_id,
             "request": thaw(payload.request),
+            "wait_kind": payload.wait_kind,
         }
+    if isinstance(payload, SignalAccepted):
+        return {'message_id': payload.message_id, 'endpoint': payload.endpoint, 'payload': thaw(payload.payload),
+            'size_bytes': payload.size_bytes, 'origin': thaw(payload.origin), 'external': thaw(payload.external)}
+    if isinstance(payload, SignalsReceived):
+        return {'call_id': payload.call_id, 'message_ids': list(payload.message_ids)}
+    if isinstance(payload, SignalReceiptReleased):
+        return {'call_id': payload.call_id, 'caller_sequence': payload.caller_sequence}
+    if isinstance(payload, CancellationRequested):
+        return {'reason': payload.reason, 'origin': thaw(payload.origin)}
+    if isinstance(payload, ResumeReceiptReleased):
+        return {"call_id": payload.call_id, "caller_sequence": payload.caller_sequence}
     if isinstance(payload, WaitResumed):
-        return {"wait_id": payload.wait_id, "response": thaw(payload.response)}
+        return {"wait_id": payload.wait_id, "response": thaw(payload.response), "origin": thaw(payload.origin)}
     if isinstance(payload, ChildInvocationPlanned):
         return {
             "creation_id": payload.creation_id,
             "parent_occurrence_id": payload.parent_occurrence_id,
-            "mode": payload.mode,
             "workflow_id": payload.workflow_id,
             "workflow_revision_id": payload.workflow_revision_id,
+            "entry_node_id": payload.entry_node_id,
             "units": [
                 {
                     "unit_index": unit.unit_index,
@@ -557,11 +603,7 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
             "unit_index": payload.unit_index,
             "phase": payload.phase,
         }
-    if isinstance(payload, (ChildAwaitSuspended, ChildAwaitReady)):
-        return {
-            "creation_id": payload.creation_id,
-            "parent_occurrence_id": payload.parent_occurrence_id,
-        }
+
     raise TypeError(f"Unsupported Runtime Event payload: {type(payload).__name__}.")
 
 
@@ -607,25 +649,36 @@ def _payload_from_record(
         )
     if event_name == NodeStarted.kind:
         return NodeStarted(_required_string(record, "occurrence_id"))
+    if event_name == CommandAwakened.kind:
+        return CommandAwakened(record["wait_id"], record["output"], tuple(record["message_ids"]))
     if event_name == WaitRequested.kind:
         return WaitRequested(
             _required_string(record, "occurrence_id"),
             _required_string(record, "wait_id"),
             _required_value(record, "request"),
+            _required_string(record, "wait_kind"),
         )
+    if event_name == SignalAccepted.kind:
+        return SignalAccepted(record['message_id'], record['endpoint'], record['payload'], record['size_bytes'], record['origin'], record['external'])
+    if event_name == SignalsReceived.kind:
+        return SignalsReceived(record['call_id'], tuple(record['message_ids']))
+    if event_name == SignalReceiptReleased.kind:
+        return SignalReceiptReleased(record['call_id'], record['caller_sequence'])
+    if event_name == CancellationRequested.kind:
+        return CancellationRequested(record.get('reason'), record.get('origin'))
+    if event_name == ResumeReceiptReleased.kind:
+        return ResumeReceiptReleased(_required_string(record, "call_id"), _required_integer(record, "caller_sequence"))
     if event_name == WaitResumed.kind:
         return WaitResumed(
             _required_string(record, "wait_id"),
             _required_value(record, "response"),
+            record.get("origin"),
         )
     if event_name == ChildInvocationPlanned.kind:
-        mode = _required_string(record, "mode")
-        if mode not in {"await", "spawn"}:
-            raise ValueError(f"Unknown Child Invocation mode {mode!r}.")
         return ChildInvocationPlanned(
             _required_string(record, "creation_id"),
             _required_string(record, "parent_occurrence_id"),
-            mode,  # type: ignore[arg-type]
+            _required_string(record, "entry_node_id"),
             _required_string(record, "workflow_id"),
             _required_string(record, "workflow_revision_id"),
             tuple(
@@ -646,16 +699,6 @@ def _payload_from_record(
             _required_string(record, "creation_id"),
             _required_integer(record, "unit_index"),
             phase,  # type: ignore[arg-type]
-        )
-    if event_name == ChildAwaitSuspended.kind:
-        return ChildAwaitSuspended(
-            _required_string(record, "creation_id"),
-            _required_string(record, "parent_occurrence_id"),
-        )
-    if event_name == ChildAwaitReady.kind:
-        return ChildAwaitReady(
-            _required_string(record, "creation_id"),
-            _required_string(record, "parent_occurrence_id"),
         )
     raise ValueError(f"Unknown Runtime Event type {event_name!r}.")
 

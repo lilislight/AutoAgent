@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn
 from tests.graph_fixtures import (
     async_join_observed,
     join_observed,
@@ -171,7 +172,7 @@ class AppCorrectnessTests(unittest.TestCase):
         child = Workflow("unload-live-child", nodes=[Node("work", block)])
         parent = Workflow(
             "unload-live-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
+            nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
         )
         app = AutoAgentApp()
         try:
@@ -558,7 +559,7 @@ class AppCorrectnessTests(unittest.TestCase):
         child = Workflow("owned-child", nodes=[Node("work", identity)])
         parent = Workflow(
             "owned-parent",
-            nodes=[Node("child", child, execution_mode="spawn")],
+            nodes=[Node("child", Spawn(child, child.nodes[0].id))],
         )
         app = AutoAgentApp()
         try:
@@ -571,13 +572,13 @@ class AppCorrectnessTests(unittest.TestCase):
                 app.invoke(
                     child,
                     {"value": 2},
-                    session_id=handle.child_session_id,
+                    session_id=handle.session_id,
                 )
             checkpoint = app.close(capture_checkpoint=True)
             self.assertEqual(len(session_checkpoints(checkpoint)), 2)
             self.assertEqual(
                 {item.session_id for item in session_checkpoints(checkpoint)},
-                {parent_result.session_id, handle.child_session_id},
+                {parent_result.session_id, handle.session_id},
             )
         finally:
             app.close()

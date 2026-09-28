@@ -1,5 +1,6 @@
 """Root-only lifecycle, structured completion and graph recovery contracts."""
 
+from autoagent import Spawn, Await
 from tests.graph_fixtures import (
     graph_bundle,
 )
@@ -8,7 +9,7 @@ import json
 import threading
 import unittest
 from dataclasses import replace
-from autoagent import (AutoAgentApp, AppCheckpoint, ChildHandle, InvocationRef, Map,
+from autoagent import (AutoAgentApp, AppCheckpoint, RuntimeHandle, InvocationRef, Map,
     Node, Workflow, Wait, RuntimeGraphCheckpoint, RuntimeTransitionError, Recovery)
 from autoagent.core import SessionCheckpoint, StateReducer, RuntimeState
 from tests.benchmarks.benchmark_core_audit import Value, identity, items
@@ -32,7 +33,7 @@ class RuntimeGraphTests(unittest.TestCase):
             return v
         app = AutoAgentApp()
         try:
-            ref = app.submit_invoke(Workflow('root', nodes=[Node('spawn', Workflow('child', nodes=[Node('work', slow)]), execution_mode='spawn')]), {'value': 1}).ref
+            ref = app.submit_invoke(Workflow('root', nodes=[Node('spawn', Spawn(Workflow('child', nodes=[Node('work', slow)]), 'work'))]), {'value': 1}).ref
             self.assertTrue(started.wait(1))
             async def inspect():
                 for _ in range(1000):
@@ -49,7 +50,7 @@ class RuntimeGraphTests(unittest.TestCase):
             release.set()
             result = app.join(ref, timeout=2)
             self.assertEqual(result.status, 'completed')
-            self.assertIsInstance(result.output, ChildHandle)
+            self.assertIsInstance(result.output, RuntimeHandle)
         finally:
             release.set()
             app.close()
@@ -59,8 +60,8 @@ class RuntimeGraphTests(unittest.TestCase):
         app = AutoAgentApp()
         try:
             leaf = Workflow('leaf', nodes=[Node('wait', Wait(Value, Value))])
-            child = Workflow('child', nodes=[Node('spawn', leaf, execution_mode='spawn')])
-            root = Workflow('root', nodes=[Node('spawn', child, execution_mode='spawn')])
+            child = Workflow('child', nodes=[Node('spawn', Spawn(leaf, leaf.nodes[0].id))])
+            root = Workflow('root', nodes=[Node('spawn', Spawn(child, child.nodes[0].id))])
             result = app.invoke(root, {'value': 1})
             self.assertEqual(result.status, 'settling')
             self.assertEqual(len(result.waits), 1)
@@ -83,16 +84,16 @@ class RuntimeGraphTests(unittest.TestCase):
         app = AutoAgentApp()
         try:
             c = Workflow('child', nodes=[Node('work', identity)])
-            r = app.invoke(Workflow('root', nodes=[Node('spawn', c, execution_mode='spawn')]), {'value': 1})
+            r = app.invoke(Workflow('root', nodes=[Node('spawn', Spawn(c, c.nodes[0].id))]), {'value': 1})
             h = r.output
-            forged = InvocationRef(session_id=h.child_session_id, invocation_id=h.child_invocation_id,
+            forged = InvocationRef(session_id=h.session_id, invocation_id=h.invocation_id,
                                    workflow_id=c.id, workflow_revision_id=h.workflow_revision_id)
             for method in (app.status, app.join, app.cancel, app.recover, app.unload_session):
                 with self.subTest(method=method.__name__):
                     with self.assertRaises(TypeError): method(h)
                     with self.assertRaisesRegex(RuntimeTransitionError, 'CHILD_CONTROL_FORBIDDEN'): method(forged)
             with self.assertRaisesRegex(RuntimeTransitionError, 'SESSION_OWNED_BY_CHILD'):
-                app.invoke(c, {'value': 2}, session_id=h.child_session_id)
+                app.invoke(c, {'value': 2}, session_id=h.session_id)
         finally:
             app.close()
 
@@ -101,9 +102,9 @@ class RuntimeGraphTests(unittest.TestCase):
         def fail(v: Value) -> Value: raise ValueError('expected')
         app = AutoAgentApp()
         try:
-            r = app.invoke(Workflow('root', nodes=[Node('spawn', Workflow('bad', nodes=[Node('bad', fail)]), execution_mode='spawn')]), {'value': 1})
+            r = app.invoke(Workflow('root', nodes=[Node('spawn', Spawn(Workflow('bad', nodes=[Node('bad', fail)]), 'bad'))]), {'value': 1})
             self.assertEqual(r.status, 'completed')
-            self.assertEqual(app._repository.state(r.output.child_session_id).invocation.status, 'failed')
+            self.assertEqual(app._repository.state(r.output.session_id).invocation.status, 'failed')
         finally: app.close()
 
     def test_cancel_waiting_nested_graph(self):
@@ -111,8 +112,8 @@ class RuntimeGraphTests(unittest.TestCase):
         app = AutoAgentApp()
         try:
             leaf = Workflow('leaf', nodes=[Node('wait', Wait(Value, Value))])
-            child = Workflow('child', nodes=[Node('leaf', leaf, execution_mode='spawn')])
-            result = app.invoke(Workflow('root', nodes=[Node('child', child, execution_mode='spawn')]), {'value': 1})
+            child = Workflow('child', nodes=[Node('leaf', Spawn(leaf, leaf.nodes[0].id))])
+            result = app.invoke(Workflow('root', nodes=[Node('child', Spawn(child, child.nodes[0].id))]), {'value': 1})
             result = app.cancel(result.ref)
             self.assertEqual(result.status, 'cancelled')
             for sid in app._repository.session_ids():
@@ -127,7 +128,7 @@ class RuntimeGraphTests(unittest.TestCase):
         """Partial ownership and identity changes cannot form a valid graph bundle."""
         app = AutoAgentApp()
         try:
-            r = app.invoke(Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', identity)]))]), {'value': 1})
+            r = app.invoke(Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('n', identity)]), 'n'))]), {'value': 1})
             cp = app.unload_session(r.ref, capture_checkpoint=True)
             parent = next(s for s in cp.sessions if s.session_id == r.session_id)
             child = next(s for s in cp.sessions if s.session_id != r.session_id)
@@ -142,7 +143,7 @@ class RuntimeGraphTests(unittest.TestCase):
         """A checkpointed joining Parent recovers children without rerunning its body."""
         sink = Collector()
         app = AutoAgentApp(runtime_event_sink=sink)
-        root = Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('w', Wait(Value, Value))]), execution_mode='spawn')])
+        root = Workflow('root', nodes=[Node('child', Spawn(Workflow('child', nodes=[Node('w', Wait(Value, Value))]), 'w'))])
         try:
             r = app.invoke(root, {'value': 1})
             checkpoint = app.close(capture_checkpoint=True)
@@ -162,7 +163,7 @@ class RuntimeGraphTests(unittest.TestCase):
     def test_planned_checkpoint_restores_unopened_children(self):
         """A durable plan alone is sufficient to reconstruct unopened Child Sessions."""
         sink = Collector()
-        root = Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('w', identity)]), recovery_mode=Recovery('replay_safe', max_attempts=2))])
+        root = Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('w', identity)]), 'w'), recovery_mode=Recovery('replay_safe', max_attempts=2))])
         app = AutoAgentApp(runtime_event_sink=sink)
         try: app.invoke(root, {'value': 1}, session_id='root')
         finally: app.close()
@@ -181,7 +182,7 @@ class RuntimeGraphTests(unittest.TestCase):
     def test_every_admission_prefix_preserves_child_sequence(self):
         """Graph recovery keeps ACKed SessionOpened even before Child InvocationStarted."""
         source_sink = Collector()
-        root = Workflow('prefix-root', nodes=[Node('child', Workflow('prefix-child', nodes=[Node('work', identity)]), recovery_mode=Recovery('replay_safe'))])
+        root = Workflow('prefix-root', nodes=[Node('child', Await(Workflow('prefix-child', nodes=[Node('work', identity)]), 'work'), recovery_mode=Recovery('replay_safe'))])
         app = AutoAgentApp(runtime_event_sink=source_sink)
         try: app.invoke(root, {'value': 3}, session_id='root')
         finally: app.close()
@@ -210,7 +211,7 @@ class RuntimeGraphTests(unittest.TestCase):
         """Cancellation abandons an unopened plan without fabricating a terminal Child."""
         from autoagent.core import RuntimeRepository, InvocationSettling
         sink = Collector()
-        root = Workflow('cancel-planned-root', nodes=[Node('child', Workflow('cancel-planned-child', nodes=[Node('work', identity)]))])
+        root = Workflow('cancel-planned-root', nodes=[Node('child', Await(Workflow('cancel-planned-child', nodes=[Node('work', identity)]), 'work'))])
         app = AutoAgentApp(runtime_event_sink=sink)
         try: app.invoke(root, {'value': 1}, session_id='root')
         finally: app.close()
@@ -258,7 +259,7 @@ class RuntimeGraphTests(unittest.TestCase):
         sink = Collector()
         source = AutoAgentApp(runtime_event_sink=sink)
         try:
-            r = source.invoke(Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', identity)]))]), {'value': 1})
+            r = source.invoke(Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('n', identity)]), 'n'))]), {'value': 1})
             graph = source.unload_session(r.ref, capture_checkpoint=True)
         finally: source.close()
         child = next(s for s in graph.sessions if s.session_id != graph.root_session_id)
@@ -286,7 +287,7 @@ class RuntimeGraphTests(unittest.TestCase):
         """Cancellation does not authorize dropping an admitted Child from a bundle."""
         app = AutoAgentApp()
         try:
-            r = app.invoke(Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('w', Wait(Value, Value))]))]), {'value': 1})
+            r = app.invoke(Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('w', Wait(Value, Value))]), 'w'))]), {'value': 1})
             app.cancel(r.ref)
             cp = app.unload_session(r.ref, capture_checkpoint=True)
             root = next(s for s in cp.sessions if s.session_id == cp.root_session_id)
@@ -297,7 +298,7 @@ class RuntimeGraphTests(unittest.TestCase):
         """Close retains a partial Child Session so recovery cannot reuse sequence one."""
         from autoagent.core import RuntimeRepository
         sink = Collector()
-        workflow = Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', identity)]), recovery_mode=Recovery('replay_safe'))])
+        workflow = Workflow('root', nodes=[Node('child', Await(Workflow('child', nodes=[Node('n', identity)]), 'n'), recovery_mode=Recovery('replay_safe'))])
         source = AutoAgentApp(runtime_event_sink=sink)
         try: source.invoke(workflow, {'value': 1}, session_id='root')
         finally: source.close()
@@ -321,11 +322,11 @@ class RuntimeGraphTests(unittest.TestCase):
     def test_child_handle_strict_round_trip(self):
         """Durable Handle contracts restore identity without allowing extra control fields."""
         from autoagent import ValueContract
-        handle = ChildHandle(child_session_id='session', child_invocation_id='invocation', workflow_revision_id='revision')
-        contract = ValueContract.create(ChildHandle, location='handle test')
+        handle = RuntimeHandle(session_id='session', invocation_id='invocation', workflow_id='workflow', workflow_revision_id='revision')
+        contract = ValueContract.create(RuntimeHandle, location='handle test')
         self.assertEqual(contract.restore(contract.to_record(handle)), handle)
         with self.assertRaises(Exception):
-            contract.restore({**contract.to_record(handle), 'workflow_id': 'unexpected'})
+            contract.restore({**contract.to_record(handle), 'control': 'unexpected'})
 
     def test_cancel_after_child_sink_failure_clears_resolved_drive_error(self):
         """A successful cancellation resolves old infrastructure errors after exact ACK retry."""
@@ -338,7 +339,7 @@ class RuntimeGraphTests(unittest.TestCase):
                     raise OSError('ambiguous child completion')
         app = AutoAgentApp(runtime_event_sink=FailOnce())
         try:
-            workflow = Workflow('root', nodes=[Node('child', Workflow('child', nodes=[Node('n', identity)]), execution_mode='spawn')])
+            workflow = Workflow('root', nodes=[Node('child', Spawn(Workflow('child', nodes=[Node('n', identity)]), 'n'))])
             with self.assertRaises(RuntimeInfrastructureError): app.invoke(workflow, {'value': 1}, session_id='root')
             ref = app.resident_invocations()[0]
             self.assertEqual(app.cancel(ref).status, 'cancelled')

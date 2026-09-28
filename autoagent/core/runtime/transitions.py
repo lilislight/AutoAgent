@@ -1,6 +1,10 @@
 """Live transition planning. Replay never invokes user code or this planner."""
 from __future__ import annotations
 
+from ..commands.models import SYSTEM_COMMAND_IDS
+from .events import ResumeReceiptReleased, CancellationRequested
+from .signals import SignalAccepted, SignalsReceived, SignalReceiptReleased, signal_delta
+
 from collections import ChainMap
 from dataclasses import replace
 from types import MappingProxyType
@@ -11,9 +15,9 @@ from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
     NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed,
-    WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationSettling,
+    CommandAwakened, WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationSettling,
     InvocationFailed, InvocationCancelled, ChildInvocationPlanned,
-    ChildInvocationPhaseChanged, ChildAwaitSuspended, ChildAwaitReady,
+    ChildInvocationPhaseChanged,
     validate_payload, ChildCompacted,
 )
 from .operations import StateDelta, StateOperation
@@ -85,6 +89,19 @@ class TransitionPlanner:
             return StateDelta(tuple(operations))
         if inv is None or inv.id != invocation_id:
             raise RuntimeTransitionError("INVOCATION_MISMATCH", "Event targets another Invocation.")
+        if isinstance(payload, (SignalAccepted, SignalsReceived, SignalReceiptReleased)):
+            delta = signal_delta(self, state, payload, occurred_at_us, session_id, invocation_id, _execution_index)
+            return StateDelta((*operations, *delta.operations))
+        if isinstance(payload, CancellationRequested):
+            if inv.terminal or inv.stopping:
+                raise RuntimeTransitionError('INVOCATION_STOPPING', 'Cancellation is already decided.')
+            if child_input_digest(payload.reason) != payload.origin['reason_digest']:
+                raise ValueError('Cancellation reason digest mismatch.')
+            delta = self.plan(state, InvocationSettling('cancelled', reason=payload.reason),
+                occurred_at_us=occurred_at_us, session_id=session_id, invocation_id=invocation_id,
+                _execution_index=_execution_index)
+            return StateDelta((*delta.operations, StateOperation._from_owned(
+                'replace', ('invocation', 'cancel_origin'), payload.origin)))
         if isinstance(payload, ChildCompacted):
             if isinstance(inv, ChildResult) or not inv.terminal or any(
                 u.phase not in {"terminal", "abandoned"} for p in inv.child_plans.values() for u in p.units
@@ -94,9 +111,23 @@ class TransitionPlanner:
                 inv.status, inv.output, inv.error, inv.cancel_reason, inv.created_at_us,
                 inv.started_at_us, inv.completed_at_us, payload.parent_session_id,
                 payload.parent_invocation_id, payload.creation_id, payload.unit_index,
-                child_input_digest(inv.input), release_child_inputs(inv.child_plans))
+                child_input_digest(inv.input), release_child_inputs(inv.child_plans),
+                inv.signals, inv.cancel_origin, inv.resume_receipts, inv.resume_receipt_frontiers)
             put(("invocation",), result)
             put(("session",), replace(session, context=freeze({}), context_path_revisions=MappingProxyType({}), updated_at_us=occurred_at_us))
+            return StateDelta(tuple(operations))
+        if isinstance(payload, ResumeReceiptReleased):
+            receipt = inv.resume_receipts.get(payload.call_id)
+            if receipt is None:
+                raise RuntimeTransitionError("RESUME_RECEIPT_MISSING", "Resume receipt was already released.")
+            put(("invocation", "resume_receipts", payload.call_id), None, "remove")
+            previous = inv.resume_receipt_frontiers.get(receipt['session_id'])
+            if previous is not None and previous['invocation_id'] != receipt['invocation_id']:
+                raise RuntimeTransitionError('RESUME_CALLER_REPLACED', 'Resume caller identity changed within the graph.')
+            sequence = max(payload.caller_sequence, previous['sequence'] if previous else 0)
+            put(("invocation", "resume_receipt_frontiers", receipt['session_id']),
+                freeze({'invocation_id': receipt['invocation_id'], 'sequence': sequence}),
+                "replace" if previous else "add")
             return StateDelta(tuple(operations))
         if inv.terminal and not isinstance(payload, ChildInvocationPhaseChanged):
             raise RuntimeTransitionError("INVOCATION_TRANSITION_INVALID", "Invocation is already terminal.")
@@ -224,18 +255,33 @@ class TransitionPlanner:
                     item.status in {"waiting", "completed", "failed", "skipped", "cancelled"} for item in remaining
                 ) and any(item.status == "waiting" for item in remaining):
                     put(("invocation", "status"), "waiting")
+        elif isinstance(payload, CommandAwakened):
+            from .waits import awakening_delta
+            delta = awakening_delta(self, state, payload, occurred_at_us, session_id, invocation_id, _execution_index)
+            return StateDelta((*operations, *delta.operations))
         elif isinstance(payload, WaitRequested):
             require_occ()
             if payload.wait_id in sched.waits:
                 raise RuntimeTransitionError("WAIT_DUPLICATE", "Wait already exists.")
+            if payload.wait_kind not in {'external', 'signal', 'timer', 'child', 'any'}:
+                raise ValueError('Invalid Wait kind.')
+            if payload.wait_kind != 'external':
+                from .waits import validate_condition
+                validate_condition(payload.wait_kind, payload.request)
             occurrence_put(replace(occ, status="waiting"))
             put((*SCHED, "waits", payload.wait_id), WaitState(payload.wait_id, oid, "waiting", payload.request,
-                created_at_us=occurred_at_us), "add")
+                created_at_us=occurred_at_us, kind=payload.wait_kind, registered_sequence=state.sequence + 1), "add")
             if not _other_active(sched, oid, _execution_index):
                 put(("invocation", "status"), "waiting")
         elif isinstance(payload, WaitResumed):
+            if payload.origin is not None:
+                call_id = payload.origin['call_id']
+                if call_id in inv.resume_receipts:
+                    raise RuntimeTransitionError("RESUME_CALL_DUPLICATE", "Resume Call already applied.")
+                put(("invocation", "resume_receipts", call_id),
+                    freeze({**payload.origin, 'wait_id': payload.wait_id}), "add")
             wait = sched.waits.get(payload.wait_id)
-            if wait is None or wait.status != "waiting":
+            if wait is None or wait.status != "waiting" or wait.kind != "external":
                 raise RuntimeTransitionError("WAIT_NOT_WAITING", "Wait is not waiting.")
             put((*SCHED, "waits", wait.id), replace(wait, status="resumed", response=payload.response, resumed_at_us=occurred_at_us))
             occurrence_put(replace(sched.occurrences[wait.occurrence_id], status="running", ready_at_us=occurred_at_us))
@@ -244,7 +290,7 @@ class TransitionPlanner:
         elif isinstance(payload, RecoveryApplied):
             recovered = []
             for item in sched.operator_calls.values():
-                if item.status == "running":
+                if item.status == "running" and item.operator_id not in SYSTEM_COMMAND_IDS:
                     put((*SCHED, "operator_calls", item.id), replace(item, status="lost", completed_at_us=occurred_at_us))
             for item in sched.occurrences.values():
                 if item.status == "running":
@@ -281,6 +327,9 @@ class TransitionPlanner:
                     put(("invocation", "cancel_reason"), payload.reason if outcome == "cancelled" else None)
             if not settling:
                 put(("invocation", "completed_at_us"), occurred_at_us)
+                if inv.signals['messages']:
+                    put(('invocation', 'signals', 'messages'), freeze({}))
+                    put(('invocation', 'signals', 'bytes'), 0)
             if outcome != "completed" and inv.status != "settling":
                 put((*SCHED, "ready"), ())
                 for item in sched.occurrences.values():
@@ -298,7 +347,7 @@ class TransitionPlanner:
             parent = sched.occurrences.get(payload.parent_occurrence_id)
             if parent is None or parent.status != "running":
                 raise RuntimeTransitionError("CHILD_PARENT_OCCURRENCE_NOT_RUNNING", "Child requires a running parent.")
-            plan = ChildInvocationPlan(payload.creation_id, payload.parent_occurrence_id, payload.mode,
+            plan = ChildInvocationPlan(payload.creation_id, payload.parent_occurrence_id, payload.entry_node_id,
                 payload.workflow_id, payload.workflow_revision_id,
                 child_units(tuple(ChildUnitState(u.unit_index, u.child_session_id, u.child_invocation_id, u.input) for u in payload.units)))
             put(("invocation", "child_plans", plan.creation_id), plan, "add")
@@ -318,20 +367,6 @@ class TransitionPlanner:
                 units[payload.unit_index] = updated
                 units = tuple(units)
             put(("invocation", "child_plans", plan.creation_id), replace(plan, units=units))
-        elif isinstance(payload, (ChildAwaitSuspended, ChildAwaitReady)):
-            plan = inv.child_plans.get(payload.creation_id)
-            if plan is None or plan.mode != "await" or plan.parent_occurrence_id != payload.parent_occurrence_id:
-                raise RuntimeTransitionError("CHILD_AWAIT_PLAN_MISMATCH", "Child Await plan mismatch.")
-            item = sched.occurrences[payload.parent_occurrence_id]
-            resume = isinstance(payload, ChildAwaitReady)
-            if resume and any(unit.phase not in {'terminal', 'abandoned'} for unit in plan.units):
-                raise RuntimeTransitionError("CHILD_AWAIT_NOT_TERMINAL", "Child units have not settled.")
-            occurrence_put(replace(item, status="running" if resume else "waiting", ready_at_us=occurred_at_us))
-            if resume:
-
-                put(("invocation", "status"), "running")
-            elif not _other_active(sched, item.id, _execution_index):
-                put(("invocation", "status"), "waiting")
         else:
             raise RuntimeTransitionError("EVENT_TYPE_UNSUPPORTED", "Unsupported semantic boundary.")
         if inv.status != "settling" and isinstance(payload, (InvocationCompleted, InvocationSettling, InvocationFailed, InvocationCancelled)):

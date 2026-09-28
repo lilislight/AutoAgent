@@ -9,6 +9,7 @@ The example writes ``core_workflow_checkpoint.json`` in the current directory.
 
 from __future__ import annotations
 
+from autoagent import Spawn
 import json
 import time
 from pathlib import Path
@@ -262,9 +263,9 @@ def build_workflow() -> Workflow:
             ),
             Node(
                 "spawn_audit",
-                audit,
+                Spawn(audit, audit.nodes[0].id),
                 input_mapping=audit_input,
-                execution_mode="spawn",
+
             ),
             Node("manual_review", manual_review),
             Node("approval_rejected", reject_order, input_mapping=rejected_order_input),

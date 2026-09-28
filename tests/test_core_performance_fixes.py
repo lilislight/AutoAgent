@@ -1,4 +1,5 @@
 """Ownership, ordering and lifecycle regression boundaries for Core optimizations."""
+from autoagent import Await
 import asyncio
 import random
 import threading
@@ -79,7 +80,7 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(units[129].phase,'planned')
         self.assertEqual(updated[129].phase,'opened')
         self.assertEqual(tuple(updated),updated)
-        plan=ChildInvocationPlan('p','a@root','await','w','r',updated)
+        plan=ChildInvocationPlan('p','a@root','entry','w','r',updated)
         operation=StateOperation._from_owned('add',('invocation','child_plans','p'),plan)
         restored=StateOperation.from_record(operation.to_record())
         self.assertEqual(restored.value,plan)
@@ -112,7 +113,7 @@ class ContainerTests(unittest.TestCase):
         child=Workflow('block-child',nodes=[Node('a',identity)])
         app=AutoAgentApp(max_operator_concurrency=16)
         try:
-            result=app.invoke(Workflow('block-parent',nodes=[Node('children',child,input_mapping=items,map=Map(max_parallelism=16))]),{'value':513})
+            result=app.invoke(Workflow('block-parent',nodes=[Node('children',Await(child, child.nodes[0].id),input_mapping=items,map=Map(max_parallelism=16))]),{'value':513})
             self.assertEqual(result.status,'completed',result.error)
             self.assertEqual(len(result.output),513)
             state=app._repository.state(result.session_id)

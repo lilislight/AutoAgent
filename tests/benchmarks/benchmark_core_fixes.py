@@ -33,7 +33,7 @@ def main():
         delta=StateDelta((StateOperation('replace',('invocation','scheduler','operator_calls','1','execution_duration_ns'),43),))
         report[f'steady_call_update_{count}']=measure(lambda:apply_runtime_delta(state,delta))
         units=tuple(ChildUnitState(i,f's{i}',f'i{i}',None) for i in range(count))
-        plan=ChildInvocationPlan('p',occ.id,'await','w','r',units)
+        plan=ChildInvocationPlan('p',occ.id,'entry','w','r',units)
         state=replace(seed,invocation=replace(inv,child_plans=MappingProxyType({'p':plan})))
         delta=planner.plan(state,ChildInvocationPhaseChanged('p',0,'opened'),occurred_at_us=999,
             session_id=seed.session.id,invocation_id=inv.id)

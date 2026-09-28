@@ -1,4 +1,5 @@
 """Measure a resident Spawn graph while its last large-input Child is blocked."""
+from autoagent import Spawn
 import asyncio
 import gc
 import json
@@ -39,7 +40,7 @@ def sample(count=64, size=1024*1024, rows=False, retain_output=False):
                 await asyncio.sleep(.002)
         return {'value': value['index'], 'text': value['text'] if retain_output else ''}
     child = Workflow('child', nodes=[Node('work', work)])
-    root = Workflow('root', nodes=[Node('children', child, execution_mode='spawn',
+    root = Workflow('root', nodes=[Node('children', Spawn(child, child.nodes[0].id),
         input_mapping=inputs, map=Map(max_parallelism=8))])
     sink = Sink()
     app = AutoAgentApp(runtime_event_sink=sink)

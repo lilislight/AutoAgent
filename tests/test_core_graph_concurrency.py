@@ -1,5 +1,6 @@
 """Session commit ordering and graph lifecycle cuts under controlled Sink ACKs."""
 
+from autoagent import Await
 from tests.graph_fixtures import (
     child_refs,
     join_observed,
@@ -103,7 +104,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
     def make_wait_graph(self, sink, count=4):
         app = AutoAgentApp(runtime_event_sink=sink)
         child = Workflow('graph-child', nodes=[Node('wait', Wait(Value, Value))])
-        parent = Workflow('graph-root', nodes=[Node('children', child,
+        parent = Workflow('graph-root', nodes=[Node('children', Await(child, child.nodes[0].id),
             input_mapping=items, map=Map(max_parallelism=count))])
         result = app.invoke(parent, {'value': count}, session_id='root')
         children = [join_observed(app, ref) for ref in child_refs(app, result.ref)]
@@ -186,7 +187,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
                 sink = BlockingSink()
                 app = AutoAgentApp(runtime_event_sink=sink)
                 child = Workflow('admission-child', nodes=[Node('wait', Wait(Value, Value))])
-                workflow = Workflow('admission-root', nodes=[Node('child', child)])
+                workflow = Workflow('admission-root', nodes=[Node('child', Await(child, child.nodes[0].id))])
                 def blocked(e):
                     return ((boundary == 'session' and e.session_id != 'root' and isinstance(e.payload, SessionOpened))
                         or (boundary == 'invocation' and e.session_id != 'root' and isinstance(e.payload, InvocationStarted))
@@ -328,12 +329,12 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
             await asyncio.gather(*tasks)
         try:
             app._runtime_loop.run(asyncio.wait_for(run(), 5))
-            self.assertEqual(join_observed(app, root.ref).status, 'failed')
+            self.assertEqual(join_observed(app, root.ref).status, 'completed')
             markers = [e for e in sink.events if isinstance(e.payload, ChildInvocationPhaseChanged)
                        and e.payload.phase == 'terminal']
             self.assertEqual(len(markers), 1)
-            ready = [e for e in sink.events if e.payload.kind == 'child_await.ready']
-            self.assertEqual(len(ready), 1)
+            completed = [e for e in sink.events if e.session_id == root.session_id and e.payload.kind == 'command.awakened']
+            self.assertEqual(len(completed), 1)
             self.assert_replay(app, sink)
         finally:
             sink.predicate = lambda e: False
@@ -354,7 +355,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
                 app = AutoAgentApp(runtime_event_sink=sink)
                 child = Workflow('failing-child', nodes=[Node('wait', Wait(Value, Value)), Node('fail', fail)],
                                  edges=[Edge('wait', 'fail')])
-                parent = Workflow('failing-parent', nodes=[Node('children', child,
+                parent = Workflow('failing-parent', nodes=[Node('children', Await(child, child.nodes[0].id),
                     input_mapping=items, map=Map(max_parallelism=4))])
                 async def run(children):
                     return await asyncio.gather(*(resume_graph_wait_internal(app, c.ref, c.waits[0].id,
@@ -363,7 +364,7 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
                     root = app.invoke(parent, {'value': 4})
                     children = [join_observed(app, ref) for ref in child_refs(app, root.ref)]
                     app._runtime_loop.run(asyncio.wait_for(run(children), 5))
-                    self.assertEqual(join_observed(app, root.ref).status, 'failed')
+                    self.assertEqual(join_observed(app, root.ref).status, 'completed')
                     self.assertTrue(all(not app._task_runtime.is_live(sid)
                                         for sid in app._repository.session_ids()))
                     self.assert_replay(app, sink)

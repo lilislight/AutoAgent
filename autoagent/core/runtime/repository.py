@@ -6,7 +6,7 @@ from .clocks import unix_time_us
 from ._context_index import ContextRevisionIndex, planning_indexes
 from collections.abc import Mapping
 
-from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated
+from .events import RuntimeEvent, RuntimeEventPayload, RecoveryApplied, NodeCompleted, ChildInvocationPhaseChanged, NodeFailed, WaitRequested, Aggregated
 from .state import RuntimeState, ChildResult
 from ._execution_index import ExecutionIndex
 from .checkpoint import SessionCheckpoint
@@ -78,7 +78,7 @@ class RuntimeRepository:
                 )
             planning_options = {}
             if type(self.planner) is TransitionPlanner and isinstance(
-                payload, (NodeCompleted, NodeFailed, WaitRequested, ChildAwaitSuspended, Aggregated)
+                payload, (NodeCompleted, NodeFailed, WaitRequested, Aggregated)
             ):
                 planning_options['_execution_index'] = self._execution_indexes.get(session_id)
                 planning_options['_output_node_ids'] = output_node_ids

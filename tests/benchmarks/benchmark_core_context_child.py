@@ -3,6 +3,7 @@
 Run: .venv/bin/python -m tests.benchmarks.benchmark_core_context_child
 """
 
+from autoagent import Await
 from tests.graph_fixtures import (
     child_refs,
     join_observed,
@@ -88,11 +89,11 @@ def context_case(count, empty=False):
 
 def child_fixture(count, sink=None):
     child = Workflow('wait-child', nodes=[Node('approval', Wait(Value, Value))])
-    parent = Workflow('wait-parent', nodes=[Node('children', child, input_mapping=items,
+    parent = Workflow('wait-parent', nodes=[Node('children', Await(child, child.nodes[0].id), input_mapping=items,
                                                map=Map(max_parallelism=32))])
     app = AutoAgentApp(max_operator_concurrency=32, runtime_event_sink=sink)
     result = app.invoke(parent, {'value': count})
-    assert result.status == 'waiting'
+    assert result.status == 'settling'
     children = [join_observed(app, ref) for ref in child_refs(app, result.ref)]
     assert len(children) == count and all(c.status == 'waiting' for c in children)
     return app, result, children
@@ -104,7 +105,8 @@ def finish_children(app, parent, children):
         assert result.status == 'completed' and result.output == {'value': index}
     result = app.join(parent.ref)
     assert result.status == 'completed', result.error
-    assert result.output == [{'value': i} for i in range(len(children))]
+    assert [item.status for item in result.output] == ['waiting'] * len(children)
+    assert [item.waits[0].request for item in result.output] == [{'value': i} for i in range(len(children))]
     state = app._repository.state(parent.session_id)
     assert all(unit.phase == 'terminal' for plan in state.invocation.child_plans.values()
                for unit in plan.units)

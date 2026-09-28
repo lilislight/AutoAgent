@@ -1,5 +1,6 @@
 """Independent Session ACK overlap; preparation and profiling excluded from timings."""
 
+from autoagent import Await
 from tests.graph_fixtures import (
     child_refs,
     join_observed,
@@ -41,7 +42,7 @@ def sample(kind, size, delay):
     waiting = Workflow('wait', nodes=[Node('approve', Wait(Value, Value))])
     try:
         if kind == 'children':
-            parent = Workflow('parent', nodes=[Node('children', waiting,
+            parent = Workflow('parent', nodes=[Node('children', Await(waiting, waiting.nodes[0].id),
                 input_mapping=items, map=Map(max_parallelism=100))])
             result = app.invoke(parent, {'value': size})
             children = [join_observed(app, ref) for ref in child_refs(app, result.ref)]
@@ -79,7 +80,7 @@ def measure_graph_memory(size):
     sink = DelaySink()
     app = AutoAgentApp(runtime_event_sink=sink, max_operator_concurrency=100)
     child = Workflow('memory-child', nodes=[Node('identity', identity)])
-    parent = Workflow('memory-parent', nodes=[Node('children', child,
+    parent = Workflow('memory-parent', nodes=[Node('children', Await(child, child.nodes[0].id),
         input_mapping=items, map=Map(max_parallelism=100))])
     try:
         app.invoke(parent, {'value': size}, session_id='memory-root')

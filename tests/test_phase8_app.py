@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from autoagent import Spawn, Await
 from tests.graph_fixtures import (
     async_join_observed,
     async_resume_graph_wait,
@@ -76,11 +77,15 @@ def map_items(context: InputMappingContext) -> list[Value]:
 
 
 def aggregate_child_values(context: AggregationContext) -> Value:
-    return {"value": sum(item["value"] for item in context.outputs)}  # type: ignore[index]
+    return {"value": sum(item.output["value"] for item in context.outputs)}  # type: ignore[index]
 
 
 def aggregate_child_invocations(context: AggregationContext) -> HandleSummary:
     return {"count": len(context.outputs)}
+
+
+def map_child_completion_event(context: OutputBindingContext) -> Value:
+    return context.output["output"]
 
 
 def map_completion_event(context: OutputBindingContext) -> Value:
@@ -266,9 +271,9 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "child",
-                    child,
+                    Await(child, child.nodes[0].id),
                     user_events=(
-                        UserEventMapping("parent.completed", map_completion_event),
+                        UserEventMapping("parent.completed", map_child_completion_event),
                     ),
                 )
             ],
@@ -757,25 +762,25 @@ class AppTests(unittest.TestCase):
     def test_child_workflow_await_and_spawn_modes(self) -> None:
         """Verify child workflow await and spawn modes."""
         child = Workflow("child", nodes=[Node("increment", increment)])
-        awaited = Workflow("parent-await", nodes=[Node("child", child)])
+        awaited = Workflow("parent-await", nodes=[Node("child", Await(child, child.nodes[0].id))])
         awaited_result = self.app.invoke(awaited, {"value": 4})
-        self.assertEqual(awaited_result.output, {"value": 5})
+        self.assertEqual(awaited_result.output.output, {"value": 5})
 
         spawned = Workflow(
             "parent-spawn",
-            nodes=[Node("child", child, execution_mode="spawn")],
+            nodes=[Node("child", Spawn(child, child.nodes[0].id))],
         )
         spawned_result = self.app.invoke(spawned, {"value": 4})
         self.assertEqual(spawned_result.status, "completed")
         self.assertTrue(spawned_result.output.workflow_revision_id.startswith("child:"))
-        self.assertTrue(spawned_result.output.child_invocation_id)
-        self.assertTrue(spawned_result.output.child_session_id)
+        self.assertTrue(spawned_result.output.invocation_id)
+        self.assertTrue(spawned_result.output.session_id)
         child_result = join_observed(self.app, spawned_result.output, timeout=1)
         self.assertEqual(child_result.status, "completed")
         self.assertEqual(child_result.output, {"value": 5})
         self.assertEqual(
             status_observed(self.app, spawned_result.output).invocation_id,
-            spawned_result.output.child_invocation_id,
+            spawned_result.output.invocation_id,
         )
 
     def test_map_await_child_workflows_preserves_order_and_parallel_limit(self) -> None:
@@ -800,7 +805,7 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=2),
                 )
@@ -811,7 +816,7 @@ class AppTests(unittest.TestCase):
             {"items": [{"value": 1}, {"value": 2}, {"value": 3}]},
         )
         self.assertEqual(
-            result.output,
+            [item.output for item in result.output],
             [{"value": 11}, {"value": 12}, {"value": 13}],
         )
         self.assertEqual(peak, 2)
@@ -826,7 +831,7 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(aggregate=aggregate_child_values, max_parallelism=3),
                 )
@@ -843,7 +848,7 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=2),
                 )
@@ -875,10 +880,10 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Spawn(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=2),
-                    execution_mode="spawn",
+
                 )
             ],
         )
@@ -889,7 +894,7 @@ class AppTests(unittest.TestCase):
         handles = result.output
         self.assertEqual(len(handles), 3)
         self.assertEqual(
-            tuple(h.child_session_id for h in handles),
+            tuple(h.session_id for h in handles),
             tuple(r.session_id for r in child_refs(self.app, result.ref)),
         )
         outputs = [join_observed(self.app, handle, timeout=1).output for handle in handles]
@@ -905,10 +910,10 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Spawn(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(aggregate=aggregate_child_invocations, max_parallelism=2),
-                    execution_mode="spawn",
+
                 )
             ],
         )
@@ -926,14 +931,14 @@ class AppTests(unittest.TestCase):
         self.assertEqual(empty.output, {"count": 0})
         self.assertEqual(child_refs(self.app, empty.ref), ())
 
-    def test_map_await_child_failure_cancels_and_settles_siblings(self) -> None:
-        """Verify one failed awaited Child settles every sibling before parent failure."""
+    def test_map_await_reports_failure_without_cancelling_siblings(self) -> None:
+        """Verify Await reports each outcome without implicitly cancelling siblings."""
 
         async def child_work(value: Value) -> Value:
             if value["value"] == 0:
                 await asyncio.sleep(0.01)
                 raise RuntimeError("child failed")
-            await asyncio.sleep(10)
+            await asyncio.sleep(.02)
             return value
 
         child = Workflow("mapped-failure-child", nodes=[Node("work", child_work)])
@@ -942,7 +947,7 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=3),
                 )
@@ -954,15 +959,16 @@ class AppTests(unittest.TestCase):
             {"items": [{"value": 1}, {"value": 0}, {"value": 2}]},
         )
         self.assertLess(time.monotonic() - started_at, 2)
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "completed")
         handles = child_refs(self.app, result.ref)
         self.assertEqual(len(handles), 3)
         self.assertTrue(
             all(
-                status_observed(self.app, handle).status in {"failed", "cancelled"}
+                status_observed(self.app, handle).status in {"failed", "completed"}
                 for handle in handles
             )
         )
+        self.assertEqual([item.status for item in result.output], ["completed", "failed", "completed"])
         parent_state = self.journal.state(result.session_id).invocation
         assert parent_state is not None
         plan = next(iter(parent_state.child_plans.values()))
@@ -991,7 +997,7 @@ class AppTests(unittest.TestCase):
             nodes=[
                 Node(
                     "children",
-                    child,
+                    Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(max_parallelism=2),
                 )
@@ -1023,7 +1029,7 @@ class AppTests(unittest.TestCase):
         child = Workflow("long-child", nodes=[Node("work", long_child)])
         parent = Workflow(
             "spawn-cancel",
-            nodes=[Node("child", child, execution_mode="spawn")],
+            nodes=[Node("child", Spawn(child, child.nodes[0].id))],
         )
         spawned = self.app.submit_invoke(parent, {"value": 3})
         self.assertTrue(started.wait(1))
@@ -1048,7 +1054,7 @@ class AppTests(unittest.TestCase):
             return value
 
         child = Workflow("awaited-long-child", nodes=[Node("work", long_child)])
-        parent = Workflow("await-child-cancel", nodes=[Node("child", child)])
+        parent = Workflow("await-child-cancel", nodes=[Node("child", Await(child, child.nodes[0].id))])
         submitted = self.app.submit_invoke(parent, {"value": 1})
         self.assertTrue(started.wait(1))
         handle = child_refs(self.app, submitted.ref)[0]
@@ -1062,7 +1068,7 @@ class AppTests(unittest.TestCase):
             "waiting-child",
             nodes=[Node("approval", Wait(Value, Value))],
         )
-        parent = Workflow("parent-waits-child", nodes=[Node("child", child)])
+        parent = Workflow("parent-waits-child", nodes=[Node("child", Await(child, child.nodes[0].id))])
         submitted = self.app.submit_invoke(parent, {"value": 1})
         deadline = time.monotonic() + 1
         handles = ()
@@ -1072,6 +1078,8 @@ class AppTests(unittest.TestCase):
                 break
             time.sleep(0.001)
         self.assertEqual(len(handles), 1)
+        boundary = join_observed(self.app, submitted.ref, 1)
+        self.assertEqual(boundary.status, "settling")
         child_waiting = status_observed(self.app, handles[0])
         self.assertEqual(child_waiting.status, "waiting")
         resume_graph_wait(self.app,
@@ -1081,7 +1089,8 @@ class AppTests(unittest.TestCase):
         )
         completed = join_observed(self.app, submitted.ref, 1)
         self.assertEqual(completed.status, "completed")
-        self.assertEqual(completed.output, {"value": 8})
+        self.assertEqual(completed.output.status, "waiting")
+        self.assertEqual(status_observed(self.app, handles[0]).output, {"value": 8})
 
     def test_same_workflow_id_keeps_multiple_revisions(self) -> None:
         """Verify same workflow id keeps multiple revisions."""

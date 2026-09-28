@@ -1,4 +1,5 @@
 """Compare complete graph execution on both lifecycle models, using a counting Sink."""
+from autoagent import Spawn
 import asyncio
 import gc
 import json
@@ -48,9 +49,9 @@ def sample(count, depth, size, roots):
     app = AutoAgentApp(runtime_event_sink=sink)
     workflow = Workflow('leaf', nodes=[Node('produce', produce)])
     for level in range(depth):
-        workflow = Workflow(f'level-{level}', nodes=[Node('spawn', workflow, execution_mode='spawn')])
+        workflow = Workflow(f'level-{level}', nodes=[Node('spawn', Spawn(workflow, workflow.nodes[0].id))])
     if count > 1:
-        workflow = Workflow('mapped', nodes=[Node('children', workflow, execution_mode='spawn', input_mapping=items, map=Map(max_parallelism=32))])
+        workflow = Workflow('mapped', nodes=[Node('children', Spawn(workflow, workflow.nodes[0].id),  input_mapping=items, map=Map(max_parallelism=32))])
     app.register_workflow(workflow)
     async def run():
         results = await asyncio.gather(*(app.ainvoke(workflow.id, {'value': i, 'count': count, 'size': size}, session_id=f'root-{i}') for i in range(roots)))

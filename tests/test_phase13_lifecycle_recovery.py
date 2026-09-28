@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from autoagent import ChildHandle
+from autoagent import Spawn, Await
+from autoagent import RuntimeHandle
 
 from tests.graph_fixtures import (
     async_children,
@@ -66,7 +67,7 @@ def _cross_root_checkpoint_pair() -> tuple[
     str,
 ]:
     child = Workflow("cross-root-child", nodes=[Node("work", identity)])
-    parent = Workflow("cross-root-parent", nodes=[Node("child", child)])
+    parent = Workflow("cross-root-parent", nodes=[Node("child", Await(child, child.nodes[0].id))])
     source = AutoAgentApp()
     try:
         parent_result = source.invoke(
@@ -270,7 +271,7 @@ class _ChildRefThreadApp(AutoAgentApp):
         super().__init__()
         self.child_ref_threads: list[int] = []
 
-    def _control_ref(self, handle: ChildHandle) -> InvocationRef:
+    def _control_ref(self, handle: RuntimeHandle) -> InvocationRef:
         self.child_ref_threads.append(threading.get_ident())
         return super()._control_ref(handle)
 
@@ -525,7 +526,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         child = Workflow("stream-detached-child", nodes=[Node("node", identity)])
         parent = Workflow(
             "stream-detached-parent",
-            nodes=[Node("child", child, execution_mode="spawn")],
+            nodes=[Node("child", Spawn(child, child.nodes[0].id))],
         )
         app = AutoAgentApp()
         try:
@@ -554,7 +555,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             return value
         app = AutoAgentApp()
         stream = app.stream(Workflow("stream-root", nodes=[Node("spawn",
-            Workflow("stream-child", nodes=[Node("work", work)]), execution_mode="spawn")]), {"value": 1})
+            Spawn(Workflow("stream-child", nodes=[Node("work", work)]), "work"))]), {"value": 1})
         results = []
         reader = threading.Thread(target=lambda: results.extend(stream))
         try:
@@ -652,7 +653,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         )
         parent = Workflow(
             "recover-opened-wait-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
+            nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
         )
         source = AutoAgentApp()
         try:
@@ -835,8 +836,8 @@ class LifecycleRecoveryTests(unittest.TestCase):
                     child_cancelled.set()
 
             async def parent_block(
-                handle: ChildHandle,
-            ) -> ChildHandle:
+                handle: RuntimeHandle,
+            ) -> RuntimeHandle:
                 parent_started.set()
                 try:
                     await asyncio.Event().wait()
@@ -848,7 +849,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
             parent = Workflow(
                 "cancel-parent",
                 nodes=[
-                    Node("spawn", child, execution_mode="spawn"),
+                    Node("spawn", Spawn(child, child.nodes[0].id)),
                     Node("hold", parent_block),
                 ],
                 edges=[Edge("spawn", "hold")],
@@ -1023,7 +1024,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         source.invoke(
             Workflow(
                 "preloaded-close-parent",
-                nodes=[Node("spawn", child, execution_mode="spawn")],
+                nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
             ),
             {"value": 1},
             session_id="preloaded-close-root",
@@ -1084,7 +1085,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         )
         parent = Workflow(
             "replacement-sink-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
+            nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
         )
         app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         try:
@@ -1159,7 +1160,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         )
         parent = Workflow(
             "child-event-retirement-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
+            nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
         )
         app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         try:
@@ -1254,7 +1255,7 @@ class LifecycleRecoveryTests(unittest.TestCase):
         )
         parent = Workflow(
             "settling-replacement-parent",
-            nodes=[Node("spawn", child, execution_mode="spawn")],
+            nodes=[Node("spawn", Spawn(child, child.nodes[0].id))],
         )
         app = AutoAgentApp(runtime_repository=journal, runtime_event_sink=sink)
         replacement_done = threading.Event()

@@ -22,7 +22,7 @@ from typing import (
 )
 from typing_extensions import is_typeddict
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError, JsonValue
 
 
 def _is_model_type(value: object) -> bool:
@@ -58,6 +58,8 @@ def _validate_fields(annotation: object, location: str, seen: set[object]) -> No
     if annotation in seen:
         return
     seen.add(annotation)
+    if annotation is JsonValue:
+        return
     if annotation in {str, int, float, bool, type(None)}:
         return
     if annotation in {Any, object}:

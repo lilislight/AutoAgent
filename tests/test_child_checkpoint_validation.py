@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from autoagent import Spawn
 from autoagent import RuntimeGraphCheckpoint
 
 from tests.graph_fixtures import (
@@ -39,7 +40,7 @@ def definitions() -> tuple[Workflow, Workflow]:
     child = Workflow("checkpoint-child", nodes=[Node("work", identity)])
     parent = Workflow(
         "checkpoint-parent",
-        nodes=[Node("child", child, execution_mode="spawn")],
+        nodes=[Node("child", Spawn(child, child.nodes[0].id))],
     )
     return child, parent
 

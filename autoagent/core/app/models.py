@@ -21,7 +21,9 @@ InvocationStatus = Literal[
 @dataclass(frozen=True, slots=True)
 class InvocationWait:
     id: str
-    request: object
+    request: object = None
+    kind: str = "external"
+    condition: object = None
 
 
 @dataclass(frozen=True, slots=True)

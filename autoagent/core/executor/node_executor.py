@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Executor, Future
 from uuid import uuid4
 
+from ..commands import CommandIR, Wait
 from ..operators import Operator, ValueContract, is_stream_value
 from ..runtime.events import (
     OperatorCallCompleted,
@@ -34,7 +35,6 @@ from ..workflow import (
     NodeIR,
     OutputBindingContext,
     StreamContext,
-    WorkflowIR,
 )
 from .future import await_concurrent_future
 from .result import ExecutionMetrics, NodeExecutionResult
@@ -124,6 +124,8 @@ class NodeExecutor:
         invocation_context: object,
         session_context: object,
     ) -> object:
+        if getattr(node.executable, 'id', None) in {'system_command:receive_signal', 'system_command:await_signal', 'system_command:select'}:
+            return None
         if node.input_mapping is None:
             if not incoming:
                 value = invocation_input
@@ -225,7 +227,7 @@ class NodeExecutor:
             raise ValueError("Discarding transient outputs requires external aggregation.")
         if self._closed:
             raise RuntimeError("NodeExecutor is closed.")
-        if isinstance(node.executable, (Capability, WorkflowIR)):
+        if isinstance(node.executable, (Capability, CommandIR, Wait)):
             raise TypeError(
                 f"Node {node.id!r} requires a dispatcher owned by AutoAgentApp."
             )

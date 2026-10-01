@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .contract import OperatorContract, ValueContract
+from .contract import OperatorContract
 
 
 def callable_id(handler: Callable[..., object]) -> str:

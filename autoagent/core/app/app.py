@@ -9,7 +9,7 @@ from ..commands import SignalReceipt, SignalBatch, SelectResult
 from ..commands.signals import SendSignalRequest
 from ..runtime.signals import SignalAccepted, SignalReceiptReleased, validate_signal_workflow
 from ..commands import Wait
-from ..commands import CancelRequest, CancelReceipt, AwaitAnyRequest, TimerResult
+from ..commands import CancelRequest, CancelReceipt, TimerResult
 from ..runtime.events import CancellationRequested
 from ..commands import CommandIR, RuntimeHandle, RuntimeObservation, RuntimeWait, ResumeRequest, ResumeReceipt
 from ..runtime.events import ResumeReceiptReleased
@@ -31,7 +31,7 @@ from uuid import uuid4
 from ..compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from ..errors import RuntimeTransitionError
 from ..executor import CapabilityResolver, NodeExecutor, WorkflowExecutor
-from ..hosting import RuntimeEventSink, UserEventSink
+from ..sinks import RuntimeEventSink, UserEventSink
 from ..operators import Operator, OperatorRegistry
 from ..runtime.clocks import unix_time_us
 from ..runtime import (
@@ -51,7 +51,6 @@ from ..runtime import (
     InvocationStarted,
     NodeCompleted,
     NodeFailed,
-    SessionCheckpoint,
     RuntimeErrorInfo,
     RuntimeEvent,
     RuntimeState,
@@ -73,14 +72,7 @@ from .models import (
     InvocationWait,
     StreamItem,
 )
-from .ports import (
-    Clock,
-    NodeExecutorPort,
-    OperatorRegistryPort,
-    RuntimeRepositoryPort,
-    SchedulerPort,
-    UserEventJournalPort,
-)
+
 from .runtime_loop import RuntimeLoop
 from ._graph_gate import GraphGate
 from .stream import AttachedStream, InvocationStream, is_stream_end
@@ -95,14 +87,14 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         max_operator_concurrency: int = 32,
         max_node_executions_per_invocation: int = 1_000,
         capability_resolver: CapabilityResolver | None = None,
-        runtime_repository: RuntimeRepositoryPort | None = None,
+        runtime_repository: RuntimeRepository | None = None,
         runtime_event_sink: RuntimeEventSink | None = None,
         user_event_sink: UserEventSink | None = None,
-        user_event_journal: UserEventJournalPort | None = None,
-        scheduler: SchedulerPort | None = None,
-        node_executor: NodeExecutorPort | None = None,
-        clock_us: Clock | None = None,
-        operator_registry: OperatorRegistryPort | None = None,
+        user_event_journal: InMemoryUserEventJournal | None = None,
+        scheduler: Scheduler | None = None,
+        node_executor: NodeExecutor | None = None,
+        clock_us: Callable[[], int] | None = None,
+        operator_registry: OperatorRegistry | None = None,
     ) -> None:
         _positive_integer(max_operator_concurrency, "max_operator_concurrency")
         _positive_integer(
@@ -120,7 +112,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             if not isinstance(runtime_repository, RuntimeRepository):
                 raise TypeError("Configure the sink on the custom RuntimeRepository.")
             runtime_repository.sink = runtime_event_sink
-        self._runtime_event_sink = runtime_event_sink
         self._user_event_sink = user_event_sink
         self._user_event_sink_errors: dict[str, BaseException] = {}
         self._user_event_journal = user_event_journal or InMemoryUserEventJournal()
@@ -141,7 +132,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         self._task_runtime = TaskRuntime()
         self._init_wait_runtime()
         self._workflow_executor = WorkflowExecutor(
-            journal=self._repository,
+            repository=self._repository,
             scheduler=self._scheduler,
             node_executor=self._node_executor,  # type: ignore[arg-type]
             task_runtime=self._task_runtime,
@@ -222,7 +213,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             return snapshot
 
     @property
-    def operator_registry(self) -> OperatorRegistryPort:
+    def operator_registry(self) -> OperatorRegistry:
         return self._operator_registry
 
     @property
@@ -2321,22 +2312,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         assert created is not None
         return created
 
-    async def _capture_checkpoint(
-        self, session_id: str
-    ) -> SessionCheckpoint:
-        root = self._root_session_id(session_id)
-        async with self._graph_gate(root):
-            return await self._capture_checkpoint_locked(session_id)
-
-    async def _capture_checkpoint_locked(
-        self, session_id: str
-    ) -> SessionCheckpoint:
-        await self._settle_runtime_commits((session_id,))
-        checkpoint = self._repository.capture_checkpoint(
-            session_id, captured_at_us=self._clock_us()
-        )
-        await self._settle_runtime_commits((checkpoint.session_id,))
-        return checkpoint
 
     def _graph_gate(self, root_session_id: str) -> GraphGate:
         gate = self._graph_gates.get(root_session_id)
@@ -2521,27 +2496,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             workflow_revision_id=invocation.workflow_revision_id,
         )
 
-    def _resident_related_sessions(self, session_id: str) -> tuple[str, ...]:
-        """Return the resident component connected by durable Child ownership."""
-
-        resident = set(self._repository.session_ids())
-        adjacency: dict[str, set[str]] = {}
-        for child_session_id, owner in self._child_owners.items():
-            parent_session_id = owner[0]
-            adjacency.setdefault(parent_session_id, set()).add(child_session_id)
-            adjacency.setdefault(child_session_id, set()).add(parent_session_id)
-        found: list[str] = []
-        pending = [session_id]
-        seen: set[str] = set()
-        while pending:
-            current = pending.pop()
-            if current in seen:
-                continue
-            seen.add(current)
-            if current in resident:
-                found.append(current)
-            pending.extend(adjacency.get(current, ()))
-        return tuple(sorted(found))
 
     def _parent_plan(
         self, child_session_id: str, child_invocation_id: str | None = None

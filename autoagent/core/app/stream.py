@@ -32,8 +32,6 @@ class AttachedStream:
 
         return not self._closed
 
-    async def publish(self, item: object) -> None:
-        await self.publish_created(lambda: item)
 
     async def publish_terminal(self, item: object) -> None:
         """Publish the final Result and make later publishers non-attached."""
@@ -43,13 +41,6 @@ class AttachedStream:
 
         await self.publish_async_created(create, terminal=True)
 
-    async def publish_created(self, create: Callable[[], object]) -> object:
-        """Create and publish one item only after the caller requests it."""
-
-        async def create_async() -> object:
-            return create()
-
-        return await self.publish_async_created(create_async)
 
     async def publish_async_created(
         self,

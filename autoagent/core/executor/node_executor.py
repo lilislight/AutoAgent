@@ -29,8 +29,6 @@ from ..workflow import (
     Capability,
     ConditionContext,
     ContextPatch,
-    EdgeIR,
-    ErrorInfo,
     InputMappingContext,
     NodeIR,
     OutputBindingContext,
@@ -177,37 +175,6 @@ class NodeExecutor:
             raise TypeError("Output Binding must return ContextPatch or None.")
         return patch
 
-    async def select_edges(
-        self,
-        edges: tuple[EdgeIR, ...],
-        *,
-        source_status: str,
-        source_node_id: str,
-        output: object | None,
-        error: ErrorInfo | None,
-        invocation_context: object,
-        session_context: object,
-    ) -> set[str]:
-        selected: set[str] = set()
-        context = ConditionContext(
-            invocation_context=_mapping(invocation_context),
-            session_context=_mapping(session_context),
-            source_node_id=source_node_id,
-            output=freeze(output),
-            error=error,
-        )
-        for edge in edges:
-            if edge.on != source_status:
-                continue
-            if edge.condition is None:
-                selected.add(edge.id)
-                continue
-            decision = await _invoke(self._pool, edge.condition, context)
-            if type(decision) is not bool:
-                raise TypeError("Edge Condition must return bool.")
-            if decision:
-                selected.add(edge.id)
-        return selected
 
     async def execute(
         self,

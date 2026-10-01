@@ -30,7 +30,7 @@ def items(context: InputMappingContext) -> list[Value]:
 
 
 class RuntimeEventCollector:
-    """Collect canonical Runtime Events through the hosting boundary."""
+    """Collect canonical Runtime Events through the sink boundary."""
 
     def __init__(self) -> None:
         self.events: list[RuntimeEvent] = []

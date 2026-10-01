@@ -102,54 +102,6 @@ class SchedulerDelta:
     revived: tuple[OccurrencePlan, ...] = ()
 
 
-def delta_to_record(value: SchedulerDelta) -> dict[str, object]:
-    return {
-        "resolutions": [_resolution_to_record(item) for item in value.resolutions],
-        "boundary_resolutions": [
-            _boundary_to_record(item) for item in value.boundary_resolutions
-        ],
-        "closed_boundaries": list(value.closed_boundaries),
-        "consumed_resolution_ids": list(value.consumed_resolution_ids),
-        "ready": [_plan_to_record(item) for item in value.ready],
-        "skipped": [_plan_to_record(item) for item in value.skipped],
-        "revived": [_plan_to_record(item) for item in value.revived],
-    }
-
-
-def delta_from_record(value: dict[str, object]) -> SchedulerDelta:
-    record = _record(value, "Scheduler Delta")
-    return SchedulerDelta(
-        resolutions=tuple(
-            _resolution_from_record(item)
-            for item in _list(record, "resolutions")
-        ),
-        boundary_resolutions=tuple(
-            _boundary_from_record(item)
-            for item in _list(record, "boundary_resolutions")
-        ),
-        closed_boundaries=tuple(
-            _string_value(item, "closed boundary")
-            for item in _list(record, "closed_boundaries")
-        ),
-        consumed_resolution_ids=tuple(
-            _string_value(item, "consumed Resolution id")
-            for item in _list(record, "consumed_resolution_ids")
-        ),
-        ready=tuple(
-            _plan_from_record(item)
-            for item in _list(record, "ready")
-        ),
-        skipped=tuple(
-            _plan_from_record(item)
-            for item in _list(record, "skipped")
-        ),
-        revived=tuple(
-            _plan_from_record(item)
-            for item in _list(record, "revived")
-        ),
-    )
-
-
 def _scope_to_record(scope: ExecutionScope) -> list[dict[str, object]]:
     return [
         {"loop_region_id": item.loop_region_id, "iteration": item.iteration}
@@ -166,28 +118,6 @@ def _scope_from_record(values: object) -> ExecutionScope:
             _integer(_record(item, "Loop Iteration"), "iteration"),
         )
         for item in values
-    )
-
-
-def _plan_to_record(value: OccurrencePlan) -> dict[str, object]:
-    return {
-        "id": value.id,
-        "node_id": value.node_id,
-        "scope": _scope_to_record(value.scope),
-        "resolution_ids": list(value.resolution_ids),
-    }
-
-
-def _plan_from_record(value: object) -> OccurrencePlan:
-    record = _record(value, "Occurrence Plan")
-    return OccurrencePlan(
-        _string(record, "id"),
-        _string(record, "node_id"),
-        _scope_from_record(record.get("scope")),
-        tuple(
-            _string_value(item, "Occurrence Resolution id")
-            for item in _list(record, "resolution_ids")
-        ),
     )
 
 

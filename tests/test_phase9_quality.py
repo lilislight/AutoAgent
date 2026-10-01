@@ -319,8 +319,8 @@ class QualityTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_app_uses_injected_core_ports(self) -> None:
-        """Verify app uses injected core ports."""
+    def test_app_uses_injected_core_components(self) -> None:
+        """Verify injected Core subclasses execute through the current component interfaces."""
         class RuntimeJournal(RuntimeRepository):
             appended = 0
 

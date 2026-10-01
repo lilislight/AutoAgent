@@ -15,7 +15,7 @@ from typing import Literal, TypeAlias, Union
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from ..operators import Operator, OperatorContract, StreamReducer, ValueContract
-from ..context import ContextOperation, ContextPatch
+from ..context import ContextPatch
 
 
 Executable: TypeAlias = Union[Callable[..., object], Operator, SystemCommand]

@@ -6,7 +6,7 @@ compiles Workflows and exposes no public application API.
 
 from __future__ import annotations
 
-from ..commands import SelectResult, SignalCase, TimerCase, ChildCase
+from ..commands import SelectResult, SignalCase, TimerCase
 from ..commands.waits import CommandSuspended
 from ..commands import Wait
 from ..runtime._context_index import context_previews
@@ -43,7 +43,6 @@ from ..runtime import (
     ChildUnitSpec,
     InvocationCompleted,
     InvocationFailed,
-    InvocationState,
     InvocationStarted,
     WaitRequested,
     RuntimeErrorInfo,
@@ -86,7 +85,7 @@ class WorkflowExecutor:
     def __init__(
         self,
         *,
-        journal,
+        repository,
         scheduler,
         node_executor: NodeExecutor,
         task_runtime: TaskRuntime,
@@ -119,7 +118,7 @@ class WorkflowExecutor:
         self._resume_runtime = resume_runtime
         self._release_resume = release_resume
         self._runtime_identity = runtime_identity
-        self._repository = journal
+        self._repository = repository
         self._scheduler = scheduler
         self._node_executor = node_executor
         self._tasks = task_runtime

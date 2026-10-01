@@ -10,7 +10,7 @@ from dataclasses import replace
 from types import MappingProxyType
 
 from ..errors import RuntimeTransitionError
-from ..context import ContextOperation, ContextPatch
+from ..context import ContextOperation
 from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
@@ -612,7 +612,6 @@ class TransitionPlanner:
                 context_path_revisions=invocation_revisions,
             ),
         )
-
 
 
 def _require_status(invocation, allowed, name):

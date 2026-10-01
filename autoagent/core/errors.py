@@ -46,7 +46,7 @@ class RuntimeTransitionError(AutoAgentError):
 
 
 class RuntimeInfrastructureError(AutoAgentError):
-    """A hosting dependency failed after Core produced canonical progress."""
+    """An infrastructure dependency failed after Core produced canonical progress."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)

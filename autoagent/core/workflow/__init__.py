@@ -1,3 +1,4 @@
+from ..context import ContextOperation
 from .models import (
     Aggregation,
     AggregationContext,
@@ -6,7 +7,6 @@ from .models import (
     Condition,
     ConditionContext,
     Context,
-    ContextOperation,
     ContextPatch,
     Edge,
     EdgeIR,

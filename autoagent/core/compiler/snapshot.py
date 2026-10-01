@@ -15,7 +15,7 @@ from typing import get_args, get_origin
 from pydantic import TypeAdapter
 
 from ..operators import Operator
-from ..commands import SignalCase, TimerCase, ChildCase
+from ..commands import SignalCase, TimerCase
 from ..commands import CommandIR, SelfHandle, OwnerHandle, RuntimeHandle
 from ..workflow import Capability, WorkflowIR, workflow_hook_version
 from ._hooks import resolve_hook_contract

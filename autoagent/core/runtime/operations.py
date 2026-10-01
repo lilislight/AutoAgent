@@ -6,7 +6,7 @@ commit boundary: either every operation is applied in order, or none is.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import lru_cache
 from types import MappingProxyType
@@ -103,27 +103,6 @@ class StateDelta:
         return cls(tuple(StateOperation.from_record(item) for item in record["operations"]))
 
 
-def apply_state_delta(
-    record: Mapping[str, object], batch: StateDelta
-) -> dict[str, object]:
-    """Apply a batch with path copy-on-write.
-
-    The input record is treated as an immutable snapshot.  Every operation
-    clones only the containers on its path, while operation values are thawed
-    into newly owned containers.  This keeps a failed batch atomic without the
-    previous full-tree ``freeze``/``thaw`` clone.
-    """
-
-    candidate: object = record if isinstance(record, dict) else dict(record)
-    for operation in batch.operations:
-        candidate = _apply_operation(candidate, operation)
-    if not isinstance(candidate, dict):
-        raise RuntimeTransitionError(
-            "STATE_ROOT_INVALID", "Runtime State root must remain a mapping."
-        )
-    return candidate
-
-
 def _runtime_mapping(value: Mapping[object, object]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, item in value.items():
@@ -163,92 +142,6 @@ def _encode_runtime(value: object) -> object:
             record[item.name] = encoded
         return record
     raise TypeError(f"Unsupported Runtime State value {type(value).__name__}.")
-
-
-def _apply_operation(root: object, operation: StateOperation) -> object:
-    if len(operation.path) == 1:
-        parent = root
-        token = operation.path[0]
-        return _updated_container(parent, token, operation)
-    parent_path = operation.path[:-1]
-    parent = _read(root, parent_path)
-    updated = _updated_container(parent, operation.path[-1], operation)
-    return _replace_path(root, parent_path, updated)
-
-
-def _read(root: object, path: Sequence[PathToken]) -> object:
-    current = root
-    for token in path:
-        if isinstance(current, dict) and isinstance(token, str):
-            if token not in current:
-                raise RuntimeTransitionError(
-                    "STATE_PATH_MISSING", f"State path token {token!r} does not exist."
-                )
-            current = current[token]
-        elif isinstance(current, list) and isinstance(token, int):
-            if token >= len(current):
-                raise RuntimeTransitionError(
-                    "STATE_PATH_MISSING", f"State list index {token} does not exist."
-                )
-            current = current[token]
-        else:
-            raise RuntimeTransitionError(
-                "STATE_PATH_INVALID", "State Operation path does not match its container."
-            )
-    return current
-
-
-def _replace_path(root: object, path: Sequence[PathToken], value: object) -> object:
-    if not path:
-        return value
-    token = path[0]
-    if isinstance(root, dict) and isinstance(token, str):
-        if token not in root:
-            raise RuntimeTransitionError("STATE_PATH_MISSING", f"Missing {token!r}.")
-        clone = dict(root)
-        clone[token] = _replace_path(root[token], path[1:], value)
-        return clone
-    if isinstance(root, list) and isinstance(token, int) and token < len(root):
-        clone = list(root)
-        clone[token] = _replace_path(root[token], path[1:], value)
-        return clone
-    raise RuntimeTransitionError(
-        "STATE_PATH_INVALID", "State Operation path does not match its container."
-    )
-
-
-def _updated_container(
-    parent: object, token: PathToken, operation: StateOperation
-) -> object:
-    value = _encode_runtime(operation.value)
-    if isinstance(parent, dict) and isinstance(token, str):
-        exists = token in parent
-        if operation.op == "add" and exists:
-            raise RuntimeTransitionError("STATE_PATH_EXISTS", f"Path {token!r} exists.")
-        if operation.op in {"replace", "remove"} and not exists:
-            raise RuntimeTransitionError("STATE_PATH_MISSING", f"Path {token!r} is missing.")
-        clone = dict(parent)
-        if operation.op == "remove":
-            del clone[token]
-        else:
-            clone[token] = value
-        return clone
-    if isinstance(parent, list) and isinstance(token, int):
-        clone = list(parent)
-        if operation.op == "add":
-            if token > len(clone):
-                raise RuntimeTransitionError("STATE_PATH_MISSING", "List index is missing.")
-            clone.insert(token, value)
-        elif token >= len(clone):
-            raise RuntimeTransitionError("STATE_PATH_MISSING", "List index is missing.")
-        elif operation.op == "remove":
-            del clone[token]
-        else:
-            clone[token] = value
-        return clone
-    raise RuntimeTransitionError(
-        "STATE_PATH_INVALID", "State Operation target is not a compatible container."
-    )
 
 
 def _integer(record: dict[str, object], key: str) -> int:

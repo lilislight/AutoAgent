@@ -133,12 +133,16 @@ class CoreGraphConcurrencyTests(unittest.TestCase):
             self.assertFalse(first.done())
             # A sibling result read also must not queue behind the blocked Child.
             self.assertEqual(app._repository.state(children[1].session_id).invocation.status, 'completed')
-            checkpoint = asyncio.create_task(app._capture_checkpoint('root'))
+            async def capture_graph():
+                async with app._graph_gate('root'):
+                    return await app._capture_graph_locked('root')
+            checkpoint = asyncio.create_task(capture_graph())
             await asyncio.sleep(0)
             self.assertFalse(checkpoint.done())
             sink.release.set()
             await first
-            await checkpoint
+            captured = await checkpoint
+            self.assertEqual({item.session_id for item in captured.sessions}, set(app._repository.session_ids()))
         try:
             app._runtime_loop.run(asyncio.wait_for(run(), 5))
             self.assertEqual(join_observed(app, root.ref).status, 'completed')

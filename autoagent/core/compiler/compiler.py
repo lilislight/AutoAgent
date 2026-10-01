@@ -11,7 +11,6 @@ from typing import get_args, get_origin
 
 from ..errors import WorkflowCompileError
 from ..operators import Operator, ValueContract
-from ..commands import SelfHandle, OwnerHandle
 from ..commands import AwaitSignal, Select, SelectResult, ChildCase
 from ..commands import SignalEndpoint, SignalLimits, SendSignal, SignalReceipt, ReceiveSignal, SignalBatch
 from ..commands import Cancel, CancelRequest, CancelReceipt, AwaitAny, AwaitAnyRequest, Timer, TimerRequest, TimerResult

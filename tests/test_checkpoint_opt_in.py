@@ -18,7 +18,7 @@ from tests.test_phase13_lifecycle_recovery import _CoordinatedCloseApp, _release
 
 def forbid_capture(app):
     stack = ExitStack()
-    for name in ('_capture_checkpoint', '_capture_checkpoint_locked'):
+    for name in ('_capture_graph_locked',):
         stack.enter_context(patch.object(app, name, new=AsyncMock(side_effect=AssertionError('capture reached'))))
     stack.enter_context(patch.object(app._repository, 'capture_checkpoint', side_effect=AssertionError('capture reached')))
     stack.enter_context(patch('autoagent.core.app.app.AppCheckpoint', side_effect=AssertionError('bundle constructed')))

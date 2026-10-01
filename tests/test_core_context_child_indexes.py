@@ -32,9 +32,7 @@ class CheckingRepository(RuntimeRepository):
             self_owner = getattr(state, name)
             assert index.revisions is self_owner.context_path_revisions
             assert index.descendants == ContextRevisionIndex(index.revisions).descendants
-        expected = {key for key, value in self._states.items()
-                    if value.invocation and value.invocation.status in {'failed', 'cancelled'}}
-        assert self._failed_sessions == expected
+
 
 
 class ContextIndexTests(unittest.TestCase):
@@ -148,7 +146,7 @@ class ContextIndexTests(unittest.TestCase):
         report = verify()
         self.assertEqual(report['child_replay']['sessions'], 33)
 
-    def test_cancelled_children_rebuild_failure_and_remaining_indexes(self):
+    def test_cancelled_children_rebuild_remaining_indexes(self):
         """Cancellation converges all units; installation and discard rebuild/drop indexes."""
         with patch('tests.benchmarks.benchmark_core_context_child.AutoAgentApp',
                    side_effect=lambda **kwargs: AutoAgentApp(runtime_repository=CheckingRepository(), **kwargs)):
@@ -160,14 +158,13 @@ class ContextIndexTests(unittest.TestCase):
             saved = {sid: repository.state(sid) for sid in repository.session_ids()}
             restored = CheckingRepository()
             restored.install_states(saved)
-            self.assertEqual(restored._failed_sessions, repository._failed_sessions)
             for sid in saved:
                 assert_index(restored, sid)
             plan = next(iter(restored.state(parent.session_id).invocation.child_plans.values()))
-            self.assertTrue(restored.has_failed_child(plan))
+            self.assertTrue(all(restored.state(unit.session_id).invocation.status == "cancelled" for unit in plan.units))
             self.assertEqual(restored.execution_index(parent.session_id).child_remaining[plan.creation_id], 0)
             restored.discard_states(tuple(saved))
-            self.assertEqual(restored._failed_sessions, set())
+            self.assertEqual(restored.session_ids(), ())
             self.assertEqual(restored._execution_indexes, {})
             self.assertEqual(restored._context_indexes, {})
         finally:

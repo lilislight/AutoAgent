@@ -1,6 +1,6 @@
 """Signal delivery through the existing graph and Session commit lanes."""
 import json
-from ..commands import RuntimeHandle, SignalReceipt, SignalBatch
+from ..commands import SignalReceipt, SignalBatch
 from ..commands.signals import SendSignalRequest, ReceiveSignalRequest
 from ..errors import RuntimeTransitionError
 from ..runtime.signals import (SignalAccepted, SignalsReceived, SignalReceiptReleased,

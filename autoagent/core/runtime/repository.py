@@ -14,7 +14,7 @@ from .reducer import StateReducer
 from .scheduling import SchedulerDelta
 from .transitions import TransitionPlanner
 from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
-from ..hosting.runtime_events import RuntimeEventSink
+from ..sinks.runtime_events import RuntimeEventSink
 
 
 class RuntimeRepository:
@@ -37,7 +37,6 @@ class RuntimeRepository:
         self.sink = sink
         self._states: dict[str, RuntimeState] = {}
         self._context_indexes = {}
-        self._failed_sessions = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._execution_indexes: dict[str, ExecutionIndex] = {}
         self._pending: dict[str, tuple[RuntimeEvent, RuntimeState]] = {}
@@ -148,23 +147,9 @@ class RuntimeRepository:
                 lookups[name] = lookup.advance(revisions, operations)
             else:
                 del lookups[name]
-        old_status = before.invocation.status if before is not None and before.invocation is not None else None
-        new_status = candidate.invocation.status if candidate.invocation is not None else None
-        if old_status != new_status:
-            self._update_failure(session_id, candidate)
         self._states[session_id] = candidate
         del self._pending[session_id]
 
-    def _update_failure(self, session_id, state):
-        if state.invocation is not None and state.invocation.status in {'failed', 'cancelled'}:
-            self._failed_sessions.add(session_id)
-        else:
-            self._failed_sessions.discard(session_id)
-
-    def has_failed_child(self, plan):
-        # Failure convergence remains a scan; successful completion avoids it.
-        return bool(self._failed_sessions) and any(
-            unit.session_id in self._failed_sessions for unit in plan.units)
 
     def _context_lookups(self, session_id, state):
         lookups = self._context_indexes.setdefault(session_id, {})
@@ -215,7 +200,6 @@ class RuntimeRepository:
         if any(self._locks.get(sid) is not None and self._locks[sid].locked() for sid in session_ids):
             raise RuntimeTransitionError("SESSION_COMMIT_ACTIVE", "Session commit is active.")
         for sid in session_ids:
-            self._failed_sessions.discard(sid)
             self._states.pop(sid, None)
             self._context_indexes.pop(sid, None)
             self._execution_indexes.pop(sid, None)
@@ -239,7 +223,6 @@ class RuntimeRepository:
                    if not isinstance(state.invocation, ChildResult)}
         for sid, state in candidates.items():
             self._context_indexes.pop(sid, None)
-            self._update_failure(sid, state)
         self._states.update(candidates)
         for sid, state in candidates.items():
             if isinstance(state.invocation, ChildResult):

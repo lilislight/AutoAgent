@@ -1,4 +1,4 @@
-"""Hosting boundary for consuming captured Runtime Events."""
+"""Sink interfaces for consuming captured Runtime Events."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class RuntimeEventSink(Protocol):
     Core for a later export attempt; therefore an implementation may receive the
     same Event id again after a partial external success and must accept it
     idempotently.  Long-term storage, retry scheduling and Outbox transactions
-    remain Host responsibilities.
+    remain external integration responsibilities.
     """
 
     async def append(self, event: RuntimeEvent) -> None:

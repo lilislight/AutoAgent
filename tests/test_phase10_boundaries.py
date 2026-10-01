@@ -49,7 +49,7 @@ from autoagent.core.app.runtime_loop import RuntimeLoop
 from autoagent.core.context import apply_context_operation
 from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core.executor.future import await_concurrent_future
-from autoagent.core.hosting import RuntimeEventSink
+from autoagent.core.sinks import RuntimeEventSink
 from autoagent.core.runtime.values import freeze, thaw
 from autoagent.core.workflow import SubWorkflow
 
@@ -114,7 +114,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
             <= set(core_api.__all__)
         )
         self.assertEqual(
-            RuntimeEventSink.__module__, "autoagent.core.hosting.runtime_events"
+            RuntimeEventSink.__module__, "autoagent.core.sinks.runtime_events"
         )
 
     def test_malformed_definition_members_produce_stable_diagnostics(self) -> None:

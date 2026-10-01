@@ -83,7 +83,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             session_context={},
         )
         self.assertEqual(patch.invocation[0].path, ("result", "value"))
-        selected = await self.executor.select_edges(
+        conditions, duration = await self.executor.evaluate_conditions(
             harness.workflow.outgoing("join"),
             source_status="complete",
             source_node_id="join",
@@ -92,7 +92,8 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             invocation_context={},
             session_context={},
         )
-        self.assertEqual(selected, {"join->finish"})
+        self.assertEqual({item.edge_id for item in conditions if item.selected}, {"join->finish"})
+        self.assertGreaterEqual(duration, 0)
 
     async def test_node_completion_atomically_commits_patch_output_and_successors(self) -> None:
         """Verify node completion atomically commits patch output and successors."""

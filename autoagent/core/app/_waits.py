@@ -38,7 +38,7 @@ class WaitRuntime:
                     timer.cancel()
 
     def _schedule_waits(self, root):
-        if self._closing or root not in self._wait_roots:
+        if self._closing or root not in self._wait_roots or self._graph_is_paused(root):
             return
         self._wait_dirty.add(root)
         if root not in self._wait_pumps:
@@ -61,7 +61,7 @@ class WaitRuntime:
                             continue
                         await self._settle_runtime_commits((sid,))
                         deadlines.extend(await self._service_waits_locked(sid))
-                if deadlines and root in self._wait_roots and root not in self._wait_dirty:
+                if deadlines and root in self._wait_roots and root not in self._wait_dirty and not self._graph_is_paused(root):
                     delay = min(60_000_000, max(0, min(deadlines) - self._clock_us())) / 1_000_000
                     self._wait_timers[root] = asyncio.get_running_loop().call_later(delay, self._schedule_waits, root)
         except asyncio.CancelledError:
@@ -76,6 +76,8 @@ class WaitRuntime:
 
     async def _service_waits_locked(self, sid):
         """Resolve older registered consumers before a new nonblocking Receive."""
+        if self._graph_is_paused(sid):
+            return []
         inv = self._repository.state(sid).invocation
         if inv is None or inv.stopping or inv.terminal:
             self._remove_wait_session(sid)
@@ -186,8 +188,9 @@ class WaitRuntime:
             waits = self._runtime_waits(sessions)
             deadlines = [d for w in waits if w.kind != 'external' for d in self._condition_deadlines(w.kind, w.condition)]
             can_unload = (not self._graph_controls.get(root) and root not in self._recovering
-                and not self._result_leases.get(root) and not any(s in self._attached_streams or self._task_runtime.is_live(s) for s in sessions)
-                and all(self._repository.state(s).invocation.status in {'waiting', 'settling', 'completed', 'failed', 'cancelled'} for s in sessions))
+                and not self._result_leases.get(root) and not any(self._task_runtime.is_live(s) for s in sessions)
+                and (self._repository.state(root).invocation.control_state == 'paused'
+                     or all((inv := self._repository.state(s).invocation) is None or inv.status in {'waiting', 'settling', 'completed', 'failed', 'cancelled'} for s in sessions)))
             return SuspensionInfo(can_unload=can_unload, next_deadline_at_us=min(deadlines, default=None), waits=waits)
 
     def _forget_wait_sessions(self, sessions):

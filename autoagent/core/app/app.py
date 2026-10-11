@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from ._signals import SignalRuntime
 from ._waits import WaitRuntime
-from ..runtime.events import WaitRequested, CommandAwakened
+from ._pause import PauseRuntime
+from ._residency import ResidencyRuntime
+from ..runtime.events import WaitRequested, CommandAwakened, GraphResumed
 from ..commands import SignalReceipt, SignalBatch, SelectResult
 from ..commands.signals import SendSignalRequest
 from ..runtime.signals import SignalAccepted, SignalReceiptReleased, validate_signal_workflow
@@ -18,12 +20,12 @@ from ..commands.models import SYSTEM_COMMAND_IDS
 from dataclasses import asdict
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 import math
 import threading
 import warnings
-from collections.abc import AsyncIterator, Callable, Mapping
-from concurrent.futures import CancelledError as FutureCancelledError, Future
+from collections.abc import Callable, Mapping
+from concurrent.futures import Future
 from dataclasses import replace
 from typing import cast, get_args
 from uuid import uuid4
@@ -68,17 +70,14 @@ from .models import (
     InvocationResult,
     InvocationStatus,
     InvocationSubmission,
-    InvocationUpdate,
     InvocationWait,
-    StreamItem,
 )
 
 from .runtime_loop import RuntimeLoop
 from ._graph_gate import GraphGate
-from .stream import AttachedStream, InvocationStream, is_stream_end
 
 
-class AutoAgentApp(SignalRuntime, WaitRuntime):
+class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
     """Compile and execute Workflows while retaining only current Runtime State."""
 
     def __init__(
@@ -95,6 +94,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         node_executor: NodeExecutor | None = None,
         clock_us: Callable[[], int] | None = None,
         operator_registry: OperatorRegistry | None = None,
+        runtime_lifespan: Callable[[], AbstractAsyncContextManager] | None = None,
     ) -> None:
         _positive_integer(max_operator_concurrency, "max_operator_concurrency")
         _positive_integer(
@@ -154,15 +154,21 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             resume_runtime=self._resume_runtime,
             release_resume=self._release_resume,
             runtime_identity=self._runtime_identity,
+            node_admission=self._node_admission,
+            dispatch_blocked=self._graph_is_paused,
         )
         self._runtime_loop = RuntimeLoop()
-        self._attached_streams: dict[str, AttachedStream] = {}
-        self._attached_stream_tasks: dict[str, asyncio.Task[None]] = {}
+        self._runtime_lifespan = runtime_lifespan
+        self._runtime_resource_context = None
+        self._runtime_resource_error = None
+        self._runtime_resource_lock = asyncio.Lock()
         self._admission_retirements: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {}
         self._graph_gates: dict[str, GraphGate] = {}
         self._session_transition_locks: dict[str, asyncio.Lock] = {}
         self._recovering: dict[str, set[str]] = {}
         self._graph_controls: dict[str, int] = {}
+        self._pause_operations: dict[str, asyncio.Task] = {}
+        self._pause_fences: set[str] = set()
         self._command_cancel_tasks = {}
         self._boundary_events: dict[str, asyncio.Event] = {}
         self._drive_errors: dict[str, BaseException] = {}
@@ -177,6 +183,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         # returned.  Without this transient lease, a concurrent new invoke can
         # replace the State between InvocationCompleted and _result().
         self._result_leases: dict[str, int] = {}
+        self._residency_sizes = {}
         self._close_lock = threading.Lock()
         self._close_future: Future[AppCheckpoint | None] | None = None
         self._closing = False
@@ -185,6 +192,17 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
 
     # ------------------------------------------------------------------
     # Definition and implementation registries
+
+    async def aprepare(self) -> None:
+        """Initialize optional resources on the same loop as async Operators."""
+        await self._await(self._submit(self._prepare_resources()))
+
+    async def _prepare_resources(self) -> None:
+        async with self._runtime_resource_lock:
+            if self._runtime_resource_context is None and self._runtime_lifespan is not None:
+                context = self._runtime_lifespan()
+                await context.__aenter__()
+                self._runtime_resource_context = context
 
     def register_workflow(self, workflow: Workflow) -> WorkflowIR:
         with self._close_lock:
@@ -349,121 +367,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             )
         )
 
-    def stream(
-        self,
-        workflow: Workflow | str,
-        value: object,
-        *,
-        session_id: str | None = None,
-        session_context: dict[str, object] | None = None,
-        entry_node_id: str | None = None,
-    ) -> InvocationStream[StreamItem]:
-        session, channel = self._run(
-            self._start_attached_stream(
-                workflow,
-                value,
-                session_id=session_id,
-                session_context=session_context,
-                entry_node_id=entry_node_id,
-            )
-        )
-
-        def close() -> None:
-            self._close_attached_stream(session, channel)
-
-        def receive() -> object:
-            if self._closed or self._closing:
-                raise StopIteration
-            try:
-                return self._run(channel.receive())
-            except RuntimeError:
-                if self._closed or self._closing:
-                    raise StopIteration from None
-                raise
-
-        return InvocationStream(receive=receive, close=close)
-
-    async def astream(
-        self,
-        workflow: Workflow | str,
-        value: object,
-        *,
-        session_id: str | None = None,
-        session_context: dict[str, object] | None = None,
-        entry_node_id: str | None = None,
-    ) -> AsyncIterator[StreamItem]:
-        session, channel = await self._await(
-            self._submit(
-                self._start_attached_stream(
-                    workflow,
-                    value,
-                    session_id=session_id,
-                    session_context=session_context,
-                    entry_node_id=entry_node_id,
-                )
-            )
-        )
-        try:
-            while True:
-                try:
-                    item = await self._await(self._submit(channel.receive()))
-                except RuntimeError:
-                    if self._closed or self._closing:
-                        return
-                    raise
-                if is_stream_end(item):
-                    return
-                yield cast(StreamItem, item)
-        finally:
-            await self._aclose_attached_stream(session, channel)
-
-    def stream_resume(
-        self,
-        ref: InvocationRef,
-        wait_id: str,
-        response: object,
-    ) -> InvocationStream[StreamItem]:
-        root, channel = self._run(
-            self._start_attached_resume_stream(ref, wait_id, response)
-        )
-
-        def close() -> None:
-            self._close_attached_stream(root, channel)
-
-        def receive() -> object:
-            if self._closed or self._closing:
-                raise StopIteration
-            try:
-                return self._run(channel.receive())
-            except RuntimeError:
-                if self._closed or self._closing:
-                    raise StopIteration from None
-                raise
-
-        return InvocationStream(receive=receive, close=close)
-
-    async def astream_resume(
-        self,
-        ref: InvocationRef,
-        wait_id: str,
-        response: object,
-    ) -> AsyncIterator[StreamItem]:
-        root, channel = await self._await(
-            self._submit(self._start_attached_resume_stream(ref, wait_id, response))
-        )
-        try:
-            while True:
-                try:
-                    item = await self._await(self._submit(channel.receive()))
-                except RuntimeError:
-                    if self._closed or self._closing:
-                        return
-                    raise
-                if is_stream_end(item):
-                    return
-                yield cast(StreamItem, item)
-        finally:
-            await self._aclose_attached_stream(root, channel)
 
     def status(
         self, ref: InvocationRef
@@ -603,19 +506,19 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         return await self._await(self._submit(self._resident_invocations()))
 
     def unload_session(
-        self, ref: InvocationRef, *, capture_checkpoint: bool = False
+        self, ref: InvocationRef, *, capture_checkpoint: bool = False, expected_version: tuple | None = None
     ) -> RuntimeGraphCheckpoint | None:
         """Release a quiescent Root graph, optionally returning its checkpoint."""
 
-        return self._run(self._unload_session(ref, capture_checkpoint=capture_checkpoint))
+        return self._run(self._unload_session(ref, capture_checkpoint=capture_checkpoint, expected_version=expected_version))
 
     async def aunload_session(
-        self, ref: InvocationRef, *, capture_checkpoint: bool = False
+        self, ref: InvocationRef, *, capture_checkpoint: bool = False, expected_version: tuple | None = None
     ) -> RuntimeGraphCheckpoint | None:
         """Asynchronously release a Root graph, optionally returning its checkpoint."""
 
         return await self._await(self._submit(
-            self._unload_session(ref, capture_checkpoint=capture_checkpoint)))
+            self._unload_session(ref, capture_checkpoint=capture_checkpoint, expected_version=expected_version)))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -696,107 +599,14 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             self._closed = True
             self._closing = False
             self._closed_checkpoint = checkpoint
-        future.set_result(checkpoint)
+        if self._runtime_resource_error is not None:
+            future.set_exception(self._runtime_resource_error)
+        else:
+            future.set_result(checkpoint)
 
     # ------------------------------------------------------------------
     # Runtime operations
 
-    async def _start_attached_stream(
-        self,
-        workflow: Workflow | str,
-        value: object,
-        *,
-        session_id: str | None,
-        session_context: dict[str, object] | None,
-        entry_node_id: str | None,
-    ) -> tuple[str, AttachedStream]:
-        session = session_id or str(uuid4())
-        if session in self._attached_streams:
-            raise RuntimeTransitionError(
-                "INVOCATION_STREAM_ATTACHED",
-                "Session already has an attached Invocation stream.",
-            )
-        channel = AttachedStream()
-        self._attached_streams[session] = channel
-
-        async def run() -> None:
-            error: BaseException | None = None
-            try:
-                result = await self._invoke(
-                    workflow,
-                    value,
-                    session_id=session,
-                    session_context=session_context,
-                    entry_node_id=entry_node_id,
-                    wait_for_boundary=True,
-                    attached_channel=channel,
-                )
-                await channel.publish_terminal(result)
-            except asyncio.CancelledError:
-                raise
-            except BaseException as caught:
-                error = caught
-            finally:
-                await channel.finish(error)
-                if self._attached_streams.get(session) is channel:
-                    self._attached_streams.pop(session, None)
-                self._attached_stream_tasks.pop(session, None)
-
-        task = asyncio.create_task(run())
-        self._attached_stream_tasks[session] = task
-        return session, channel
-
-    async def _start_attached_resume_stream(
-        self,
-        ref: InvocationRef,
-        wait_id: str,
-        response: object,
-    ) -> tuple[str, AttachedStream]:
-        ref = self._control_ref(ref)
-        session_id = ref.session_id
-        if session_id in self._attached_streams:
-            raise RuntimeTransitionError(
-                "INVOCATION_STREAM_ATTACHED",
-                "Invocation already has an attached stream.",
-            )
-        channel = AttachedStream()
-        self._attached_streams[session_id] = channel
-
-        async def run() -> None:
-            error: BaseException | None = None
-            try:
-                result = await self._resume(
-                    ref,
-                    wait_id,
-                    response,
-                    wait_for_boundary=True,
-                    attached_channel=channel,
-                )
-                await channel.publish_terminal(result)
-            except asyncio.CancelledError:
-                raise
-            except BaseException as caught:
-                error = caught
-            finally:
-                await channel.finish(error)
-                if self._attached_streams.get(session_id) is channel:
-                    self._attached_streams.pop(session_id, None)
-                self._attached_stream_tasks.pop(session_id, None)
-
-        task = asyncio.create_task(run())
-        self._attached_stream_tasks[session_id] = task
-        return session_id, channel
-
-    async def _abandon_attached_stream(
-        self, session_id: str, channel: AttachedStream
-    ) -> None:
-        if self._attached_streams.get(session_id) is channel:
-            self._attached_streams.pop(session_id, None)
-        channel.abandon()
-        task = self._attached_stream_tasks.get(session_id)
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
     async def _invoke(
         self,
@@ -807,18 +617,11 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         session_context: dict[str, object] | None,
         entry_node_id: str | None,
         wait_for_boundary: bool,
-        attached_channel: AttachedStream | None = None,
     ) -> InvocationResult | InvocationSubmission:
         compiled = self._resolve_workflow(workflow)
         session_id = session_id or str(uuid4())
         if session_id in self._recovering:
             raise RuntimeTransitionError('INVOCATION_STILL_LIVE', 'Graph recovery is in progress.')
-        current_channel = self._attached_streams.get(session_id)
-        if current_channel is not None and current_channel is not attached_channel:
-            raise RuntimeTransitionError(
-                "INVOCATION_STREAM_ATTACHED",
-                "Session already has an attached Invocation stream.",
-            )
         if self._parent_plan(session_id) is not None:
             raise RuntimeTransitionError(
                 "SESSION_OWNED_BY_CHILD",
@@ -990,8 +793,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                 # A control operation first commits the terminal State and
                 # then cancels the physical drive.  Cancellation of the
                 # awaited drive is not cancellation of this public caller;
-                # return the stable terminal boundary (and let an attached
-                # stream publish its mandatory final Result).
+                # return the stable terminal boundary.
                 return await self._result(
                     InvocationRef(
                         session_id=session_id,
@@ -1032,21 +834,12 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         response: object,
         *,
         wait_for_boundary: bool,
-        attached_channel: AttachedStream | None = None,
     ) -> InvocationResult | InvocationSubmission:
         ref = self._control_ref(ref)
         state = self._state_for_ref(ref, active=True)
         if state.invocation.stopping:
             raise RuntimeTransitionError("INVOCATION_STOPPING", "Cannot resume a stopping graph.")
         root = self._root_session_id(ref.session_id)
-        current_channel = self._attached_streams.get(ref.session_id)
-        if attached_channel is None:
-            self._ensure_attached_result_boundary_delivered(ref.session_id)
-        elif current_channel is not attached_channel:
-            raise RuntimeTransitionError(
-                "INVOCATION_STREAM_ATTACHED",
-                "Runtime graph already has an attached Invocation stream.",
-            )
         self._acquire_result_lease(root)
         try:
             matches = [(sid, self._repository.state(sid)) for sid in (root, *self._descendant_sessions(root))
@@ -1075,13 +868,12 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             await self._emit(
                 target, invocation.id, WaitResumed(wait_id, validated)
             )
-            task = self._task_runtime.task(target)
-            if task is None:
-                task = self._start_drive(
-                    workflow, target, invocation.id, None, None
-                )
-            else:
-                self._task_runtime.wake(target)
+            if not self._graph_is_paused(target):
+                task = self._task_runtime.task(target)
+                if task is None:
+                    self._start_drive(workflow, target, invocation.id, None, None)
+                else:
+                    self._task_runtime.wake(target)
             if not wait_for_boundary:
                 return InvocationSubmission(ref)
             await self._await_graph_boundary(ref)
@@ -1167,7 +959,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             # A replay can find an already completed/compacted target. Only still
             # runnable targets need a wake; this never joins the target or Root.
             inv = self._repository.state(target).invocation
-            if not inv.terminal and not self._branch_stopping(target) and inv.status != 'settling':
+            if not inv.terminal and not self._branch_stopping(target) and inv.status != 'settling' and not self._graph_is_paused(target):
                 if self._task_runtime.task(target) is None:
                     self._start_drive(self._workflow_for_state(self._repository.state(target)), target, inv.id, None, None)
                 else:
@@ -1288,7 +1080,8 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         return [RuntimeWait(handle=self._runtime_identity(sid)[0], wait_id=w.id,
             request=thaw(w.request) if w.kind == "external" else None, kind=w.kind,
             condition=thaw(w.request) if w.kind != "external" else None)
-            for sid in sessions for w in self._repository.state(sid).invocation.scheduler.waits.values()
+            for sid in sessions if (inv := self._repository.state(sid).invocation) is not None
+            for w in inv.scheduler.waits.values()
             if w.status == 'waiting' and not self._branch_stopping(sid)]
 
     def _notify_boundary(self, root: str) -> None:
@@ -1326,6 +1119,8 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                 if error is not None:
                     raise error
             live = any(self._task_runtime.is_live(sid) for sid in sessions)
+            if current.control_state == "paused" and not live and not self._graph_controls.get(root):
+                return
             if current.terminal and not live and not self._graph_controls.get(root) and self._child_graph_settled(root, sessions[1:]):
                 return
             if not current.terminal and not current.stopping and root not in self._wait_pumps and not self._graph_controls.get(root) and not self._task_runtime.is_live(root) and any(
@@ -1436,7 +1231,10 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
 
     async def _recover(self, ref):
         ref = self._control_ref(ref)
+        inv = self._state_for_ref(ref).invocation
         root = self._root_session_id(ref.session_id)
+        if inv.control_state == "pausing" and root in self._pause_operations:
+            raise RuntimeTransitionError("GRAPH_PAUSING", "Pause must finish before recovery.")
         gate = self._graph_gates.get(root)
         if root in self._recovering or (gate is not None and not gate.idle):
             raise RuntimeTransitionError(
@@ -1478,11 +1276,36 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                     "INVOCATION_STILL_LIVE",
                     "Recovery cannot run while this App owns a graph task.",
                 )
+            clean = self._repository.state(root).invocation.control_state == "paused"
+            async with self._graph_gate(root):
+                await self._settle_runtime_commits((root, *self._descendant_sessions(root)))
+                clean = clean or self._repository.state(root).invocation.control_state == "paused"
+            if clean:
+                await self._continue_paused_graph(root)
+            elif self._repository.state(root).invocation.control_state == "pausing":
+                # Interrupted pause is crash recovery, not clean continuation.
+                async with self._graph_gate(root):
+                    sessions = (root, *self._descendant_sessions(root))
+                    await self._settle_runtime_commits(sessions)
+                    error = None
+                    for sid in sessions:
+                        state = self._repository.state(sid)
+                        if state.invocation is not None and not state.invocation.terminal:
+                            workflow = self._workflow_for_state(state)
+                            error = self._recovery_error(workflow, state)
+                            if error is not None:
+                                break
+                    inv = self._repository.state(root).invocation
+                    if error is None and not inv.stopping and not inv.terminal:
+                        await self._emit(root, inv.id, GraphResumed())
+                    elif error is not None:
+                        await self._emit(root, inv.id, InvocationFailed(error))
             await self._recover_session(
                 root,
                 set(),
                 wait_for_boundary=False,
                 target_path=frozenset(target_path),
+                clean=clean,
             )
             await self._await_graph_boundary(ref)
             await self._collect_resume_receipts(root)
@@ -1516,6 +1339,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         *,
         wait_for_boundary: bool,
         target_path: frozenset[str],
+        clean: bool = False,
     ) -> None:
         """Restore one graph branch while preserving spawn detachment."""
 
@@ -1557,7 +1381,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             workflow,
             state,
         )
-        if preflight_error is None and invocation.status in {"running", "waiting"} and any(
+        if not clean and preflight_error is None and invocation.status in {"running", "waiting"} and any(
             item.status in {"running", "waiting"}
             for item in invocation.scheduler.occurrences.values()
         ):
@@ -1594,6 +1418,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                             and child in target_path
                         ),
                         target_path=target_path,
+                        clean=clean,
                     )
                     for child in child_sessions
                 ),
@@ -1729,31 +1554,20 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             self._repository.capture_checkpoint(sid, captured_at_us=captured_at)
             for sid in sessions if self._repository.state(sid).session is not None))
 
-    async def _unload_session(self, ref: InvocationRef, *, capture_checkpoint: bool = False) -> RuntimeGraphCheckpoint | None:
+    async def _unload_session(self, ref: InvocationRef, *, capture_checkpoint: bool = False, expected_version: tuple | None = None) -> RuntimeGraphCheckpoint | None:
         ref = self._control_ref(ref)
         self._state_for_ref(ref)
         root = ref.session_id
         async with self._graph_gate(root):
-            self._state_for_ref(ref)
-            sessions = (root, *self._descendant_sessions(root))
-            if self._graph_controls.get(root) or any(self._task_runtime.is_live(sid) for sid in sessions):
-                raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Graph has live tasks or control operations.")
-            await self._settle_runtime_commits(sessions)
-            sessions = (root, *self._descendant_sessions(root))
-            if root in self._recovering or self._result_leases.get(root, 0) or any(sid in self._attached_streams for sid in sessions):
-                raise RuntimeTransitionError("INVOCATION_RESULT_PENDING", "Graph still has an active reader or recovery.")
-            for sid in sessions:
-                inv = self._repository.state(sid).invocation
-                if inv is not None and (inv.status not in {'waiting', 'settling', 'completed', 'failed', 'cancelled'} or self._task_runtime.is_live(sid)):
-                    raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Graph is not quiescent.")
-                if inv is not None and inv.terminal and self._remaining_children(sid):
-                    raise RuntimeTransitionError("RELATED_INVOCATION_NOT_UNLOADABLE", "Terminal graph has unsettled ownership.")
-            # Successful settling with external Child Waits is a quiescent handoff.
+            await self._check_unloadable(ref)
+            if expected_version is not None and self._graph_version(root) != expected_version:
+                raise RuntimeTransitionError("CHECKPOINT_GRAPH_CHANGED", "Graph advanced after Checkpoint capture.")
             checkpoint = await self._capture_graph_locked(root) if capture_checkpoint else None
-            self._discard_graph_sessions(sessions)
+            self._discard_graph_sessions((root, *self._descendant_sessions(root)))
             return checkpoint
 
     def _discard_graph_sessions(self, sessions: tuple[str, ...]) -> None:
+        self._pause_fences.difference_update(sessions)
         retired = set(sessions)
         invocation_ids = {
             sid: inv.id for sid in sessions
@@ -1770,6 +1584,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             self._task_runtime.release_wake_event(sid)
             self._retire_session_coordination(sid)
             self._result_leases.pop(sid, None)
+            self._residency_sizes.pop(sid, None)
             self._boundary_events.pop(sid, None)
             self._drive_errors.pop(sid, None)
         self._child_capacities = {k: v for k, v in self._child_capacities.items() if k[0] not in retired}
@@ -1812,7 +1627,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                 if resident != {item.session_id for item in graph.sessions}:
                     raise RuntimeTransitionError("CHECKPOINT_SESSION_CONFLICT", "Checkpoint cannot replace part of a resident graph.")
         affected = {self._root_session_id(sid) for sid in all_states}
-        if any(self._task_runtime.is_live(sid) or sid in self._attached_streams for sid in all_states) or any(
+        if any(self._task_runtime.is_live(sid) for sid in all_states) or any(
             self._result_leases.get(root, 0) or root in self._recovering or (root in self._graph_gates and not self._graph_gates[root].idle)
             for root in affected):
             raise RuntimeTransitionError("CHECKPOINT_SESSION_LIVE", "Checkpoint cannot replace a live graph.")
@@ -1867,7 +1682,17 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                         )
 
     async def _close(self, *, capture_checkpoint: bool = False) -> AppCheckpoint | None:
-        return await self._close_operation(capture_checkpoint=capture_checkpoint)
+        async with self._runtime_resource_lock:
+            checkpoint = await self._close_operation(capture_checkpoint=capture_checkpoint)
+            if self._runtime_resource_context is not None:
+                context, self._runtime_resource_context = self._runtime_resource_context, None
+                try:
+                    await context.__aexit__(None, None, None)
+                except BaseException as error:
+                    # Cleanup failures must not leave the Runtime loop or pool
+                    # alive after successful quiescence and checkpoint capture.
+                    self._runtime_resource_error = error
+            return checkpoint
 
     async def _close_operation(self, *, capture_checkpoint: bool = False) -> AppCheckpoint | None:
         """Quiesce owners and settle Events, optionally capturing resident Sessions."""
@@ -1880,16 +1705,12 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         if pumps:
             await asyncio.gather(*pumps, return_exceptions=True)
 
-        for channel in tuple(self._attached_streams.values()):
-            channel.abandon()
-        self._attached_streams.clear()
-        stream_tasks = tuple(
-            task for task in self._attached_stream_tasks.values() if not task.done()
-        )
-        for task in stream_tasks:
+        pauses = tuple(self._pause_operations.values())
+        for task in pauses:
             task.cancel()
-        if stream_tasks:
-            await asyncio.gather(*stream_tasks, return_exceptions=True)
+        if pauses:
+            await asyncio.gather(*pauses, return_exceptions=True)
+
         await self._task_runtime.cancel_all()
         if self._command_cancel_tasks:
             await asyncio.gather(*tuple(self._command_cancel_tasks.values()), return_exceptions=True)
@@ -2182,6 +2003,8 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         return transition
 
     def _publish_ownership(self, event):
+        if isinstance(event.payload, (GraphResumed, InvocationCompleted, InvocationFailed, InvocationCancelled)):
+            self._pause_fences.discard(event.session_id)
         if isinstance(event.payload, (WaitRequested, CommandAwakened, InvocationCancelled, InvocationFailed, InvocationSettling)):
             self._refresh_wait_session(event.session_id)
         if isinstance(event.payload, SignalAccepted) and event.payload.origin is not None:
@@ -2267,49 +2090,32 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
         payload: object,
         occurrence_id: str | None = None,
     ) -> UserEvent:
-        channel = self._attached_streams.get(session_id)
-        created: UserEvent | None = None
-
-        async def commit() -> InvocationUpdate:
-            nonlocal created
-            created = self._user_event_journal.emit(
-                session_id=session_id,
-                invocation_id=invocation_id,
-                kind=kind,
-                payload=payload,
-                occurrence_id=occurrence_id,
-                occurred_at_us=self._clock_us(),
-            )
-            sink = self._user_event_sink
-            if (
-                sink is not None
-                and invocation_id not in self._user_event_sink_errors
-            ):
-                try:
-                    await sink.append_user_event(created)
-                except asyncio.CancelledError:
-                    raise
-                except BaseException as error:
-                    # User Events do not change canonical Runtime State.
-                    # Keep Workflow progress valid, but stop the stream at the
-                    # first rejected sequence so later persistence cannot mask
-                    # a User Event sequence gap.
-                    self._user_event_sink_errors[invocation_id] = error
-                    warnings.warn(
-                        "User Event sink rejected delivery; canonical "
-                        "Workflow execution continues but persisted User Events "
-                        "are incomplete.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-            self._user_event_journal.drain(invocation_id)
-            return InvocationUpdate(created)
-
-        if channel is None:
-            await commit()
-        else:
-            await channel.publish_async_created(commit)
-        assert created is not None
+        created = self._user_event_journal.emit(
+            session_id=session_id,
+            invocation_id=invocation_id,
+            kind=kind,
+            payload=payload,
+            occurrence_id=occurrence_id,
+            occurred_at_us=self._clock_us(),
+        )
+        sink = self._user_event_sink
+        if sink is not None and invocation_id not in self._user_event_sink_errors:
+            try:
+                await sink.append_user_event(created)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:
+                # Preserve canonical progress while stopping delivery at the
+                # first rejected sequence, so later writes cannot hide a gap.
+                self._user_event_sink_errors[invocation_id] = error
+                warnings.warn(
+                    "User Event sink rejected delivery; canonical "
+                    "Workflow execution continues but persisted User Events "
+                    "are incomplete.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        self._user_event_journal.drain(invocation_id)
         return created
 
 
@@ -2341,16 +2147,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             self._result_leases.get(root_session_id, 0) + 1
         )
 
-    def _ensure_attached_result_boundary_delivered(
-        self, root_session_id: str
-    ) -> None:
-        channel = self._attached_streams.get(root_session_id)
-        if channel is not None and channel.attached:
-            raise RuntimeTransitionError(
-                "INVOCATION_RESULT_PENDING",
-                "Invocation cannot resume before its current public result "
-                "boundary is delivered.",
-            )
 
     @staticmethod
     def _public_caller_is_cancelling() -> bool:
@@ -2411,6 +2207,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
                 error=invocation.error,
                 waits=waits,
                 pending_outcome=invocation.pending_outcome,
+                control_state=invocation.control_state,
             )
 
     # ------------------------------------------------------------------
@@ -2744,35 +2541,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime):
             coroutine.close()
             raise
 
-    def _close_attached_stream(
-        self, session_id: str, channel: AttachedStream
-    ) -> None:
-        coroutine = self._abandon_attached_stream(session_id, channel)
-        try:
-            future = self._runtime_loop.submit(coroutine)
-        except RuntimeError:
-            coroutine.close()
-            return
-        try:
-            future.result()
-        except FutureCancelledError:
-            if not (self._closing or self._closed):
-                raise
-
-    async def _aclose_attached_stream(
-        self, session_id: str, channel: AttachedStream
-    ) -> None:
-        coroutine = self._abandon_attached_stream(session_id, channel)
-        try:
-            future = self._runtime_loop.submit(coroutine)
-        except RuntimeError:
-            coroutine.close()
-            return
-        try:
-            await self._runtime_loop.wait(future)
-        except FutureCancelledError:
-            if not (self._closing or self._closed):
-                raise
 
     async def _await(self, future):
         return await self._runtime_loop.wait(future)
@@ -2828,9 +2596,6 @@ __all__ = [
     "CheckpointLoadResult",
     "InvocationRef",
     "InvocationResult",
-    "InvocationStream",
     "InvocationSubmission",
-    "InvocationUpdate",
     "InvocationWait",
-    "StreamItem",
 ]

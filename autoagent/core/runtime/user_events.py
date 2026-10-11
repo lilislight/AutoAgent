@@ -134,8 +134,18 @@ class InMemoryUserEventJournal:
     def events(self, invocation_id: str) -> tuple[UserEvent, ...]:
         return tuple(self._events.get(invocation_id, ()))
 
+    def continue_sequence(self, invocation_id: str, sequence: int) -> None:
+        """Seed a restored observation stream without generating historical events."""
+        if not isinstance(invocation_id, str) or not invocation_id.strip():
+            raise ValueError("Invocation id cannot be empty.")
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("User Event frontier must be nonnegative.")
+        if sequence < self._sequences.get(invocation_id, 0):
+            raise ValueError("User Event frontier cannot move backwards.")
+        self._sequences[invocation_id] = sequence
+
     def drain(self, invocation_id: str) -> tuple[UserEvent, ...]:
-        """Return and release User Events already handed to an SDK caller."""
+        """Return and release User Events after their observation handoff."""
 
         return tuple(self._events.pop(invocation_id, ()))
 

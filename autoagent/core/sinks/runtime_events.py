@@ -13,7 +13,9 @@ class RuntimeEventSink(Protocol):
 
     Core awaits this boundary, so a slow sink applies Runtime backpressure.  Calls
     are ordered within one Session but may overlap across independent Sessions.
-    Returning means the Event is durably accepted.  Raising leaves the Event in
+    Returning means acceptance under the sink's configured policy: a durable
+    sink has committed it; a buffered sink owns an in-memory copy and can lose
+    an uncommitted tail on process failure. Raising leaves the Event in
     Core for a later export attempt; therefore an implementation may receive the
     same Event id again after a partial external success and must accept it
     idempotently.  Long-term storage, retry scheduling and Outbox transactions
@@ -21,7 +23,7 @@ class RuntimeEventSink(Protocol):
     """
 
     async def append(self, event: RuntimeEvent) -> None:
-        """Durably and idempotently accept one Session-ordered canonical Event."""
+        """Idempotently accept an Event under the configured persistence policy."""
 
 
 class UserEventSink(Protocol):

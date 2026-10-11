@@ -30,7 +30,6 @@ from autoagent import (
     ContextPatch,
     Edge,
     InputMappingContext,
-    InvocationUpdate,
     Map,
     Node,
     Operator,
@@ -52,6 +51,14 @@ from autoagent.core import (
 )
 from autoagent.core.context import apply_context_operation
 from autoagent.core.runtime.values import freeze
+
+
+class UserEventCollector:
+    def __init__(self) -> None:
+        self.events: list[UserEvent] = []
+
+    async def append_user_event(self, event: UserEvent) -> None:
+        self.events.append(event)
 
 
 class Value(TypedDict):
@@ -293,9 +300,10 @@ class QualityTests(unittest.TestCase):
     def test_node_output_can_emit_non_canonical_user_event(self) -> None:
         """Verify node output can emit non canonical user event."""
         journal = RuntimeRepository()
-        app = AutoAgentApp(runtime_repository=journal)
+        sink = UserEventCollector()
+        app = AutoAgentApp(runtime_repository=journal, user_event_sink=sink)
         try:
-            items = list(app.stream(
+            result = app.invoke(
                 Workflow(
                     "mapped-user-event",
                     nodes=[
@@ -309,9 +317,10 @@ class QualityTests(unittest.TestCase):
                     ],
                 ),
                 {"value": 4},
-            ))
-            result = items[-1]
-            events = [item.event for item in items if isinstance(item, InvocationUpdate)]
+            )
+            events = sink.events
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.output, {"value": 4})
             self.assertEqual(
                 [(event.kind, event.payload) for event in events],
                 [("node.output", {"value": 4})],
@@ -398,17 +407,17 @@ class QualityTests(unittest.TestCase):
 
     def test_stream_chunks_are_separate_ordered_user_events(self) -> None:
         """Verify stream chunks are separate ordered user events."""
-        app = AutoAgentApp()
+        sink = UserEventCollector()
+        app = AutoAgentApp(user_event_sink=sink)
         try:
-            items = list(app.stream(
+            result = app.invoke(
                 Workflow(
                     "user-events",
                     nodes=[Node("stream", chunks, stream=Stream(SumReducer()))],
                 ),
                 {"value": 3},
-            ))
-            result = items[-1]
-            events = [item.event for item in items if isinstance(item, InvocationUpdate)]
+            )
+            events = sink.events
             self.assertEqual(result.output, {"total": 3})
             self.assertEqual(
                 [event.payload for event in events],

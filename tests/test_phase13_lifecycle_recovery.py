@@ -32,7 +32,6 @@ from autoagent import (
     InvocationRef,
     InvocationResult,
     InvocationStatus,
-    InvocationUpdate,
     Node,
     Recovery,
     RuntimeInfrastructureError,
@@ -47,7 +46,6 @@ from autoagent.core import (
     SessionCheckpoint,
     RuntimeEvent,
 )
-from autoagent.core.app.stream import AttachedStream
 from autoagent.core.app.runtime_loop import RuntimeLoop
 
 
@@ -433,145 +431,6 @@ class LifecycleRecoveryTests(unittest.TestCase):
         finally:
             app.close(timeout=1)
 
-    def test_closed_stream_does_not_commit_a_queued_publisher(self) -> None:
-        """Verify a failed stream cancels queued publishers before state creation."""
-
-        async def run() -> None:
-            channel = AttachedStream()
-            first_entered = asyncio.Event()
-            release_first = asyncio.Event()
-            second_created = False
-
-            async def fail_first() -> object:
-                first_entered.set()
-                await release_first.wait()
-                raise RuntimeError("publish failed")
-
-            async def create_second() -> object:
-                nonlocal second_created
-                second_created = True
-                return object()
-
-            first = asyncio.create_task(channel.publish_async_created(fail_first))
-            second = asyncio.create_task(channel.publish_async_created(create_second))
-            receive = asyncio.create_task(channel.receive())
-            await first_entered.wait()
-            release_first.set()
-
-            with self.assertRaisesRegex(RuntimeError, "publish failed"):
-                await receive
-            with self.assertRaisesRegex(RuntimeError, "publish failed"):
-                await first
-            with self.assertRaises(asyncio.CancelledError):
-                await second
-            self.assertFalse(second_created)
-
-        asyncio.run(run())
-
-    def test_abandoned_stream_does_not_commit_a_waiting_publisher(self) -> None:
-        """Verify caller abandonment cancels a publisher before state creation."""
-
-        async def run() -> None:
-            channel = AttachedStream()
-            created = False
-
-            async def create() -> object:
-                nonlocal created
-                created = True
-                return object()
-
-            publisher = asyncio.create_task(channel.publish_async_created(create))
-            await asyncio.sleep(0)
-            channel.abandon()
-            with self.assertRaises(asyncio.CancelledError):
-                await publisher
-            self.assertFalse(created)
-
-        asyncio.run(run())
-
-    def test_terminal_delivery_gracefully_detaches_later_publisher(self) -> None:
-        """Verify final Result lets later detached work commit without demand."""
-
-        async def run() -> None:
-            channel = AttachedStream()
-            receive = asyncio.create_task(channel.receive())
-            terminal = object()
-            terminal_publish = asyncio.create_task(
-                channel.publish_terminal(terminal)
-            )
-            self.assertIs(await receive, terminal)
-
-            created = False
-
-            async def create_detached() -> object:
-                nonlocal created
-                created = True
-                return object()
-
-            queued = asyncio.create_task(
-                channel.publish_async_created(create_detached)
-            )
-            channel.abandon()
-            await terminal_publish
-            await queued
-            self.assertTrue(created)
-
-        asyncio.run(run())
-
-    def test_completed_parent_stream_detaches_a_spawned_child_without_cancelling_it(
-        self,
-    ) -> None:
-        """Verify normal stream completion lets a spawned Child continue detached."""
-
-        child = Workflow("stream-detached-child", nodes=[Node("node", identity)])
-        parent = Workflow(
-            "stream-detached-parent",
-            nodes=[Node("child", Spawn(child, child.nodes[0].id))],
-        )
-        app = AutoAgentApp()
-        try:
-            items = list(
-                app.stream(
-                    parent,
-                    {"value": 1},
-                    session_id="stream-detached-parent-session",
-                )
-            )
-            result = items[-1]
-            self.assertEqual(result.status, "completed")
-            child_result = join_observed(app, result.output, timeout=1.0)
-            self.assertEqual(child_result.status, "completed")
-            self.assertEqual(child_result.output, {"value": 1})
-        finally:
-            app.close()
-
-    def test_final_stream_result_waits_for_spawn_child(self):
-        """Stream cannot deliver its final result while structured work is running."""
-        child_started = _ThreadSignal()
-        release_child = _RuntimeGate()
-        async def work(value: Value) -> Value:
-            child_started.set()
-            await release_child.wait()
-            return value
-        app = AutoAgentApp()
-        stream = app.stream(Workflow("stream-root", nodes=[Node("spawn",
-            Spawn(Workflow("stream-child", nodes=[Node("work", work)]), "work"))]), {"value": 1})
-        results = []
-        reader = threading.Thread(target=lambda: results.extend(stream))
-        try:
-            reader.start()
-            self.assertTrue(child_started.wait(1))
-            self.assertFalse(any(isinstance(item, InvocationResult) for item in results))
-            _release_runtime_gate_sync(app._runtime_loop, release_child)
-            reader.join(2)
-            self.assertFalse(reader.is_alive())
-            self.assertEqual(results[-1].status, "completed")
-        finally:
-            _release_runtime_gate_sync(app._runtime_loop, release_child)
-            stream.close()
-            reader.join(2)
-            app.close()
-
 
     def test_result_waits_behind_queued_transitions_before_reading_state(self) -> None:
         """Verify Result State and Checkpoint share one queued lock boundary."""
@@ -641,7 +500,6 @@ class LifecycleRecoveryTests(unittest.TestCase):
             if result_thread is not None:
                 result_thread.join(1)
             app.close(timeout=1)
-
 
 
     def test_recover_accepts_opened_spawn_child_already_waiting(self) -> None:
@@ -719,7 +577,6 @@ class LifecycleRecoveryTests(unittest.TestCase):
             self.assertEqual(completed_plan.units[0].phase, "terminal")
         finally:
             recovered.close(timeout=1)
-
 
 
     def test_cancelled_aresume_does_not_leave_running_state_without_task(self) -> None:
@@ -888,8 +745,6 @@ class LifecycleRecoveryTests(unittest.TestCase):
                 await app.aclose(timeout=1.0)
 
         asyncio.run(run())
-
-
 
 
     def test_concurrent_aclose_calls_share_one_result(self) -> None:

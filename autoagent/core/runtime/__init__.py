@@ -1,4 +1,7 @@
 from .events import (
+    GraphPauseRequested,
+    GraphPaused,
+    GraphResumed,
     RUNTIME_EVENT_SCHEMA_VERSION,
     InvocationCancelled,
     InvocationCompleted,
@@ -60,6 +63,9 @@ from .user_events import InMemoryUserEventJournal, UserEvent
 from .task_runtime import TaskRuntime
 
 __all__ = [
+    "GraphPauseRequested",
+    "GraphPaused",
+    "GraphResumed",
     "DurableValue",
     "Activation",
     "EdgeResolution",

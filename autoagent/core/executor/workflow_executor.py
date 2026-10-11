@@ -106,6 +106,8 @@ class WorkflowExecutor:
         resume_runtime=None,
         release_resume=None,
         runtime_identity=None,
+        node_admission=None,
+        dispatch_blocked=None,
         child_admission: Callable[[str, str], AbstractAsyncContextManager[None]] | None = None,
     ) -> None:
         self._suspend_command = suspend_command
@@ -118,6 +120,8 @@ class WorkflowExecutor:
         self._resume_runtime = resume_runtime
         self._release_resume = release_resume
         self._runtime_identity = runtime_identity
+        self._node_admission = node_admission or (lambda _: nullcontext(True))
+        self._dispatch_blocked = dispatch_blocked or (lambda _: False)
         self._repository = repository
         self._scheduler = scheduler
         self._node_executor = node_executor
@@ -162,28 +166,31 @@ class WorkflowExecutor:
                 execution_count = index.started_count
                 dispatchable = tuple(dict.fromkeys((*invocation.scheduler.ready, *index.running)))
                 for occurrence_id in dispatchable:
-                    if occurrence_id in tasks:
-                        continue
-                    occurrence = invocation.scheduler.occurrences[occurrence_id]
-                    node = workflow.node(occurrence.node_id)
-                    if occurrence.started_sequence is None and execution_count >= self._max_node_executions:
-                        await self._emit(
-                            session_id,
-                            invocation.id,
-                            InvocationFailed(
-                                RuntimeErrorInfo(
-                                    "InvocationExecutionLimitExceeded",
-                                    "Invocation exceeded its Node execution limit.",
-                                )
-                            ),
+                    async with self._node_admission(session_id) as admitted:
+                        if not admitted:
+                            break
+                        if occurrence_id in tasks:
+                            continue
+                        occurrence = invocation.scheduler.occurrences[occurrence_id]
+                        node = workflow.node(occurrence.node_id)
+                        if occurrence.started_sequence is None and execution_count >= self._max_node_executions:
+                            await self._emit(
+                                session_id,
+                                invocation.id,
+                                InvocationFailed(
+                                    RuntimeErrorInfo(
+                                        "InvocationExecutionLimitExceeded",
+                                        "Invocation exceeded its Node execution limit.",
+                                    )
+                                ),
+                            )
+                            return
+                        if occurrence.started_sequence is None:
+                            await self._emit(session_id, invocation.id, NodeStarted(occurrence_id))
+                            execution_count += 1
+                        tasks[occurrence_id] = asyncio.create_task(
+                            self._execute_occurrence(workflow, session_id, occurrence_id)
                         )
-                        return
-                    if occurrence.started_sequence is None:
-                        await self._emit(session_id, invocation.id, NodeStarted(occurrence_id))
-                        execution_count += 1
-                    tasks[occurrence_id] = asyncio.create_task(
-                        self._execute_occurrence(workflow, session_id, occurrence_id)
-                    )
                 if not tasks:
                     await self._finish_if_quiescent(workflow, session_id)
                     # A Child completion or resume may make an occurrence ready
@@ -194,7 +201,7 @@ class WorkflowExecutor:
                     # sees it done and starts a replacement drive.
                     current = self._repository.state(session_id).invocation
                     if current is not None and not current.terminal:
-                        if current.scheduler.ready or self._execution_index(session_id).running:
+                        if not self._dispatch_blocked(session_id) and (current.scheduler.ready or self._execution_index(session_id).running):
                             wake.clear()
                             continue
                     return

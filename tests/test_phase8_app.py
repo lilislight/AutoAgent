@@ -28,17 +28,13 @@ from autoagent import (
     Node,
     OutputBindingContext,
     Recovery,
-    InvocationUpdate,
     RuntimeTransitionError,
-    UserEvent,
-    UserEventMapping,
     Wait,
     Workflow,
 )
 from autoagent.core import (
     RuntimeRepository,
     RecoveryApplied,
-    InvocationResult,
     NodeStarted,
 )
 from autoagent.core.runtime import RuntimeEvent
@@ -82,14 +78,6 @@ def aggregate_child_values(context: AggregationContext) -> Value:
 
 def aggregate_child_invocations(context: AggregationContext) -> HandleSummary:
     return {"count": len(context.outputs)}
-
-
-def map_child_completion_event(context: OutputBindingContext) -> Value:
-    return context.output["output"]
-
-
-def map_completion_event(context: OutputBindingContext) -> Value:
-    return context.output  # type: ignore[return-value]
 
 
 def map_response_event(context: OutputBindingContext) -> Response:
@@ -170,223 +158,6 @@ class AppTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_astream_is_strictly_caller_driven_and_ends_with_result(self) -> None:
-        """Verify astream applies backpressure and yields one final boundary result."""
-
-        async def run() -> None:
-            operator_started = asyncio.Event()
-
-            async def observed(value: Value) -> Value:
-                operator_started.set()
-                return value
-
-            workflow = Workflow(
-                "attached-stream",
-                nodes=[
-                    Node(
-                        "node",
-                        observed,
-                        user_events=(
-                            UserEventMapping("node.completed", map_completion_event),
-                        ),
-                    )
-                ],
-            )
-            stream = self.app.astream(workflow, {"value": 1})
-            first = await anext(stream)
-            self.assertIsInstance(first, InvocationUpdate)
-            self.assertIsInstance(first.event, UserEvent)
-            self.assertEqual(first.event.kind, "node.completed")
-            self.assertTrue(operator_started.is_set())
-            self.assertEqual(
-                self.journal.state(first.event.session_id).invocation.status,
-                "running",
-            )
-
-            items = [first]
-            async for item in stream:
-                items.append(item)
-
-            self.assertTrue(operator_started.is_set())
-            self.assertIsInstance(items[-1], InvocationResult)
-            self.assertEqual(items[-1].status, "completed")
-            self.assertEqual(items[-1].output, {"value": 1})
-            self.assertFalse(hasattr(items[-1], "user_events"))
-
-        asyncio.run(run())
-
-    def test_stream_is_strictly_caller_driven_and_ends_with_result(self) -> None:
-        """Verify synchronous stream preserves attached-stream backpressure."""
-
-        operator_started = threading.Event()
-
-        def observed(value: Value) -> Value:
-            operator_started.set()
-            return value
-
-        stream = self.app.stream(
-            Workflow(
-                "sync-attached-stream",
-                nodes=[
-                    Node(
-                        "node",
-                        observed,
-                        user_events=(
-                            UserEventMapping("node.completed", map_completion_event),
-                        ),
-                    )
-                ],
-            ),
-            {"value": 1},
-        )
-        first = next(stream)
-        self.assertIsInstance(first, InvocationUpdate)
-        self.assertIsInstance(first.event, UserEvent)
-        self.assertEqual(first.event.kind, "node.completed")
-        self.assertTrue(operator_started.is_set())
-
-        items = [first, *stream]
-        self.assertTrue(operator_started.is_set())
-        self.assertIsInstance(items[-1], InvocationResult)
-        self.assertEqual(items[-1].status, "completed")
-        self.assertEqual(items[-1].output, {"value": 1})
-
-    def test_parent_stream_excludes_child_user_events(self) -> None:
-        """Yield only User Events emitted by the exact streamed Invocation."""
-
-        child = Workflow(
-            "isolated-user-event-child",
-            nodes=[
-                Node(
-                    "work",
-                    identity,
-                    user_events=(
-                        UserEventMapping("child.completed", map_completion_event),
-                    ),
-                )
-            ],
-        )
-        parent = Workflow(
-            "isolated-user-event-parent",
-            nodes=[
-                Node(
-                    "child",
-                    Await(child, child.nodes[0].id),
-                    user_events=(
-                        UserEventMapping("parent.completed", map_child_completion_event),
-                    ),
-                )
-            ],
-        )
-        items = list(self.app.stream(parent, {"value": 1}))
-        updates = [
-            item.event for item in items if isinstance(item, InvocationUpdate)
-        ]
-        self.assertEqual([event.kind for event in updates], ["parent.completed"])
-        result = items[-1]
-        self.assertEqual(result.status, "completed")
-        child_ref = child_refs(self.app, result.ref)[0]
-        self.assertEqual(
-            self.app._user_event_journal.events(child_ref.invocation_id), ()
-        )
-
-    def test_stream_context_manager_cancels_when_closed_early(self) -> None:
-        """Verify closing a synchronous attached stream converges cancellation."""
-
-        stream = self.app.stream(
-            Workflow(
-                "sync-stream-close",
-                nodes=[
-                    Node(
-                        "node",
-                        identity,
-                        user_events=(
-                            UserEventMapping("node.completed", map_completion_event),
-                        ),
-                    )
-                ],
-            ),
-            {"value": 1},
-        )
-        session_id = None
-        with stream:
-            for item in stream:
-                if isinstance(item, InvocationUpdate):
-                    session_id = item.event.session_id
-                    break
-        assert session_id is not None
-        state = self.journal.state(session_id)
-        self.assertEqual(state.invocation.status, "cancelled")
-
-    def test_astream_serializes_parallel_event_publishers(self) -> None:
-        """Verify parallel branches share one ordered attached-stream rendezvous."""
-
-        async def run() -> None:
-            workflow = Workflow(
-                "parallel-stream",
-                nodes=[
-                    Node("start", identity),
-                    Node("left", identity, user_events=(UserEventMapping("left", map_completion_event),)),
-                    Node("right", identity, user_events=(UserEventMapping("right", map_completion_event),)),
-                ],
-                edges=[Edge("start", "left"), Edge("start", "right")],
-            )
-
-            async def consume() -> list[object]:
-                return [
-                    item
-                    async for item in self.app.astream(workflow, {"value": 1})
-                ]
-
-            items = await asyncio.wait_for(consume(), timeout=2)
-            self.assertIsInstance(items[-1], InvocationResult)
-            self.assertEqual(items[-1].status, "completed")
-            sequences = [item.event.sequence for item in items if isinstance(item, InvocationUpdate)]
-            self.assertEqual(sequences, list(range(1, len(sequences) + 1)))
-
-        asyncio.run(run())
-
-    def test_astream_returns_waiting_as_its_final_boundary(self) -> None:
-        """Verify astream ends normally when an Invocation reaches Wait."""
-
-        async def run() -> None:
-            items = [
-                item
-                async for item in self.app.astream(
-                    Workflow("stream-wait", nodes=[Node("wait", Wait(Request, Response))]),
-                    {"question": "continue?"},
-                )
-            ]
-            boundary = items[-1]
-            self.assertIsInstance(boundary, InvocationResult)
-            self.assertEqual(boundary.status, "waiting")
-            self.assertEqual(len(boundary.waits), 1)
-
-        asyncio.run(run())
-
-    def test_slow_astream_consumer_does_not_block_other_invocations(self) -> None:
-        """Verify attached-stream backpressure is isolated to its Invocation."""
-
-        async def run() -> None:
-            stream = self.app.astream(
-                Workflow(
-                    "slow-stream",
-                    nodes=[Node("node", identity, user_events=(UserEventMapping("done", map_completion_event),))],
-                ),
-                {"value": 1},
-            )
-            first = await anext(stream)
-            self.assertIsInstance(first, InvocationUpdate)
-
-            independent = await self.app.ainvoke(
-                Workflow("independent", nodes=[Node("node", identity)]),
-                {"value": 2},
-            )
-            self.assertEqual(independent.status, "completed")
-            self.assertEqual(independent.output, {"value": 2})
-            await stream.aclose()
-
-        asyncio.run(run())
 
     def test_map_failure_settles_every_physical_call_before_invocation_terminal(self) -> None:
         """Verify map failure settles every physical call before invocation terminal."""
@@ -449,90 +220,6 @@ class AppTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_stream_resume_yields_updates_and_final_result(self) -> None:
-        """Verify stream_resume observes one resumed segment through its boundary."""
-
-        def after(response: Response) -> Response:
-            return response
-
-        workflow = Workflow(
-            "stream-resume-app",
-            nodes=[
-                Node(
-                    "approval",
-                    Wait(Request, Response),
-                    input_mapping=wait_request,
-                ),
-                Node(
-                    "after",
-                    after,
-                    user_events=(
-                        UserEventMapping("after.completed", map_response_event),
-                    ),
-                ),
-            ],
-            edges=[Edge("approval", "after")],
-        )
-        waiting = self.app.invoke(workflow, {})
-        items = list(
-            self.app.stream_resume(
-                waiting.ref,
-                waiting.waits[0].id,
-                {"answer": "yes"},
-            )
-        )
-        self.assertTrue(
-            any(
-                isinstance(item, InvocationUpdate)
-                and item.event.kind == "after.completed"
-                for item in items
-            )
-        )
-        self.assertIsInstance(items[-1], InvocationResult)
-        self.assertEqual(items[-1].status, "completed")
-        self.assertEqual(items[-1].output, {"answer": "yes"})
-
-    def test_astream_resume_yields_updates_and_final_result(self) -> None:
-        """Verify astream_resume provides the asynchronous resumed segment."""
-
-        async def run() -> None:
-            def after(response: Response) -> Response:
-                return response
-
-            workflow = Workflow(
-                "astream-resume-app",
-                nodes=[
-                        Node("approval", Wait(Request, Response), input_mapping=wait_request),
-                        Node(
-                            "after",
-                            after,
-                            user_events=(
-                                UserEventMapping("after.completed", map_response_event),
-                            ),
-                        ),
-                    ],
-                    edges=[Edge("approval", "after")],
-            )
-            waiting = await self.app.ainvoke(workflow, {})
-            items = [
-                item
-                async for item in self.app.astream_resume(
-                    waiting.ref,
-                    waiting.waits[0].id,
-                    {"answer": "yes"},
-                )
-            ]
-            self.assertTrue(
-                any(
-                    isinstance(item, InvocationUpdate)
-                    and item.event.kind == "after.completed"
-                    for item in items
-                )
-            )
-            self.assertIsInstance(items[-1], InvocationResult)
-            self.assertEqual(items[-1].status, "completed")
-
-        asyncio.run(run())
 
     def test_join_timeout_does_not_cancel_the_invocation(self) -> None:
         """Verify join raises TimeoutError while submitted work keeps running."""
@@ -1193,8 +880,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(calls, 1)
 
-    def test_new_app_recovers_running_invocation_from_checkpoint(self) -> None:
-        """Verify another App resumes replay-safe in-flight work from a checkpoint."""
+    def test_default_recovery_replays_running_node_from_checkpoint(self) -> None:
+        """Verify the default policy replays an interrupted Operator in another App."""
         started = threading.Event()
         calls = 0
 
@@ -1208,7 +895,7 @@ class AppTests(unittest.TestCase):
 
         workflow = Workflow(
             "event-recovery",
-            nodes=[Node("node", blocking, recovery_mode=Recovery("replay_safe"))],
+            nodes=[Node("node", blocking)],
         )
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 9}, session_id="recovery-session")
@@ -1247,7 +934,7 @@ class AppTests(unittest.TestCase):
             await asyncio.sleep(10)
             return value
 
-        workflow = Workflow("unsafe-recovery", nodes=[Node("node", side_effect)])
+        workflow = Workflow("unsafe-recovery", nodes=[Node("node", side_effect, recovery_mode=Recovery("never"))])
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 4}, session_id="unsafe-session")
         self.assertTrue(started.wait(1))

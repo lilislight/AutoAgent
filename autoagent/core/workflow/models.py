@@ -124,9 +124,9 @@ class Map:
 
 @dataclass(frozen=True, slots=True)
 class Recovery:
-    """Crash recovery rule for one logical Node occurrence."""
+    """Crash recovery rule for one Node occurrence; replay is allowed by default."""
 
-    mode: Literal["never", "replay_safe"] = "never"
+    mode: Literal["never", "replay_safe"] = "replay_safe"
     max_attempts: int = 1
 
     def __post_init__(self) -> None:

@@ -13,8 +13,21 @@ dependencies = [
   "typing-extensions>=4.12",
 ]
 
+[project.optional-dependencies]
+host = [
+  "sqlalchemy[asyncio]>=2.0.54,<2.1",
+  "aiosqlite>=0.22,<1",
+  "asyncpg>=0.31,<1",
+  "python-dotenv>=1.1,<2",
+]
+persistence = [
+  "sqlalchemy[asyncio]>=2.0.54,<2.1",
+  "aiosqlite>=0.22,<1",
+  "asyncpg>=0.31,<1",
+]
+
 [tool.setuptools.packages.find]
-include = ["autoagent", "autoagent.core", "autoagent.core.*"]
+include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.host", "autoagent.host.*"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]

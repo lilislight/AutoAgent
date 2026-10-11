@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from .checkpoint import SessionCheckpoint
-from .state import RuntimeState, ChildResult, child_input_digest
+from .state import RuntimeState, ChildResult, child_input_digest, validate_pause_boundary
 
 
 def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> None:
@@ -25,6 +25,10 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
             raise ValueError("Graph Session identity mismatch.")
         if inv is None:
             continue  # An acknowledged SessionOpened can precede Child admission.
+        if sid != root_session_id and not isinstance(inv, ChildResult) and inv.control_state != "active":
+            raise ValueError("Pause control belongs only to the Graph Root.")
+        if states[root_session_id].invocation.control_state == "paused" and not isinstance(inv, ChildResult):
+            validate_pause_boundary(inv)
         for wait in inv.scheduler.waits.values():
             if wait.status == 'waiting':
                 if wait.id in waits:
@@ -172,6 +176,14 @@ class RuntimeGraphCheckpoint:
         if len(states) != len(self.sessions):
             raise ValueError("Duplicate Graph Session.")
         validate_graph(self.root_session_id, states)
+
+    @property
+    def version(self) -> tuple[tuple[str, str | None, int], ...]:
+        """Exact graph membership and acknowledged Session frontiers."""
+        return tuple(sorted(
+            (s.session_id, s.state.invocation.id if s.state.invocation else None, s.sequence)
+            for s in self.sessions
+        ))
 
     def to_record(self) -> dict[str, object]:
         record = {'schema_version': 1, 'root_session_id': self.root_session_id,

@@ -6,14 +6,12 @@ from .app import (
     AutoAgentApp,
     CapabilityResolver,
     CheckpointLoadResult,
+    GraphResidencyInfo,
     InvocationRef,
     InvocationResult,
     InvocationStatus,
-    InvocationStream,
     InvocationSubmission,
-    InvocationUpdate,
     InvocationWait,
-    StreamItem,
 )
 from .compiler import (
     CompileResult,
@@ -43,6 +41,9 @@ from .executor import (
 )
 from .scheduler import Scheduler
 from .runtime import (
+    GraphPauseRequested,
+    GraphPaused,
+    GraphResumed,
     Activation,
     EdgeResolution,
     RuntimeRepository,
@@ -112,6 +113,9 @@ from .workflow import (
 )
 
 __all__ = [
+    "GraphPauseRequested",
+    "GraphPaused",
+    "GraphResumed",
     "AggregationContext",
     "Activation",
     "AppCheckpoint",
@@ -125,6 +129,7 @@ __all__ = [
     "ChildUnitSpec",
     "ChildUnitState",
     "CheckpointLoadResult",
+    "GraphResidencyInfo",
     "CompileResult",
     "ConditionContext",
     "Context",
@@ -150,9 +155,7 @@ __all__ = [
     "ChildResult",
     "InvocationResult",
     "InvocationStatus",
-    "InvocationStream",
     "InvocationSubmission",
-    "InvocationUpdate",
     "InvocationWait",
     "LoopControlError",
     "LoopRegionIR",
@@ -191,7 +194,6 @@ __all__ = [
     "StateOperation",
     "TaskRuntime",
     "Stream",
-    "StreamItem",
     "StreamContext",
     "StreamReducer",
     "SubWorkflow",

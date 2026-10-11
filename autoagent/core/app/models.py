@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal
 
-from ..runtime import (
-    RuntimeErrorInfo,
-    UserEvent,
-)
+from ..runtime import RuntimeErrorInfo
 from ..workflow.models import InvocationRef
 from ..runtime.graph_checkpoint import RuntimeGraphCheckpoint
 
@@ -55,6 +52,7 @@ class InvocationResult:
     error: RuntimeErrorInfo | None = None
     waits: tuple[InvocationWait, ...] = ()
     pending_outcome: Literal["completed", "failed", "cancelled"] | None = None
+    control_state: Literal["active", "pausing", "paused"] = "active"
 
     @property
     def session_id(self) -> str:
@@ -66,10 +64,16 @@ class InvocationResult:
 
 
 @dataclass(frozen=True, slots=True)
-class InvocationUpdate:
-    """One backpressured User Event from the exact streamed Invocation."""
+class GraphResidencyInfo:
+    """Process-local estimates for a Host's graph residency policy."""
 
-    event: UserEvent
+    ref: InvocationRef
+    version: tuple[tuple[str, str | None, int], ...]
+    estimated_bytes: int
+    can_unload: bool
+    next_deadline_at_us: int | None
+    status: InvocationStatus
+    control_state: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,17 +114,13 @@ class CheckpointLoadResult:
     invocations: tuple[InvocationRef, ...]
 
 
-StreamItem: TypeAlias = InvocationUpdate | InvocationResult
-
-
 __all__ = [
     "AppCheckpoint",
     "CheckpointLoadResult",
+    "GraphResidencyInfo",
     "InvocationRef",
     "InvocationResult",
     "InvocationStatus",
     "InvocationSubmission",
-    "InvocationUpdate",
     "InvocationWait",
-    "StreamItem",
 ]

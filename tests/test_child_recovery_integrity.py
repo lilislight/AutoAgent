@@ -361,7 +361,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         finally:
             restored.close(timeout=1)
 
-    def test_child_map_aggregate_obeys_default_recovery_policy(self) -> None:
+    def test_child_map_aggregate_obeys_explicit_never_recovery_policy(self) -> None:
         """Verify a Child plan cannot make an interrupted aggregate replay-safe."""
 
         entered = threading.Event()
@@ -383,6 +383,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
                     Await(child, child.nodes[0].id),
                     input_mapping=map_items,
                     map=Map(aggregate=aggregate),
+                    recovery_mode=Recovery("never"),
                 )
             ],
         )
@@ -422,7 +423,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         )
         parent = Workflow(
             "preflight-parent",
-            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output)],
+            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output, recovery_mode=Recovery("never"))],
         )
         source = AutoAgentApp()
         try:
@@ -449,7 +450,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         finally:
             restored.close(timeout=1)
 
-    def test_child_output_binding_obeys_default_recovery_policy(self) -> None:
+    def test_child_output_binding_obeys_explicit_never_recovery_policy(self) -> None:
         """Verify a durable Child plan does not implicitly replay Output Binding."""
 
         entered = threading.Event()
@@ -467,7 +468,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         child = Workflow("policy-binding-child", nodes=[Node("work", identity)])
         parent = Workflow(
             "policy-binding-parent",
-            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output)],
+            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output, recovery_mode=Recovery("never"))],
         )
         checkpoint = self._close_during_hook(parent, {"value": 1}, entered)
         result = self._recover(parent, checkpoint)
@@ -475,7 +476,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         self.assertEqual(result.error.type, "RecoveryNotAllowed")  # type: ignore[union-attr]
         self.assertEqual(calls, 1)
 
-    def test_child_condition_obeys_default_recovery_policy(self) -> None:
+    def test_child_condition_obeys_explicit_never_recovery_policy(self) -> None:
         """Verify a durable Child plan does not implicitly replay an Edge Condition."""
 
         entered = threading.Event()
@@ -491,7 +492,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         child = Workflow("policy-condition-child", nodes=[Node("work", identity)])
         parent = Workflow(
             "policy-condition-parent",
-            nodes=[Node("child", Await(child, child.nodes[0].id)), Node("done", identity, input_mapping=child_output)],
+            nodes=[Node("child", Await(child, child.nodes[0].id), recovery_mode=Recovery("never")), Node("done", identity, input_mapping=child_output)],
             edges=[Edge("child", "done", condition=route)],
         )
         checkpoint = self._close_during_hook(parent, {"value": 1}, entered)

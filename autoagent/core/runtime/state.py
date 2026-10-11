@@ -24,7 +24,7 @@ from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 14
+RUNTIME_STATE_SCHEMA_VERSION = 15
 InvocationStatus = Literal[
     "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
@@ -181,6 +181,7 @@ class InvocationState:
     resume_receipts: DurableValue = field(default_factory=lambda: freeze({}))
     resume_receipt_frontiers: DurableValue = field(default_factory=lambda: freeze({}))
     pending_outcome: Literal["completed", "failed", "cancelled"] | None = None
+    control_state: Literal["active", "pausing", "paused"] = "active"
 
     @property
     def stopping(self) -> bool:
@@ -224,6 +225,9 @@ class ChildResult:
     kind: Literal["child_result"] = field(default="child_result", init=False)
 
     # Common read-only view used by graph traversal and result consumers.
+    @property
+    def control_state(self) -> Literal["active"]:
+        return "active"
     @property
     def terminal(self) -> bool:
         return True
@@ -854,7 +858,27 @@ def _validate_activation(
         raise ValueError("Activation target_node_id does not match its target.")
 
 
+def validate_pause_boundary(invocation: InvocationState | ChildResult) -> None:
+    """A clean pause may retain waits and ready Nodes, never uncertain user work."""
+    for occ in invocation.scheduler.occurrences.values():
+        if occ.status == "running" and not any(
+            w.occurrence_id == occ.id and w.kind == "external" and w.status == "resumed"
+            for w in invocation.scheduler.waits.values()
+        ):
+            raise ValueError("Paused Graph contains interrupted work.")
+    for call in invocation.scheduler.operator_calls.values():
+        if call.operator_id not in SYSTEM_COMMAND_IDS and (
+            call.status in {"running", "lost"} or (call.status == "failed"
+            and call.error is not None and call.error.type == "CancelledError")
+        ):
+            raise ValueError("Paused Graph contains an uncertain Operator Call.")
+
+
 def _validate_invocation_lifecycle(invocation: InvocationState) -> None:
+    if invocation.control_state not in {"active", "pausing", "paused"}:
+        raise ValueError("Invalid graph control state.")
+    if invocation.terminal and invocation.control_state != "active":
+        raise ValueError("Terminal Invocation cannot retain pause control.")
     if not invocation.stopping and any(
         u.phase == "abandoned" for p in invocation.child_plans.values() for u in p.units
     ):
@@ -1067,6 +1091,7 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
         "error": _error_record(value.error),
         "cancel_reason": value.cancel_reason,
         "pending_outcome": value.pending_outcome,
+        "control_state": value.control_state,
         "signals": thaw(value.signals),
         "cancel_origin": thaw(value.cancel_origin),
         "resume_receipts": thaw(value.resume_receipts),
@@ -1283,6 +1308,7 @@ def _invocation_from_record(value: object) -> InvocationState | ChildResult | No
         error=_error_from_record(record.get("error")),
         cancel_reason=_optional_string(record, "cancel_reason"),
         pending_outcome=_optional_string(record, "pending_outcome"),
+        control_state=_string(record, "control_state"),
         signals=freeze(record.get("signals", empty_signals())),
         cancel_origin=freeze(record.get("cancel_origin")),
         resume_receipts=freeze(record.get("resume_receipts", {})),

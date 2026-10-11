@@ -31,11 +31,9 @@ from autoagent import (
     InputMappingContext,
     InvocationRef,
     InvocationResult,
-    InvocationUpdate,
     Map,
     Node,
     Operator,
-    UserEventMapping,
     OutputBindingContext,
     Recovery,
     RuntimeTransitionError,
@@ -198,17 +196,11 @@ class AppCorrectnessTests(unittest.TestCase):
 
         app = AutoAgentApp()
         try:
-            items = list(
-                app.stream(
-                    Workflow(
-                        "operator-self-cancel",
-                        nodes=[Node("work", self_cancel)],
-                    ),
-                    {"value": 1},
-                    session_id="operator-self-cancel-session",
-                )
+            result = app.invoke(
+                Workflow("operator-self-cancel", nodes=[Node("work", self_cancel)]),
+                {"value": 1},
+                session_id="operator-self-cancel-session",
             )
-            result = items[-1]
             self.assertIsInstance(result, InvocationResult)
             self.assertEqual(result.status, "failed")
             self.assertIsNotNone(result.error)
@@ -220,7 +212,6 @@ class AppCorrectnessTests(unittest.TestCase):
                     for occurrence in state.invocation.scheduler.occurrences.values()
                 )
             )
-            self.assertFalse(any(isinstance(item, InvocationUpdate) for item in items))
         finally:
             app.close()
 
@@ -248,7 +239,7 @@ class AppCorrectnessTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_non_streaming_invoke_does_not_capture_a_checkpoint(self) -> None:
+    def test_invoke_does_not_capture_a_checkpoint(self) -> None:
         """Build a checkpoint only for a lifecycle transfer operation."""
 
         class CountingJournal(RuntimeRepository):
@@ -278,10 +269,6 @@ class AppCorrectnessTests(unittest.TestCase):
             self.assertEqual(journal.captures, 1)
         finally:
             app.close()
-
-
-
-
 
 
     def test_parallel_runtime_transitions_reach_sink_once_and_in_order(self) -> None:
@@ -325,11 +312,6 @@ class AppCorrectnessTests(unittest.TestCase):
             )
         finally:
             app.close()
-
-
-
-
-
 
 
     def test_terminal_invocation_cannot_be_replaced_before_result_delivery(self) -> None:
@@ -457,28 +439,6 @@ class AppCorrectnessTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_close_and_active_astream_finish_without_lifecycle_error(self) -> None:
-        """Verify App close cleanly terminates a consumer blocked on the next update."""
-
-        async def run() -> None:
-            app = AutoAgentApp()
-            first_update = asyncio.Event()
-
-            async def consume() -> None:
-                async for _item in app.astream(
-                    Workflow("close-active-stream", nodes=[Node("node", identity)]),
-                    {"value": 1},
-                    session_id="close-active-stream-session",
-                ):
-                    first_update.set()
-
-            consumer = asyncio.create_task(consume())
-            await asyncio.wait_for(first_update.wait(), 1)
-            checkpoint = await app.aclose(capture_checkpoint=True)
-            await asyncio.wait_for(consumer, 1)
-            self.assertIsInstance(checkpoint, AppCheckpoint)
-
-        asyncio.run(run())
 
     def test_empty_app_checkpoint_round_trips_through_load(self) -> None:
         """Verify an idle App close checkpoint is a valid no-op restore input."""
@@ -532,26 +492,6 @@ class AppCorrectnessTests(unittest.TestCase):
             finally:
                 target.close()
 
-    def test_sync_stream_is_exhausted_after_its_terminal_error(self) -> None:
-        """Verify a caught stream error cannot leave the iterator blocking forever."""
-
-        app = AutoAgentApp()
-        stream = app.stream(
-            Workflow(
-                "stream-admission-error",
-                nodes=[Node("left", identity), Node("right", identity)],
-            ),
-            {"value": 1},
-        )
-        try:
-            with self.assertRaises(RuntimeTransitionError):
-                next(stream)
-            with self.assertRaises(StopIteration):
-                next(stream)
-        finally:
-            stream.close()
-            app.close()
-
 
     def test_public_invoke_cannot_replace_a_session_owned_by_child_plan(self) -> None:
         """Verify reusing a Child Session cannot invalidate its parent checkpoint graph."""
@@ -583,47 +523,6 @@ class AppCorrectnessTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_attached_stream_reserves_session_before_invocation_open(self) -> None:
-        """Verify another invoke fails promptly while a stream pauses at Session open."""
-
-        async def run() -> None:
-            app = AutoAgentApp()
-            stream = app.astream(
-                Workflow(
-                    "reserved-stream",
-                    nodes=[
-                        Node(
-                            "node",
-                            identity,
-                            user_events=(UserEventMapping("node.done", map_value_event),),
-                        )
-                    ],
-                ),
-                {"value": 1},
-                session_id="reserved-stream-session",
-            )
-            try:
-                first = await anext(stream)
-                self.assertEqual(first.event.kind, "node.done")
-                with self.assertRaisesRegex(
-                    RuntimeTransitionError, "INVOCATION_STREAM_ATTACHED"
-                ):
-                    await asyncio.wait_for(
-                        app.ainvoke(
-                            Workflow(
-                                "conflicting-invoke",
-                                nodes=[Node("node", identity)],
-                            ),
-                            {"value": 2},
-                            session_id="reserved-stream-session",
-                        ),
-                        timeout=0.5,
-                    )
-            finally:
-                await stream.aclose()
-                await app.aclose()
-
-        asyncio.run(run())
 
     def test_invalid_entry_does_not_open_an_invocation(self) -> None:
         """Verify invalid admission leaves no Session state or Runtime Events."""

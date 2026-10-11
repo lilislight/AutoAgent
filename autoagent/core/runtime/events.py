@@ -14,7 +14,7 @@ from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 14
+RUNTIME_EVENT_SCHEMA_VERSION = 15
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +173,21 @@ class OperatorCallFailed:
     call_id: str
     error: RuntimeErrorInfo
     execution_duration_ns: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class GraphPauseRequested:
+    kind: ClassVar[str] = "graph.pause_requested"
+
+
+@dataclass(frozen=True, slots=True)
+class GraphPaused:
+    kind: ClassVar[str] = "graph.paused"
+
+
+@dataclass(frozen=True, slots=True)
+class GraphResumed:
+    kind: ClassVar[str] = "graph.resumed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,7 +425,10 @@ class NodeFaulted:
 
 
 RuntimeEventPayload: TypeAlias = (
-    InputMapped
+    GraphPauseRequested
+    | GraphPaused
+    | GraphResumed
+    | InputMapped
     | CapabilityResolved
     | Aggregated
     | OutputBound
@@ -443,6 +461,7 @@ RuntimeEventPayload: TypeAlias = (
 )
 
 _PAYLOAD_TYPES = (
+    GraphPauseRequested, GraphPaused, GraphResumed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
     SessionOpened,
     InvocationStarted,
@@ -535,6 +554,8 @@ class RuntimeEvent:
 
 
 def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
+    if isinstance(payload, (GraphPauseRequested, GraphPaused, GraphResumed)):
+        return {}
     if isinstance(payload, ChildCompacted):
         return {item.name: getattr(payload, item.name) for item in fields(payload)}
     if isinstance(payload, (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
@@ -610,6 +631,11 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
 def _payload_from_record(
     event_name: str, record: dict[str, object]
 ) -> RuntimeEventPayload:
+    for cls in (GraphPauseRequested, GraphPaused, GraphResumed):
+        if event_name == cls.kind:
+            if record:
+                raise TypeError("Graph control payload must be empty.")
+            return cls()
     for cls in (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied):
         if event_name == cls.kind:
             values = dict(record)

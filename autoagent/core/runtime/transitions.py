@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from ..commands.models import SYSTEM_COMMAND_IDS
 from .events import ResumeReceiptReleased, CancellationRequested
+from .events import GraphPauseRequested, GraphPaused, GraphResumed
 from .signals import SignalAccepted, SignalsReceived, SignalReceiptReleased, signal_delta
 
 from collections import ChainMap
@@ -89,6 +90,14 @@ class TransitionPlanner:
             return StateDelta(tuple(operations))
         if inv is None or inv.id != invocation_id:
             raise RuntimeTransitionError("INVOCATION_MISMATCH", "Event targets another Invocation.")
+        if isinstance(payload, (GraphPauseRequested, GraphPaused, GraphResumed)):
+            expected = {GraphPauseRequested: {"active"}, GraphPaused: {"pausing"},
+                        GraphResumed: {"paused", "pausing"}}[type(payload)]
+            if inv.terminal or inv.stopping or inv.control_state not in expected:
+                raise RuntimeTransitionError("GRAPH_CONTROL_INVALID", "Invalid graph control transition.")
+            value = {GraphPauseRequested: "pausing", GraphPaused: "paused", GraphResumed: "active"}[type(payload)]
+            put(("invocation", "control_state"), value)
+            return StateDelta(tuple(operations))
         if isinstance(payload, (SignalAccepted, SignalsReceived, SignalReceiptReleased)):
             delta = signal_delta(self, state, payload, occurred_at_us, session_id, invocation_id, _execution_index)
             return StateDelta((*operations, *delta.operations))
@@ -369,6 +378,8 @@ class TransitionPlanner:
             put(("invocation", "child_plans", plan.creation_id), replace(plan, units=units))
         else:
             raise RuntimeTransitionError("EVENT_TYPE_UNSUPPORTED", "Unsupported semantic boundary.")
+        if isinstance(payload, (InvocationCompleted, InvocationFailed, InvocationCancelled)):
+            put(("invocation", "control_state"), "active")
         if inv.status != "settling" and isinstance(payload, (InvocationCompleted, InvocationSettling, InvocationFailed, InvocationCancelled)):
             # Terminal Invocations retain their public result and business Context,
             # not execution payload history. Apply after lifecycle status updates.

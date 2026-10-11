@@ -25,7 +25,6 @@ from autoagent import (
     Edge,
     InputMappingContext,
     InvocationResult,
-    InvocationUpdate,
     Node,
     OutputBindingContext,
     Recovery,
@@ -331,32 +330,23 @@ def load_checkpoint(path: Path) -> RuntimeGraphCheckpoint:
     return RuntimeGraphCheckpoint.from_record(record)
 
 
+class PrintUserEvents:
+    async def append_user_event(self, event) -> None:
+        print("user event:", event.kind, event.payload)
+
+
 def main() -> None:
-    source = AutoAgentApp(max_operator_concurrency=4)
+    source = AutoAgentApp(max_operator_concurrency=4, user_event_sink=PrintUserEvents())
     workflow = build_workflow()
     compiled = source.register_workflow(workflow)
     print("registered revision:", compiled.workflow_revision_id)
 
-    # stream() invokes the Workflow and yields only explicit User Events, then
-    # one final InvocationResult. It does not build checkpoints implicitly.
-    waiting: InvocationResult | None = None
-    with source.stream(
+    # Execution returns the stable boundary; User Events go to the separate sink.
+    waiting = source.invoke(
         workflow.id,
         {"order_id": "order-42", "amount": 600, "stock": 3},
         session_id="core-api-demo-session",
-    ) as updates:
-        for item in updates:
-            if isinstance(item, InvocationUpdate):
-                print(
-                    "stream update:",
-                    item.event.kind,
-                    item.event.payload,
-                )
-            else:
-                waiting = item
-    assert waiting is not None
-    # Streamed User Events are delivered once as InvocationUpdate. The final
-    # Result contains only the Invocation boundary data.
+    )
     print_result("source reached Wait", waiting)
 
     # Explicitly capture a checkpoint while releasing this quiescent Session.
@@ -366,7 +356,7 @@ def main() -> None:
 
     # Simulate a new process. Loading restores State without requiring Workflow
     # code; the exact revision is required only when recover() executes it.
-    recovered = AutoAgentApp(max_operator_concurrency=4)
+    recovered = AutoAgentApp(max_operator_concurrency=4, user_event_sink=PrintUserEvents())
     loaded = recovered.load_checkpoint(load_checkpoint(PARENT_CHECKPOINT_PATH))
     root_ref = loaded.invocations[0]
     recovered_workflow = build_workflow()
@@ -378,18 +368,11 @@ def main() -> None:
     restored_wait = recovered.recover(root_ref)
     print_result("recovered Wait", restored_wait)
 
-    completed: InvocationResult | None = None
-    with recovered.stream_resume(
+    completed = recovered.resume(
         root_ref,
         restored_wait.waits[0].id,
         {"approved": True},
-    ) as updates:
-        for item in updates:
-            if isinstance(item, InvocationUpdate):
-                print("resume update:", item.event.kind)
-            else:
-                completed = item
-    assert completed is not None
+    )
     print_result("parent completed", completed)
 
     # Root completion includes the spawned audit Child's completion.

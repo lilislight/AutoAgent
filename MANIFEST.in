@@ -1,1 +1,4 @@
 include autoagent/py.typed
+include ui/package.json ui/package-lock.json ui/tsconfig.json ui/tsconfig.test.json ui/vite.config.ts ui/index.html
+recursive-include ui/src *.ts *.tsx *.css *.svg
+recursive-include ui/tests *.ts

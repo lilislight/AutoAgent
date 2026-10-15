@@ -1,0 +1,52 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { replayFrame, replayMarker } from '../src/replay.js';
+import type { ExecutionTrace, ReplayWindow, ReplayEvent } from '../src/types.js';
+const trace: ExecutionTrace = { observed_at_us:0,last_event:null,invocation:{invocation_id:'i',workflow_id:'wf',workflow_revision_id:'r',root_invocation_id:'i',values:[],status:'running',control_state:'active'},nodes:[{node_id:'n',occurrence_id:'old',occurrences:10,status:'running'}],edges:[],active_routes:[],child_count:0,frontier:100,view:'durable' };
+const event = (sequence: number, changes: ReplayEvent['changes']): ReplayEvent => ({ sequence,occurred_at_us:sequence*10,event_id:String(sequence),event_name:'node_occurrence.completed',changes,routes:[],evaluations:[],child_ids:[],call_starts:[] });
+const window: ReplayWindow = { history_complete:true,baseline:{trace,child_ids:[],occurrences:[{occurrence_id:'old',node_id:'n',status:'running',created_sequence:1},{occurrence_id:'newer',node_id:'n',status:'completed',created_sequence:2}]},events:[event(4,[{entity_type:'node',entity_id:'old',node_id:'n',change:{status:'completed'}}]),event(8,[{entity_type:'node',entity_id:'next',node_id:'n',change:{status:'ready',node_id:'n'}}]),event(11,[{entity_type:'node',entity_id:'next',node_id:'n',change:{status:'waiting'}},{entity_type:'invocation',entity_id:'i',node_id:null,change:{control_state:'paused'}}])],boundary:null,previous:null,next:null,first:null,last:null,frontier:100,time_from_us:40,time_until_us:null };
+test('replay retains the latest terminal representative and increments only new occurrences', () => {
+  assert.equal(replayFrame(window,4)!.nodes[0].occurrence_id,'newer');
+  const future = replayFrame(window,8)!;
+  assert.equal(future.nodes[0].occurrences,11);
+  assert.equal(future.nodes[0].status,'ready');
+  assert.equal(replayFrame(window,11)!.invocation.control_state,'paused');
+  assert.equal(replayFrame(window,4)!.nodes[0].occurrences,10);
+  assert.equal(window.baseline!.occurrences[0].status,'running');
+});
+test('replay selection follows actual sequences and every change in one atomic Event', () => {
+  assert.equal(replayMarker(window,{sequence:10})?.sequence,8);
+  assert.equal(replayMarker(window,{at_us:115})?.sequence,11);
+  const frame = replayFrame(window,11)!;
+  assert.equal(frame.nodes[0].status,'waiting');
+  assert.equal(frame.invocation.control_state,'paused');
+  assert.equal(frame.last_event?.sequence,11);
+});
+test('routing decisions override evaluations, finished targets release routes and children count once', () => {
+  const routed = event(12,[{entity_type:'node',entity_id:'target',node_id:'destination',change:{status:'waiting',node_id:'destination'}},{entity_type:'edge',entity_id:'choice',node_id:null,change:{edge_id:'choice',selected:false}}]);
+  routed.evaluations=[{edge_id:'choice',condition_result:true}];
+  routed.routes=[{edge_id:'incoming',source_occurrence_id:'old',target_node_id:'destination',target_occurrence_id:'target'}];
+  routed.child_ids=['child','child'];
+  const ended=event(15,[{entity_type:'node',entity_id:'target',node_id:'destination',change:{status:'completed'}},{entity_type:'invocation',entity_id:'i',node_id:null,change:{status:'completed'}}]);
+  ended.child_ids=['child'];
+  const batch={...window,events:[routed,ended]};
+  const first=replayFrame(batch,12)!;
+  assert.equal(first.edges[0].condition_result,false);
+  assert.equal(first.edges[0].evaluations,1);
+  assert.equal(first.active_routes[0].status,'waiting');
+  assert.equal(first.child_count,1);
+  const last=replayFrame(batch,15)!;
+  assert.equal(last.active_routes.length,0);
+  assert.equal(last.child_count,1);
+  assert.equal(last.invocation.completed_at_us,150);
+});
+test('Map Call counts follow start boundaries across batches and rewind without future leakage', () => {
+  const first=event(4,[]);first.call_starts=[{node_id:'n',count:3}];
+  const second=event(8,[]);second.call_starts=[{node_id:'n',count:2}];
+  const batch={...window,baseline:{...window.baseline!,trace:{...trace,nodes:trace.nodes.map(n=>({...n,call_count:7}))}},events:[first,second]};
+  assert.equal(replayFrame(batch,3)!.nodes[0].call_count,7);
+  assert.equal(replayFrame(batch,4)!.nodes[0].call_count,10);
+  assert.equal(replayFrame(batch,8)!.nodes[0].call_count,12);
+  assert.equal(replayFrame(batch,4)!.nodes[0].call_count,10);
+  assert.equal(batch.baseline.trace.nodes[0].call_count,7);
+});

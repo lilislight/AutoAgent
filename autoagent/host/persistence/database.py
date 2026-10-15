@@ -11,7 +11,11 @@ from autoagent.core.runtime.user_events import UserEvent
 from .maintenance import Maintenance
 from .models import OperatorDefinition, PersistenceConfig, ReadView
 from .queries import Queries
+from .tracing import TraceQueries
+from .timeline import TimelineQueries
 from .writer import Writer
+from .datasets import TraceDatasets
+from .watching import TraceHeads
 
 
 class DatabaseSink:
@@ -26,7 +30,10 @@ class DatabaseSink:
         self.config = config or PersistenceConfig()
         self._writer = Writer(url, self.config)
         self._queries = Queries(self._writer)
+        self._traces = TraceQueries(self._queries)
         self._maintenance = Maintenance(self._writer)
+        self._datasets = TraceDatasets(self._queries, self.config, url)
+        self._llm_calls = None
 
     @classmethod
     async def open(cls, url: str, *, config: PersistenceConfig | None = None):
@@ -112,6 +119,18 @@ class DatabaseSink:
             raise TypeError("Expected UserEvent.")
         await self._writer.run(self._writer.accept, "user_event", event.id, event)
 
+    async def record_llm_call(self, record) -> None:
+        """Persist one model-call metadata update; no model SDK or query API required."""
+        from autoagent.agent.recording import LLMCallRecord
+        from .llm_calls import LLMCallStorage
+
+        record = LLMCallRecord.model_validate(record)
+        async def write():
+            if self._llm_calls is None:
+                self._llm_calls = LLMCallStorage(self._writer)
+            await self._llm_calls.write(record)
+        await self._writer.run(write)
+
     async def _checkpoint(self, checkpoint, anchor):
         if not isinstance(checkpoint, RuntimeGraphCheckpoint):
             raise TypeError("Expected complete RuntimeGraphCheckpoint.")
@@ -143,6 +162,72 @@ class DatabaseSink:
         )
         return RuntimeGraphCheckpoint.from_record(record) if record else None
 
+    async def workflow_graph(self, revision_id):
+        return await self._writer.run(self._traces.graph, revision_id)
+
+    async def workflow_object(self, revision_id, kind, identity):
+        return await self._writer.run(self._traces.definition, revision_id, kind, identity)
+
+    async def trace_page(self, kind, invocation_id=None, **filters):
+        return await self._writer.run(self._traces.page, kind, invocation_id, **filters)
+
+    async def execution_sessions(self, **filters):
+        return await self._writer.run(self._traces.sessions, **filters)
+
+    async def execution_trace(self, invocation_id):
+        return await self._writer.run(self._traces.execution, invocation_id)
+
+    async def execution_family(self, invocation_id):
+        return await self._writer.run(self._traces.family, invocation_id)
+
+    async def trace_dataset(self, invocation_id, **options):
+        return await self._writer.run(self._datasets.create, invocation_id, **options)
+
+    async def trace_dataset_page(self, snapshot_id, kind, page):
+        return await self._writer.run(self._datasets.page, snapshot_id, kind, page)
+
+    async def release_trace_dataset(self, snapshot_id):
+        await self._writer.run(self._datasets.release, snapshot_id)
+
+    async def trace_head(self, invocation_id):
+        return await self._writer.run(TraceHeads(self._queries).read, invocation_id)
+
+    async def wait_trace_commit(self, revision, timeout):
+        return await self._writer.run(self._writer.wait_committed, revision, timeout)
+
+    async def execution_timeline(self, invocation_id):
+        return await self._writer.run(TimelineQueries(self._queries).overview, invocation_id)
+
+    async def timeline_page(self, invocation_id, **filters):
+        return await self._writer.run(TimelineQueries(self._queries).page, invocation_id, **filters)
+
+    async def timeline_position(self, invocation_id, kind, identity, **filters):
+        return await self._writer.run(TimelineQueries(self._queries).position, invocation_id, kind, identity, **filters)
+
+    async def timeline_event_groups(self, invocation_id, **filters):
+        return await self._writer.run(TimelineQueries(self._queries).event_groups, invocation_id, **filters)
+
+    async def timeline_markers(self, invocation_id, **filters):
+        return await self._writer.run(TimelineQueries(self._queries).markers, invocation_id, **filters)
+
+    async def timeline_frame(self, invocation_id, **position):
+        return await self._writer.run(TimelineQueries(self._queries).frame, invocation_id, **position)
+
+    async def timeline_replay(self, invocation_id, **position):
+        return await self._writer.run(TimelineQueries(self._queries).replay, invocation_id, **position)
+
+    async def execution_record(self, invocation_id, kind, identity):
+        return await self._writer.run(TimelineQueries(self._queries).record, invocation_id, kind, identity)
+
+    async def trace_value(self, invocation_id, kind, identity, field):
+        return await self._writer.run(self._traces.value, invocation_id, kind, identity, field)
+
+    async def execution_stages(self, invocation_id, occurrence_id, **filters):
+        return await self._writer.run(self._traces.stages, invocation_id, occurrence_id, **filters)
+
+    async def execution_stage_value(self, invocation_id, occurrence_id, event_id, field):
+        return await self._writer.run(self._traces.stage_value, invocation_id, occurrence_id, event_id, field)
+
     async def get_workflow(self, revision_id):
         return await self._writer.run(
             self._queries.source_record, "workflow_revision", revision_id
@@ -169,6 +254,12 @@ class DatabaseSink:
         return await self._writer.run(
             self._queries.definitions, "workflow_revision", workflow_id, limit, cursor
         )
+
+    async def workflow_catalog(self, *, registered_ids=(), search="", limit=100, cursor=None):
+        return await self._writer.run(self._queries.workflow_catalog, registered_ids, search, limit, cursor)
+
+    async def workflow_revisions(self, workflow_id, *, prefix=None, limit=100, cursor=None):
+        return await self._writer.run(self._queries.workflow_revisions, workflow_id, prefix, limit, cursor)
 
     async def list_operators(self, *, operator_id=None, limit=100, cursor=None):
         return await self._writer.run(
@@ -262,6 +353,10 @@ class DatabaseSink:
         return await self._writer.run(
             self._queries.get_row, "invocations", {"invocation_id": invocation_id}, view
         )
+
+    async def control_metadata(self, invocation_id, registered, **options):
+        from .controls import ControlQueries
+        return await self._writer.run(ControlQueries(self._queries).read, invocation_id, registered, **options)
 
     async def get_session(self, session_id, *, view: ReadView = "durable"):
         return await self._writer.run(
@@ -406,6 +501,10 @@ class DatabaseSink:
         return await self._writer.run(self._writer.health)
 
     async def close(self):
+        if self._datasets.cleaner is None:
+            await self._datasets.close()
+        elif not self._writer._closed and self._writer._close_future is None:
+            await self._writer.run(self._datasets.close)
         await self._writer.close()
 
     async def delete_checkpoint(self, checkpoint_id):

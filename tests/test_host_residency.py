@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
+from tests.postgres import POSTGRES_TEST_URL
 
 from typing_extensions import TypedDict
 
@@ -481,13 +482,13 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await host._persistence.list_sessions()).items, ())
 
 
-@unittest.skipUnless(os.environ.get('AUTOAGENT_TEST_POSTGRES_URL'), 'isolated PostgreSQL URL not configured')
+@unittest.skipUnless(POSTGRES_TEST_URL, 'isolated PostgreSQL URL not configured')
 class PostgreSQLAdaptiveHostTests(AdaptiveHostTests):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         import asyncpg
         from sqlalchemy.engine import make_url
-        self.admin_url = make_url(os.environ['AUTOAGENT_TEST_POSTGRES_URL'])
+        self.admin_url = make_url(POSTGRES_TEST_URL)
         self.database_name = 'autoagent_residency_' + uuid4().hex
         conn = await asyncpg.connect(self.admin_url.set(drivername='postgresql').render_as_string(hide_password=False))
         try:

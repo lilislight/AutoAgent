@@ -47,6 +47,8 @@ class PersistenceConfig:
     queue_count: int = 10_000
     queue_bytes: int = 128 * MIB
     encoding_cache_bytes: int = 16 * MIB
+    trace_snapshot_bytes: int = 128 * MIB
+    trace_snapshot_ttl_seconds: float = 300
     retry_attempts: int = 3
     retry_delay_ms: float = 50
 
@@ -60,11 +62,12 @@ class PersistenceConfig:
             "queue_count",
             "queue_bytes",
             "encoding_cache_bytes",
+            "trace_snapshot_bytes",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
-        for name in ("batch_delay_ms", "durable_batch_delay_ms", "retry_delay_ms"):
+        for name in ("batch_delay_ms", "durable_batch_delay_ms", "retry_delay_ms", "trace_snapshot_ttl_seconds"):
             value = getattr(self, name)
             if (
                 isinstance(value, bool)
@@ -162,6 +165,7 @@ class Page:
     items: tuple[dict, ...]
     next_cursor: tuple | None = None
     frontier: int = 0
+    total_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

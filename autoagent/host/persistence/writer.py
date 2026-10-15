@@ -72,6 +72,7 @@ class Writer:
         self.pending, self.objects = deque(), {}
         self.pending_count, self.retained = 0, 0
         self.accepted_ticket = self.durable_ticket = self.store_order = 0
+        self.commit_revision = 0
         self.flush_ticket = 0
         self.state, self.fault = "open", None
         self.operator_bindings = {}
@@ -385,6 +386,16 @@ class Writer:
                     raise
                 await asyncio.sleep(self.config.retry_delay_ms / 1000 * 2**attempt)
 
+    async def wait_committed(self, after, timeout):
+        """Wait without holding a DB connection or retaining committed records."""
+        async with self.condition:
+            try:
+                await asyncio.wait_for(self.condition.wait_for(
+                    lambda: self.commit_revision != after or self.state != "open"), timeout)
+            except TimeoutError:
+                pass
+            return self.commit_revision
+
     async def _worker(self):
         while True:
             async with self.condition:
@@ -421,6 +432,7 @@ class Writer:
                     order = await self._commit(prepared)
                     async with self.condition:
                         self.store_order = order
+                        self.commit_revision += 1
                         for entry in entries:
                             assert self.pending[0] is entry
                             self.pending.popleft()

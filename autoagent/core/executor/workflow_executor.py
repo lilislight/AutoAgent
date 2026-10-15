@@ -20,6 +20,7 @@ from uuid import uuid4
 from ..runtime._execution_index import ExecutionIndex
 from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
 from ..operators import Operator
+from ..operators.context import OperatorCallContext, operator_call_context
 from ..commands import SignalReceipt, SignalBatch, SelfHandle, OwnerHandle
 from ..commands.signals import SendSignalRequest, ReceiveSignalRequest
 from ..workflow import InputMappingContext
@@ -271,7 +272,15 @@ class WorkflowExecutor:
     async def _execute_occurrence(self, workflow: WorkflowIR, session_id: str, occurrence_id: str) -> None:
         token = runtime_handles.set(self._runtime_identity(session_id) if self._runtime_identity else (None, None))
         try:
-            await self._execute_occurrence_body(workflow, session_id, occurrence_id)
+            invocation = _active_invocation(self._repository.state(session_id))
+            occurrence = invocation.scheduler.occurrences[occurrence_id]
+            with operator_call_context(OperatorCallContext(
+                workflow_id=workflow.workflow_id, workflow_revision_id=workflow.workflow_revision_id,
+                workflow_version=workflow.workflow_version, session_id=session_id,
+                invocation_id=invocation.id, occurrence_id=occurrence_id, node_id=occurrence.node_id,
+                attempt=occurrence.recovery_attempts + 1,
+            )):
+                await self._execute_occurrence_body(workflow, session_id, occurrence_id)
         finally:
             runtime_handles.reset(token)
 

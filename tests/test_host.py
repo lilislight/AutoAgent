@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
+from tests.postgres import POSTGRES_TEST_URL
 
 try:
     import dotenv  # noqa: F401 -- optional dependency guard
@@ -625,7 +626,7 @@ def second(): return Workflow("duplicate", nodes=[Node("work", work)])
 
 
 @unittest.skipUnless(
-    os.environ.get("AUTOAGENT_TEST_POSTGRES_URL"),
+    POSTGRES_TEST_URL,
     "isolated PostgreSQL URL not configured",
 )
 class PostgreSQLHostTests(HostTests):
@@ -634,7 +635,7 @@ class PostgreSQLHostTests(HostTests):
         from sqlalchemy.engine import make_url
 
         await super().asyncSetUp()
-        self.admin_url = make_url(os.environ["AUTOAGENT_TEST_POSTGRES_URL"])
+        self.admin_url = make_url(POSTGRES_TEST_URL)
         self.database_name = "autoagent_host_test_" + uuid4().hex
         connection = await asyncpg.connect(
             self.admin_url.set(drivername="postgresql").render_as_string(
@@ -682,7 +683,7 @@ class HostConfigurationTests(unittest.TestCase):
             for line in (Path(__file__).resolve().parents[1] / ".env.example")
             .read_text()
             .splitlines()
-            if line.startswith("AUTOAGENT_")
+            if line.startswith("AUTOAGENT_") and not line.startswith("AUTOAGENT_SERVER_")
         }
         self.assertEqual(names, documented)
 

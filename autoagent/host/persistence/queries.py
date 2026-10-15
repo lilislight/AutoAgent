@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from sqlalchemy import func, select, tuple_, or_
+from sqlalchemy import case, func, select, tuple_, or_
 
 from .models import Page
 from .projections import ProjectionBatch, light_record
@@ -154,6 +154,63 @@ class Queries:
                 tuple(rows[limit - 1][k] for k in order) if len(rows) > limit else None,
                 frontier,
             )
+
+    async def workflow_catalog(self, registered_ids, search, limit, cursor):
+        """Group metadata before paging, with ID fuzzy matching or hash prefixes."""
+        limit_value(limit)
+        revisions = meta.tables["workflow_revisions"]
+        table = select(
+            revisions.c.workflow_id, revisions.c.revision_id, revisions.c.workflow_version,
+            revisions.c.definition_hash, revisions.c.registered_at_us,
+            func.max(revisions.c.registered_at_us).over(partition_by=revisions.c.workflow_id).label("workflow_registered_at_us"),
+        ).subquery()
+        # Ordered characters also match abbreviated IDs, such as 'ordproc'.
+        escaped = [char.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for char in search if not char.isspace()]
+        id_match = func.lower(table.c.workflow_id).like("%" + "%".join(escaped) + "%", escape="\\")
+        prefix = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        revision_match = or_(
+            func.lower(table.c.definition_hash).like(prefix + "%", escape="\\"),
+            func.lower(table.c.revision_id).like(prefix + "%", escape="\\") & (":" in search),
+        ) & bool(search)
+        matches = select(
+            table.c.workflow_id, table.c.revision_id, table.c.workflow_version,
+            table.c.workflow_registered_at_us,
+            case((revision_match, table.c.revision_id), else_=None).label("matched_revision_id"),
+            func.row_number().over(partition_by=table.c.workflow_id, order_by=(case((revision_match, 0), else_=1), table.c.registered_at_us.desc(), table.c.revision_id.desc())).label("position"),
+        ).where(or_(id_match, revision_match)).subquery()
+        ranked = case((matches.c.workflow_id.in_(registered_ids), 0), else_=1)
+        newest_first = -matches.c.workflow_registered_at_us
+        statement = select(
+            matches.c.workflow_id, matches.c.revision_id, matches.c.workflow_version,
+            matches.c.workflow_registered_at_us.label("registered_at_us"),
+            matches.c.matched_revision_id, ranked.label("registration_rank"),
+        ).where(matches.c.position == 1)
+        if cursor is not None:
+            if not isinstance(cursor, (tuple, list)) or len(cursor) != 3 or type(cursor[0]) is not int or cursor[0] not in (0, 1) or type(cursor[1]) is not int or not isinstance(cursor[2], str):
+                raise ValueError("Invalid Workflow catalog cursor.")
+            statement = statement.where(tuple_(ranked, newest_first, matches.c.workflow_id) > tuple(cursor))
+        async with self.view() as (conn, _, _, frontier):
+            rows = [dict(row) for row in (await conn.execute(statement.order_by(ranked, newest_first, matches.c.workflow_id).limit(limit + 1))).mappings()]
+        return Page(tuple(rows[:limit]), (rows[limit - 1]["registration_rank"], -rows[limit - 1]["registered_at_us"], rows[limit - 1]["workflow_id"]) if len(rows) > limit else None, frontier)
+
+    async def workflow_revisions(self, workflow_id, prefix, limit, cursor):
+        """Return newest Revision metadata first, without loading definitions."""
+        limit_value(limit)
+        table = meta.tables["workflow_revisions"]
+        statement = select(*(column for column in table.columns if column.name != "snapshot_text")).where(table.c.workflow_id == workflow_id)
+        if prefix:
+            escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            statement = statement.where(or_(
+                func.lower(table.c.definition_hash).like(escaped + "%", escape="\\"),
+                func.lower(table.c.revision_id).like(escaped + "%", escape="\\"),
+            ))
+        if cursor is not None:
+            if not isinstance(cursor, (tuple, list)) or len(cursor) != 2 or type(cursor[0]) is not int or cursor[0] < 0 or not isinstance(cursor[1], str):
+                raise ValueError("Invalid Workflow Revision cursor.")
+            statement = statement.where(tuple_(table.c.registered_at_us, table.c.revision_id) < tuple(cursor))
+        async with self.view() as (conn, _, _, frontier):
+            rows = [dict(row) for row in (await conn.execute(statement.order_by(table.c.registered_at_us.desc(), table.c.revision_id.desc()).limit(limit + 1))).mappings()]
+        return Page(tuple(rows[:limit]), (rows[limit - 1]["registered_at_us"], rows[limit - 1]["revision_id"]) if len(rows) > limit else None, frontier)
 
     async def events(
         self, kind, stream, after, limit, mode, occurrence_id=None, invocation_id=None

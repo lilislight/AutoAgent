@@ -12,6 +12,7 @@ import weakref
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
+from tests.postgres import POSTGRES_TEST_URL
 
 try:
     from sqlalchemy import select
@@ -883,7 +884,7 @@ class SQLitePersistenceTests(PersistenceContracts, unittest.IsolatedAsyncioTestC
 
 
 @unittest.skipUnless(
-    os.environ.get("AUTOAGENT_TEST_POSTGRES_URL"),
+    POSTGRES_TEST_URL,
     "isolated PostgreSQL URL not configured",
 )
 class PostgreSQLPersistenceTests(
@@ -893,7 +894,7 @@ class PostgreSQLPersistenceTests(
         import asyncpg
         from sqlalchemy.engine import make_url
 
-        self.admin_url = make_url(os.environ["AUTOAGENT_TEST_POSTGRES_URL"])
+        self.admin_url = make_url(POSTGRES_TEST_URL)
         self.database_name = "autoagent_test_" + uuid4().hex
         conn = await asyncpg.connect(
             self.admin_url.set(drivername="postgresql").render_as_string(

@@ -25,8 +25,15 @@ to modify the archived implementation.
 Run V2 commands from the repository root through the root virtual environment:
 
 - `.venv/bin/python -m unittest discover -s tests -v`
+- `.venv/bin/python -m tests.postgres` starts the installed local PostgreSQL test
+  cluster and runs the full V2 suite with both database backends enabled.
 - `.venv/bin/python -m compileall -q autoagent tests`
 - `.venv/bin/python -m tests.benchmarks.benchmark_full_core`
+
+Run PostgreSQL tests for Persistence, Host, Server, and Agent recording changes.
+Do not treat skipped PostgreSQL tests as completed verification. Tests use
+`AUTOAGENT_TEST_POSTGRES_URL` when set, otherwise the ignored local
+`.autoagent/postgres/test-url`; each test creates and removes its own database.
 
 Run an archived V1 command only when work is explicitly scoped to `v1/`, and
 run it with `cwd=v1` so its same-named `autoagent` package cannot shadow V2.

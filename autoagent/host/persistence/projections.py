@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .schema import meta
 
@@ -113,6 +113,8 @@ class ProjectionBatch:
         self.source_loader = source_loader
         self.rows = {name: {} for name in PROJECTION_TABLES}
         self.dirty = {name: set() for name in PROJECTION_TABLES}
+        self.order = 0
+        self.ordinals = {}
 
     async def get(self, name, **identity):
         table = meta.tables[name]
@@ -132,6 +134,15 @@ class ProjectionBatch:
         previous = await self.get(name, **identity)
         row = dict(previous or identity)
         row.update(values)
+        if name in ("invocations", "node_executions", "operator_calls", "waits"):
+            row["updated_store_order"] = self.order
+        if name == "node_executions" and previous is None:
+            scope = (identity["invocation_id"], row["node_id"])
+            if scope not in self.ordinals:
+                self.ordinals[scope] = await self.connection.scalar(select(func.max(table.c.ordinal)).where(
+                    table.c.invocation_id == scope[0], table.c.node_id == scope[1])) or 0
+            self.ordinals[scope] += 1
+            row["ordinal"] = self.ordinals[scope]
         key = tuple(identity[c.name] for c in table.primary_key)
         self.rows[name][key] = row
         if previous is None or row != previous:
@@ -146,6 +157,7 @@ class ProjectionBatch:
         ]
 
     async def runtime(self, event, order, operator_definition_id=None):
+        self.order = order
         sid, iid, seq = event["session_id"], event["invocation_id"], event["sequence"]
         payload, name, stamp = (
             event["payload"],
@@ -202,6 +214,7 @@ class ProjectionBatch:
             )
             defaults = {
                 "node_id": value["node_id"],
+                "activations": [{"edge_id": a["edge_id"], "source_occurrence_id": a["source_occurrence_id"]} for a in value.get("activations", [])],
                 "scope": value["scope"],
                 "status": value["status"],
                 "recovery_attempts": value.get("recovery_attempts", 0),
@@ -760,6 +773,7 @@ class ProjectionBatch:
                     )
                 }
                 row["phase"] = occurrence["execution"]["phase"]
+                row["activations"] = [{"edge_id": a["edge_id"], "source_occurrence_id": a["source_occurrence_id"]} for a in occurrence.get("activations", [])]
                 np = [*path, "scheduler", "occurrences", oid]
                 if occurrence["execution"].get("mapped_input") is not None:
                     row["input_ref"] = source(

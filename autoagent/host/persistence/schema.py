@@ -44,6 +44,7 @@ table(
     c("format_version", Integer, False),
     c("projection_version", Integer, False),
     c("last_store_order", B, False),
+    c("store_id", Text, False),
     CheckConstraint("id = 1"),
 )
 table(
@@ -163,6 +164,7 @@ table(
 table(
     "invocations",
     c("invocation_id", Text, False, True),
+    c("updated_store_order", B, False),
     c("session_id", Text, False, False, "sessions.session_id"),
     c("workflow_revision_id", Text, False, False, "workflow_revisions.revision_id"),
     c("entry_node_id", Text, False),
@@ -212,6 +214,9 @@ table(
     "node_executions",
     c("invocation_id", Text, False, True, "invocations.invocation_id"),
     c("occurrence_id", Text, False, True),
+    c("updated_store_order", B, False),
+    c("ordinal", B, False),
+    c("activations", J, False),
     c("node_id", Text, False),
     c("scope", J, False),
     c("status", Text, False),
@@ -236,6 +241,7 @@ table(
     "operator_calls",
     c("invocation_id", Text, False, True, "invocations.invocation_id"),
     c("call_id", Text, False, True),
+    c("updated_store_order", B, False),
     c("occurrence_id", Text, False),
     c("operator_id", Text, False),
     c(
@@ -269,6 +275,7 @@ table(
     "waits",
     c("invocation_id", Text, False, True, "invocations.invocation_id"),
     c("wait_id", Text, False, True),
+    c("updated_store_order", B, False),
     c("occurrence_id", Text, False),
     c("kind", Text, False),
     c("status", Text, False),
@@ -330,7 +337,8 @@ indexes = {
     "operator_definitions": [
         ("operator_versions", ["operator_id", "version", "definition_id"])
     ],
-    "runtime_events": [("runtime_invocation_seq", ["invocation_id", "sequence"])],
+    "runtime_events": [("runtime_invocation_seq", ["invocation_id", "sequence"]),
+                       ("runtime_invocation_order", ["invocation_id", "store_order"])],
     "user_events": [
         ("user_occurrence_seq", ["invocation_id", "occurrence_id", "sequence"])
     ],
@@ -345,23 +353,30 @@ indexes = {
         ("invocation_status_time", ["status", "started_at_us", "invocation_id"]),
         ("invocation_session_time", ["session_id", "started_at_us", "invocation_id"]),
         ("invocation_root", ["root_invocation_id", "invocation_id"]),
+        ("invocation_parent", ["parent_invocation_id", "unit_index", "invocation_id"]),
+        ("invocation_root_update", ["root_invocation_id", "updated_store_order"]),
     ],
     "node_executions": [
-        ("node_statistics", ["node_id", "status", "started_at_us", "invocation_id"])
+        ("node_statistics", ["node_id", "status", "started_at_us", "invocation_id"]),
+        ("node_updates", ["invocation_id", "updated_store_order"]),
+        ("node_ordinal", ["invocation_id", "node_id", "ordinal"]),
     ],
     "operator_calls": [
         ("call_occurrence", ["invocation_id", "occurrence_id", "unit_index"]),
+        ("call_updates", ["invocation_id", "updated_store_order"]),
         (
             "operator_statistics",
             ["operator_id", "status", "started_at_us", "invocation_id"],
         ),
     ],
     "waits": [("invocation_wait_status", ["invocation_id", "status", "wait_id"]),
+              ("wait_updates", ["invocation_id", "updated_store_order"]),
               ("wait_deadline", ["status", "deadline_at_us", "invocation_id"])],
     "edge_evaluations": [
         ("edge_statistics", ["edge_id", "source_status", "invocation_id"])
     ],
     "graph_changes": [
+        ("graph_updates", ["invocation_id", "store_order", "change_index"]),
         ("graph_replay", ["invocation_id", "sequence", "change_index"]),
         (
             "graph_entity_history",
@@ -373,3 +388,6 @@ for name, items in indexes.items():
     t = meta.tables[name]
     for index_name, cols in items:
         Index(index_name, *[t.c[x] for x in cols])
+
+g = meta.tables['graph_changes']
+Index('graph_edge_order', g.c.invocation_id, g.c.change['edge_id'].as_string(), g.c.store_order)

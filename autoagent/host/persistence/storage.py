@@ -7,6 +7,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from uuid import uuid4
 
 from sqlalchemy import event, insert, inspect, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -19,8 +20,8 @@ from .models import ConflictError, FormatError
 from .projections import ProjectionBatch, light_record
 from .schema import meta
 
-FORMAT_VERSION = 2
-PROJECTION_VERSION = 2
+FORMAT_VERSION = 3
+PROJECTION_VERSION = 3
 SOURCES = {
     "workflow_revision": ("workflow_revisions", "revision_id", "snapshot_text"),
     "operator_definition": ("operator_definitions", "definition_id", "definition_text"),
@@ -135,7 +136,8 @@ class Storage:
                 if not set(meta.tables).issubset(names):
                     raise FormatError("Database is not a complete Persistence schema.")
                 info = (
-                    (await conn.execute(select(meta.tables["persistence_meta"])))
+                    (await conn.execute(select(meta.tables["persistence_meta"].c.format_version,
+                                               meta.tables["persistence_meta"].c.projection_version)))
                     .mappings()
                     .all()
                 )
@@ -166,6 +168,7 @@ class Storage:
                         format_version=FORMAT_VERSION,
                         projection_version=PROJECTION_VERSION,
                         last_store_order=0,
+                        store_id=uuid4().hex,
                     )
                 )
 
@@ -515,6 +518,8 @@ class Storage:
                     ],
                 )
         await self.projections(conn, batch)
+        if any(entry.kind == 'checkpoint' and entry.anchor for entry in entries):
+            await conn.execute(update(meta.tables['persistence_meta']).values(store_id=uuid4().hex))
         await conn.execute(
             update(meta.tables["persistence_meta"]).values(last_store_order=order)
         )

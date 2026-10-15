@@ -1,0 +1,88 @@
+"""Deployment settings for the standalone Server and its embedded UI."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from collections.abc import Mapping
+import math
+import re
+
+
+def route_prefix(value: str, *, root: bool = False) -> str:
+    if root and value == "/":
+        return value
+    if not isinstance(value, str) or not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)+", value):
+        raise ValueError("Route prefixes must contain slash-separated letters, digits, underscores or hyphens.")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ServerSettings:
+    host: str = "127.0.0.1"
+    port: int = 8765
+    api_prefix: str = "/api/v2"
+    ui_path: str = "/"
+    ui_directory: Path | None = None
+    page_size: int = 50
+    max_page_size: int = 200
+    query_timeout_seconds: float = 15
+    trace_max_subscribers: int = 128
+    trace_coalesce_ms: float = 100
+    trace_heartbeat_seconds: float = 10
+    operation_concurrency: int = 32
+    operation_receipts: int = 256
+    operation_ttl_seconds: float = 300
+
+    def __post_init__(self):
+        if not isinstance(self.host, str) or not self.host.strip():
+            raise ValueError("Server host cannot be empty.")
+        if type(self.port) is not int or not 1 <= self.port <= 65535:
+            raise ValueError("Server port must be between 1 and 65535.")
+        route_prefix(self.api_prefix)
+        route_prefix(self.ui_path, root=True)
+        if self.ui_path == self.api_prefix or self.ui_path.startswith(self.api_prefix + "/"):
+            raise ValueError("The UI cannot be mounted inside the API prefix.")
+        if any(type(v) is not int or not 1 <= v <= 1000 for v in (self.page_size, self.max_page_size)):
+            raise ValueError("Page sizes must be between 1 and 1000.")
+        if self.page_size > self.max_page_size:
+            raise ValueError("Default page size cannot exceed the maximum.")
+        for name in ('operation_concurrency','operation_receipts'):
+            if type(getattr(self,name)) is not int or getattr(self,name)<1:
+                raise ValueError(f'{name} must be a positive integer.')
+        if self.operation_receipts<self.operation_concurrency:
+            raise ValueError('operation_receipts cannot be smaller than operation_concurrency.')
+        if isinstance(self.operation_ttl_seconds,bool) or not math.isfinite(self.operation_ttl_seconds) or self.operation_ttl_seconds<=0:
+            raise ValueError('operation_ttl_seconds must be positive and finite.')
+        if type(self.trace_max_subscribers) is not int or self.trace_max_subscribers < 1:
+            raise ValueError('trace_max_subscribers must be a positive integer.')
+        for name in ('trace_coalesce_ms', 'trace_heartbeat_seconds'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or name == 'trace_heartbeat_seconds' and not 0 < value <= 30:
+                raise ValueError('Invalid trace notification timing.')
+        value = self.query_timeout_seconds
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError("Query timeout must be finite and positive.")
+
+    @classmethod
+    def from_environment(cls, env: Mapping[str, str], *, root: Path | None = None):
+        directory = env.get("AUTOAGENT_SERVER_UI_DIRECTORY", "").strip()
+        path = Path(directory).expanduser() if directory else None
+        if path is not None and not path.is_absolute():
+            path = (root or Path.cwd()) / path
+        return cls(
+            host=env.get("AUTOAGENT_SERVER_HOST", "127.0.0.1"),
+            port=int(env.get("AUTOAGENT_SERVER_PORT", "8765")),
+            api_prefix=env.get("AUTOAGENT_SERVER_API_PREFIX", "/api/v2"),
+            ui_path=env.get("AUTOAGENT_SERVER_UI_PATH", "/"),
+            ui_directory=path,
+            page_size=int(env.get("AUTOAGENT_SERVER_PAGE_SIZE", "50")),
+            max_page_size=int(env.get("AUTOAGENT_SERVER_MAX_PAGE_SIZE", "200")),
+            query_timeout_seconds=float(env.get("AUTOAGENT_SERVER_QUERY_TIMEOUT_SECONDS", "15")),
+            trace_max_subscribers=int(env.get('AUTOAGENT_SERVER_TRACE_MAX_SUBSCRIBERS', '128')),
+            trace_coalesce_ms=float(env.get('AUTOAGENT_SERVER_TRACE_COALESCE_MS', '100')),
+            trace_heartbeat_seconds=float(env.get('AUTOAGENT_SERVER_TRACE_HEARTBEAT_SECONDS', '10')),
+            operation_concurrency=int(env.get('AUTOAGENT_SERVER_OPERATION_CONCURRENCY','32')),
+            operation_receipts=int(env.get('AUTOAGENT_SERVER_OPERATION_RECEIPTS','256')),
+            operation_ttl_seconds=float(env.get('AUTOAGENT_SERVER_OPERATION_TTL_SECONDS','300')),
+        )

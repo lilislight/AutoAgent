@@ -20,6 +20,18 @@ class HostCapacityError(HostError):
     """Configured admission or memory capacity is exhausted."""
 
 
+class HostNotFoundError(HostError):
+    """A requested historical or registered object does not exist."""
+
+
+class HostRunConflict(HostError):
+    """A registered Revision or Session cannot accept a new Root execution."""
+
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
 class ProjectError(HostError):
     """Project discovery, imports or configuration are invalid."""
 
@@ -132,6 +144,8 @@ class HostSettings:
                 encoding_cache_bytes=integer(
                     "AUTOAGENT_ENCODING_CACHE_BYTES", 16777216
                 ),
+                trace_snapshot_bytes=integer("AUTOAGENT_TRACE_SNAPSHOT_BYTES", 134217728),
+                trace_snapshot_ttl_seconds=number("AUTOAGENT_TRACE_SNAPSHOT_TTL_SECONDS", 300),
                 retry_attempts=integer("AUTOAGENT_RETRY_ATTEMPTS", 3),
                 retry_delay_ms=float(env.get("AUTOAGENT_RETRY_DELAY_MS", "50")),
             ),

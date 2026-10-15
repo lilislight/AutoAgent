@@ -27,6 +27,7 @@ from .errors import (
     WorkflowCompileError,
 )
 from .operators import (
+    OperatorCallContext, operator_call_context,
     Operator,
     OperatorRegistration,
     OperatorRegistry,
@@ -113,6 +114,7 @@ from .workflow import (
 )
 
 __all__ = [
+    "OperatorCallContext", "operator_call_context",
     "GraphPauseRequested",
     "GraphPaused",
     "GraphResumed",

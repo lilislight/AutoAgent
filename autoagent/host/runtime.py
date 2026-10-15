@@ -65,6 +65,7 @@ class Runtime:
         self.journal = InMemoryUserEventJournal()
         self.definitions = {}
         self.revisions = {}
+        self.workflow_irs = {}
         self.workflow_ids = {}
         self.resident = {}
         self.owners = {}
@@ -78,13 +79,19 @@ class Runtime:
             runtime_event_sink=self,
             user_event_sink=self,
             user_event_journal=self.journal,
-            runtime_lifespan=self._resources if lifespan is not None else None,
+            runtime_lifespan=self._resources,
         )
 
     @asynccontextmanager
     async def _resources(self):
-        async with self.lifespan(self.setup):
-            yield
+        from autoagent.agent.recording import runtime_llm_recorder
+
+        with runtime_llm_recorder(self.persistence):
+            if self.lifespan is None:
+                yield
+            else:
+                async with self.lifespan(self.setup):
+                    yield
 
     async def prepare(self):
         await self.app.aprepare()
@@ -123,7 +130,16 @@ class Runtime:
             await self.persistence.register_workflow(snapshot)
             self.revisions[revision] = snapshot
         for workflow in self.setup.workflows:
-            self.app.register_workflow(workflow)
+            pending = [self.app.register_workflow(workflow)]
+            seen = set()
+            while pending:
+                current = pending.pop()
+                if current.workflow_revision_id in seen:
+                    continue
+                seen.add(current.workflow_revision_id)
+                self.workflow_irs[current.workflow_revision_id] = current
+                pending.extend(node.executable.workflow for node in current.nodes
+                    if isinstance(node.executable, CommandIR) and node.executable.workflow is not None)
         for wid in {snapshot.workflow_id for snapshot in self.revisions.values()}:
             self.workflow_ids[wid] = self.app.workflow_definition_snapshot(wid).workflow_revision_id
         for registration in self.setup.operators:

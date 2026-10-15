@@ -10,8 +10,8 @@ build/
 dist/
 *.egg-info/
 ui/node_modules/
+autoagent/server/static/
 ui/.test-dist/
 ui/*.tsbuildinfo
 ui/vite.config.js
 ui/vite.config.d.ts
-core_workflow_checkpoint.json

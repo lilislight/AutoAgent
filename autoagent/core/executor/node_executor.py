@@ -13,10 +13,13 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Executor, Future
+from contextvars import copy_context
+from dataclasses import replace
 from uuid import uuid4
 
 from ..commands import CommandIR, Wait
 from ..operators import Operator, ValueContract, is_stream_value
+from ..operators.context import OperatorCallContext, operator_call_context
 from ..runtime.events import (
     OperatorCallCompleted,
     OperatorCallFailed,
@@ -422,7 +425,12 @@ class NodeExecutor:
             return contract.validate(returned), contract
 
         try:
-            output, contract = await invoke_and_validate()
+            parent_context = OperatorCallContext.current() or OperatorCallContext()
+            with operator_call_context(replace(
+                parent_context, node_id=node.id, occurrence_id=occurrence_id,
+                operator_id=operator.id, operator_call_id=call_id, unit_index=unit_index,
+            )):
+                output, contract = await invoke_and_validate()
             output_record = contract._to_record_validated(output)
         except _RuntimeEmitFailure as failure:
             raise failure.error from failure
@@ -620,7 +628,8 @@ async def _run_sync(
     *args: object,
     defer_release: Callable[[Future[object]], None] | None = None,
 ) -> object:
-    future = pool.submit(handler, *args)
+    context = copy_context()
+    future = pool.submit(context.run, handler, *args)
     # This cancels queued work when the caller is cancelled. Python cannot
     # forcibly interrupt a sync callable that has already entered user code.
     try:

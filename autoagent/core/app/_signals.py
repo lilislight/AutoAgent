@@ -79,7 +79,7 @@ class SignalRuntime:
         contract = dict(workflow.signal_endpoints).get(request.endpoint)
         if contract is None:
             fail('SIGNAL_ENDPOINT_UNKNOWN', 'Target Workflow does not declare this Signal Endpoint.')
-        payload = contract.to_record(request.payload)
+        payload = contract.to_record(contract.restore(request.payload))
         size = payload_size(payload)
         limits = workflow.signal_limits
         if size > limits.max_message_bytes:

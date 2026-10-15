@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from sqlalchemy import delete, func, select, update
 
 from .models import ConflictError
@@ -20,7 +22,13 @@ class Maintenance:
             self.writer.check_open()
             await self.writer.flush()
             async with self.writer.mutation, self.storage.engine.begin() as conn:
-                return await operation(conn, *args)
+                result = await operation(conn, *args)
+                if operation.__name__ in ("rebuild", "purge"):
+                    await conn.execute(update(meta.tables['persistence_meta']).values(store_id=uuid4().hex))
+            async with self.writer.condition:
+                self.writer.commit_revision += 1
+                self.writer.condition.notify_all()
+            return result
 
     async def gc(self, conn):
         refs = meta.tables["artifact_refs"]
@@ -177,6 +185,12 @@ class Maintenance:
             members.c.session_id.in_(sids)
         )
         cpids = (await conn.execute(checkpoint_ids.distinct())).scalars().all()
+        from sqlalchemy import inspect
+
+        if await conn.run_sync(lambda sync: inspect(sync).has_table("llm_calls")):
+            from .llm_calls import llm_calls
+
+            await conn.execute(delete(llm_calls).where(llm_calls.c.invocation_id.in_(ids)))
         for name in ("graph_changes", "edge_evaluations", "operator_calls", "waits"):
             table = meta.tables[name]
             await conn.execute(delete(table).where(table.c.invocation_id.in_(ids)))

@@ -14,6 +14,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+skills = [
+  "PyYAML>=6,<7",
+]
+agent = [
+  "jsonschema>=4.23,<5",
+  "openai>=2.53,<3",
+]
+mcp = [
+  "mcp>=2.3,<3",
+  "jsonschema>=4.20,<5",
+  "referencing>=0.31,<1",
+]
+server = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "sqlalchemy[asyncio]>=2.0.54,<2.1",
+  "aiosqlite>=0.22,<1",
+  "asyncpg>=0.31,<1",
+  "python-dotenv>=1.1,<2",
+]
 host = [
   "sqlalchemy[asyncio]>=2.0.54,<2.1",
   "aiosqlite>=0.22,<1",
@@ -27,7 +47,8 @@ persistence = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.host", "autoagent.host.*"]
+include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.host", "autoagent.host.*", "autoagent.server"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]
+"autoagent.server" = ["static/index.html", "static/assets/*"]

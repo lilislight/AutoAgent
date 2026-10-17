@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { beforeCalls, callPresentation, executionTiming, pickDefinition, stageDefinitionPath, valueMessage } from '../src/inspectorModel.js';
+import { beforeCalls, callPresentation, executionTiming, pickDefinition, stageDefinitionPath, stageTabs, systemCommandId, valueMessage } from '../src/inspectorModel.js';
 import type { TraceRow } from '../src/types.js';
 const row: TraceRow = { invocation_id:'run', occurrence_id:'node@root', values:[] };
 test('untimed commands do not display the default zero as measured Operator execution', () => {
@@ -32,4 +32,15 @@ test('stage definitions point at the recorded hook, including faulted phases and
 test('preparation faults stay before Calls while aggregation faults belong to result processing', () => {
   assert.equal(beforeCalls({...row,event_name:'node.faulted',error_phase:'input_mapping'}),true);
   assert.equal(beforeCalls({...row,event_name:'node.faulted',error_phase:'aggregation'}),false);
+});
+test('stage sections expose owned values without empty or duplicate error and routing sections', () => {
+  assert.deepEqual(stageTabs({...row,event_name:'capability.resolved'}), ['Summary','Definition']);
+  assert.deepEqual(stageTabs({...row,event_name:'input.mapped',values:['mapped_input']}), ['Summary','Input / Output','Definition']);
+  assert.deepEqual(stageTabs({...row,event_name:'routing.resolved',values:['conditions']}), ['Summary','Execution']);
+  assert.deepEqual(stageTabs({...row,event_name:'node.faulted',error_phase:'aggregation',values:['error']}), ['Summary','Definition']);
+  assert.deepEqual(stageTabs({...row,event_name:'node.faulted',error_phase:'validation',values:['error']}), ['Summary']);
+});
+test('durable wait inspectors preserve existing command prefixes', () => {
+  assert.equal(systemCommandId('timer'),'system_command:timer');
+  assert.equal(systemCommandId('system_command:select'),'system_command:select');
 });

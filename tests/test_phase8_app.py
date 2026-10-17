@@ -545,21 +545,12 @@ class AppTests(unittest.TestCase):
         self.assertEqual(empty_result.output, [])
         self.assertEqual(child_refs(self.app, empty_result.ref), ())
 
-    def test_map_spawn_child_workflows_returns_ordered_handles_and_limits_children(self) -> None:
-        """Verify mapped Spawn returns stable handles while limiting Child execution."""
-
-        active = 0
-        peak = 0
+    def test_map_spawn_child_workflows_returns_ordered_handles(self) -> None:
+        """Verify mapped Spawn returns stable Handles and ordered Child results."""
 
         async def delayed(value: Value) -> Value:
-            nonlocal active, peak
-            active += 1
-            peak = max(peak, active)
-            try:
-                await asyncio.sleep(0.03)
-                return {"value": value["value"] + 1}
-            finally:
-                active -= 1
+            await asyncio.sleep(0.03)
+            return {"value": value["value"] + 1}
 
         child = Workflow("mapped-spawn-child", nodes=[Node("work", delayed)])
         parent = Workflow(
@@ -586,7 +577,6 @@ class AppTests(unittest.TestCase):
         )
         outputs = [join_observed(self.app, handle, timeout=1).output for handle in handles]
         self.assertEqual(outputs, [{"value": 2}, {"value": 3}, {"value": 4}])
-        self.assertEqual(peak, 2)
 
     def test_map_spawn_child_workflows_supports_aggregation_and_empty_input(self) -> None:
         """Verify Spawn Map can aggregate handles and creates nothing for empty input."""

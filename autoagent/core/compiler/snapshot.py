@@ -198,6 +198,7 @@ def workflow_semantic_definition(
                     "mode": node.recovery_mode.mode,
                     "max_attempts": node.recovery_mode.max_attempts,
                 },
+                **({"timeout": asdict(node.timeout)} if node.timeout is not None else {}),
             }
             for node in nodes
         ],

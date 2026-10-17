@@ -64,9 +64,13 @@ def light_record(item, *, availability=False):
                 "cancel_reason",
                 "error",
                 "fault",
+                "pending_recovery",
+                "reused_calls",
+                "command_inputs",
             }
         ):
             result[key] = (
+                value is not None if item["path"][-1] == "pending_recovery" else
                 {k: value.get(k) for k in ("type", "code", "phase")}
                 if isinstance(value, dict) and item["path"][-1] in ("error", "fault")
                 else True
@@ -90,10 +94,13 @@ def light_record(item, *, availability=False):
             "resume_receipts",
             "resume_receipt_frontiers",
             "cancel_origin",
+            "pending_recovery",
+            "reused_calls",
+            "command_inputs",
             "reason",
             "cancel_reason",
         }:
-            result[key] = True if availability and value is not None else None
+            result[key] = (value is not None) if key == "pending_recovery" else True if availability and value is not None else None
         elif key in {"error", "fault"}:
             result[key] = (
                 {k: value.get(k) for k in ("type", "code", "phase")}
@@ -202,6 +209,8 @@ class ProjectionBatch:
                     ),
                     "status": "running",
                     "control_state": "active",
+                    "recovery_count": 0,
+                    "recovery_pending": False,
                     "started_at_us": stamp,
                     "last_sequence": seq,
                     "input_ref": ref("payload", "input"),
@@ -222,7 +231,10 @@ class ProjectionBatch:
             for key in ("ready_at_us", "started_at_us", "completed_at_us"):
                 if key in value:
                     defaults[key] = value[key]
-            defaults["phase"] = value.get("execution", {}).get("phase", "none")
+            workspace = value.get('execution', {})
+            defaults["phase"] = workspace.get("phase", "none")
+            if previous is None and 'input_mapped' in workspace.get('completed_stages', ()):
+                defaults['input_ref'] = ref(*path, 'execution', 'mapped_input')
             if value.get("error"):
                 defaults.update(
                     error_type=value["error"]["type"],
@@ -468,11 +480,16 @@ class ProjectionBatch:
                         "status",
                         "pending_outcome",
                         "control_state",
+                        "recovery_count",
+                        "last_recovery_id",
                         "started_at_us",
                         "completed_at_us",
                     )
                     if k in value
                 }
+                values['recovery_pending'] = bool(value.get('pending_recovery'))
+                if name == 'invocation.reopened':
+                    values.update(error_ref=None, error_type=None, error_code=None, output_ref=None)
                 await self.put("invocations", {"invocation_id": iid}, values)
                 if "status" in value:
                     change("invocation", iid, {"status": value["status"]})
@@ -482,6 +499,8 @@ class ProjectionBatch:
                 )
                 for item in value.get("child_plans", {}).values():
                     await plan(item)
+            elif path == ['invocation', 'pending_recovery']:
+                await self.put('invocations', {'invocation_id':iid}, {'recovery_pending':bool(value)})
             elif path[:2] == ["invocation", "child_plans"] and len(path) == 3:
                 await plan(value)
             elif path[:2] == ["invocation", "scheduler"] and len(path) >= 4:
@@ -733,6 +752,9 @@ class ProjectionBatch:
                 "status": inv["status"],
                 "pending_outcome": inv.get("pending_outcome"),
                 "control_state": inv.get("control_state", "active"),
+                "recovery_count": inv.get("recovery_count", 0),
+                "last_recovery_id": inv.get("last_recovery_id"),
+                "recovery_pending": bool(inv.get("pending_recovery")),
                 "started_at_us": inv["started_at_us"],
                 "completed_at_us": inv["completed_at_us"],
                 "last_sequence": seq,

@@ -5,12 +5,26 @@ export function recordIdentity(kind: ExecutionRecordSelection['kind'], row: Trac
   return kind === 'node' ? row.occurrence_id : kind === 'call' ? row.call_id : row.wait_id;
 }
 export function selectRecord(kind: ExecutionRecordSelection['kind'], row: TraceRow, section?: ExecutionRecordSelection['section']): Selection {
+  if (isExternalWaitRecord(kind, row)) {
+    const selection = selectRecord('node', row, section);
+    const waitId = kind === 'wait' ? row.wait_id : row.call_id;
+    return selection?.record && waitId ? { ...selection, record: { ...selection.record, waitId } } : selection;
+  }
   const id = kind === 'edge' ? row.edge_id as string | undefined : row.node_id;
   const identity = recordIdentity(kind, row);
   return id && identity ? { kind: kind === 'edge' ? 'edge' : 'node', id, record: { kind, id: identity, ...(section ? { section } : {}) } } : null;
 }
+export function isExternalWaitRecord(kind: ExecutionRecordSelection['kind'], row: TraceRow): boolean {
+  return kind === 'call' && row.operator_id === 'system_command:wait'
+    || kind === 'wait' && (row.kind === 'external' || row.wait_kind === 'external');
+}
+export function selectResponseNode(row: TraceRow): Selection {
+  const selection = selectRecord('node', row, 'Actions');
+  return selection?.record && row.wait_id ? { ...selection, record: { ...selection.record, waitId: row.wait_id } } : null;
+}
 export function recordMatches(selection: NonNullable<Selection>, row: TraceRow): boolean {
   const record = selection.record;
+  if (record?.kind === 'node' && (row.call_id || row.wait_id) || record?.kind === 'call' && row.wait_id) return false;
   return Boolean(record && recordIdentity(record.kind, row) === record.id && (record.kind === 'edge'
     ? selection.kind === 'edge' && row.edge_id === selection.id
     : selection.kind === 'node' && row.node_id === selection.id));
@@ -22,8 +36,7 @@ export function selectedInterval(kind: ExecutionRecordSelection['kind'], row: Tr
   return typeof start === 'number' ? { start_at_us: start, end_at_us: typeof end === 'number' ? end : null, status: row.status } : null;
 }
 export function parentRecord(selection: NonNullable<Selection>, row: TraceRow): Selection {
-  if (selection.record?.kind === 'wait' && row.wait_id) return { kind: 'node', id: selection.id, record: { kind: 'call', id: row.wait_id } };
   const id = row.node_id;
   const occurrence = row.occurrence_id ?? row.source_occurrence_id;
-  return id && occurrence ? { kind: 'node', id, record: { kind: 'node', id: occurrence } } : null;
+  return id && occurrence ? { kind: 'node', id, record: { kind: 'node', id: occurrence, section: 'Execution' } } : null;
 }

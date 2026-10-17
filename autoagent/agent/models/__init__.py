@@ -1,7 +1,7 @@
 """Public, serializable generation and embedding models."""
 
 from .embedding import (
-    EmbeddingInput, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage,
+    EmbeddingInput, EmbeddingProviderOptions, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage,
     EmbeddingVector,
 )
 
@@ -26,7 +26,7 @@ from .structured import LLMStructuredOutputError, parse_response, validate_respo
 
 __all__ = [
     "LLMStructuredOutputError", "parse_response", "validate_response",
-    "EmbeddingInput", "EmbeddingRequest", "EmbeddingResponse", "EmbeddingUsage",
+    "EmbeddingInput", "EmbeddingProviderOptions", "EmbeddingRequest", "EmbeddingResponse", "EmbeddingUsage",
     "EmbeddingVector",
     "ToolOutput",
     "AssetSource", "AudioContent", "DataSource", "FileContent", "ImageContent",

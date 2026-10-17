@@ -1,4 +1,8 @@
-import type { LocationState } from "./types.js";
+import type { InspectorTab, LocationState } from "./types.js";
+
+function readSection(value: string | null): InspectorTab | undefined {
+  return value === 'Summary' || value === 'Input / Output' || value === 'Execution' || value === 'Definition' || value === 'Actions' ? value : undefined;
+}
 
 export function readLocation(search: string): LocationState {
   const params = new URLSearchParams(search);
@@ -21,10 +25,15 @@ export function readLocation(search: string): LocationState {
       const id = params.get('record');
       if (id && (kind === 'node' || kind === 'call' || kind === 'wait' || kind === 'edge') &&
           (kind === 'edge' ? state.selection.kind === 'edge' : state.selection.kind === 'node')) {
-        const section = params.get('section');
+        const section = readSection(params.get('section'));
         state.selection.record = { kind, id };
-        if (section === 'Summary' || section === 'Input / Output' || section === 'Execution' || section === 'Evaluations' || section === 'Definition') state.selection.record.section = section;
+        if (kind === 'node' && params.get('response_wait')) state.selection.record.waitId = params.get('response_wait')!;
+        if (section) state.selection.record.section = section;
       } else state.selection = null;
+    }
+    if (state.selection && !state.selection.record) {
+      const section = readSection(params.get('section'));
+      if (section) state.selection.section = section;
     }
   }
   return state;
@@ -40,10 +49,12 @@ export function writeLocation(state: LocationState): string {
     if (state.executionView) params.set("pane", state.executionView);
   }
   if (state.selection) params.set(state.selection.kind === "workflow" ? "definition" : state.selection.kind, state.selection.id);
+  if (state.view === 'executions' && state.selection?.section && !state.selection.record) params.set('section', state.selection.section);
   if (state.view === 'executions' && state.selection?.record) {
     params.set('record_kind', state.selection.record.kind);
     params.set('record', state.selection.record.id);
     if (state.selection.record.section) params.set('section', state.selection.record.section);
+    if (state.selection.record.kind === 'node' && state.selection.record.waitId) params.set('response_wait', state.selection.record.waitId);
   }
   const query = params.toString();
   return query ? `?${query}` : "";

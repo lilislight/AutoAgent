@@ -92,6 +92,8 @@ def common_parameters(request: LLMRequest, protocol: str, provider_id: str) -> d
         if value is not None:
             result[key] = value
     if request.provider_options is not None:
+        if request.provider_options.provider_id not in {None, provider_id}:
+            unsupported("Provider options target another connection.", provider_id, protocol)
         if request.provider_options.protocol != protocol:
             unsupported("Provider options target another protocol.", provider_id, protocol)
         values = deepcopy(request.provider_options.values)

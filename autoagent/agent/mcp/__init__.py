@@ -9,6 +9,7 @@ from .tools import MCPTool
 from .callbacks import MCPCallbacks
 from .oauth_callback import MCPOAuthCallbackServer
 from .registry import MCPToolRegistry
+from .operations import MCPReadResourceRequest, MCPGetPromptRequest, MCPOperations
 from .storage import MCPFileTokenStorage
 from .streaming import MCPToolStreamChunk
 from .recovery import MCPReconnectPolicy, MCPSubscriptionUpdate, MCPChangeEvent
@@ -18,6 +19,7 @@ from .content import (
 )
 
 __all__ = [
+    "MCPReadResourceRequest", "MCPGetPromptRequest", "MCPOperations",
     "MCPReconnectPolicy", "MCPSubscriptionUpdate", "MCPChangeEvent",
     "MCPContentError", "MCPResourceContent", "MCPResourceResponse", "MCPPromptResponse",
     "mcp_content", "mcp_resource_response", "mcp_prompt_response",

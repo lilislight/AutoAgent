@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from .checkpoint import SessionCheckpoint
+from .values import thaw
 from .state import RuntimeState, ChildResult, child_input_digest, validate_pause_boundary
 
 
@@ -13,6 +14,33 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
     """Validate closure, causal phases, identities and external Wait uniqueness."""
     if not isinstance(root_session_id, str) or not root_session_id.strip() or root_session_id not in states:
         raise ValueError("Graph root must identify a bundled Session.")
+    root = states[root_session_id].invocation
+    if root is not None and root.pending_recovery is not None:
+        # Preparing a graph is a durable barrier: a Child may have accepted the
+        # new round while the Root still carries its old terminal outcome.
+        plan = root.pending_recovery
+        if set(plan) != {'request_id', 'states'} or root_session_id not in plan['states']:
+            raise ValueError('Invalid Root recovery barrier.')
+        effective = dict(states)
+        for sid, record in plan['states'].items():
+            if sid not in states:
+                raise ValueError('Recovery plan references a missing Session.')
+            candidate = RuntimeState.from_record(thaw(record))
+            current = states[sid]
+            before, after = current.invocation, candidate.invocation
+            if (before.id != after.id or before.workflow_revision_id != after.workflow_revision_id
+                    or after.last_recovery_id != plan['request_id'] or after.pending_recovery is not None
+                    or after.status != 'running'):
+                raise ValueError('Recovery plan changes execution identity or lifecycle.')
+            accepted = before.last_recovery_id == plan['request_id']
+            if accepted:
+                if before != after:
+                    raise ValueError('Execution advanced before the Root recovery barrier cleared.')
+            elif not before.terminal or before.recovery_count + 1 != after.recovery_count:
+                raise ValueError('Recovery plan does not follow the current terminal round.')
+            effective[sid] = replace(candidate, sequence=current.sequence, last_event_id=current.last_event_id)
+        validate_graph(root_session_id, effective)
+        return
     owners = {}
     if isinstance(states[root_session_id].invocation, ChildResult):
         raise ValueError("A compacted Child cannot become a Root.")

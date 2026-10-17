@@ -16,6 +16,7 @@ from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
     NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed,
+    RecoveryPrepared, InvocationReopened,
     CommandAwakened, WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationSettling,
     InvocationFailed, InvocationCancelled, ChildInvocationPlanned,
     ChildInvocationPhaseChanged,
@@ -43,7 +44,7 @@ class TransitionPlanner:
 
     def plan(self, state, payload, *, occurred_at_us, session_id=None,
              invocation_id=None, scheduler_delta=None, _execution_index=None,
-             _output_node_ids=None):
+             _output_node_ids=None, recovery_state=None, recovery_plan=None):
         validate_payload(payload)
         operations = []
         def put(path, value, op="replace"):
@@ -90,6 +91,26 @@ class TransitionPlanner:
             return StateDelta(tuple(operations))
         if inv is None or inv.id != invocation_id:
             raise RuntimeTransitionError("INVOCATION_MISMATCH", "Event targets another Invocation.")
+        if isinstance(payload, RecoveryPrepared):
+            if inv.status not in {'failed', 'cancelled'} or inv.pending_recovery is not None or recovery_plan is None:
+                raise RuntimeTransitionError('RECOVERY_PREPARATION_INVALID', 'Recovery requires a settled failed or cancelled Root.')
+            put(('invocation', 'pending_recovery'), freeze(recovery_plan))
+            return StateDelta(tuple(operations))
+        if isinstance(payload, InvocationReopened):
+            candidate = recovery_state
+            if candidate is None or candidate.session.id != session_id or candidate.invocation.id != inv.id:
+                raise RuntimeTransitionError('RECOVERY_STATE_INVALID', 'Recovery must preserve Session and Invocation identities.')
+            if (candidate.invocation.workflow_revision_id != inv.workflow_revision_id
+                    or candidate.invocation.recovery_count != inv.recovery_count + 1
+                    or candidate.invocation.last_recovery_id != payload.request_id
+                    or payload.recovery_count != candidate.invocation.recovery_count
+                    or payload.previous_status != inv.status or candidate.invocation.status != 'running'
+                    or candidate.invocation.pending_recovery is not None
+                    or inv.status not in {'failed', 'cancelled'}):
+                raise RuntimeTransitionError('RECOVERY_STATE_INVALID', 'Recovery cannot replace another Revision or execution round.')
+            put(('session',), replace(candidate.session, updated_at_us=occurred_at_us))
+            put(('invocation',), candidate.invocation)
+            return StateDelta(tuple(operations))
         if isinstance(payload, (GraphPauseRequested, GraphPaused, GraphResumed)):
             expected = {GraphPauseRequested: {"active"}, GraphPaused: {"pausing"},
                         GraphResumed: {"paused", "pausing"}}[type(payload)]
@@ -121,7 +142,8 @@ class TransitionPlanner:
                 inv.started_at_us, inv.completed_at_us, payload.parent_session_id,
                 payload.parent_invocation_id, payload.creation_id, payload.unit_index,
                 child_input_digest(inv.input), release_child_inputs(inv.child_plans),
-                inv.signals, inv.cancel_origin, inv.resume_receipts, inv.resume_receipt_frontiers)
+                inv.signals, inv.cancel_origin, inv.resume_receipts, inv.resume_receipt_frontiers,
+                inv.recovery_count, inv.last_recovery_id)
             put(("invocation",), result)
             put(("session",), replace(session, context=freeze({}), context_path_revisions=MappingProxyType({}), updated_at_us=occurred_at_us))
             return StateDelta(tuple(operations))
@@ -534,7 +556,7 @@ class TransitionPlanner:
             )
         for plan in (*delta.ready, *delta.skipped):
             _validate_scope(plan.scope, "Occurrence scope")
-            if plan.id != occurrence_key(plan.node_id, plan.scope):
+            if plan.id != scheduler.occurrence_ids.get(occurrence_key(plan.node_id, plan.scope), occurrence_key(plan.node_id, plan.scope)):
                 raise RuntimeTransitionError(
                     "NODE_OCCURRENCE_ID_INVALID",
                     f"Invalid Node Occurrence id {plan.id!r}.",

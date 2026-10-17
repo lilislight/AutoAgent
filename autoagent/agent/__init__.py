@@ -5,6 +5,7 @@ connections or Runtime resources. Providers load the optional SDK lazily.
 """
 
 from .models import (
+    EmbeddingProviderOptions,
     EmbeddingInput, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage,
     EmbeddingVector,
     AssetSource, AudioContent, DataSource, FileContent, ImageContent,
@@ -21,6 +22,8 @@ from .models import ToolOutput
 from .models import LLMStructuredOutputError, parse_response, validate_response
 from .models import __all__ as _model_exports
 from .providers import (
+    DeepSeekProviderConfig, DeepSeekProvider, DeepSeekChatCompletionsAdapter, DeepSeekResponsesAdapter,
+    LiteLLMProviderConfig, LiteLLMProvider, LiteLLMEmbeddingProvider, LiteLLMChatCompletionsAdapter,
     OpenAIFileClient,
     EmbeddingProvider, EmbeddingProviderError, OpenAIEmbeddingAdapter,
     OpenAIEmbeddingProvider, ProviderError,
@@ -37,6 +40,7 @@ from .tools import (
 )
 from .tools import __all__ as _tool_exports
 from .mcp import (
+    MCPReadResourceRequest, MCPGetPromptRequest, MCPOperations,
     MCPReconnectPolicy, MCPSubscriptionUpdate, MCPChangeEvent,
     MCPContentError, MCPResourceContent, MCPResourceResponse, MCPPromptResponse,
     mcp_content, mcp_resource_response, mcp_prompt_response,
@@ -48,6 +52,7 @@ from .mcp import __all__ as _mcp_exports
 from .integration import LLMStreamReducer, LLMStreamState, tool_operator
 from .integration import MCPToolStreamReducer, MCPToolStreamState
 from .skills import (
+    SkillLoadRequest, SkillListResourcesRequest, SkillReadResourceRequest, SkillReadTextRequest, SkillRunScriptRequest, SkillOperations,
     SkillSnapshotFile, SkillSnapshot, SnapshotSkillSource,
     Skill, SkillSet, SkillMetadata, SkillLimits, SkillResource,
     SkillDocument, SkillResourceContent, SkillError, SkillFormatError,

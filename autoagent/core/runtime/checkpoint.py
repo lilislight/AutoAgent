@@ -11,7 +11,7 @@ from uuid import uuid4
 from .state import RuntimeState, validate_runtime_state
 
 
-SESSION_CHECKPOINT_SCHEMA_VERSION = 13
+SESSION_CHECKPOINT_SCHEMA_VERSION = 14
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,6 +5,15 @@ class AutoAgentError(Exception):
     """Base class for V2 Core failures."""
 
 
+class NodeTimeoutError(TimeoutError, AutoAgentError):
+    """An admitted Operator Call exceeded its Node's execution deadline."""
+
+    def __init__(self, node_id: str, seconds: float):
+        self.node_id = node_id
+        self.seconds = seconds
+        super().__init__(f"Node {node_id!r} Operator Call exceeded {seconds:g} seconds.")
+
+
 class WorkflowCompileError(AutoAgentError):
     """The Workflow cannot be compiled into executable IR."""
 

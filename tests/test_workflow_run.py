@@ -130,7 +130,7 @@ class WorkflowRunTests(unittest.IsolatedAsyncioTestCase):
             revision=await self.revision(host,wf.id)
             body=dict(workflow_id=wf.id,revision_id=revision,entry_node_id='entry',input={'text':'ok'})
             async with self.client(host) as client:
-                for override in ({'entry_node_id':'not-an-entry'},{'input':{'text':1}},{'session_mode':'existing'},{'session_mode':'new','session_id':'not-new'},{'session_mode':'existing','session_id':'some','session_context':{}}):
+                for override in ({'entry_node_id':'not-an-entry'},{'input':{'text':1}},{'session_mode':'existing'},{'session_mode':'new','session_id':''},{'session_mode':'existing','session_id':'some','session_context':{}}):
                     response=await client.post('/api/v2/executions',json=body|override)
                     self.assertIn(response.status_code,(400,422),response.text)
             self.assertEqual((await host.list_executions()).items,())
@@ -155,6 +155,61 @@ class WorkflowRunTests(unittest.IsolatedAsyncioTestCase):
                 attempts=await asyncio.gather(*(client.post('/api/v2/executions',json=request) for _ in range(2)))
                 self.assertEqual(sorted(r.status_code for r in attempts),[202,409])
 
+    async def test_generated_new_session_skips_existence_preflight(self):
+        """Host-generated IDs reserve capacity and execute without looking up another Session."""
+        wf = Workflow('generated-new', nodes=[Node('ask', Wait(Value, Value))])
+        async with self.host([wf]) as host:
+            revision = await self.revision(host, wf.id)
+            with patch.object(host._persistence, 'get_session', side_effect=AssertionError('No Session preflight')):
+                ref = await host.execute_json(wf.id, {'text':'ask'}, revision_id=revision, entry_node_id='ask', require_new_session=True)
+            self.assertTrue(ref.session_id)
+            await host.cancel(ref)
+
+    async def test_custom_new_session_rejects_concurrent_and_buffered_duplicates(self):
+        """A custom new ID has one admission even before buffered SessionOpened reaches storage."""
+        wf = Workflow('custom-new', nodes=[Node('ask', Wait(Value, Value))])
+        async with self.host([wf], persistence=PersistenceConfig(mode='buffered', batch_delay_ms=5000)) as host:
+            revision = await self.revision(host, wf.id)
+            body = dict(workflow_id=wf.id, revision_id=revision, entry_node_id='ask', input={'text':'ask'}, session_mode='new', session_id='chosen-id')
+            async with self.client(host) as client:
+                responses = await asyncio.gather(*(client.post('/api/v2/executions', json=body) for _ in range(2)))
+                self.assertEqual(sorted(response.status_code for response in responses), [202, 409])
+                rejected = next(response for response in responses if response.status_code == 409)
+                self.assertEqual(rejected.json()['detail']['code'], 'session_exists')
+                ref = next(response.json() for response in responses if response.status_code == 202)
+                self.assertEqual(ref['session_id'], 'chosen-id')
+                await host.cancel(ref['invocation_id'])
+
+    async def test_custom_new_session_checks_saved_and_core_sessions(self):
+        """Completed persisted IDs and Core-resident IDs cannot silently become Session reuse."""
+        wf = Workflow('custom-saved', nodes=[Node('entry', identity)])
+        async with self.host([wf]) as host:
+            revision = await self.revision(host, wf.id)
+            first = await host.execute(wf.id, {'text':'first'}, session_id='saved-id')
+            await host.join(first)
+        async with self.host([wf]) as host:
+            with self.assertRaises(HostRunConflict) as error:
+                await host.execute_json(wf.id, {'text':'second'}, revision_id=revision, entry_node_id='entry', session_id='saved-id', require_new_session=True)
+            self.assertEqual(error.exception.code, 'session_exists')
+            live = await host.execute(wf.id, {'text':'warm'}, session_id='core-id')
+            await host.join(live)
+            with patch.object(host._persistence, 'get_session', return_value=None), patch.dict(host._runtime.resident, {}, clear=True):
+                with self.assertRaises(HostRunConflict) as error:
+                    await host.execute_json(wf.id, {'text':'duplicate'}, revision_id=revision, entry_node_id='entry', session_id='core-id', require_new_session=True)
+            self.assertEqual(error.exception.code, 'session_exists')
+
+    async def test_http_validation_preserves_nested_field_paths_without_echoing_input(self):
+        """Contract failures identify the exact field without returning submitted business values."""
+        wf = Workflow('field-errors', nodes=[Node('entry', model_echo)])
+        async with self.host([wf]) as host:
+            revision = await self.revision(host, wf.id)
+            async with self.client(host) as client:
+                response = await client.post('/api/v2/executions', json=dict(workflow_id=wf.id, revision_id=revision, entry_node_id='entry', input={'text':123}))
+                self.assertEqual(response.status_code, 422, response.text)
+                detail = response.json()['detail']
+                self.assertEqual(detail['errors'][0]['path'], ['text'])
+                self.assertNotIn('input', detail['errors'][0])
+
     async def test_buffered_run_returns_accepted_before_trace_commit_without_forcing_flush(self):
         """A successful Run can precede its durable trace; viewing and admission must not flush the queue."""
         wf=Workflow('run-buffer',nodes=[Node('ask',Wait(Value,Value))])
@@ -165,6 +220,10 @@ class WorkflowRunTests(unittest.IsolatedAsyncioTestCase):
                     response=await client.post('/api/v2/executions',json=dict(workflow_id=wf.id,revision_id=revision,entry_node_id='ask',input={'text':'pending'}))
                     self.assertEqual(response.status_code,202,response.text)
                     iid=response.json()['invocation_id']
+                    await host.join(iid)
+                    controls=await host.get_execution_controls(iid)
+                    self.assertEqual(controls['pending_responses'][0]['node_id'], 'ask')
+                    self.assertGreater(controls['pending_responses'][0]['store_order'], 0)
                     trace=await client.get('/api/v2/execution-trace',params={'invocation_id':iid})
                     self.assertEqual(trace.status_code,404)
                 await host._persistence.flush()

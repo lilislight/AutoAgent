@@ -5,6 +5,7 @@ from __future__ import annotations
 from ._signals import SignalRuntime
 from ._waits import WaitRuntime
 from ._pause import PauseRuntime
+from ._recovery import TerminalRecoveryRuntime
 from ._residency import ResidencyRuntime
 from ..runtime.events import WaitRequested, CommandAwakened, GraphResumed
 from ..commands import SignalReceipt, SignalBatch, SelectResult
@@ -49,6 +50,7 @@ from ..runtime import (
     ChildResult,
     RuntimeGraphCheckpoint,
     RecoveryApplied,
+    RecoverySource,
     InvocationState,
     InvocationStarted,
     NodeCompleted,
@@ -77,7 +79,7 @@ from .runtime_loop import RuntimeLoop
 from ._graph_gate import GraphGate
 
 
-class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
+class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRuntime, ResidencyRuntime):
     """Compile and execute Workflows while retaining only current Runtime State."""
 
     def __init__(
@@ -473,14 +475,23 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
         return await self._await(self._submit(self._signal(ref, request, source_id, sequence)))
 
     def recover(
-        self, ref: InvocationRef
+        self, ref: InvocationRef, *, source: RecoverySource | None = None,
+        request_id: str | None = None, expected_version: int | None = None
     ) -> InvocationResult:
-        return self._run(self._recover(ref))
+        """Continue the same graph; terminal reopening requires caller-owned canonical history.
+
+        Paused and interrupted graphs use their durable workspace directly.
+        expected_version compares the Root Session sequence before admission.
+        """
+        return self._run(self._recover(ref, source=source, request_id=request_id, expected_version=expected_version))
 
     async def arecover(
-        self, ref: InvocationRef
+        self, ref: InvocationRef, *, source: RecoverySource | None = None,
+        request_id: str | None = None, expected_version: int | None = None
     ) -> InvocationResult:
-        return await self._await(self._submit(self._recover(ref)))
+        future = self._submit(self._recover(ref, source=source, request_id=request_id, expected_version=expected_version))
+        source = None
+        return await self._await(future)
 
     # ------------------------------------------------------------------
     # Checkpoints and Child relationships
@@ -887,9 +898,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
         finally:
             self._release_result_lease(root)
 
-    async def _status(
-        self, ref: InvocationRef
-    ) -> InvocationResult:
+    async def _status(self, ref: InvocationRef) -> InvocationResult:
         ref = self._control_ref(ref)
         self._state_for_ref(ref)
         root = self._root_session_id(ref.session_id)
@@ -1229,24 +1238,32 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
         for session_id in session_ids:
             self._drive_errors.pop(session_id, None)
 
-    async def _recover(self, ref):
+    async def _recover(self, ref, *, source=None, request_id=None, expected_version=None):
         ref = self._control_ref(ref)
         inv = self._state_for_ref(ref).invocation
         root = self._root_session_id(ref.session_id)
         if inv.control_state == "pausing" and root in self._pause_operations:
             raise RuntimeTransitionError("GRAPH_PAUSING", "Pause must finish before recovery.")
+        accepted = self._repository.state(root).invocation
+        if request_id and accepted.last_recovery_id == request_id and (
+                accepted.status != 'running' or accepted.control_state != 'active' or not self._recovery_not_dispatched(root, request_id) or any(
+                    self._task_runtime.is_live(sid) for sid in (root, *self._descendant_sessions(root)))):
+            return await self._status(ref)
         gate = self._graph_gates.get(root)
         if root in self._recovering or (gate is not None and not gate.idle):
             raise RuntimeTransitionError(
                 "INVOCATION_STILL_LIVE", "Graph admission or recovery is in progress.")
         self._recovering[root] = set()
         try:
-            return await self._recover_reserved(ref)
+            operation = self._recover_reserved(ref, source=source, request_id=request_id, expected_version=expected_version)
+            source = None
+            return await operation
         finally:
             self._recovering.pop(root, None)
 
     async def _recover_reserved(
-        self, ref: InvocationRef
+        self, ref: InvocationRef, *, source: RecoverySource | None = None,
+        request_id: str | None = None, expected_version: int | None = None
     ) -> InvocationResult:
         ref = self._control_ref(ref)
         self._state_for_ref(ref)
@@ -1276,6 +1293,12 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
                     "INVOCATION_STILL_LIVE",
                     "Recovery cannot run while this App owns a graph task.",
                 )
+            async with self._graph_gate(root):
+                await self._settle_runtime_commits((root, *self._descendant_sessions(root)))
+                duplicate = await self._prepare_recovery(ref, source, expected_version, request_id)
+                source = None
+            if duplicate:
+                return await self._result(ref)
             clean = self._repository.state(root).invocation.control_state == "paused"
             async with self._graph_gate(root):
                 await self._settle_runtime_commits((root, *self._descendant_sessions(root)))
@@ -1896,13 +1919,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
         if parent_info is None:
             return supplied
         parent_session_id, creation_id, _unit_index = parent_info
-        key = (parent_session_id, creation_id)
-        existing = self._child_capacities.get(key)
-        if existing is not None:
-            return existing
-        if supplied is not None:
-            self._child_capacities[key] = supplied
-            return supplied
         parent_state = self._repository.state(parent_session_id)
         parent = parent_state.invocation
         if parent is None:
@@ -1914,6 +1930,17 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, ResidencyRuntime):
         if occurrence is None:
             return None
         node = self._workflow_for_state(parent_state).node(occurrence.node_id)
+        if node.executable.id == 'system_command:spawn':
+            # Spawn's Map permit ends when admission returns its Handle.
+            # Child Operators share NodeExecutor's global capacity instead.
+            return None
+        key = (parent_session_id, creation_id)
+        existing = self._child_capacities.get(key)
+        if existing is not None:
+            return existing
+        if supplied is not None:
+            self._child_capacities[key] = supplied
+            return supplied
         limit = min(
             len(plan.units),
             node.map.max_parallelism

@@ -2,12 +2,12 @@ import { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, getExecutionItems, getExecutionRecord, getExecutionStages } from '../api';
 import type { GraphEdge, TraceRow, WorkflowGraphData } from '../types';
-import { beforeCalls, callPresentation, executionTiming, isSystemCall, stageDefinitionPath, STAGE_LABELS } from '../inspectorModel';
+import { beforeCalls, callPresentation, executionTiming, isSystemCall, stageDefinitionPath, stageTabs, STAGE_LABELS } from '../inspectorModel';
 import { useExecutionSnapshot, useSnapshotMetadata } from './ExecutionSnapshot';
 import { useExecutionNavigation } from './ExecutionNavigation';
 import { CopyId, InspectorFrame, type InspectorTab } from './InspectorFrame';
 import { DefinitionDetails } from './DefinitionDetails';
-import { duration, formatTime, LazyValue, LoadedValue, MissingValue, RowDetails, RowValues, StatusBadge } from './TraceDetails';
+import { duration, formatTime, LazyValue, LoadedValue, RowDetails, RowValues, StatusBadge } from './TraceDetails';
 
 export function useInspectorPage(iid: string, kind: string, filters: Record<string, string>, frontier: number, enabled = true) {
   const { active } = useExecutionNavigation();
@@ -17,7 +17,7 @@ export function useInspectorPage(iid: string, kind: string, filters: Record<stri
   const current = position.scope === scope ? position : { scope, cursors: [null], index: 0 };
   const result = useQuery({ queryKey: ['inspector-items', iid, kind, filters, current.cursors[current.index], snapshot.epoch], meta: snapshot.meta,
     queryFn: ({ signal }) => kind === 'stage' ? getExecutionStages(iid, filters.occurrence_id, current.cursors[current.index], signal)
-      : getExecutionItems(iid, kind, filters, current.cursors[current.index], signal),
+      : getExecutionItems(iid, kind, { order: kind === 'child' ? 'asc' : 'desc', ...filters }, current.cursors[current.index], signal),
     enabled: active && enabled, staleTime: Infinity, gcTime: 30_000, refetchOnWindowFocus: false });
   const data = useSnapshotMetadata(JSON.stringify([scope, current.cursors[current.index]]), result.data);
   const query = { ...result, data, isPending: result.isPending && !data };
@@ -49,11 +49,12 @@ export function RouteChoice({ edge, onPick }: { edge: GraphEdge; onPick: (id: st
   return <RecordChoice title={edge.target} caption={`${edge.on === 'error' ? 'Fail' : 'Complete'} edge${edge.conditional ? ' · Conditional' : ''}`} type="edge" onClick={() => onPick(edge.id)} />;
 }
 
-export function CallInspector({ row, workflow, frontier, onBack, onClose, onWait, backLabel, initial }: {
+export function CallInspector({ row, workflow, frontier, onBack, onClose, backLabel, initial }: {
   row: TraceRow; workflow: WorkflowGraphData; frontier: number; onBack: () => void; onClose: () => void;
-  onWait: (row: TraceRow) => void; backLabel?: string; initial?: InspectorTab;
+  backLabel?: string; initial?: InspectorTab;
 }) {
-  const { active } = useExecutionNavigation();
+  const navigation = useExecutionNavigation();
+  const { active } = navigation;
   const snapshot = useExecutionSnapshot();
   const iid = row.invocation_id;
   const command = isSystemCall(row);
@@ -67,8 +68,24 @@ export function CallInspector({ row, workflow, frontier, onBack, onClose, onWait
     catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
   }, enabled: active && command && !spawning, staleTime: Infinity, gcTime: 30_000, refetchOnWindowFocus: false });
   const status = callPresentation(record, wait.data);
-  return <InspectorFrame kind={command ? 'system-command' : 'call'} title={record.operator_id?.replace(/^system_command:/, '') ?? record.call_id!} initial={initial} context={<><StatusBadge row={status} /><span>Unit {String(record.unit_index ?? 0)}</span></>} tabs={command ? ['Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Input / Output', 'Definition']} onClose={onClose} onBack={onBack} backLabel={backLabel} footer={<span>Full recorded Call</span>}>
-    {tab => tab === 'Summary' ? <><RowDetails row={status} />{spawning ? <CallChildren row={record} frontier={frontier} /> : null}{command && executionTiming(record) == null ? <p className="inspector-empty">Elapsed uses the recorded Call boundaries. Separate execution timing is unavailable for this command.</p> : null}{record.values.includes('error') ? <LazyValue invocationId={iid} kind="call" identity={record.call_id!} field="error" valueKey={record.value_keys?.error} label="Error" /> : null}</> : tab === 'Input / Output' ? <RowValues row={status} kind="call" /> : tab === 'Definition' ? record.operator_definition_id ? <LoadedValue invocationId={iid} kind="call" identity={record.call_id!} field="definition" /> : row.node_id && nodeDefinitionAvailable ? <DefinitionDetails workflow={workflow} kind="node" identity={row.node_id} path={['executable']} /> : <p className="inspector-empty">Executable definition was not recorded.</p> : spawning ? <CallChildren row={record} frontier={frontier} /> : <InspectorSection title="Durable wait">{wait.isPending ? <p className="inspector-empty" role="status">Loading wait…</p> : wait.error ? <div className="sidebar-error"><p>{wait.error.message}</p><button onClick={() => void wait.refetch()}>Retry</button></div> : wait.data ? <RecordChoice type="wait" title={`${String(wait.data.kind)} wait`} caption={`Created ${formatTime(wait.data.created_at_us as number)}`} badge={<StatusBadge row={wait.data} />} onClick={() => onWait(wait.data!)} /> : <p className="inspector-empty">This command has no recorded durable wait.</p>}</InspectorSection>}
+  return <InspectorFrame kind={command ? 'system-command' : 'call'} title={record.operator_id?.replace(/^system_command:/, '') ?? record.call_id!} initial={initial} context={<><StatusBadge row={status} /><span>Unit {String(record.unit_index ?? 0)}</span></>} tabs={command && (spawning || wait.data) ? ['Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Input / Output', 'Definition']} onClose={onClose} onBack={onBack} backLabel={backLabel}>
+    {tab => {
+      switch (tab) {
+        case 'Summary': return <>
+          {detail.isPending ? <p className="inspector-empty" role="status">Loading Call metadata…</p> : detail.error ? <div className="sidebar-error"><p>{detail.error.message}</p><button onClick={() => void detail.refetch()}>Retry</button></div> : null}
+          <RowDetails row={status} />
+          {command && !spawning && wait.error ? <div className="sidebar-error"><p>{wait.error.message}</p><button onClick={() => void wait.refetch()}>Retry Wait metadata</button></div> : null}
+          {command && executionTiming(record) == null ? <p className="inspector-empty">Elapsed time includes command waits; no separate processing duration was recorded.</p> : null}
+          {record.values.includes('error') ? <LazyValue invocationId={iid} kind="call" identity={record.call_id!} field="error" valueKey={record.value_keys?.error} label="Error" /> : null}
+        </>;
+        case 'Input / Output': return <RowValues row={status} kind="call" />;
+        case 'Definition': return record.operator_definition_id ? <LoadedValue invocationId={iid} kind="call" identity={record.call_id!} field="definition" label="Definition" />
+          : row.node_id && nodeDefinitionAvailable ? <DefinitionDetails workflow={workflow} kind="node" identity={row.node_id} path={['executable']} />
+          : <p className="inspector-empty">Executable definition was not recorded.</p>;
+        case 'Execution': return spawning ? <CallChildren row={record} frontier={frontier} /> : <InspectorSection title="Wait"><WaitFacts row={wait.data!} /></InspectorSection>;
+        default: return null;
+      }
+    }}
   </InspectorFrame>;
 }
 function CallChildren({ row, frontier }: { row: TraceRow; frontier: number }) {
@@ -78,23 +95,42 @@ function CallChildren({ row, frontier }: { row: TraceRow; frontier: number }) {
     {page.rows.map(child => <RecordChoice key={child.invocation_id} type="command" title={child.workflow_id ?? 'Child Workflow'} caption={`Unit ${child.unit_index ?? 0} · ${child.invocation_id.slice(0, 8)}`} badge={<StatusBadge row={child} />} durationLabel={duration(child.started_at_us != null && child.completed_at_us != null ? child.completed_at_us - child.started_at_us : null)} onClick={() => openChild?.(child)} />)}
     <InspectorPages page={page} label="Child executions" /></InspectorSection>;
 }
-export function WaitInspector({ row:provided, onBack, onClose, backLabel, initial }: { initial?: InspectorTab; row: TraceRow; onBack: () => void; onClose: () => void; backLabel?: string }) {
-  const navigation=useExecutionNavigation();
-  const snapshot=useExecutionSnapshot();
-  const detail=useQuery({queryKey:['execution-record',provided.invocation_id,'wait',provided.wait_id,snapshot.epoch],meta:snapshot.meta,
-    queryFn:({signal})=>getExecutionRecord(provided.invocation_id,'wait',String(provided.wait_id),signal),enabled:navigation.active,staleTime:Infinity,gcTime:30_000,refetchOnWindowFocus:false});
-  const row=detail.data ?? provided;
-  return <InspectorFrame kind="wait" initial={initial} title={`${String(row.kind)} wait`} context={<><StatusBadge row={row} />{row.kind==='external' && row.status==='waiting' && navigation.canRespond?<button className="inspector-link" onClick={()=>navigation.respondToWait?.(row)}>Respond</button>:null}</>} tabs={['Summary', 'Input / Output']} onClose={onClose} onBack={onBack} backLabel={backLabel} footer={<span>Waiting interval within the command Call</span>}>
-    {tab => tab === 'Summary' ? <dl className="trace-facts"><dt>Wait</dt><dd><CopyId value={String(row.wait_id)} /></dd><dt>Occurrence</dt><dd><CopyId value={row.occurrence_id} /></dd><dt>Kind</dt><dd>{String(row.kind)}</dd><dt>Created</dt><dd>{formatTime(row.created_at_us as number, true)}</dd><dt>{row.status === 'cancelled' ? 'Cancelled' : 'Resolved'}</dt><dd>{formatTime((row.end_at_us ?? row.resumed_at_us) as number, true)}</dd>{row.deadline_at_us != null ? <><dt>Deadline</dt><dd>{formatTime(row.deadline_at_us as number, true)}</dd></> : null}</dl> : <>{(['request', 'response'] as const).map(field => row.values.includes(field) ? <LazyValue key={field} invocationId={row.invocation_id} kind="wait" identity={String(row.wait_id)} field={field} valueKey={row.value_keys?.[field]} label={field === 'request' ? 'Wait request' : 'Wait response'} /> : <MissingValue key={field} title={field === 'request' ? 'Wait request' : 'Wait response'} message={field === 'response' && row.status === 'waiting' ? 'The wait has not been resolved yet.' : `${field === 'request' ? 'Request' : 'Response'} was not recorded.`} />)}</>}
-  </InspectorFrame>;
+export function CommandWaitDetails({ row }: { row: TraceRow }) {
+  const snapshot = useExecutionSnapshot();
+  const navigation = useExecutionNavigation();
+  const wait = useQuery({ queryKey: ['execution-record', row.invocation_id, 'wait', row.call_id, snapshot.epoch], meta: snapshot.meta,
+    queryFn: ({ signal }) => getExecutionRecord(row.invocation_id, 'wait', row.call_id!, signal), enabled: navigation.active,
+    staleTime: Infinity, gcTime: 30_000, refetchOnWindowFocus: false });
+  return wait.isPending ? <p className="inspector-empty" role="status">Loading Wait…</p> : wait.error ? <div className="sidebar-error"><p>{wait.error.message}</p><button onClick={() => void wait.refetch()}>Retry</button></div> : <WaitFacts row={wait.data} />;
+}
+function WaitFacts({ row }: { row: TraceRow }) {
+  return <dl className="trace-facts"><dt>Wait ID</dt><dd><CopyId value={String(row.wait_id)} /></dd><dt>Status</dt><dd><StatusBadge row={row} /></dd><dt>Kind</dt><dd>{String(row.kind)}</dd><dt>Started</dt><dd>{formatTime(row.created_at_us as number, true)}</dd><dt>{row.status === 'cancelled' ? 'Cancelled' : 'Resolved'}</dt><dd>{formatTime((row.end_at_us ?? row.resumed_at_us) as number, true)}</dd>{row.deadline_at_us != null ? <><dt>Deadline</dt><dd>{formatTime(row.deadline_at_us as number, true)}</dd></> : null}</dl>;
 }
 export function StageInspector({ row, nodeId, workflow, onBack, onClose, onEdge }: {
   row: TraceRow; nodeId: string; workflow: WorkflowGraphData; onBack: () => void; onClose: () => void; onEdge: (id: string) => void;
 }) {
   const title = STAGE_LABELS[String(row.event_name)] ?? String(row.event_name);
   const routing = row.event_name === 'routing.resolved';
-  return <InspectorFrame kind={`stage:${String(row.event_name)}`} title={title} context={<><code>Event #{row.sequence}</code>{row.error_type ? <StatusBadge row={row} /> : null}</>} tabs={['Summary', 'Input / Output', 'Definition']} onClose={onClose} onBack={onBack} footer={<span>Recorded stage · {nodeId}</span>}>
-    {tab => tab === 'Summary' ? <><dl className="trace-facts"><dt>Occurrence</dt><dd><CopyId value={row.occurrence_id} /></dd><dt>Event</dt><dd><CopyId value={String(row.event_id)} /></dd><dt>Recorded</dt><dd>{formatTime(row.occurred_at_us as number, true)}</dd><dt>Measured time</dt><dd>{duration(row.duration_ns == null ? null : row.duration_ns / 1000)}</dd>{row.capability_id ? <><dt>Capability</dt><dd>{String(row.capability_id)}</dd><dt>Resolved Operator</dt><dd>{row.operator_id}</dd></> : null}{row.error_type ? <><dt>Error</dt><dd>{row.error_type}</dd><dt>Phase</dt><dd>{String(row.error_phase ?? '—')}</dd></> : null}</dl>{routing ? <InspectorSection title="Outgoing edges">{workflow.definition.edges.filter(edge => edge.source === nodeId).map(edge => <RouteChoice key={edge.id} edge={edge} onPick={onEdge} />)}</InspectorSection> : null}</> : tab === 'Definition' ? routing ? <InspectorSection title="Edge definitions">{workflow.definition.edges.filter(edge => edge.source === nodeId).map(edge => <RouteChoice key={edge.id} edge={edge} onPick={onEdge} />)}</InspectorSection> : <DefinitionDetails workflow={workflow} kind="node" identity={nodeId} path={stageDefinitionPath(row)} /> : row.values.length ? <>{row.event_name === 'output.bound' ? <p className="inspector-empty">Context patch produced here; it commits at Node completion.</p> : null}{row.values.map(field => <LazyValue key={field} invocationId={row.invocation_id} kind="stage" identity={String(row.event_id)} occurrenceId={row.occurrence_id} field={field} valueKey={row.value_keys?.[field]} label={({ mapped_input: 'Mapped input', output: 'Aggregate output', patch: 'Context patch', conditions: 'Condition results', error: 'Error' } as Record<string,string>)[field] ?? field} />)}</> : <p className="inspector-empty">This stage records metadata only; it has no separate input or output.</p>}
+  return <InspectorFrame kind={`stage:${String(row.event_name)}`} title={title} context={<><code>Event #{row.sequence}</code><span>{nodeId}</span><StatusBadge row={row} /></>} tabs={stageTabs(row)} onClose={onClose} onBack={onBack}>
+    {tab => {
+      switch (tab) {
+        case 'Summary': return <>
+          <dl className="trace-facts"><dt>Occurrence ID</dt><dd><CopyId value={row.occurrence_id} /></dd><dt>Event ID</dt><dd><CopyId value={String(row.event_id)} /></dd><dt>Recorded</dt><dd>{formatTime(row.occurred_at_us as number, true)}</dd><dt>Processing time</dt><dd>{duration(row.duration_ns == null ? null : row.duration_ns / 1000)}</dd>
+            {row.capability_id ? <><dt>Capability</dt><dd>{String(row.capability_id)}</dd><dt>Resolved Operator</dt><dd>{row.operator_id}</dd></> : null}
+            {row.error_type ? <><dt>Error type</dt><dd>{row.error_type}</dd><dt>Error phase</dt><dd>{String(row.error_phase ?? '—')}</dd></> : null}
+          </dl>
+          {row.values.includes('error') ? <LazyValue invocationId={row.invocation_id} kind="stage" identity={String(row.event_id)} occurrenceId={row.occurrence_id} field="error" valueKey={row.value_keys?.error} label="Error" /> : null}
+          {routing ? <p className="inspector-empty">Inspect an outgoing edge in Execution for its decision in this occurrence.</p> : null}
+        </>;
+        case 'Execution': return <InspectorSection title="Outgoing edges">{workflow.definition.edges.filter(edge => edge.source === nodeId).map(edge => <RouteChoice key={edge.id} edge={edge} onPick={onEdge} />)}</InspectorSection>;
+        case 'Definition': return <DefinitionDetails workflow={workflow} kind="node" identity={nodeId} path={stageDefinitionPath(row)} />;
+        case 'Input / Output': return <>
+          {row.event_name === 'output.bound' ? <p className="inspector-empty">Context patch produced by Output Binding; it commits when the Node completes.</p> : null}
+          {row.values.filter(field => field !== 'error' && field !== 'conditions').map(field => <LazyValue key={field} invocationId={row.invocation_id} kind="stage" identity={String(row.event_id)} occurrenceId={row.occurrence_id} field={field} valueKey={row.value_keys?.[field]} label={({ mapped_input: 'Mapped input', output: 'Output', patch: 'Context patch' } as Record<string,string>)[field] ?? field} />)}
+        </>;
+        default: return null;
+      }
+    }}
   </InspectorFrame>;
 }
 export { beforeCalls };

@@ -18,7 +18,7 @@ from ..runtime.scheduling import (
     SchedulerDelta,
     boundary_key,
     boundary_resolution_key,
-    occurrence_key,
+    occurrence_key, current_occurrence_key,
     resolution_key,
 )
 from ..runtime.state import RuntimeState
@@ -160,7 +160,7 @@ class _LoopPlanner:
         resolution_ids: tuple[str, ...] = (),
     ) -> None:
         plan = OccurrencePlan(
-            occurrence_key(node_id, scope), node_id, scope, resolution_ids
+            current_occurrence_key(self.scheduler, node_id, scope), node_id, scope, resolution_ids
         )
         if plan.id in self.known_occurrences:
             return
@@ -168,7 +168,7 @@ class _LoopPlanner:
         self.ready.append(plan)
 
     def plan_skipped(self, node_id: str, scope: ExecutionScope) -> None:
-        plan = OccurrencePlan(occurrence_key(node_id, scope), node_id, scope)
+        plan = OccurrencePlan(current_occurrence_key(self.scheduler, node_id, scope), node_id, scope)
         if plan.id in self.known_occurrences:
             return
         self.known_occurrences[plan.id] = None
@@ -367,7 +367,7 @@ class _LoopPlanner:
                 progressed = True
 
     def _try_target(self, node_id: str, scope: ExecutionScope) -> bool:
-        occurrence_id = occurrence_key(node_id, scope)
+        occurrence_id = current_occurrence_key(self.scheduler, node_id, scope)
         expected = self._expected_incoming(node_id, scope)
         values = [self.resolutions.get(resolution_key(edge_id, scope)) for edge_id in expected]
         if not values or any(value is None for value in values):

@@ -13,7 +13,7 @@ from ..runtime.scheduling import (
     EdgeResolution,
     OccurrencePlan,
     SchedulerDelta,
-    occurrence_key,
+    occurrence_key, current_occurrence_key,
     resolution_key,
 )
 from ..runtime.state import RuntimeState
@@ -174,7 +174,7 @@ class DAGScheduler:
 
         while targets:
             target = targets.popleft()
-            target_occurrence = occurrence_key(target)
+            target_occurrence = current_occurrence_key(invocation.scheduler, target)
             if target_occurrence in existing_occurrences or target_occurrence in planned:
                 continue
             incoming = workflow.incoming(target)

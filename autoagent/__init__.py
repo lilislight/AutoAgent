@@ -20,12 +20,13 @@ from .core.compiler import (
 )
 from .core.context import ContextOperation, ContextPatch
 from .core.errors import (
+    NodeTimeoutError,
     AutoAgentError,
     RuntimeInfrastructureError,
     RuntimeTransitionError,
     WorkflowCompileError,
 )
-from .core.operators import Operator, StreamReducer, ValueContract
+from .core.operators import Operator, StreamReducer, ValueContract, run_sync
 from .core.runtime import SessionCheckpoint, RuntimeErrorInfo, UserEvent
 from .core.workflow import (
     AggregationContext,
@@ -39,6 +40,7 @@ from .core.workflow import (
     Node,
     OutputBindingContext,
     Recovery,
+    TimeoutPolicy,
     Stream,
     StreamContext,
     SubWorkflow,
@@ -48,6 +50,7 @@ from .core.workflow import (
 )
 
 __all__ = [
+    "TimeoutPolicy", "NodeTimeoutError", "run_sync",
     "AggregationContext",
     "AppCheckpoint",
     "AutoAgentApp",
@@ -113,3 +116,6 @@ __all__ += ["SelfHandle", "OwnerHandle"]
 
 from .core.commands import AwaitSignal, SignalCase, TimerCase, ChildCase, Select, SelectResult, SuspensionInfo
 __all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "SelectResult", "SuspensionInfo"]
+
+from .core.runtime.recovery import RecoverySource
+__all__ += ["RecoverySource"]

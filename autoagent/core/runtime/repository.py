@@ -60,6 +60,8 @@ class RuntimeRepository:
         occurred_at_us: int | None = None,
         scheduler_delta: SchedulerDelta | None = None,
         output_node_ids: tuple[str, ...] | None = None,
+        recovery_state: RuntimeState | None = None,
+        recovery_plan=None,
     ) -> RuntimeEvent:
         async with self._session_lock(session_id):
             pending = self._pending.get(session_id)
@@ -81,6 +83,10 @@ class RuntimeRepository:
             ):
                 planning_options['_execution_index'] = self._execution_indexes.get(session_id)
                 planning_options['_output_node_ids'] = output_node_ids
+            if recovery_state is not None:
+                planning_options["recovery_state"] = recovery_state
+            if recovery_plan is not None:
+                planning_options["recovery_plan"] = recovery_plan
             timestamp = unix_time_us() if occurred_at_us is None else occurred_at_us
             patch = (before.invocation.scheduler.occurrences[payload.occurrence_id].execution.pending_context_patch
                      if isinstance(payload, NodeCompleted) and before.invocation is not None

@@ -31,30 +31,34 @@ class ExecutionControls:
             return dict(available=bool(base and available),reason=reason or (None if available else message))
         actions=dict(
             pause=action(active and not interrupted and not stopping and control=='active','Execution is paused, interrupted, stopping or already finished.'),
-            continue_execution=action(active and not recovering and not stopping and (control=='paused' or interrupted),'Execution is already active or cannot be continued.'),
+            recover=action(not recovering and not stopping and (control=='paused' or interrupted or root['status'] in ('failed','cancelled') or root.get('recovery_pending')),'Execution is already active or has completed successfully.'),
             cancel=action(active,'Execution has already finished.'),
             respond=action(active and not stopping and bool(data['waits']),'There are no pending external responses.'),
             signal=action(root['status'] in ('running','waiting') and not stopping and bool(endpoints),'No declared Signal Endpoint is currently available.'),
             run_again=dict(available=selected['workflow_revision_id'] in self._runtime.revisions,reason=None if selected['workflow_revision_id'] in self._runtime.revisions else 'This exact Revision is not registered in this Host.'))
         return data,dict(invocation_id=iid,root_invocation_id=root['invocation_id'],root_session_id=root['session_id'],
-            status=root['status'],control_state=control,continue_reason='paused' if control=='paused' else 'interrupted' if interrupted else None,
+            status=root['status'],control_state=control,recovery_reason='paused' if control=='paused' else 'interrupted' if interrupted else root['status'] if root['status'] in ('failed','cancelled') else None,
+            expected_version=root['last_sequence'],recovery_count=root.get('recovery_count') or 0,
+            last_recovery_id=root.get('last_recovery_id'),
+            response_target=(dict(invocation_id=data['wait']['invocation_id'],wait_id=data['wait']['wait_id'],status=data['wait']['status']) if data['wait'] else None),
             actions=actions,endpoints=endpoints,
-            pending_responses=[{k:row[k] for k in ('invocation_id','wait_id','occurrence_id','created_at_us')} for row in data['waits']],
+            pending_responses=[dict({k:row[k] for k in ('invocation_id','wait_id','occurrence_id','created_at_us','node_id')}, store_order=row['updated_store_order']) for row in data['waits']],
             next_cursor=data['next_cursor'],frontier=data['frontier'])
 
-    async def get_execution_controls(self, invocation_id, *, cursor=None):
+    async def get_execution_controls(self, invocation_id, *, cursor=None, target_invocation_id=None, wait_id=None):
         async def query():
-            _,controls=await self._control_view(invocation_id,cursor=cursor)
+            _,controls=await self._control_view(invocation_id,cursor=cursor,target_iid=target_invocation_id,wait_id=wait_id)
             return controls
         return await self._perform(query)
 
-    async def _action_spec(self, iid, action, *, target_invocation_id=None, wait_id=None, endpoint=None, source_id=None):
+    async def _action_spec(self, iid, action, *, target_invocation_id=None, wait_id=None, endpoint=None, source_id=None,request_id=None):
         data,controls=await self._control_view(iid,target_iid=target_invocation_id,wait_id=wait_id,source_id=source_id)
-        key='continue_execution' if action=='continue' else action
+        key=action
         if key not in controls['actions']:
             raise ValueError('Unknown execution action.')
         permission=controls['actions'][key]
-        if not permission['available']:
+        duplicate=action=='recover' and request_id and request_id==data['root'].get('last_recovery_id')
+        if not permission['available'] and not duplicate:
             raise HostRunConflict('action_unavailable',permission['reason'])
         contract=None
         if action=='respond':
@@ -82,11 +86,13 @@ class ExecutionControls:
         return await self._perform(query)
 
     async def validate_execution_action(self, invocation_id, action, *, payload=None, target_invocation_id=None,
-        wait_id=None, endpoint=None, source_id=None, sequence=None, reason=None):
+        wait_id=None, endpoint=None, source_id=None, sequence=None, reason=None, expected_version=None, request_id=None):
         """Reject malformed payloads before asynchronous admission, without changing Runtime state."""
         async def validate():
-            _,_,contract=await self._action_spec(invocation_id,action,target_invocation_id=target_invocation_id,
-                wait_id=wait_id,endpoint=endpoint,source_id=source_id)
+            data,_,contract=await self._action_spec(invocation_id,action,target_invocation_id=target_invocation_id,
+                wait_id=wait_id,endpoint=endpoint,source_id=source_id,request_id=request_id)
+            if action=='recover' and expected_version is not None and data['root']['last_sequence'] != expected_version and data['root'].get('last_recovery_id') != request_id and not data['root'].get('recovery_pending'):
+                raise HostRunConflict('recovery_version_conflict','Execution changed; refresh it before recovering.')
             if action in ('respond','signal'):
                 if contract is None:
                     raise ValueError('Choose a declared action contract.')
@@ -94,17 +100,20 @@ class ExecutionControls:
         return await self._perform(validate,payload=payload)
 
     async def perform_execution_action(self, invocation_id, action, *, payload=None, target_invocation_id=None,
-        wait_id=None, endpoint=None, source_id=None, sequence=None, reason=None):
+        wait_id=None, endpoint=None, source_id=None, sequence=None, reason=None, expected_version=None, request_id=None):
         """Apply an exact Root-scoped command; callers may observe this awaitable asynchronously."""
         async def apply():
             data,controls,contract=await self._action_spec(invocation_id,action,target_invocation_id=target_invocation_id,
-                wait_id=wait_id,endpoint=endpoint,source_id=source_id)
+                wait_id=wait_id,endpoint=endpoint,source_id=source_id,request_id=request_id)
             root_id=controls['root_invocation_id']
             async with self._execution(root_id,load=True,touch=True) as ref:
                 if action=='cancel':
                     result=await self._runtime.app.acancel(ref,reason)
-                elif action=='continue':
-                    result=await self._runtime.activate(ref,force=True)
+                elif action=='recover':
+                    result=await self._runtime.activate(ref,force=True,request_id=request_id,expected_version=expected_version)
+                    # A finished recovery receipt must be visible to the
+                    # durable-only trace endpoint used by the UI refresh.
+                    await self._persistence.flush()
                 elif action=='pause':
                     result=await self._runtime.app.apause(ref)
                 elif action=='respond':

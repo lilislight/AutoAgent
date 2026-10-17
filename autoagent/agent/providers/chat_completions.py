@@ -93,8 +93,7 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
             result["content"] = parts or None
         return result, extra.get("_group_id")
 
-    def encode_request(self, request: LLMRequest, *, provider_id: str) -> dict:
-        params = common_parameters(request, self.protocol, provider_id)
+    def _messages(self, request: LLMRequest, provider_id: str) -> list[dict]:
         messages = []
         last_group = None
         for item in request.input:
@@ -128,7 +127,11 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
                 last_group = None
             elif isinstance(item, LLMReasoning):
                 unsupported("Standard Chat Completions has no reasoning-item replay field.", provider_id, self.protocol)
-        params["messages"] = messages
+        return messages
+
+    def encode_request(self, request: LLMRequest, *, provider_id: str) -> dict:
+        params = common_parameters(request, self.protocol, provider_id)
+        params["messages"] = self._messages(request, provider_id)
         if request.max_output_tokens is not None:
             params[self.token_parameter] = request.max_output_tokens
         if request.tools:
@@ -194,6 +197,15 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
             provider_metadata={**{key: value for key, value in raw.items() if key not in {"choices", "usage", "model", "id"}}, "finish_reason": finish},
         )
 
+    def _extra_stream_delta(self, message: dict, delta: dict, provider_id: str):
+        return ()
+
+    def _has_extra_stream_output(self, delta: dict) -> bool:
+        return False
+
+    def _extra_tool_delta(self, target: dict, call: dict) -> None:
+        pass
+
     async def decode_stream(self, source: AsyncIterator[object], *, request: LLMRequest, provider_id: str) -> AsyncIterator[LLMStreamChunk]:
         message = {"role": "assistant", "content": None}
         raw = {"model": request.model, "choices": [{"message": message, "finish_reason": None}]}
@@ -214,8 +226,10 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
                 raise ValueError("Chat stream must contain one candidate.")
             choice = choices[0]
             delta = choice.get("delta") or {}
-            if terminal and any(delta.get(field) for field in ("content", "refusal", "tool_calls", "audio")):
+            if terminal and (any(delta.get(field) for field in ("content", "refusal", "tool_calls", "audio")) or self._has_extra_stream_output(delta)):
                 raise ValueError("Chat stream emitted output after its finish reason.")
+            for observation in self._extra_stream_delta(message, delta, provider_id):
+                yield observation
             for field, kind in (("content", "text"), ("refusal", "refusal")):
                 if delta.get(field) is not None:
                     message[field] = (message.get(field) or "") + delta[field]
@@ -224,6 +238,7 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
             for call in delta.get("tool_calls") or ():
                 index = call["index"]
                 target = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                self._extra_tool_delta(target, call)
                 if call.get("type") not in {None, "function"}:
                     raise ValueError("Chat streaming adapter supports function calls only.")
                 if call.get("id"):
@@ -261,7 +276,8 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
         response = self.decode_response(raw, provider_id=provider_id, request=request)
         call_indices = iter(sorted(calls))
         for item in response.output:
-            key = f"tool:{next(call_indices)}" if isinstance(item, (LLMToolCall, LLMProviderItem)) else "message"
+            key = (f"tool:{next(call_indices)}" if isinstance(item, (LLMToolCall, LLMProviderItem))
+                   else "reasoning" if isinstance(item, LLMReasoning) else "message")
             yield LLMStreamChunk(type="item", item_key=key, item=item)
         yield LLMStreamChunk(type="completed", response=response)
 

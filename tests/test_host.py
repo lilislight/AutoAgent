@@ -225,7 +225,7 @@ entrypoint="{name}:workflow"
                 "flush",
                 "unload",
                 "load_checkpoint",
-                "recover",
+                "continue_execution",
             ):
                 self.assertFalse(hasattr(host, forbidden))
         with self.assertRaises(HostError):

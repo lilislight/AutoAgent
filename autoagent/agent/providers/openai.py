@@ -92,6 +92,9 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
     def _endpoint(self, client):
         return client.responses if self.protocol == "openai.responses" else client.chat.completions
 
+    async def _create(self, params):
+        return await self._endpoint(self._get_client()).create(**params)
+
     async def ainvoke(self, request: LLMRequest) -> LLMResponse:
         self._bind_loop()
         self._active += 1
@@ -102,7 +105,7 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
             recording = await start_llm_call(self, request)
             request = await self._prepare_request(request)
             params = self.adapter.encode_request(request, provider_id=self.provider_id)
-            value = await self._endpoint(self._get_client()).create(**params)
+            value = await self._create(params)
             raw = raw_object(value)
             request_id = getattr(value, "_request_id", None)
             if request_id is not None:
@@ -149,7 +152,7 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
             request = await self._prepare_request(request)
             params = self.adapter.encode_request(request, provider_id=self.provider_id)
             params = self.adapter.stream_parameters(params)
-            source = await self._endpoint(self._get_client()).create(**params)
+            source = await self._create(params)
             http_response = getattr(source, "response", None)
             request_id = http_response.headers.get("x-request-id") if http_response is not None else None
             decoder = self.adapter.decode_stream(source, request=request, provider_id=self.provider_id)
@@ -183,7 +186,8 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
                         await decoder.aclose()
                 finally:
                     if source is not None:
-                        result = source.close()
+                        close = getattr(source, "aclose", None) or source.close
+                        result = close()
                         if inspect.isawaitable(result):
                             await result
             except BaseException as error:

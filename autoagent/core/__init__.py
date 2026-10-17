@@ -20,6 +20,7 @@ from .compiler import (
     WorkflowDefinitionSnapshot,
 )
 from .errors import (
+    NodeTimeoutError,
     AutoAgentError,
     LoopControlError,
     RuntimeInfrastructureError,
@@ -27,6 +28,7 @@ from .errors import (
     WorkflowCompileError,
 )
 from .operators import (
+    run_sync,
     OperatorCallContext, operator_call_context,
     Operator,
     OperatorRegistration,
@@ -104,6 +106,7 @@ from .workflow import (
     NodeIR,
     OutputBindingContext,
     Recovery,
+    TimeoutPolicy,
     Stream,
     StreamContext,
     SubWorkflow,
@@ -114,6 +117,7 @@ from .workflow import (
 )
 
 __all__ = [
+    "TimeoutPolicy", "NodeTimeoutError", "run_sync",
     "OperatorCallContext", "operator_call_context",
     "GraphPauseRequested",
     "GraphPaused",
@@ -235,3 +239,6 @@ __all__ += ["SelfHandle", "OwnerHandle"]
 
 from .commands import AwaitSignal, SignalCase, TimerCase, ChildCase, Select, SelectResult, SuspensionInfo
 __all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "SelectResult", "SuspensionInfo"]
+
+from .runtime.recovery import RecoverySource
+__all__ += ["RecoverySource"]

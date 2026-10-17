@@ -50,7 +50,9 @@ class TraceWatchHub:
         published = time.monotonic()
         signature = lambda row: (row['store_id'], row['invocation_version'], row['family_version'], row['active'])
         try:
-            while head['active']:
+            # A terminal Invocation can be recovered in place. Keep its visible
+            # observer attached so that a later reopen is delivered too.
+            while not self.closed:
                 remaining = self.settings.trace_heartbeat_seconds - (time.monotonic() - published)
                 revision = await self.host.wait_trace_commit(head['revision'], timeout=max(.01, min(30, remaining)))
                 if revision != head['revision'] and self.settings.trace_coalesce_ms:
@@ -69,6 +71,10 @@ class TraceWatchHub:
     async def close(self):
         self.closed = True
         tasks = [group['task'] for group in self.groups.values()]
+        # Cancelling the producers alone leaves StreamingResponse waiting on
+        # queue.get(). Wake every consumer before draining its producer.
+        for group in self.groups.values():
+            self._publish(group, 'closed', {})
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

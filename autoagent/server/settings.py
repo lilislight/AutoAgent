@@ -27,6 +27,7 @@ class ServerSettings:
     page_size: int = 50
     max_page_size: int = 200
     query_timeout_seconds: float = 15
+    shutdown_timeout_seconds: float = 15
     trace_max_subscribers: int = 128
     trace_coalesce_ms: float = 100
     trace_heartbeat_seconds: float = 10
@@ -60,9 +61,10 @@ class ServerSettings:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or name == 'trace_heartbeat_seconds' and not 0 < value <= 30:
                 raise ValueError('Invalid trace notification timing.')
-        value = self.query_timeout_seconds
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-            raise ValueError("Query timeout must be finite and positive.")
+        for name in ('query_timeout_seconds', 'shutdown_timeout_seconds'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f'{name} must be finite and positive.')
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str], *, root: Path | None = None):
@@ -79,6 +81,7 @@ class ServerSettings:
             page_size=int(env.get("AUTOAGENT_SERVER_PAGE_SIZE", "50")),
             max_page_size=int(env.get("AUTOAGENT_SERVER_MAX_PAGE_SIZE", "200")),
             query_timeout_seconds=float(env.get("AUTOAGENT_SERVER_QUERY_TIMEOUT_SECONDS", "15")),
+            shutdown_timeout_seconds=float(env.get("AUTOAGENT_SERVER_SHUTDOWN_TIMEOUT_SECONDS", "15")),
             trace_max_subscribers=int(env.get('AUTOAGENT_SERVER_TRACE_MAX_SUBSCRIBERS', '128')),
             trace_coalesce_ms=float(env.get('AUTOAGENT_SERVER_TRACE_COALESCE_MS', '100')),
             trace_heartbeat_seconds=float(env.get('AUTOAGENT_SERVER_TRACE_HEARTBEAT_SECONDS', '10')),

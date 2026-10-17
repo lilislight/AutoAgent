@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from html import escape
 from pathlib import Path
@@ -18,8 +19,8 @@ class WorkflowUI(StaticFiles):
     def __init__(self, directory: Path, settings: ServerSettings):
         super().__init__(directory=directory, html=True)
         self.settings = settings
-        self.index = (directory / "index.html").read_text(encoding="utf-8")
-        if "<!--AUTOAGENT_CONFIG-->" not in self.index:
+        self.index_path = directory / "index.html"
+        if "<!--AUTOAGENT_CONFIG-->" not in self.index_path.read_text(encoding="utf-8"):
             raise ValueError("UI index.html is missing the AutoAgent configuration marker.")
 
     async def get_response(self, path: str, scope):
@@ -45,8 +46,11 @@ class WorkflowUI(StaticFiles):
                 f'<base href="{escape(mounted_root, quote=True)}/">'
                 f'<script id="autoagent-config" type="application/json">{config}</script>'
             )
+            # Vite rebuilds hashed assets. Never serve startup HTML pointing
+            # at chunks that a later local build has already replaced.
+            index = await asyncio.to_thread(self.index_path.read_text, encoding="utf-8")
             return HTMLResponse(
-                self.index.replace("<!--AUTOAGENT_CONFIG-->", injection),
+                index.replace("<!--AUTOAGENT_CONFIG-->", injection),
                 headers={"Cache-Control": "no-store"},
             )
         return response

@@ -24,7 +24,7 @@ from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 15
+RUNTIME_STATE_SCHEMA_VERSION = 16
 InvocationStatus = Literal[
     "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
@@ -99,6 +99,8 @@ class NodeExecutionState:
     routing: tuple[EdgeConditionResult, ...] = ()
     routing_source_status: str | None = None
     fault: RuntimeErrorInfo | None = None
+    reused_calls: DurableValue = field(default_factory=lambda: freeze({}))
+    command_inputs: DurableValue = field(default_factory=lambda: freeze({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +124,8 @@ class NodeOccurrenceState:
 
 @dataclass(frozen=True, slots=True)
 class SchedulerState:
+    occurrence_ids: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    retired_occurrences: Mapping[str, NodeOccurrenceState] = field(default_factory=lambda: MappingProxyType({}))
     initialized: bool = False
     ready: tuple[str, ...] = ()
     occurrences: Mapping[str, NodeOccurrenceState] = field(
@@ -165,6 +169,9 @@ class InvocationState:
     output: DurableValue = None
     error: RuntimeErrorInfo | None = None
     cancel_reason: str | None = None
+    recovery_count: int = 0
+    last_recovery_id: str | None = None
+    pending_recovery: DurableValue = None
     created_at_us: int = 0
     started_at_us: int | None = None
     completed_at_us: int | None = None
@@ -222,7 +229,13 @@ class ChildResult:
     cancel_origin: DurableValue = None
     resume_receipts: DurableValue = field(default_factory=lambda: freeze({}))
     resume_receipt_frontiers: DurableValue = field(default_factory=lambda: freeze({}))
+    recovery_count: int = 0
+    last_recovery_id: str | None = None
     kind: Literal["child_result"] = field(default="child_result", init=False)
+
+    @property
+    def pending_recovery(self):
+        return None
 
     # Common read-only view used by graph traversal and result consumers.
     @property
@@ -432,6 +445,10 @@ def validate_runtime_state(state: RuntimeState) -> None:
     )
     _validate_invocation_lifecycle(invocation)
     _optional_non_empty_string(invocation.cancel_reason, "Invocation cancel_reason")
+    _non_negative(invocation.recovery_count, "Recovery count")
+    _optional_non_empty_string(invocation.last_recovery_id, "Recovery request identity")
+    if invocation.pending_recovery is not None and not isinstance(invocation.pending_recovery, Mapping):
+        raise ValueError("Pending recovery must be a Root recovery plan.")
     _validate_context_revision_map(
         invocation.context_path_revisions,
         state.sequence,
@@ -472,7 +489,27 @@ def _validate_scheduler(
     if not isinstance(scheduler.occurrences, Mapping):
         raise TypeError("Scheduler occurrences must be a mapping.")
 
+    if not isinstance(scheduler.occurrence_ids, Mapping):
+        raise TypeError('Recovered occurrence identities must be a mapping.')
+    for logical, physical in scheduler.occurrence_ids.items():
+        _non_empty_string_value(logical, 'Logical occurrence identity')
+        _non_empty_string_value(physical, 'Physical occurrence identity')
+        prefix = logical + '~recover:'
+        if not physical.startswith(prefix) or not physical[len(prefix):].isdecimal() or int(physical[len(prefix):]) < 1:
+            raise ValueError('Invalid recovered occurrence identity.')
     occurrences = scheduler.occurrences
+    if not isinstance(scheduler.retired_occurrences, Mapping):
+        raise TypeError('Retired activation sources must be a mapping.')
+    for key,item in scheduler.retired_occurrences.items():
+        if (not isinstance(item, NodeOccurrenceState) or key != item.id or key in occurrences
+                or item.status != 'completed' or item.output is not None or item.activations
+                or item.execution != NodeExecutionState() or item.metrics is not None):
+            raise ValueError('Retired activation sources must be settled metadata without values.')
+        _non_empty_string_value(item.id, 'Retired source identity')
+        _non_empty_string_value(item.node_id, 'Retired source Node')
+        _validate_scope(item.scope, 'Retired source scope')
+        _validate_occurrence_lifecycle(item)
+    activation_sources = {**scheduler.retired_occurrences, **occurrences}
     for key, occurrence in occurrences.items():
         _non_empty_string_value(key, "Node Occurrence key")
         if not isinstance(occurrence, NodeOccurrenceState):
@@ -482,7 +519,7 @@ def _validate_scheduler(
         _non_empty_string_value(occurrence.id, "Node Occurrence id")
         _non_empty_string_value(occurrence.node_id, "Node Occurrence node_id")
         _validate_scope(occurrence.scope, "Node Occurrence scope")
-        if occurrence.id != occurrence_key(occurrence.node_id, occurrence.scope):
+        if occurrence.id != scheduler.occurrence_ids.get(occurrence_key(occurrence.node_id, occurrence.scope), occurrence_key(occurrence.node_id, occurrence.scope)):
             raise ValueError(
                 "Node Occurrence id must match its node_id and Execution Scope."
             )
@@ -536,7 +573,7 @@ def _validate_scheduler(
         for activation in occurrence.activations:
             _validate_activation(
                 activation,
-                occurrences,
+                activation_sources,
                 expected_target_node_id=occurrence.node_id,
             )
 
@@ -1060,6 +1097,8 @@ def _child_result_record(value):
         "entry_node_id": value.entry_node_id, "status": value.status,
         "output": thaw(value.output), "error": _error_record(value.error),
         "cancel_reason": value.cancel_reason,
+        "recovery_count": value.recovery_count,
+        "last_recovery_id": value.last_recovery_id,
         "created_at_us": value.created_at_us, "started_at_us": value.started_at_us,
         "completed_at_us": value.completed_at_us,
         "parent_session_id": value.parent_session_id, "parent_invocation_id": value.parent_invocation_id,
@@ -1090,7 +1129,10 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
         "output": thaw(value.output),
         "error": _error_record(value.error),
         "cancel_reason": value.cancel_reason,
+        "recovery_count": value.recovery_count,
+        "last_recovery_id": value.last_recovery_id,
         "pending_outcome": value.pending_outcome,
+        "pending_recovery": thaw(value.pending_recovery),
         "control_state": value.control_state,
         "signals": thaw(value.signals),
         "cancel_origin": thaw(value.cancel_origin),
@@ -1105,6 +1147,8 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
         },
         "child_plans": _child_plans_record(value.child_plans),
         "scheduler": {
+            "occurrence_ids": dict(value.scheduler.occurrence_ids),
+            "retired_occurrences": {key: _occurrence_record(item) for key,item in value.scheduler.retired_occurrences.items()},
             "initialized": value.scheduler.initialized,
             "ready": list(value.scheduler.ready),
             "occurrences": {
@@ -1277,6 +1321,8 @@ def _invocation_from_record(value: object) -> InvocationState | ChildResult | No
             entry_node_id=_string(record, "entry_node_id"), status=_string(record, "status"),
             output=freeze(record.get("output")), error=_error_from_record(record.get("error")),
             cancel_reason=_optional_string(record, "cancel_reason"),
+            recovery_count=_integer(record,"recovery_count"),
+            last_recovery_id=_optional_string(record,"last_recovery_id"),
             created_at_us=_integer(record, "created_at_us"), started_at_us=_optional_integer(record, "started_at_us"),
             completed_at_us=_integer(record, "completed_at_us"),
             parent_session_id=_string(record, "parent_session_id"), parent_invocation_id=_string(record, "parent_invocation_id"),
@@ -1307,6 +1353,9 @@ def _invocation_from_record(value: object) -> InvocationState | ChildResult | No
         output=freeze(record.get("output")),
         error=_error_from_record(record.get("error")),
         cancel_reason=_optional_string(record, "cancel_reason"),
+        recovery_count=_integer(record,"recovery_count"),
+        last_recovery_id=_optional_string(record,"last_recovery_id"),
+        pending_recovery=freeze(record.get("pending_recovery")),
         pending_outcome=_optional_string(record, "pending_outcome"),
         control_state=_string(record, "control_state"),
         signals=freeze(record.get("signals", empty_signals())),
@@ -1342,6 +1391,8 @@ def _scheduler_from_record(value: object) -> SchedulerState:
     if type(initialized) is not bool:
         raise TypeError("Scheduler initialized must be bool.")
     return SchedulerState(
+        occurrence_ids=MappingProxyType(dict(_mapping(record.get("occurrence_ids"), "Occurrence identities"))),
+        retired_occurrences=runtime_mapping({key:_occurrence_from_record(item) for key,item in _mapping(record.get("retired_occurrences"), "Retired activation sources").items()}),
         initialized=initialized,
         ready=tuple(ready),
         occurrences=runtime_mapping(
@@ -1650,6 +1701,8 @@ def _execution_record(value: NodeExecutionState) -> dict[str, object]:
         "routing": [{"edge_id": r.edge_id, "selected": r.selected, "duration_ns": r.duration_ns} for r in value.routing],
         "routing_source_status": value.routing_source_status,
         "fault": _error_record(value.fault),
+        "reused_calls": thaw(value.reused_calls),
+        "command_inputs": thaw(value.command_inputs),
     }
 
 
@@ -1665,12 +1718,25 @@ def _execution_from_record(record: object) -> NodeExecutionState:
         routing=tuple(EdgeConditionResult(**item) for item in record["routing"]),
         routing_source_status=_optional_string(record, "routing_source_status"),
         fault=_error_from_record(record.get("fault")),
+        reused_calls=freeze(record.get("reused_calls", {})),
+        command_inputs=freeze(record.get("command_inputs", {})),
     )
 
 
 def _validate_execution(execution: NodeExecutionState) -> None:
     if not isinstance(execution, NodeExecutionState):
         raise TypeError("Occurrence execution must be NodeExecutionState.")
+    for cache in (execution.reused_calls, execution.command_inputs):
+        if not isinstance(cache, Mapping):
+            raise TypeError('Recovery Unit caches must be mappings.')
+        for key in cache:
+            if not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key:
+                raise ValueError('Recovery Unit keys must be canonical nonnegative indices.')
+    for call in execution.reused_calls.values():
+        if not isinstance(call, Mapping) or set(call) != {'id', 'operator_id', 'output'}:
+            raise ValueError('Reused Call requires identity and its accepted output.')
+        _non_empty_string_value(call['id'], 'Reused Call identity')
+        _non_empty_string_value(call['operator_id'], 'Reused Operator identity')
     stages = {"input_mapped", "capability_resolved", "aggregated", "output_bound", "routing_resolved"}
     if execution.phase not in stages | {"none", "started", "executing", "faulted"}:
         raise ValueError("Unknown execution phase.")

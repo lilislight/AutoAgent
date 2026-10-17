@@ -1,4 +1,4 @@
-import type { TraceRow } from './types.js';
+import type { InspectorTab, TraceRow } from './types.js';
 
 export const STAGE_LABELS: Record<string, string> = {
   'input.mapped': 'Input Mapping', 'capability.resolved': 'Capability Resolution',
@@ -34,6 +34,17 @@ export function stageDefinitionPath(row: TraceRow): string[] | undefined {
     case 'output.bound': case 'output_binding': return ['output_binding'];
     default: return undefined;
   }
+}
+/** Only expose sections that this stage actually owns. Errors belong to Summary. */
+export function stageTabs(row: TraceRow): InspectorTab[] {
+  const tabs: InspectorTab[] = ['Summary'];
+  if (row.values.some(field => field !== 'error' && field !== 'conditions')) tabs.push('Input / Output');
+  if (row.event_name === 'routing.resolved') tabs.push('Execution');
+  if (stageDefinitionPath(row)) tabs.push('Definition');
+  return tabs;
+}
+export function systemCommandId(id?: string): string {
+  return id?.startsWith('system_command:') ? id : `system_command:${id ?? 'wait'}`;
 }
 export function pickDefinition(value: unknown, path?: string[]): unknown {
   for (const key of path ?? []) value = value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined;

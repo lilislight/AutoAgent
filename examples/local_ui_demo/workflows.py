@@ -6,7 +6,7 @@ from typing import cast
 from typing_extensions import TypedDict
 
 from autoagent import (Capability, ConditionContext, ContextOperation, ContextPatch, Edge, InputMappingContext, OutputBindingContext, TimerRequest,
-                       Map, Node, Operator, Spawn, Workflow)
+                       Map, Node, Operator, Spawn, Wait, Workflow)
 from autoagent.host import workflow
 from examples.core_workflow_api_demo import CheckResult, CombinedChecks, Decision, Order, build_workflow, manual_review, order_from_context, risk_check
 from examples.host_project_demo.workflows import finish
@@ -269,3 +269,25 @@ def live_signal_review():
     from autoagent import AwaitSignal, SignalEndpoint
     return Workflow('live-signal-review',nodes=[Node('receive',AwaitSignal('message'))],
         signal_endpoints=[SignalEndpoint('message',LiveSignalMessage)])
+
+
+class ParallelApprovalRequest(TypedDict):
+    subject: str
+
+
+class ParallelApprovalResponse(TypedDict):
+    approved: bool
+    comment: str
+
+
+def prepare_parallel_approvals(value: ParallelApprovalRequest) -> ParallelApprovalRequest:
+    """Fan one request out to twenty independently resumable Wait Nodes."""
+    return value
+
+
+@workflow
+def parallel_approvals():
+    """Twenty concurrent external approvals in a single Invocation."""
+    approvals = [Node(f"approval_{index:02d}", Wait(ParallelApprovalRequest, ParallelApprovalResponse)) for index in range(1, 21)]
+    return Workflow("parallel-approvals", nodes=[Node("prepare", prepare_parallel_approvals), *approvals],
+                    edges=[Edge(source="prepare", target=node.id, id=f"request_{index:02d}") for index, node in enumerate(approvals, 1)])

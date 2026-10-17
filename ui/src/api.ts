@@ -6,8 +6,10 @@ import { traceQuery } from './traceClient';
 import type { AcceptedExecution, RunWorkflowInput, WorkflowRunSpec } from './types';
 import type { ExecutionActionInput, ExecutionActionSpec, ExecutionControls, ExecutionOperation } from './types';
 
-export function getExecutionControls(iid:string,signal:AbortSignal,cursor?:string|null) {
+export function getExecutionControls(iid:string,signal:AbortSignal,cursor?:string|null,target?:{target_invocation_id?:string;wait_id?:string}) {
   const query=new URLSearchParams({invocation_id:iid});if(cursor)query.set('cursor',cursor);
+  if(target?.target_invocation_id)query.set('target_invocation_id',target.target_invocation_id);
+  if(target?.wait_id)query.set('wait_id',target.wait_id);
   return request<ExecutionControls>(`/execution-controls?${query}`,signal);
 }
 export function getExecutionActionSpec(iid:string,action:string,options:Record<string,string>,signal:AbortSignal) {
@@ -30,8 +32,9 @@ export function runWorkflow(input: RunWorkflowInput, signal: AbortSignal) {
   return request<AcceptedExecution>('/executions',signal,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)});
 }
 
-export function browseWorkflows(search: string, cursor: string | null, signal: AbortSignal) {
+export function browseWorkflows(search: string, cursor: string | null, signal: AbortSignal, registeredOnly = false) {
   const query = new URLSearchParams({ q: search, limit: String(config.pageSize) });
+  if (registeredOnly) query.set("registered_only", "true");
   if (cursor) query.set("cursor", cursor);
   return request<WorkflowCatalogPage>(`/workflow-catalog?${query}`, signal);
 }
@@ -60,6 +63,7 @@ function appendExecutionFilters(query: URLSearchParams, filters?: ExecutionFilte
   if (filters.query) query.set("q", filters.query);
   for (const id of filters.workflowIds) query.append("workflow_id", id);
   for (const id of filters.revisionIds) query.append("revision_id", id);
+  for (const status of filters.statuses) query.append("status", status);
   if (filters.startedFrom) query.set('started_after_us', String(Date.parse(filters.startedFrom) * 1000));
   if (filters.startedTo) query.set('started_before_us', String(Date.parse(filters.startedTo) * 1000));
 }

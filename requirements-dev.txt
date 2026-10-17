@@ -1,0 +1,9 @@
+# Runtime plus tools for pip installs and local wheel/source builds.
+# Tests use the standard-library unittest runner, so pytest is not required.
+#   uv pip install --python .venv/bin/python -r requirements-dev.txt
+-r requirements.txt
+
+pip>=25
+build>=1.2,<2
+setuptools>=75
+wheel>=0.45,<1

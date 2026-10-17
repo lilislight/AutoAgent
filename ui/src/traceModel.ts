@@ -2,6 +2,7 @@ import type { TraceDataset, TimelineRow, TimelineMarker, TimelinePage, TimelineE
 import { spanGeometry } from './timeline.js';
 import { ReplayAccumulator } from './replay.js';
 import { LiveGraph } from './liveGraph.js';
+import { appendPauseIntervals, pauseIntervals, TimelineActivity, type PauseInterval } from './liveObservation.js';
 
 export class TraceModel {
   readonly nodes = new Map<string, TimelineRow>();
@@ -14,6 +15,8 @@ export class TraceModel {
   private untimed = 0;
   private recordedEnd = 0;
   private graph: LiveGraph;
+  private pauses: PauseInterval[];
+  private activity = new TimelineActivity();
   bytesDelta = 0;
   constructor(readonly data: TraceDataset) {
     for (const row of data.node) this.nodes.set(row.id, row);
@@ -27,6 +30,8 @@ export class TraceModel {
     data.node.sort((a,b)=>(a.ready_at_us ?? a.start_at_us)-(b.ready_at_us ?? b.start_at_us) || a.id.localeCompare(b.id));
     data.event.sort((a,b)=>a.sequence-b.sequence);
     for(const row of data.event)this.eventIds.add(row.event_id);
+    this.pauses = pauseIntervals(data.event);
+    this.activity.append(data.event);
     this.starts=data.node.filter(row=>row.status!=='skipped' && row.start_at_us!=null).map(row=>row.start_at_us);
     for(const kind of ['node','call','wait'] as const)for(const row of data[kind])this.timing(kind,row,1);
     this.starts.sort((a,b)=>a-b);
@@ -45,14 +50,16 @@ export class TraceModel {
     const base=this.data.manifest.overview, inv=this.data.manifest.trace.invocation;
     const terminal=['completed','failed','cancelled'].includes(inv.status ?? '');
     const start=base.start_at_us;
-    const end=start==null?null:Math.max(start,this.recordedEnd,inv.completed_at_us ?? 0,terminal?0:observed);
+    const idle=this.activity.idle(this.data.manifest.trace,Math.max(start ?? 0,this.recordedEnd),this.pauses);
+    const observedAt=idle?.at_us ?? observed;
+    const end=start==null?null:Math.max(start,this.recordedEnd,inv.completed_at_us ?? 0,terminal?0:observedAt);
     const bins:number[]=[];
     if(start!=null && end!=null)for(let index=0;index<64;index++){
       const left=index?this.lower(start+(end-start)*index/64):0;
       const right=index===63?this.starts.length:this.lower(start+(end-start)*(index+1)/64);
       bins.push(right-left);
     }
-    return {...base,start_at_us:start,end_at_us:end,observed_at_us:observed,counts:{...this.counts},untimed_count:this.untimed,node_start_bins:bins};
+    return {...base,start_at_us:start,end_at_us:end,observed_at_us:observedAt,counts:{...this.counts},untimed_count:this.untimed,node_start_bins:bins,pause_intervals:this.pauses,idle};
   }
   apply(delta:TraceDataset) {
     const old=this.data.manifest,next=delta.manifest;
@@ -96,6 +103,8 @@ export class TraceModel {
     }
     for(const id of callGroups)this.calls.get(id)!.sort((a,b)=>a.start_at_us-b.start_at_us || a.id.localeCompare(b.id));
     for(const marker of delta.event){this.bytesDelta+=JSON.stringify(marker).length*2;this.eventIds.add(marker.event_id);this.data.event.push(marker);}
+    if(delta.event.some(event=>event.control_state || event.invocation_status))this.pauses=appendPauseIntervals(this.pauses,delta.event);
+    this.activity.append(delta.event);
     this.graph.updateEdges(delta.edge ?? []);
     this.data.manifest={...next,delta:false,base_cursor:null,trace:this.graph.frame(next.trace)};
     this.data.manifest.overview=this.overview();

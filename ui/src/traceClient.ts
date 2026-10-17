@@ -38,7 +38,7 @@ const current = new Map<string, Entry>();
 const readers = new Map<string, number>();
 const known = new Map<string, ExecutionTrace>();
 const loading = new Map<string, Promise<ExecutionTrace>>();
-const headerKey = (trace: ExecutionTrace) => `${source()}|${trace.source_id ?? 'unknown'}|${trace.invocation.invocation_id}|${trace.last_event?.event_id ?? 'empty'}|${trace.invocation.status}`;
+const headerKey = (trace: ExecutionTrace) => `control-spans:1|${source()}|${trace.source_id ?? 'unknown'}|${trace.invocation.invocation_id}|${trace.last_event?.event_id ?? 'empty'}|${trace.invocation.status}`;
 const entryKey = (manifest: TraceDatasetManifest) => `${source()}|${manifest.invocation_id}|${manifest.version}`;
 
 async function release(manifest: TraceDatasetManifest) {

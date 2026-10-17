@@ -14,8 +14,9 @@ class PauseExecution(ExecutionAction):
     action: Literal['pause']
 
 
-class ContinueExecution(ExecutionAction):
-    action: Literal['continue']
+class RecoverExecution(ExecutionAction):
+    action: Literal['recover']
+    expected_version: int=Field(ge=0,le=9007199254740991)
 
 
 class CancelExecution(ExecutionAction):
@@ -38,7 +39,7 @@ class SendExecutionSignal(ExecutionAction):
     payload: JsonValue
 
 
-ExecutionActionRequest=Annotated[PauseExecution|ContinueExecution|CancelExecution|RespondToWait|SendExecutionSignal,Field(discriminator='action')]
+ExecutionActionRequest=Annotated[PauseExecution|RecoverExecution|CancelExecution|RespondToWait|SendExecutionSignal,Field(discriminator='action')]
 
 
 class RunWorkflowRequest(BaseModel):
@@ -56,8 +57,6 @@ class RunWorkflowRequest(BaseModel):
     def validate_session(self):
         if self.session_mode == "existing" and not self.session_id:
             raise ValueError("Choose a Session ID when reusing a Session.")
-        if self.session_mode == "new" and self.session_id is not None:
-            raise ValueError("New Session IDs are assigned by the Host.")
         if self.session_mode == "existing" and self.session_context is not None:
             raise ValueError("Session context can only be set for a new Session.")
         return self

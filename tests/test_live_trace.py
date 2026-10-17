@@ -136,7 +136,7 @@ class LiveTraceTests(unittest.IsolatedAsyncioTestCase):
             await hub.close()
 
     async def test_sse_delivers_terminal_commit_and_disconnect_cleans_up(self):
-        """SSE carries metadata-only heads and finishes only after the last persisted family state."""
+        """SSE delivers terminal metadata and keeps observing until the browser disconnects."""
         wf=Workflow('live-sse',nodes=[Node('approval',Wait(Value,Value))])
         async with self.host(wf) as host:
             root=await host.execute(wf.id,{'text':'ask'},entry_node_id='approval')
@@ -162,12 +162,70 @@ class LiveTraceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(body['active'])
             self.assertEqual(body['status'],'completed')
             self.assertGreater(body['invocation_version'],first_head['invocation_version'])
-            with self.assertRaises(StopAsyncIteration):
-                await anext(iterator)
+            await iterator.aclose()
             # A second subscription can be disconnected before any updates.
             response=await endpoint(root.invocation_id)
             await anext(response.body_iterator)
             await response.body_iterator.aclose()
+
+    async def test_terminal_observer_receives_in_place_recovery_without_reconnecting(self):
+        """An observer opened on a failed Root receives its recovered state on the same stream."""
+        attempts = []
+        def flaky(value: Value) -> Value:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise ValueError('temporary failure')
+            return value
+        wf = Workflow('live-recover', nodes=[Node('work', flaky)])
+        async with self.host(wf) as host:
+            root = await host.execute(wf.id, {'text': 'retry'}, entry_node_id='work')
+            await host.join(root)
+            router = create_router(host, settings=ServerSettings(trace_coalesce_ms=0, trace_heartbeat_seconds=.1))
+            endpoint = next(route.endpoint for route in router.routes if route.path.endswith('/trace-watch'))
+            response = await endpoint(root.invocation_id)
+            iterator = response.body_iterator
+            try:
+                await anext(iterator)
+                first = json.loads((await anext(iterator)).split('data: ', 1)[1])
+                self.assertEqual(first['status'], 'failed')
+                self.assertFalse(first['active'])
+                heartbeat = await asyncio.wait_for(anext(iterator), 2)
+                self.assertIn('event: heartbeat', heartbeat)
+                await host.recover(root, request_id='recover-observed')
+                for _ in range(30):
+                    body = json.loads((await asyncio.wait_for(anext(iterator), 2)).split('data: ', 1)[1])
+                    if body['status'] == 'completed':
+                        break
+                self.assertEqual(body['status'], 'completed')
+                self.assertEqual(body['invocation_id'], root.invocation_id)
+                self.assertGreater(body['invocation_version'], first['invocation_version'])
+                self.assertEqual(len(attempts), 2)
+            finally:
+                await iterator.aclose()
+
+    async def test_pause_boundaries_are_lightweight_incremental_headers(self):
+        """Pause/continue boundaries match full exports without reading Event payloads or business values."""
+        wf = Workflow('live-pauses', nodes=[Node('approval', Wait(Value, Value))])
+        async with self.host(wf) as host:
+            root = await host.execute(wf.id, {'text': 'private input'}, entry_node_id='approval')
+            await host.join(root)
+            baseline = await host.get_trace_dataset(root.invocation_id)
+            before = await self.rows(host, baseline, 'event')
+            await host.pause(root)
+            paused = await host.get_trace_dataset(root.invocation_id, cursor=baseline['cursor'])
+            pause_headers = await self.rows(host, paused, 'event')
+            self.assertTrue(any(row.get('control_state') == 'paused' for row in pause_headers))
+            await host.recover(root, request_id='continue-observed')
+            await host.join(root)
+            with patch.object(SourceReader, 'read', side_effect=AssertionError('No Event payloads or values')):
+                resumed = await host.get_trace_dataset(root.invocation_id, cursor=paused['cursor'])
+                resume_headers = await self.rows(host, resumed, 'event')
+                fresh = await host.get_trace_dataset(root.invocation_id)
+                full = await self.rows(host, fresh, 'event')
+            self.assertTrue(any(row.get('control_state') == 'active' for row in resume_headers))
+            self.assertEqual(before + pause_headers + resume_headers, full)
+            self.assertEqual(len(full), len({row['event_id'] for row in full}))
+            self.assertNotIn('private input', json.dumps(full))
 
     async def test_generation_reset_and_cursor_scope_are_explicit(self):
         """Rebuilt stores require a fresh baseline, while malformed or cross-Invocation cursors are rejected."""

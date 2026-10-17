@@ -20,7 +20,7 @@ from autoagent import (
 )
 from autoagent.core.commands import CommandIR
 from autoagent.core.operators import OperatorRegistration
-from autoagent.core.runtime import InMemoryUserEventJournal, RuntimeEvent, StateReducer
+from autoagent.core.runtime import InMemoryUserEventJournal, RuntimeEvent, RuntimeRepository, StateReducer
 
 from .models import HostError
 from .persistence import OperatorDefinition
@@ -72,11 +72,13 @@ class Runtime:
         self.residency = None
         self.locks = {}
         self.recovery_tasks = {}
+        self.recovery_requests = {}
         self.needs_recovery = set()
+        self.repository = RuntimeRepository(sink=self)
         self.app = AutoAgentApp(
             max_operator_concurrency=settings.max_operator_concurrency,
             max_node_executions_per_invocation=settings.max_node_executions_per_invocation,
-            runtime_event_sink=self,
+            runtime_repository=self.repository,
             user_event_sink=self,
             user_event_journal=self.journal,
             runtime_lifespan=self._resources,
@@ -334,21 +336,41 @@ class Runtime:
                     raise HostError("A planned Child Session cannot be admitted as a Root.")
             await self.residency.reserve(session_id)
 
-    async def activate(self, ref, *, force=False):
+    async def activate(self, ref, *, force=False, request_id=None, expected_version=None):
         if not force and ref.invocation_id not in self.needs_recovery:
             return None
         status = await self.app.astatus(ref)
-        if not force and status.control_state != "active":
+        if not force and (status.control_state != "active" or status.status in {"completed", "failed", "cancelled"}):
             return None
         task = self.recovery_tasks.get(ref.invocation_id)
         if task is None:
-            task = asyncio.create_task(self.app.arecover(ref))
+            async def recover():
+                source = None
+                if force and status.status in {'failed', 'cancelled'}:
+                    from autoagent.core import RecoverySource
+                    await self.persistence.flush()
+                    bundle = await self.persistence.read_recovery_bundle(ref.invocation_id, full_history=True)
+                    source = await asyncio.to_thread(RecoverySource.from_events,
+                        (RuntimeEvent.from_record(record) for records in bundle['events'].values() for record in records))
+                    del bundle
+                operation = self.app.arecover(ref, source=source, request_id=request_id, expected_version=expected_version)
+                source = None
+                return await operation
+            # Install single-flight ownership before SQL reads or reconstruction
+            # yield; a second request must not start another recovery plan.
+            task = asyncio.create_task(recover())
             self.recovery_tasks[ref.invocation_id] = task
+            self.recovery_requests[ref.invocation_id] = (request_id, expected_version)
             def finished(result):
-                self.recovery_tasks.pop(ref.invocation_id, None)
+                if self.recovery_tasks.get(ref.invocation_id) is result:
+                    self.recovery_tasks.pop(ref.invocation_id, None)
+                    self.recovery_requests.pop(ref.invocation_id, None)
                 if not result.cancelled() and result.exception() is None:
                     self.needs_recovery.discard(ref.invocation_id)
             task.add_done_callback(finished)
+        elif force and (request_id is None or self.recovery_requests.get(ref.invocation_id) != (request_id, expected_version)):
+            from .models import HostRunConflict
+            raise HostRunConflict('recovery_in_progress', 'Recovery is already in progress for this Root.')
         return await asyncio.shield(task)
 
     async def shutdown(self):

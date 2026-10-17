@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import get_args, get_origin
 
 from ..errors import WorkflowCompileError
+from ..workflow import TimeoutPolicy
 from ..operators import Operator, ValueContract
 from ..commands import AwaitSignal, Select, SelectResult, ChildCase
 from ..commands import SignalEndpoint, SignalLimits, SendSignal, SignalReceipt, ReceiveSignal, SignalBatch
@@ -643,6 +644,11 @@ class WorkflowCompiler:
                 "NODE_CONFIGURATION_INVALID",
                 f"Node {node.id!r} recovery_mode must be Recovery.",
             )
+        if node.timeout is not None:
+            if not isinstance(node.timeout, TimeoutPolicy):
+                raise _error("NODE_CONFIGURATION_INVALID", f"Node {node.id!r} timeout must be TimeoutPolicy.")
+            if isinstance(node.executable, SystemCommand):
+                raise _error("NODE_CONFIGURATION_INVALID", "TimeoutPolicy applies to Operator Calls; use Timer/Select for durable waits.")
         if not isinstance(node.user_events, tuple) or not all(
             isinstance(item, UserEventMapping) for item in node.user_events
         ):
@@ -809,6 +815,7 @@ class WorkflowCompiler:
             stream=node.stream,
             user_events=tuple(user_events),
             recovery_mode=node.recovery_mode,
+            timeout=node.timeout,
         )
 
     def _validate_input_mapping(self, node: Node, target: ValueContract | None) -> None:

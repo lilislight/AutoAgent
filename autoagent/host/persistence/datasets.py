@@ -134,11 +134,23 @@ class TraceDatasets:
                                 await write('edge', rows)
                     headers = select(events.c.event_id, events.c.event_name, events.c.sequence, events.c.occurred_at_us).where(
                         events.c.invocation_id == iid, events.c.sequence <= upper).order_by(events.c.sequence)
+                    if not replay:
+                        # Small control boundaries, never Runtime Event payloads.
+                        # Scalar subqueries retain one header per Event even when
+                        # the same commit changes several Invocation fields.
+                        for field, label in (('control_state', 'control_state'), ('status', 'invocation_status')):
+                            value = changes.c.change[field].as_string()
+                            boundary = select(value).where(changes.c.event_id == events.c.event_id,
+                                changes.c.entity_type == 'invocation', changes.c.entity_id == iid,
+                                value.is_not(None)).order_by(changes.c.change_index.desc()).limit(1).scalar_subquery()
+                            headers = headers.add_columns(boundary.label(label))
                     if previous is not None and not replay:
                         headers = headers.where(events.c.store_order > previous)
                     stream = await conn.stream(headers)
                     async for rows in stream.mappings().partitions(PAGE_SIZE):
                         batch = [dict(row) for row in rows]
+                        if not replay:
+                            batch = [{key: value for key, value in row.items() if value is not None} for row in batch]
                         if replay:
                             batch = list((await replay_events(conn, iid, batch)).values())
                         await write('event', batch)

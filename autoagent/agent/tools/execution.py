@@ -8,6 +8,7 @@ import json
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import ValidationError
+from autoagent.core.operators import run_sync
 
 from ..models import (
     AudioContent, FileContent, ImageContent, LLMToolCall, LLMToolDefinition,
@@ -79,8 +80,8 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
 class Tool:
     """An executable typed function, separate from its advertised definition.
 
-    Direct ainvoke offloads synchronous handlers. Use as_operator() in Core so
-    synchronous calls use Core's own executor and cancellation accounting.
+    ainvoke uses Core's executor and cancellation accounting inside Operators;
+    standalone synchronous handlers use the calling loop's default executor.
     Argument and declared business failures become observations; unexpected
     exceptions and invalid outputs raise ToolError without automatic retries.
     """
@@ -197,7 +198,7 @@ class Tool:
     async def ainvoke(self, call: LLMToolCall, *, context: ToolContext | None = None) -> LLMToolResult:
         """Execute one Tool; externally requested cancellation stays cancellation."""
         if not self.is_async:
-            return await asyncio.to_thread(self.invoke, call, context=context)
+            return await run_sync(self.invoke, call, context=context)
         call = LLMToolCall.model_validate(call)
         arguments = self._arguments(call)
         if isinstance(arguments, LLMToolResult):

@@ -144,7 +144,13 @@ class WorkflowExecutor:
     def _occurrence_calls(self, session_id, occurrence_id):
         invocation = self._repository.state(session_id).invocation
         ids = self._execution_index(session_id).calls_by_occurrence.get(occurrence_id, ())
-        return tuple(invocation.scheduler.operator_calls[key] for key in ids)
+        actual = tuple(invocation.scheduler.operator_calls[key] for key in ids)
+        workspace = invocation.scheduler.occurrences[occurrence_id].execution
+        from ..runtime.state import OperatorCallState
+        reused = tuple(OperatorCallState(item['id'], occurrence_id, item['operator_id'], int(index),
+            'completed', None, item['output'], started_at_us=0, completed_at_us=0)
+            for index, item in workspace.reused_calls.items())
+        return (*reused, *actual)
 
     def _occurrence_waits(self, session_id, occurrence_id):
         invocation = self._repository.state(session_id).invocation
@@ -502,6 +508,8 @@ class WorkflowExecutor:
 
     async def _execute_command(self, node, occurrence_id, mapped, session_id):
         command = node.executable
+        if command.id == 'system_command:spawn':
+            return await self._execute_spawn(node, occurrence_id, mapped, session_id)
         invocation_id = self._repository.state(session_id).invocation.id
         async def emit(payload):
             return await self._emit(session_id, invocation_id, payload)
@@ -543,6 +551,9 @@ class WorkflowExecutor:
                             kind, condition = 'child', {'handle': RuntimeHandle.model_validate(handle).model_dump(), 'after': after}
                         cases.append({'name': name, 'kind': kind, 'condition': condition})
                     record = {'cases': cases, 'select': True}
+                cached_inputs = self._repository.state(session_id).invocation.scheduler.occurrences[occurrence_id].execution.command_inputs
+                if str(index) in cached_inputs:
+                    record = thaw(cached_inputs[str(index)])
                 await emit(OperatorCallStarted(str(uuid4()), occurrence_id, command.id, index, record))
         calls = {c.unit_index: c for c in self._occurrence_calls(session_id, occurrence_id)}
         if command.workflow is not None and any(c.status != 'completed' for c in calls.values()):
@@ -557,8 +568,7 @@ class WorkflowExecutor:
         for index, handle in enumerate(handles):
             call = calls[index]
             if call.status == 'completed':
-                typ = (RuntimeHandle if command.id == 'system_command:spawn' else
-                    ResumeReceipt if command.id == 'system_command:resume' else
+                typ = (ResumeReceipt if command.id == 'system_command:resume' else
                     CancelReceipt if command.id == 'system_command:cancel' else
                     TimerResult if command.id == 'system_command:timer' else
                     SignalReceipt if command.id == 'system_command:send_signal' else
@@ -593,9 +603,7 @@ class WorkflowExecutor:
                     elif command.id == 'system_command:status':
                         result = await self._status_runtime(session_id, handle)
                     else:
-                        if command.id != 'system_command:spawn':
-                            raise RuntimeError('Unsupported System Command.')
-                        result = handle
+                        raise RuntimeError('Unsupported System Command.')
                 except (CommandSuspended, asyncio.CancelledError, RuntimeInfrastructureError):
                     raise
                 except Exception as exc:
@@ -608,16 +616,68 @@ class WorkflowExecutor:
             if command.id == 'system_command:resume':
                 await self._release_resume(session_id, invocation_id, call.id, handle.handle.session_id)
             outputs.append(result)
+        return await self._command_output(node, occurrence_id, inputs, outputs, session_id)
+
+    async def _command_output(self, node, occurrence_id, inputs, outputs, session_id):
         if node.map is not None and node.map.aggregate is not None:
             state = self._repository.state(session_id)
             output, duration = await self._node_executor.timed(self._node_executor.call_hook,
                 node.map.aggregate, AggregationContext(invocation_context=state.invocation.context,
                     session_context=state.session.context, inputs=tuple(inputs), outputs=tuple(outputs)))
             record = node.output_contract.to_record(output)
-            accepted = await emit(Aggregated(occurrence_id, record, duration))
+            accepted = await self._emit(session_id, state.invocation.id, Aggregated(occurrence_id, record, duration))
             return accepted.payload.output
         return freeze([x.model_dump(mode='python') for x in outputs] if node.map is not None
             else outputs[0].model_dump(mode='python'))
+
+    async def _execute_spawn(self, node, occurrence_id, mapped, session_id):
+        """Map admission Calls, independently of the lifetime of their Children."""
+        invocation = self._repository.state(session_id).invocation
+        invocation_id = invocation.id
+        inputs = list(mapped) if node.map is not None else [mapped]
+        calls = {call.unit_index: call for call in self._occurrence_calls(session_id, occurrence_id)}
+        plan = None
+        if any(index not in calls or calls[index].status != 'completed' for index in range(len(inputs))):
+            plan = await self._plan_children(node, occurrence_id, mapped, self._repository.state(session_id))
+        invocation = None
+        outputs = [None] * len(inputs)
+        next_index = 0
+
+        async def worker():
+            nonlocal next_index
+            while next_index < len(inputs):
+                index = next_index
+                next_index += 1
+                call = calls.get(index)
+                if call is not None and call.status == 'completed':
+                    outputs[index] = RuntimeHandle.model_validate(thaw(call.output))
+                    continue
+                call_id = call.id if call is not None else str(uuid4())
+                if call is None:
+                    record = node.input_contract.to_record(inputs[index]) if node.input_contract is not None else inputs[index]
+                    await self._emit(session_id, invocation_id,
+                        OperatorCallStarted(call_id, occurrence_id, node.executable.id, index, record))
+                await self._ensure_child_unit(node.executable.workflow, session_id, invocation_id,
+                    plan.creation_id, index, None)
+                result = self._child_handle(node.executable.workflow, plan.units[index])
+                await self._emit(session_id, invocation_id,
+                    OperatorCallCompleted(call_id, result.model_dump(mode='python')))
+                outputs[index] = result
+
+        limit = min(len(inputs), node.map.max_parallelism if node.map is not None and node.map.max_parallelism is not None
+            else self._node_executor.max_operator_concurrency, self._node_executor.max_operator_concurrency)
+        if limit == 1:
+            await worker()
+        else:
+            tasks = [asyncio.create_task(worker()) for _ in range(limit)]
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+        return await self._command_output(node, occurrence_id, inputs, outputs, session_id)
 
     async def _create_children(
         self,
@@ -626,6 +686,24 @@ class WorkflowExecutor:
         value: object,
         state: RuntimeState,
     ) -> list[RuntimeHandle]:
+        """Start awaited Children under their logical Call concurrency limit."""
+        plan = await self._plan_children(node, occurrence_id, value, state)
+        if plan is None:
+            return []
+        limit = min(
+            len(plan.units),
+            node.map.max_parallelism
+            if node.map is not None and node.map.max_parallelism is not None
+            else self._node_executor.max_operator_concurrency,
+            self._node_executor.max_operator_concurrency,
+        )
+        capacity = asyncio.Semaphore(limit)
+        for unit in plan.units:
+            await self._ensure_child_unit(node.executable.workflow, state.session.id, state.invocation.id,
+                plan.creation_id, unit.unit_index, capacity)
+        return [self._child_handle(node.executable.workflow, unit) for unit in plan.units]
+
+    async def _plan_children(self, node, occurrence_id, value, state):
         """Plan every Child unit once and reuse that plan after recovery/waits."""
 
         command = node.executable
@@ -643,7 +721,7 @@ class WorkflowExecutor:
             else inputs
         )
         if not input_records:
-            return []
+            return None
 
         parent_session = state.session
         parent = state.invocation
@@ -678,24 +756,7 @@ class WorkflowExecutor:
             raise RuntimeError("Child plan entry does not match the Command.")
         self._validate_child_plan(node, child, plan, input_records)
 
-        limit = min(
-            len(plan.units),
-            node.map.max_parallelism
-            if node.map is not None and node.map.max_parallelism is not None
-            else self._node_executor.max_operator_concurrency,
-            self._node_executor.max_operator_concurrency,
-        )
-        capacity = asyncio.Semaphore(limit)
-        for unit in plan.units:
-            await self._ensure_child_unit(
-                child,
-                parent_session.id,
-                parent.id,
-                plan.creation_id,
-                unit.unit_index,
-                capacity,
-            )
-        return [self._child_handle(child, unit) for unit in plan.units]
+        return plan
 
     async def _ensure_child_unit(
         self,
@@ -704,7 +765,7 @@ class WorkflowExecutor:
         parent_invocation_id: str,
         creation_id: str,
         unit_index: int,
-        capacity: asyncio.Semaphore,
+        capacity: asyncio.Semaphore | None,
     ) -> asyncio.Task[None] | None:
         async with self._child_admission(parent_session_id, parent_invocation_id):
             parent = _active_invocation(self._repository.state(parent_session_id))

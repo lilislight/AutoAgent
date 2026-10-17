@@ -60,3 +60,48 @@ test('metadata arriving after a snapshot appends all Event headers in Session se
   const duplicate=delta(model.data,'c2',6,{node:[row('new','n','running',3,null)],event:[{...events[0],event_id:'new'},{...events[1],event_id:'new'}]});
   assert.throws(()=>model.apply(duplicate),/repeats/);assert.equal(model.data.manifest.cursor,'c1');assert.equal(model.data.node.length,0);
 });
+test('pause intervals survive metadata-only incremental updates and completion freezes the Timeline boundary',()=>{
+  const initial=data(),model=new TraceModel(initial);
+  const paused=delta(model.data,'c1',3,{event:[{event_id:'pause',sequence:3,event_name:'graph.paused',occurred_at_us:100,control_state:'paused'}]});
+  paused.manifest.trace.invocation={...trace.invocation,status:'waiting',control_state:'paused'};
+  model.apply(paused);
+  assert.deepEqual(model.overview(150).pause_intervals,[{start_at_us:100,end_at_us:null}]);
+  const resumed=delta(model.data,'c2',4,{event:[{event_id:'resume',sequence:4,event_name:'graph.resumed',occurred_at_us:200,control_state:'active'}]});
+  model.apply(resumed);
+  assert.deepEqual(model.overview(300).pause_intervals,[{start_at_us:100,end_at_us:200}]);
+  const ended=delta(model.data,'c3',6,{event:[{event_id:'pause2',sequence:5,event_name:'graph.paused',occurred_at_us:350,control_state:'paused'},{event_id:'end',sequence:6,event_name:'invocation.cancelled',occurred_at_us:400,invocation_status:'cancelled'}]});
+  ended.manifest.trace.invocation={...trace.invocation,status:'cancelled',completed_at_us:400};
+  model.apply(ended);
+  const overview=model.overview(100000);
+  assert.equal(overview.end_at_us,400);
+  assert.deepEqual(overview.pause_intervals,[{start_at_us:100,end_at_us:200},{start_at_us:350,end_at_us:400}]);
+});
+test('long-lived Wait and Pause snapshots keep all Timeline geometry fixed until a committed transition',()=>{
+  const initial=data();
+  initial.manifest.trace={...trace,invocation:{...trace.invocation,status:'waiting'},last_event:{event_id:'waiting',sequence:3,event_name:'node_occurrence.waiting',occurred_at_us:100}};
+  initial.node=[row('a','first','waiting',10,null),row('b','second','waiting',20,null)];
+  initial.event=[{...initial.manifest.trace.last_event!,invocation_status:'waiting'}];
+  const model=new TraceModel(initial);
+  const before=model.overview(1000);
+  assert.equal(before.end_at_us,100);assert.equal(before.observed_at_us,100);
+  assert.deepEqual(model.overview(1_000_000_000),before);
+  assert.deepEqual(before.idle,{state:'waiting',since_at_us:100,at_us:100});
+  // One of several approvals completes while the Invocation remains Waiting.
+  const partial=delta(model.data,'partial',4,{node:[row('a','first','completed',10,200)],event:[{event_id:'partial',sequence:4,event_name:'node_occurrence.completed',occurred_at_us:200}]});
+  partial.manifest.trace.invocation={...trace.invocation,status:'waiting'};
+  partial.manifest.trace.last_event=partial.event[0];
+  model.apply(partial);
+  assert.equal(model.overview(1_000_000).end_at_us,200);
+  assert.deepEqual(model.overview(2000),model.overview(1_000_000));
+  const paused=delta(model.data,'paused',5,{event:[{event_id:'paused',sequence:5,event_name:'graph.paused',occurred_at_us:300,control_state:'paused'}]});
+  paused.manifest.trace.invocation={...trace.invocation,status:'waiting',control_state:'paused'};
+  paused.manifest.trace.last_event=paused.event[0];
+  model.apply(paused);
+  const frozen=model.overview(10_000);
+  assert.equal(frozen.end_at_us,300);assert.equal(frozen.idle?.state,'paused');
+  assert.deepEqual(model.overview(1_000_000),frozen);
+  const resumed=delta(model.data,'resumed',6,{node:[row('b','second','running',20,null)],event:[{event_id:'resumed',sequence:6,event_name:'graph.resumed',occurred_at_us:400,control_state:'active',invocation_status:'running'}]});
+  resumed.manifest.trace.last_event=resumed.event[0];
+  model.apply(resumed);
+  assert.equal(model.overview(500).idle,null);assert.equal(model.overview(500).end_at_us,500);
+});

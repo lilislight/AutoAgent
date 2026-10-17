@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { getExecutionTimeline, getTimelineItems, getTimelinePosition } from '../api';
-import type { ExecutionTrace, TimelineFocus, TimelineOverview, TimelineRow, WorkflowGraphData } from '../types';
+import type { ExecutionTrace, TimelineFocus, TimelineOverview, TimelineRow, TimelineIdle, WorkflowGraphData } from '../types';
 import { elapsedLabel, focusWindow, fullWindow, moveWindow, spanGeometry, timelineScale, timelineTimestamp, zoomWindow, type TimeWindow } from '../timeline';
 import { duration } from './TraceDetails';
+import { pausedDuration, quiescentTrace, terminalStatus, type ObservationClock, type PauseInterval } from '../liveObservation';
+import { useObservationClock } from './useObservationClock';
 import { callPresentation, executionTiming, isSystemCall } from '../inspectorModel';
 import { useExecutionSnapshot, useSnapshotMetadata } from './ExecutionSnapshot';
 import { TimelineEvents } from './TimelineEvents';
@@ -13,7 +15,7 @@ import { TimelineReveal } from './TimelineReveal';
 import type { ExecutionReplay } from './ExecutionReplay';
 
 interface Props {
-  nowUs: number; followingLive: boolean;
+  clock: ObservationClock; observing: boolean;
   ready: boolean; loadingStatus: string; loadError?: string; onRetry: () => void;
   trace: ExecutionTrace; workflow: WorkflowGraphData; active: boolean;
   selectedEvent: { id: string; time: number; sequence: number } | null; focus: TimelineFocus | null; selected: string | null; selectedNode: string | null; onPick: (row: TimelineRow) => void;
@@ -53,19 +55,28 @@ function PageControls({ page, label }: { page: ReturnType<typeof usePage>; label
 function QueryMessage({ page, label }: { page: ReturnType<typeof usePage>; label: string }) {
   return page.query.isPending ? <p className="timeline-message" role="status">Loading {label}…</p> : page.query.error ? <div className="timeline-message sidebar-error"><p>{page.query.error.message}</p><button onClick={() => void page.query.refetch()}>Retry</button></div> : !page.query.data?.items.length ? <p className="timeline-message muted">No {label} in this window.</p> : null;
 }
+function PauseSegments({ pauses, row, window, observed }: { pauses?:PauseInterval[]; row?:TimelineRow; window:TimeWindow; observed:number }) {
+  if(row?.kind==='wait')return null;
+  return <>{pauses?.map((pause,index)=>{
+    const start=Math.max(pause.start_at_us,row?.start_at_us ?? window.start,window.start);
+    const end=Math.min(pause.end_at_us ?? observed,row?.end_at_us ?? observed,window.end);
+    if(end<=start)return null;
+    return <span key={index} className={`timeline-pause-segment ${row?'':'is-axis'}`} style={{left:`${(start-window.start)/(window.end-window.start)*100}%`,width:`${(end-start)/(window.end-window.start)*100}%`}} title={`Paused · ${timelineTimestamp(pause.start_at_us)}${pause.end_at_us==null?' · ongoing':` – ${timelineTimestamp(pause.end_at_us)}`}`} />;
+  })}</>;
+}
 function EmbeddedIntervals({ calls, wait, window, observed, paused }: { calls?: TimelineRow[]; wait?: TimelineRow | null; window: TimeWindow; observed: number; paused: boolean }) {
   const segment = (row: TimelineRow) => {
     const geo = spanGeometry(row, window, observed);
     const presented = row.kind === 'call' ? callPresentation(row, row.wait) : row;
-    const status = paused && ['ready', 'running', 'waiting'].includes(presented.status ?? '') ? 'paused' : presented.status;
+    const status = paused && row.kind !== 'wait' && ['ready', 'running', 'waiting'].includes(presented.status ?? '') ? 'paused' : presented.status;
     return geo.visible ? <span key={`${row.kind}:${row.id}`} className={`timeline-span timeline-embedded timeline-embedded-${row.kind} timeline-state-${status} ${geo.open ? 'is-open' : ''}`} data-preview-kind={row.kind} style={{ left: `${geo.left}%`, width: `${geo.width}%` }} /> : null;
   };
   return <span className="timeline-embedded-intervals" aria-hidden="true">{calls?.map(call => <span key={call.id}>{segment(call)}{call.wait ? segment(call.wait) : null}</span>)}{wait ? segment(wait) : null}</span>;
 }
-function SpanRow({ reveal, row, label, window, observed, origin, trackWidth, selected, selectedNode, paused, onPick, onZoom, expanded, onExpand }: {
+function SpanRow({ reveal, row, label, window, observed, origin, trackWidth, selected, selectedNode, paused, pauses, onPick, onZoom, expanded, onExpand }: {
   reveal?: number; row: TimelineRow; label: string; window: TimeWindow; observed: number; selected: string | null;
   origin: number; trackWidth: number; onZoom: (row: TimelineRow) => void;
-  selectedNode?: string | null; paused: boolean; onPick: (row: TimelineRow) => void; expanded?: boolean; onExpand?: () => void;
+  selectedNode?: string | null; pauses?: PauseInterval[]; paused: boolean; onPick: (row: TimelineRow) => void; expanded?: boolean; onExpand?: () => void;
 }) {
   const geo = spanGeometry(row, window, observed);
   const isSelected = selected === `${row.kind}:${row.id}`;
@@ -83,20 +94,21 @@ function SpanRow({ reveal, row, label, window, observed, origin, trackWidth, sel
   }, [isSelected, reveal]);
   const graphSelected = !selected && row.kind === 'node' && selectedNode === row.node_id;
   const presented = row.kind === 'call' ? callPresentation(row, row.wait) : row;
-  const status = paused && ['ready', 'running', 'waiting'].includes(presented.status ?? '') ? 'paused' : presented.status ?? '';
+  const status = paused && row.kind !== 'wait' && ['ready', 'running', 'waiting'].includes(presented.status ?? '') ? 'paused' : presented.status ?? '';
   const execution = executionTiming(row);
   const waitGeo = row.wait ? spanGeometry(row.wait, window, observed) : null;
   const elapsed = row.status === 'skipped' ? 'Skipped' : geo.elapsed === null ? 'End not recorded' : `${geo.open ? '~ ' : ''}${duration(geo.elapsed)}${geo.open ? ' · open' : ''}`;
   const startLabel = row.kind === 'wait' ? 'Waiting since' : row.kind === 'node' && row.started_at_us == null ? row.ready_at_us != null ? 'Ready since' : 'Recorded' : 'Started';
+  const pausedUs=row.kind==='wait'?0:pausedDuration(pauses ?? [],row.start_at_us,row.end_at_us ?? observed);
   const relativeStart = elapsedLabel(row.start_at_us - origin);
-  const description = `${label}\n${status}\n${startLabel}: ${timelineTimestamp(row.start_at_us)} (+${relativeStart})\nEnd: ${row.end_at_us == null ? 'Not ended at snapshot' : timelineTimestamp(row.end_at_us)}\nElapsed: ${elapsed}${row.kind === 'call' && execution !== null ? `\nQueue: ${duration((row.queue_duration_ns ?? 0) / 1000)}\nExecution: ${duration(execution)}` : ''}${waitGeo ? `\nWaiting: ${duration(waitGeo.elapsed)} (within this Call)` : ''}${row.preview_calls?.length ? '\nUp to 6 visible Calls are previewed in time order. Expand for details.' : ''}\n${row.id}`;
+  const description = `${label}\n${status}\n${startLabel}: ${timelineTimestamp(row.start_at_us)} (+${relativeStart})\nEnd: ${row.end_at_us == null ? 'Not yet recorded' : timelineTimestamp(row.end_at_us)}\nWall elapsed: ${elapsed}${pausedUs ? `\nPaused: ${duration(pausedUs)} (included in elapsed)` : ''}${row.kind === 'call' && execution !== null ? `\nQueue: ${duration((row.queue_duration_ns ?? 0) / 1000)}\nExecution: ${duration(execution)}` : ''}${waitGeo ? `\nWaiting: ${duration(waitGeo.elapsed)} (within this Call)` : ''}${row.preview_calls?.length ? '\nUp to 6 visible Calls are previewed in time order. Expand for details.' : ''}\n${row.id}`;
   const tiny = geo.point || geo.width * trackWidth / 100 < 7;
   const barClasses = `timeline-state-${status} ${geo.clippedStart ? 'clipped-start' : ''} ${geo.clippedEnd ? 'clipped-end' : ''} ${geo.open ? 'is-open' : ''}`;
   return <div ref={element} className={`timeline-row timeline-${row.kind} ${expanded ? 'is-expanded' : ''} ${isSelected ? 'is-selected' : graphSelected ? 'graph-selected' : ''}`} data-timeline-id={row.id}>
     <div className="timeline-row-label">{onExpand ? <button className="timeline-disclosure" aria-expanded={expanded} aria-label={`${expanded ? 'Hide' : 'Show'} details for ${label}`} onClick={onExpand}><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></button> : <span className="timeline-disclosure-spacer" />}<button className="timeline-item-label" onClick={() => onPick(row)} title={description}><span>{label}</span><small><span className={`timeline-kind timeline-kind-${row.kind}`}>{row.kind === 'call' ? isSystemCall(row) ? 'Command' : 'Call' : row.kind === 'node' ? 'Node' : 'Wait'}</span>{row.kind === 'node' ? `${status}${row.call_count ? ` · ${row.call_count} ${row.call_count === 1 ? 'call' : 'calls'}` : ''}` : row.kind === 'wait' ? `${row.wait_kind} · ${status}` : `Unit ${row.unit_index} · ${status}`}</small></button><button className="timeline-row-zoom" aria-label={`Focus interval for ${label}`} title="Focus interval" onClick={() => onZoom(row)}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5" /><path d="m12 12 5 5M5 8h6M8 5v6" /></svg></button></div>
-    <div className="timeline-duration" title={description}><strong>{elapsed}</strong>{row.kind === 'call' && execution !== null ? <small>Execution {duration(execution)}</small> : waitGeo && !expanded ? <small>Waiting {duration(waitGeo.elapsed)}</small> : row.kind === 'wait' ? <small>Within command Call</small> : null}</div>
+    <div className="timeline-duration" title={description}><strong>{elapsed}</strong>{pausedUs ? <small>Paused {duration(pausedUs)}</small> : null}{row.kind === 'call' && execution !== null ? <small>Execution {duration(execution)}</small> : waitGeo && !expanded ? <small>Waiting {duration(waitGeo.elapsed)}</small> : row.kind === 'wait' ? <small>Within command Call</small> : null}</div>
     <div className="timeline-track">
-      {geo.visible ? <><span className={`timeline-span timeline-block ${barClasses}`} style={{ left: `${geo.left}%`, width: `${geo.width}%` }} />{!expanded ? <EmbeddedIntervals calls={row.preview_calls} wait={row.wait} window={window} observed={observed} paused={paused} /> : null}{tiny ? <span className={`timeline-span timeline-small-mark ${barClasses} ${geo.point ? 'is-instant' : ''}`} style={{ left: `${geo.left}%` }} /> : null}<button className="timeline-block-hit" style={{ left: `${geo.left}%`, width: `${geo.width}%` }} onClick={() => onPick(row)} onDoubleClick={() => onZoom(row)} title={`${description}${tiny ? '\nShort interval: double-click to focus' : ''}`} aria-label={`Inspect ${label}, elapsed ${elapsed}`} /></> : null}
+      {geo.visible ? <><span className={`timeline-span timeline-block ${barClasses}`} style={{ left: `${geo.left}%`, width: `${geo.width}%` }} /><PauseSegments pauses={pauses} row={row} window={window} observed={observed} />{!expanded ? <EmbeddedIntervals calls={row.preview_calls} wait={row.wait} window={window} observed={observed} paused={paused} /> : null}{tiny ? <span className={`timeline-span timeline-small-mark ${barClasses} ${geo.point ? 'is-instant' : ''}`} style={{ left: `${geo.left}%` }} /> : null}<button className="timeline-block-hit" style={{ left: `${geo.left}%`, width: `${geo.width}%` }} onClick={() => onPick(row)} onDoubleClick={() => onZoom(row)} title={`${description}${tiny ? '\nShort interval: double-click to focus' : ''}`} aria-label={`Inspect ${label}, elapsed ${elapsed}`} />{geo.clippedEnd && geo.open ? <span className="timeline-continues" title="Continues beyond the visible range" aria-label="Continues beyond the visible range">›</span> : null}</> : null}
     </div>
   </div>;
 }
@@ -115,30 +127,37 @@ function ExpandedOccurrence({ node, window, queryWindow, overview, active, selec
   trackWidth: number; onZoom: (row: TimelineRow) => void;
 }) {
   const calls = usePage(node.invocation_id, 'call', queryWindow, node.occurrence_id, active && (node.call_count ?? 0) > 0, overview.frontier, null, focus?.occurrenceId === node.id ? focus.callId ?? null : null);
-  const common = { reveal: focus?.serial, window, observed: overview.observed_at_us, origin: overview.start_at_us!, trackWidth, selected, paused: overview.control_state === 'paused', onPick, onZoom };
+  const common = { reveal: focus?.serial, window, observed: overview.observed_at_us, pauses: overview.pause_intervals, origin: overview.start_at_us!, trackWidth, selected, paused: overview.control_state === 'paused', onPick, onZoom };
   return <div className="timeline-children">
     {(node.call_count ?? 0) > 0 ? <QueryMessage page={calls} label="calls" /> : null}
     {calls.query.data?.items.map(row => <CallRow key={row.id} row={{ ...row, node_id: node.node_id, ui_ordinal: node.ordinal }} {...common} />)}
     <PageControls page={calls} label="Calls" />
   </div>;
 }
-function TimelineBody({ overview, ...props }: Props & { overview: TimelineOverview }) {
-  const snapshot = useExecutionSnapshot();
-  const full = fullWindow(overview)!;
-  const [navigation, setNavigation] = useState(() => ({ window: full, whole: true, following: false, history: [] as TimeWindow[] }));
-  const committedWindow = navigation.following ? moveWindow(full, full.end - (navigation.window.end - navigation.window.start), navigation.window.end - navigation.window.start) : navigation.whole ? full : moveWindow(full, navigation.window.start, navigation.window.end - navigation.window.start);
+function TimelineIdleTimer({idle,clock,active}:{idle:TimelineIdle;clock:ObservationClock;active:boolean}) {
+  const now=useObservationClock(clock,active,idle.at_us);
+  return <span className={`timeline-idle-timer is-${idle.state}`} title={`${idle.state==='paused'?'Paused':'Waiting'} since ${timelineTimestamp(idle.since_at_us)}`}><span>{idle.state==='paused'?'Paused':'Waiting'}</span><time>{duration(Math.max(0,now-idle.since_at_us))}</time></span>;
+}
+function TimelineBody({ overview: saved, ...props }: Props & { overview: TimelineOverview }) {
+  const idle=quiescentTrace(props.trace) && !terminalStatus(props.trace.invocation.status);
+  const terminal=terminalStatus(props.trace.invocation.status);
+  const now=useObservationClock(props.clock,props.active && props.observing && !terminal && !idle,saved.observed_at_us);
+  const base=fullWindow(saved)!;
+  const idleState:TimelineIdle|null=idle ? saved.idle ?? {state:props.trace.invocation.control_state==='paused'?'paused':'waiting',since_at_us:props.trace.last_event?.occurred_at_us ?? base.end,at_us:props.trace.last_event?.occurred_at_us ?? base.end} : null;
+  const observed=idleState?.at_us ?? (terminal?saved.observed_at_us:now);
+  const end=terminal?base.end:idleState?.at_us ?? Math.max(base.end,observed);
+  const full=useMemo(()=>({start:base.start,end:Math.max(base.start+1,end)}),[base.start,end]);
+  const overview={...saved,observed_at_us:observed};
+  const [navigation, setNavigation] = useState(() => ({ window: full, whole: true, history: [] as TimeWindow[] }));
+  const committedWindow = useMemo(()=>navigation.whole ? full : moveWindow(full, navigation.window.start, navigation.window.end - navigation.window.start),[full,navigation]);
   const [rangeRevision,setRangeRevision]=useState(0);
   const [preview, setPreview] = useState<TimeWindow | null>(null);
   const window = preview ?? committedWindow;
-  useEffect(() => {
-    if (snapshot.refreshing) setNavigation(current => current.whole ? { ...current, window: full, whole: false } : current);
-  }, [snapshot.refreshing]);
   const [queryWindow, setQueryWindow] = useState(committedWindow);
   const [expanded, setExpanded] = useState(() => new Set<string>(props.focus && ['call', 'wait'].includes(props.focus.kind) ? [props.focus.occurrenceId] : []));
   const [nodeFilter, setNodeFilter] = useState<string | null>(null);
   const [focusEnabled, setFocusEnabled] = useState(Boolean(props.focus));
   const [appliedFocus, setAppliedFocus] = useState<number | null>(props.focus?.serial ?? null);
-  const [showEvents, setShowEvents] = useState(false);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const axisTrack = useRef<HTMLDivElement>(null);
@@ -171,13 +190,12 @@ function TimelineBody({ overview, ...props }: Props & { overview: TimelineOvervi
     const bounded = moveWindow(full, next.start, next.end - next.start);
     const previous = committedWindow;
     if (previous.start === bounded.start && previous.end === bounded.end) return current;
-    return { window: bounded, whole: bounded.start === full.start && bounded.end === full.end, following: false, history: [...current.history, previous].slice(-20) };
+    return { window: bounded, whole: bounded.start === full.start && bounded.end === full.end, history: [...current.history, previous].slice(-20) };
   }); };
-  const reset = () => { change(full); setNavigation(current => ({...current,whole:true,following:false})); };
-  const follow = () => { setRangeRevision(value=>value+1); setNavigation(current => ({window:committedWindow,whole:false,following:!current.following,history:[...current.history,committedWindow].slice(-20)})); };
+  const reset = () => { change(full); setNavigation(current => ({...current,whole:true})); };
   const back = () => { setRangeRevision(value=>value+1); setFocusEnabled(false); setNavigation(current => {
     const previous = current.history.at(-1);
-    return previous ? { window: previous, whole: previous.start === full.start && previous.end === full.end, following: false, history: current.history.slice(0, -1) } : current;
+    return previous ? { window: previous, whole: previous.start === full.start && previous.end === full.end, history: current.history.slice(0, -1) } : current;
   }); };
   useEffect(() => {
     const target = props.focus;
@@ -223,33 +241,33 @@ function TimelineBody({ overview, ...props }: Props & { overview: TimelineOvervi
     return bounds ? Math.round(window.start + Math.max(0, Math.min(1, (x - bounds.left) / bounds.width)) * width) : window.start;
   };
   return <div className={`timeline-body ${preview ? 'is-range-dragging' : ''}`} style={{ '--timeline-scrollbar-width': `${scrollbarWidth}px` } as CSSProperties}>
-    <header className="timeline-toolbar"><div><strong>Timeline</strong><span className="muted">{overview.counts.node} node runs · {elapsedLabel(total)}</span></div><div className="timeline-range-controls"><button aria-label="Previous time range" disabled={!navigation.history.length} onClick={back}>← Back</button><button className="timeline-reset-range" disabled={!zoomed} onClick={reset}>Full range</button>{!navigation.whole && !navigation.following && full.end > window.end + 1 ? <button className="timeline-new-activity" onClick={follow}>New activity</button> : null}<button className="timeline-follow" aria-pressed={navigation.following} disabled={!props.followingLive} onClick={follow} title="Keep this time span at the latest execution time">Follow latest</button></div></header>
-    <TimelineRange full={full} window={committedWindow} bins={overview.node_start_bins} onChange={change} onPreview={setPreview} onReset={reset} replayTime={props.replay.enabled ? props.replay.cursorTime : null} />
+    <header className="timeline-toolbar"><div><strong>Timeline</strong><span className="muted">{overview.counts.node} node runs · {terminal?'':'~ '}{elapsedLabel(total)}</span>{idleState ? <TimelineIdleTimer idle={idleState} clock={props.clock} active={props.active && props.observing && !props.replay.enabled} /> : null}</div><div className="timeline-range-controls"><button aria-label="Previous time range" disabled={!navigation.history.length} onClick={back}>← Back</button><button className="timeline-reset-range" disabled={!zoomed} onClick={reset}>Full range</button></div></header>
+    <TimelineRange full={full} window={committedWindow} bins={saved.node_start_bins} activityEnd={saved.end_at_us ?? undefined} onChange={change} onPreview={setPreview} onReset={reset} replayTime={props.replay.enabled ? props.replay.cursorTime : null} />
     <div className="timeline-list-toolbar">
-      <div className="timeline-row-options"><TimelineNodeFilter nodes={props.workflow.definition.nodes.map(node => node.id)} value={nodeFilter} onChange={value => { setNodeFilter(value); setFocusEnabled(false); }} /><button aria-pressed={showEvents} onClick={() => setShowEvents(value => !value)}>Events</button><button aria-pressed={props.replay.enabled} disabled={!props.trace.last_event} onClick={() => { if (props.replay.enabled) props.replay.stop(); else { setShowEvents(true); props.onReplay({ at_us: window.start }); } }}>{props.replay.enabled ? "End replay" : "Replay"}</button><button className="timeline-collapse-all" disabled={!expanded.size} onClick={() => setExpanded(new Set())}>Collapse all</button></div>
+      <div className="timeline-row-options"><TimelineNodeFilter nodes={props.workflow.definition.nodes.map(node => node.id)} value={nodeFilter} onChange={value => { setNodeFilter(value); setFocusEnabled(false); }} /><button aria-pressed={props.replay.enabled} disabled={!props.trace.last_event} onClick={() => { if (props.replay.enabled) props.replay.stop(); else { props.onReplay(props.replay.resumePosition() ?? { at_us: window.start }); } }}>{props.replay.enabled ? "End replay" : "Replay"}</button><button className="timeline-collapse-all" disabled={!expanded.size} onClick={() => setExpanded(new Set())}>Collapse all</button></div>
       <div className={`timeline-toolbar-track ${props.replay.enabled ? 'timeline-replay-controls' : ''}`}>
-        {props.replay.enabled ? <div className="timeline-replay-track"><input type="range" aria-label="Replay time" min={0} max={width} step={1} value={Math.max(0, Math.min(width, (props.replay.cursorTime ?? window.start) - window.start))} onChange={event => props.onReplay({ at_us: window.start + Number(event.target.value) })} /></div> : null}
-        <span className={`timeline-update-status ${props.replay.enabled ? 'sr-only' : ''}`} role="status">{updating ? 'Updating…' : `${elapsedLabel(width)} visible`}</span>
+        {props.replay.enabled ? <div className="timeline-replay-track"><input type="range" aria-label="Replay time" min={0} max={width} step={1} value={Math.max(0, Math.min(width, (props.replay.cursorTime ?? window.start) - window.start))} onChange={event => props.onReplay({ at_us: window.start + Number(event.target.value) })} />{props.replay.marker && replayVisible ? <output className={`timeline-replay-label ${(props.replay.cursorTime! - window.start) / width > .5 ? 'align-end' : ''}`} style={{ left: `${(props.replay.cursorTime! - window.start) / width * 100}%` }} title={`Event #${props.replay.marker.sequence} · ${props.replay.marker.event_name}`}>#{props.replay.marker.sequence} · {props.replay.marker.event_name}</output> : null}</div> : null}
+        <span className={`timeline-update-status ${props.replay.enabled ? 'sr-only' : ''}`} role="status">{`${elapsedLabel(width)} visible`}</span>
       </div>
     </div>
     {focusEnabled && props.focus && (page.location.error || !canReveal) ? <div className="timeline-location-notice" role="status"><span>Selected record is outside the current range or filter.</span><button onClick={() => { change(focusWindow(full, props.focus!.interval, overview.observed_at_us), true); }}>Focus selected interval</button>{nodeFilter ? <button onClick={() => setNodeFilter(null)}>Show all nodes</button> : null}<button aria-label="Dismiss location notice" onClick={() => setFocusEnabled(false)}>×</button></div> : null}
     <div className={`timeline-pinned ${eventVisible || replayVisible ? 'has-selected-event' : ''} ${replayVisible ? 'has-replay-position' : ''}`} style={trackStyle}>
-      {showEvents ? <TimelineEvents rangeRevision={rangeRevision} replaying={props.replay.enabled} onReplay={props.onReplay} iid={props.trace.invocation.invocation_id} window={window} full={full} previewing={Boolean(preview)} queryWindow={requestWindow} frontier={overview.frontier} active={props.active} trackWidth={trackWidth} through={props.trace.last_event?.sequence ?? 0} /> : null}
-      <div className="timeline-axis timeline-row"><div className="timeline-row-label">Execution</div><div className="timeline-duration">Elapsed</div><div className="timeline-track" ref={axisTrack}>{eventVisible ? <span className="timeline-selected-boundary" style={{ left: `clamp(22px, ${(props.selectedEvent!.time - window.start) / width * 100}%, calc(100% - 22px))` }} title={`Selected Edge evaluation · Event #${props.selectedEvent!.sequence}`} role="img" aria-label={`Selected Edge evaluation, Event ${props.selectedEvent!.sequence}`}>#{props.selectedEvent!.sequence}</span> : null}<span className="timeline-axis-unit">Time since start ({scale.unit})</span>{[0,.25,.5,.75,1].map(ratio => <span key={ratio} className={`timeline-tick ${ratio === 0 ? 'first' : ratio === 1 ? 'last' : 'middle'}`} style={{ left: `${ratio * 100}%` }}><span>{Number(((window.start - full.start + width * ratio) / scale.divisor).toFixed(3))}</span><i /></span>)}</div></div>
+      <TimelineEvents rangeRevision={rangeRevision} replaying={props.replay.enabled} onReplay={props.onReplay} iid={props.trace.invocation.invocation_id} window={window} full={full} previewing={Boolean(preview)} queryWindow={requestWindow} frontier={overview.frontier} active={props.active} trackWidth={trackWidth} through={props.trace.last_event?.sequence ?? 0} />
+      <div className="timeline-axis timeline-row"><div className="timeline-row-label">Execution</div><div className="timeline-duration">Elapsed</div><div className="timeline-track" ref={axisTrack}><PauseSegments pauses={overview.pause_intervals} window={window} observed={overview.observed_at_us} />{idleState && idleState.since_at_us>=window.start && idleState.since_at_us<=window.end ? <span className="timeline-idle-boundary" style={{left:`${(idleState.since_at_us-window.start)/width*100}%`}} title={`${idleState.state==='paused'?'Paused':'Waiting'} since ${timelineTimestamp(idleState.since_at_us)}`} aria-label={`${idleState.state} boundary`} /> : null}{eventVisible ? <span className="timeline-selected-boundary" style={{ left: `clamp(22px, ${(props.selectedEvent!.time - window.start) / width * 100}%, calc(100% - 22px))` }} title={`Selected Edge evaluation · Event #${props.selectedEvent!.sequence}`} role="img" aria-label={`Selected Edge evaluation, Event ${props.selectedEvent!.sequence}`}>#{props.selectedEvent!.sequence}</span> : null}<span className="timeline-axis-unit">Time since start ({scale.unit})</span>{[0,.25,.5,.75,1].map(ratio => <span key={ratio} className={`timeline-tick ${ratio === 0 ? 'first' : ratio === 1 ? 'last' : 'middle'}`} style={{ left: `${ratio * 100}%` }}><span>{Number(((window.start - full.start + width * ratio) / scale.divisor).toFixed(3))}</span><i /></span>)}</div></div>
     </div>
     <div ref={scroll} className={`timeline-scroll ${hoverVisible ? 'has-time-hover' : ''} ${eventVisible || replayVisible ? 'has-selected-event' : ''} ${replayVisible ? 'has-replay-position' : ''}`} style={trackStyle} aria-busy={updating} tabIndex={0} aria-label="Timeline intervals. Control or Command and scroll to zoom. Escape returns to the full range."
       onKeyDown={event => { if (event.target !== event.currentTarget) return; if (['+', '=', '-', 'ArrowLeft', 'ArrowRight', 'Escape'].includes(event.key)) event.preventDefault(); if (event.key === '+' || event.key === '=') zoom(.5); if (event.key === '-') zoom(2); if (event.key === 'Escape') reset(); if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') change(moveWindow(full, window.start + width / 4 * (event.key === 'ArrowLeft' ? -1 : 1), width)); }}
       onPointerMove={event => setHoverTime((event.target as Element).closest('.timeline-track') ? pointerTime(event.clientX) : null)} onPointerLeave={() => setHoverTime(null)}>
       <QueryMessage page={page} label="Node runs" />
-      {visibleRows?.map(row => <div key={row.id}><SpanRow reveal={canReveal ? focused?.serial : undefined} row={{ ...row, ui_ordinal: row.ordinal }} label={`${row.node_id}${(counts.get(row.node_id!) ?? 0) > 1 ? ` (${row.ordinal} of ${counts.get(row.node_id!)})` : ''}`} window={window} origin={full.start} trackWidth={trackWidth} observed={overview.observed_at_us} paused={overview.control_state === 'paused'} selected={props.selected} selectedNode={props.selectedNode} onPick={props.onPick} onZoom={focus} expanded={expanded.has(row.id)} onExpand={(row.call_count ?? 0) > 0 ? () => setExpanded(value => { const next = new Set(value); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; }) : undefined} /><TimelineReveal open={expanded.has(row.id)}><ExpandedOccurrence node={row} window={window} queryWindow={requestWindow} overview={overview} active={props.active && expanded.has(row.id)} focus={canReveal ? focused : null} selected={props.selected} onPick={props.onPick} onZoom={focus} trackWidth={trackWidth} /></TimelineReveal></div>)}
+      {visibleRows?.map(row => <div key={row.id}><SpanRow reveal={canReveal ? focused?.serial : undefined} row={{ ...row, ui_ordinal: row.ordinal }} label={`${row.node_id}${(counts.get(row.node_id!) ?? 0) > 1 ? ` (${row.ordinal} of ${counts.get(row.node_id!)})` : ''}`} window={window} origin={full.start} trackWidth={trackWidth} observed={overview.observed_at_us} pauses={overview.pause_intervals} paused={overview.control_state === 'paused'} selected={props.selected} selectedNode={props.selectedNode} onPick={props.onPick} onZoom={focus} expanded={expanded.has(row.id)} onExpand={(row.call_count ?? 0) > 0 ? () => setExpanded(value => { const next = new Set(value); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; }) : undefined} /><TimelineReveal open={expanded.has(row.id)}><ExpandedOccurrence node={row} window={window} queryWindow={requestWindow} overview={overview} active={props.active && expanded.has(row.id)} focus={canReveal ? focused : null} selected={props.selected} onPick={props.onPick} onZoom={focus} trackWidth={trackWidth} /></TimelineReveal></div>)}
       {overview.untimed_count ? <p className="timeline-message muted">{overview.untimed_count} records have no timestamp and cannot be positioned.</p> : null}
     </div>
-    <footer className="timeline-footer"><div className="timeline-color-key"><span><i className="key-node" />Node</span><span><i className="key-call" />Call</span><span><i className="key-wait" />Wait</span></div><span>Drag the overview to focus · Double-click to reset</span><PageControls page={page} label="Occurrences" /></footer>
+    {page.index > 0 || page.query.data?.next_cursor ? <footer className="timeline-footer"><PageControls page={page} label="Occurrences" /></footer> : null}
   </div>;
 }
 export default function ExecutionTimeline(props: Props) {
   const snapshot = useExecutionSnapshot();
-  const query = useQuery({ queryKey: ['execution-timeline', props.trace.invocation.invocation_id, snapshot.epoch], meta: snapshot.meta, placeholderData: keepPreviousData, queryFn: ({ signal }) => getExecutionTimeline(props.trace.invocation.invocation_id, signal, props.nowUs), enabled: props.active && props.ready, refetchInterval: props.followingLive ? 500 : false, staleTime: Infinity, gcTime: 5000, refetchOnWindowFocus: false });
+  const query = useQuery({ queryKey: ['execution-timeline', props.trace.invocation.invocation_id, snapshot.epoch], meta: snapshot.meta, placeholderData: keepPreviousData, queryFn: ({ signal }) => getExecutionTimeline(props.trace.invocation.invocation_id, signal), enabled: props.active && props.ready, staleTime: Infinity, gcTime: 5000, refetchOnWindowFocus: false });
   const overview = useSnapshotMetadata(props.trace.invocation.invocation_id, query.data);
   const hasTimes = overview && fullWindow(overview);
   return <section className="execution-timeline" aria-label="Execution Timeline">

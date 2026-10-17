@@ -14,7 +14,7 @@ from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 15
+RUNTIME_EVENT_SCHEMA_VERSION = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +247,21 @@ class ResumeReceiptReleased:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryPrepared:
+    kind: ClassVar[str] = "recovery.prepared"
+    request_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationReopened:
+    kind: ClassVar[str] = "invocation.reopened"
+    request_id: str
+    previous_status: str
+    recovery_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryApplied:
     kind: ClassVar[str] = "recovery.applied"
     recovered_occurrence_ids: tuple[str, ...] = ()
@@ -453,6 +468,8 @@ RuntimeEventPayload: TypeAlias = (
     | SignalReceiptReleased
     | CancellationRequested
     | ResumeReceiptReleased
+    | RecoveryPrepared
+    | InvocationReopened
     | RecoveryApplied
     | ChildInvocationPlanned
     | ChildInvocationPhaseChanged
@@ -480,6 +497,7 @@ _PAYLOAD_TYPES = (
     SignalAccepted, SignalsReceived, SignalReceiptReleased,
     CancellationRequested,
     ResumeReceiptReleased,
+    RecoveryPrepared, InvocationReopened,
     RecoveryApplied,
     ChildInvocationPlanned,
     ChildInvocationPhaseChanged,
@@ -556,7 +574,7 @@ class RuntimeEvent:
 def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
     if isinstance(payload, (GraphPauseRequested, GraphPaused, GraphResumed)):
         return {}
-    if isinstance(payload, ChildCompacted):
+    if isinstance(payload, (RecoveryPrepared, InvocationReopened, ChildCompacted)):
         return {item.name: getattr(payload, item.name) for item in fields(payload)}
     if isinstance(payload, (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
         return {item.name: _encode_payload_value(getattr(payload, item.name)) for item in fields(payload)}
@@ -649,6 +667,9 @@ def _payload_from_record(
             if "conditions" in values:
                 values["conditions"] = tuple(EdgeConditionResult(**item) for item in values["conditions"])
             return cls(**values)
+    for cls in (RecoveryPrepared, InvocationReopened):
+        if event_name == cls.kind:
+            return cls(**record)
     if event_name == ChildCompacted.kind:
         return ChildCompacted(_required_string(record, "parent_session_id"),
             _required_string(record, "parent_invocation_id"), _required_string(record, "creation_id"),
@@ -880,6 +901,14 @@ def _duration(value: object) -> None:
 
 def validate_payload(payload: RuntimeEventPayload) -> None:
     """Validate small event-local data without traversing the Runtime State."""
+    if isinstance(payload, (RecoveryPrepared, InvocationReopened)):
+        if not isinstance(payload.request_id, str) or not payload.request_id.strip():
+            raise ValueError('Recovery requires a request identity.')
+        status = payload.reason if isinstance(payload, RecoveryPrepared) else payload.previous_status
+        if status not in {'failed', 'cancelled'}:
+            raise ValueError('Reopening requires a failed or cancelled outcome.')
+        if isinstance(payload, InvocationReopened) and (type(payload.recovery_count) is not int or payload.recovery_count < 1):
+            raise ValueError('Recovery count must be a positive integer.')
     if not isinstance(payload, _PAYLOAD_TYPES):
         raise TypeError("Unsupported Runtime Event payload.")
     for item in fields(payload):

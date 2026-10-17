@@ -4,10 +4,9 @@ import { listWorkflowRevisions } from "../api";
 import type { WorkflowGraphData } from "../types";
 import { formatTime } from "./TraceDetails";
 
-export function WorkflowToolbar({ workflow, onRevision, onDefinition, onRun }: {
+export function WorkflowToolbar({ workflow, onRevision, onDefinition }: {
   workflow: WorkflowGraphData; onRevision: (id: string) => void;
   onDefinition: () => void;
-  onRun: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
@@ -39,6 +38,6 @@ export function WorkflowToolbar({ workflow, onRevision, onDefinition, onRun }: {
         {revisions.hasNextPage ? <button className="load-more" disabled={revisions.isFetchingNextPage} onClick={() => void revisions.fetchNextPage()}>More revisions</button> : null}
       </div> : null}
     </div></div>
-    <button type="button" className="workflow-run-button" disabled={!workflow.runnable} title={workflow.runnable?'Run this exact registered Revision':'This Revision is not registered in this Host'} onClick={onRun}><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 3 7 5-7 5Z" /></svg>Run</button>
+
   </header>;
 }

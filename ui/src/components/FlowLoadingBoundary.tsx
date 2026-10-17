@@ -2,7 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { useExecutionSnapshot } from './ExecutionSnapshot';
 import { retainedViews } from '../workspaceRetention';
 
-export const FLOW_LOADING_MINIMUM_MS = 300;
 const FlowLoadingContext = createContext({ loading: false, markReady: () => {} });
 export function useFlowReady() {
   const { markReady } = useContext(FlowLoadingContext);
@@ -14,19 +13,17 @@ export function useFlowReady() {
 const ignoreReady = () => {};
 
 /** Prepare the next workspace offscreen, then present its header and graph together. */
-export function FlowLoadingBoundary<T extends { key: string }>({ flowKey, candidate, pending, failed, render, fallback, onPresented, minimumMs = FLOW_LOADING_MINIMUM_MS, retainLimit = 1, retainGroup, pinnedKey }: {
+export function FlowLoadingBoundary<T extends { key: string }>({ flowKey, candidate, pending, failed, render, fallback, onPresented, retainLimit = 1, retainGroup, pinnedKey }: {
   flowKey: string | null; candidate: T | null; pending: boolean; failed: boolean;
   render: (value: T) => ReactNode; fallback: ReactNode;
-  onPresented: (value: T | null) => void; minimumMs?: number;
+  onPresented: (value: T | null) => void;
   retainLimit?: number; retainGroup?: (value: T) => string | null; pinnedKey?: string;
 }) {
   const [presented, setPresented] = useState<T | null>(null);
   const [retained, setRetained] = useState<T[]>([]);
   const [readyKey, setReadyKey] = useState<string | null>(null);
   const [complete, setComplete] = useState(false);
-  const startedAt = useRef(performance.now());
   useLayoutEffect(() => {
-    startedAt.current = performance.now();
     setReadyKey(presented?.key === flowKey || retained.some(value => value.key === flowKey) ? flowKey : null);
     setComplete(!flowKey);
     if (!flowKey) { setPresented(null); setRetained([]); }
@@ -34,13 +31,10 @@ export function FlowLoadingBoundary<T extends { key: string }>({ flowKey, candid
   const markReady = useCallback(() => setReadyKey(flowKey), [flowKey]);
   useEffect(() => {
     if (!candidate || pending || failed || readyKey !== flowKey || complete && presented === candidate) return;
-    const timer = setTimeout(() => {
-      setRetained(current => retainGroup ? retainedViews(candidate, [...(presented ? [presented] : []), ...current], retainGroup, retainLimit, pinnedKey) : []);
-      setPresented(candidate);
-      setComplete(true);
-    }, Math.max(0, minimumMs - (performance.now() - startedAt.current)));
-    return () => clearTimeout(timer);
-  }, [candidate, pending, failed, readyKey, flowKey, minimumMs, retainLimit, retainGroup, pinnedKey, complete, presented]);
+    setRetained(current => retainGroup ? retainedViews(candidate, [...(presented ? [presented] : []), ...current], retainGroup, retainLimit, pinnedKey) : []);
+    setPresented(candidate);
+    setComplete(true);
+  }, [candidate, pending, failed, readyKey, flowKey, retainLimit, retainGroup, pinnedKey, complete, presented]);
   useEffect(() => onPresented(presented), [presented, onPresented]);
 
   const loading = Boolean(flowKey && !failed && (!complete || pending || presented?.key !== flowKey));

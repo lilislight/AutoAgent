@@ -22,6 +22,6 @@ export function TimelineNodeFilter({ nodes, value, onChange }: { nodes: string[]
     items[index]?.focus();
   }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}>
     <button ref={trigger} className="timeline-filter-trigger" aria-label="Filter Node runs" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} title={value ?? 'All nodes'} onClick={() => setOpen(current => !current)} onKeyDown={event => { if (!open && ['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); setOpen(true); } }}><span>{value ?? 'All nodes'}</span><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button>
-    {open ? <div className="timeline-filter-menu" id={menuId} role="menu" aria-label="Filter Node runs">{[null, ...nodes].map(node => <button key={node ?? ''} role="menuitemradio" tabIndex={-1} aria-checked={node === value} onClick={() => { onChange(node); setOpen(false); trigger.current?.focus(); }}><span>{node ?? 'All nodes'}</span>{node === value ? <span aria-hidden="true">✓</span> : null}</button>)}</div> : null}
+    {open ? <div className="timeline-filter-menu" id={menuId} role="menu" aria-label="Filter Node runs">{[null, ...nodes].map(node => <button key={node ?? ''} role="menuitemradio" tabIndex={-1} aria-checked={node === value} onClick={() => { onChange(node); setOpen(false); trigger.current?.focus(); }}><span>{node ?? 'All nodes'}</span></button>)}</div> : null}
   </div>;
 }

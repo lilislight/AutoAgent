@@ -15,11 +15,14 @@ from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Executor, Future
 from contextvars import copy_context
 from dataclasses import replace
+from functools import partial
 from uuid import uuid4
 
 from ..commands import CommandIR, Wait
 from ..operators import Operator, ValueContract, is_stream_value
 from ..operators.context import OperatorCallContext, operator_call_context
+from ..operators.execution import _sync_execution_scope
+from ..errors import NodeTimeoutError
 from ..runtime.events import (
     OperatorCallCompleted,
     OperatorCallFailed,
@@ -424,13 +427,32 @@ class NodeExecutor:
                 raise TypeError("Operator output contract is unavailable.")
             return contract.validate(returned), contract
 
+        async def run_owned_sync(handler, args, kwargs):
+            return await _run_sync(self._pool, partial(handler, *args, **kwargs),
+                                   defer_release=lease.defer, track=True)
+
+        async def invoke_with_timeout():
+            if node.timeout is None:
+                return await invoke_and_validate()
+            timer = asyncio.timeout(node.timeout.seconds)
+            try:
+                async with timer:
+                    result = await invoke_and_validate()
+            except TimeoutError as error:
+                if not timer.expired():
+                    raise
+                raise NodeTimeoutError(node.id, node.timeout.seconds) from error
+            if timer.expired():
+                raise NodeTimeoutError(node.id, node.timeout.seconds)
+            return result
+
         try:
             parent_context = OperatorCallContext.current() or OperatorCallContext()
-            with operator_call_context(replace(
+            with _sync_execution_scope(run_owned_sync), operator_call_context(replace(
                 parent_context, node_id=node.id, occurrence_id=occurrence_id,
                 operator_id=operator.id, operator_call_id=call_id, unit_index=unit_index,
             )):
-                output, contract = await invoke_and_validate()
+                output, contract = await invoke_with_timeout()
             output_record = contract._to_record_validated(output)
         except _RuntimeEmitFailure as failure:
             raise failure.error from failure
@@ -627,9 +649,12 @@ async def _run_sync(
     handler: Callable[..., object],
     *args: object,
     defer_release: Callable[[Future[object]], None] | None = None,
+    track: bool = False,
 ) -> object:
     context = copy_context()
     future = pool.submit(context.run, handler, *args)
+    if track and defer_release is not None:
+        defer_release(future)
     # This cancels queued work when the caller is cancelled. Python cannot
     # forcibly interrupt a sync callable that has already entered user code.
     try:
@@ -678,7 +703,7 @@ class _OperatorCapacityLease:
 
     @property
     def has_deferred_work(self) -> bool:
-        return bool(self._futures)
+        return any(not future.done() for future in self._futures)
 
     def defer(self, future: Future[object]) -> None:
         if future not in self._futures:
@@ -692,6 +717,7 @@ class _OperatorCapacityLease:
         if self._closed:
             return
         self._closed = True
+        self._futures = [future for future in self._futures if not future.done()]
         if not self._futures and not self._stream_sources:
             self._capacity.release()
             return

@@ -255,8 +255,8 @@ class DatabaseSink:
             self._queries.definitions, "workflow_revision", workflow_id, limit, cursor
         )
 
-    async def workflow_catalog(self, *, registered_ids=(), search="", limit=100, cursor=None):
-        return await self._writer.run(self._queries.workflow_catalog, registered_ids, search, limit, cursor)
+    async def workflow_catalog(self, *, registered_ids=(), search="", limit=100, cursor=None, registered_only=False):
+        return await self._writer.run(self._queries.workflow_catalog, registered_ids, search, limit, cursor, registered_only)
 
     async def workflow_revisions(self, workflow_id, *, prefix=None, limit=100, cursor=None):
         return await self._writer.run(self._queries.workflow_revisions, workflow_id, prefix, limit, cursor)
@@ -481,8 +481,8 @@ class DatabaseSink:
     async def activation_candidates(self, now_us, *, limit=32, cursor=None):
         return await self._writer.run(self._queries.activation_candidates, now_us, limit, cursor)
 
-    async def read_recovery_bundle(self, root_invocation_id):
-        return await self._writer.run(self._queries.recovery_bundle, root_invocation_id)
+    async def read_recovery_bundle(self, root_invocation_id, *, full_history=False):
+        return await self._writer.run(self._queries.recovery_bundle, root_invocation_id, full_history=full_history)
 
     async def flush(self):
         await self._writer.run(self._writer.flush)

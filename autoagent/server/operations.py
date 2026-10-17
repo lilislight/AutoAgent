@@ -40,6 +40,8 @@ class ExecutionOperations:
         if self.closed or len(self.tasks)>=self.settings.operation_concurrency:
             raise HostCapacityError('Execution operation capacity is exhausted.')
         options={key:value for key,value in body.items() if key not in ('request_id','invocation_id','action')}
+        if body['action']=='recover':
+            options['request_id']=body['request_id']
         await self.host.validate_execution_action(body['invocation_id'],body['action'],**options)
         # Preflight awaited: another submit may have acquired this key or slot.
         if body['request_id'] in self.entries:
@@ -61,6 +63,8 @@ class ExecutionOperations:
     async def run(self,entry,body):
         try:
             options={key:value for key,value in body.items() if key not in ('request_id','invocation_id','action')}
+            if body['action']=='recover':
+                options['request_id']=body['request_id']
             entry['result']=await self.host.perform_execution_action(body['invocation_id'],body['action'],**options)
             entry['status']='succeeded'
         except asyncio.CancelledError:

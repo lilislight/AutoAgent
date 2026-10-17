@@ -109,7 +109,10 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                         rows.extend(response.json()['items'])
                     self.assertEqual(len(rows),manifest['sections']['event']['count'])
                     self.assertEqual(len({row['event_id'] for row in rows}),len(rows))
-                    self.assertTrue(all(set(row)=={'event_id','event_name','sequence','occurred_at_us'} for row in rows))
+                    required = {'event_id','event_name','sequence','occurred_at_us'}
+                    allowed = required | {'control_state','invocation_status'}
+                    self.assertTrue(all(required <= set(row) <= allowed for row in rows))
+                    self.assertTrue(any(row.get('invocation_status') == 'completed' for row in rows))
                 response=await client.get('/api/v2/trace-dataset',params=dict(invocation_id=root.invocation_id,replay='true',snapshot_id=manifest['snapshot_id']))
                 self.assertEqual(response.status_code,200,response.text)
                 replay=response.json()
@@ -596,7 +599,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(nested['end_at_us'])
             self.assertEqual(nested['values'], [])
             self.assertNotIn('request_ref', nested)
-            await host.continue_execution(root)
+            await host.recover(root)
             await host.respond(root, wait['wait_id'], {'text': 'yes'})
             await host.join(root)
             finished = (await host.list_execution_waits(root.invocation_id, occurrence_id=node['occurrence_id'])).items[0]
@@ -773,7 +776,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             nodes = await host.list_timeline_items(root.invocation_id, start_us=overview['start_at_us'], end_us=overview['end_at_us'] + 1)
             self.assertEqual(nodes.items[0]['wait_count'], 1)
             wait = (await host.list_execution_waits(root.invocation_id)).items[0]
-            await host.continue_execution(root)
+            await host.recover(root)
             await host.respond(root, wait['wait_id'], {'text': 'approved'})
             await host.join(root)
             replay = await host.get_timeline_frame(root.invocation_id, sequence=paused['boundary']['sequence'])
@@ -788,6 +791,37 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             missing = await host.get_timeline_frame(root.invocation_id)
             self.assertFalse(missing['history_complete'])
             self.assertIsNone(missing['trace'])
+
+    async def test_inspector_cancellation_reason_is_lazy_scoped_and_survives_reopen(self):
+        """Cancelled Invocation reasons remain canonical lazy values, including Artifact-backed text."""
+        from autoagent import Wait
+        from autoagent.host.persistence.reading import SourceReader
+
+        wf = Workflow('cancel-reason', nodes=[Node('approval', Wait(Value, Value))])
+        reason = 'Review cancelled: ' + 'x' * (2 * 1024 * 1024)
+        async with self.host([wf]) as host:
+            root = await host.execute(wf.id, {'text': 'request'}, entry_node_id='approval')
+            await host.join(root)
+            await host.cancel(root, reason=reason)
+            other = await host.execute(wf.id, {'text': 'other'}, entry_node_id='approval')
+            await host.join(other)
+            await host.cancel(other)
+            wait = (await host.list_execution_waits(root.invocation_id)).items[0]
+        async with self.host([wf]) as host, self.client(create_app(host, ui=False)) as client:
+            with patch.object(SourceReader, 'read', side_effect=AssertionError('Summary must not hydrate cancellation reason')):
+                trace = await client.get('/api/v2/execution-trace', params={'invocation_id': root.invocation_id})
+                self.assertEqual(trace.status_code, 200, trace.text)
+                self.assertNotIn('Review cancelled:', trace.text)
+                self.assertLess(len(trace.content), 20_000)
+            params = dict(invocation_id=root.invocation_id, kind='invocation', identity=root.invocation_id, field='cancel_reason')
+            response = await client.get('/api/v2/execution-value', params=params)
+            self.assertEqual(response.status_code, 200, response.text[:1000])
+            self.assertEqual(response.json(), {'available': True, 'value': reason})
+            self.assertEqual((await client.get('/api/v2/execution-value', params=dict(params, identity=other.invocation_id))).status_code, 404)
+            absent = await client.get('/api/v2/execution-value', params=dict(params, invocation_id=other.invocation_id, identity=other.invocation_id))
+            self.assertEqual(absent.json(), {'available': False, 'value': None})
+            wrong_kind = await client.get('/api/v2/execution-value', params=dict(params, kind='wait', identity=wait['wait_id']))
+            self.assertEqual(wrong_kind.status_code, 400)
 
     async def test_inspector_reads_one_wait_without_resolving_values_and_preserves_cancellation(self):
         """Command child Inspectors read exact Wait metadata, with real cancellation time and lazy values."""
@@ -883,6 +917,59 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(invalid.status_code, 400)
                     invalid = await client.get('/api/v2/' + endpoint, params={'session_id': 'shared', 'started_after_us': -1})
                     self.assertEqual(invalid.status_code, 422)
+
+    async def test_invocation_status_filters_sessions_counts_and_scoped_pages(self):
+        """Status unions filter metadata pages, preserve Session totals and distinguish paused work."""
+        from sqlalchemy import update
+        from autoagent.host.persistence.schema import meta
+        from autoagent.host.persistence.reading import SourceReader
+        async with self.host() as host:
+            seeded = []
+            states = [('shared', 'completed', 'active'), ('shared', 'cancelled', 'active'),
+                ('shared', 'failed', 'active'), ('shared', 'running', 'paused'),
+                ('shared', 'waiting', 'active'), ('shared', 'settling', 'active'),
+                ('running-only', 'running', 'active'), ('completed-only', 'completed', 'active'),
+                ('paused-only', 'running', 'paused')]
+            for sid, status, control in states:
+                ref = await host.execute('catalog', {'text': sid}, session_id=sid, entry_node_id='identity')
+                await host.join(ref)
+                seeded.append((ref, status, control))
+            async with self.database_connection(host, write=True) as conn:
+                for ref, status, control in seeded:
+                    await conn.execute(update(meta.tables['invocations']).where(meta.tables['invocations'].c.invocation_id == ref.invocation_id).values(status=status, control_state=control))
+            async with self.client(create_app(host, ui=False)) as client:
+                with patch.object(SourceReader, 'read', side_effect=AssertionError('Status filters must remain metadata-only')):
+                    both = {'status': ['completed', 'cancelled']}
+                    sessions = (await client.get('/api/v2/execution-sessions', params=both)).json()
+                    self.assertEqual(sessions['total_count'], 2)
+                    shared = next(row for row in sessions['items'] if row['session_id'] == 'shared')
+                    self.assertEqual((shared['invocation_count'], shared['matching_count']), (6, 2))
+                    params = dict(both, session_id='shared', limit=1)
+                    first = (await client.get('/api/v2/session-invocations', params=params)).json()
+                    self.assertEqual(len(first['items']), 1)
+                    second = (await client.get('/api/v2/session-invocations', params=dict(params, status=['cancelled', 'completed', 'completed'], cursor=first['next_cursor']))).json()
+                    self.assertEqual({first['items'][0]['status'], second['items'][0]['status']}, {'completed', 'cancelled'})
+                    self.assertIsNone(second['next_cursor'])
+                    wrong = await client.get('/api/v2/session-invocations', params=dict(params, status=['failed'], cursor=first['next_cursor']))
+                    self.assertEqual(wrong.status_code, 400)
+                    session_first = (await client.get('/api/v2/execution-sessions', params=dict(both, limit=1))).json()
+                    wrong = await client.get('/api/v2/execution-sessions', params=dict(status='waiting', limit=1, cursor=session_first['next_cursor']))
+                    self.assertEqual(wrong.status_code, 400)
+                    running = (await client.get('/api/v2/execution-sessions', params={'status':'running'})).json()
+                    self.assertEqual([row['session_id'] for row in running['items']], ['running-only'])
+                    paused = (await client.get('/api/v2/execution-sessions', params={'status':'paused'})).json()
+                    self.assertEqual({row['session_id'] for row in paused['items']}, {'shared', 'paused-only'})
+                    paused_inv = (await client.get('/api/v2/session-invocations', params={'status':'paused', 'session_id':'shared'})).json()
+                    self.assertEqual([row['invocation_id'] for row in paused_inv['items']], [seeded[3][0].invocation_id])
+                    combined = (await client.get('/api/v2/session-invocations', params={'status':['paused','waiting'], 'session_id':'shared', 'workflow_id':'catalog'})).json()
+                    self.assertEqual(len(combined['items']), 2)
+                    narrowed = (await client.get('/api/v2/execution-sessions', params={'status':'paused', 'workflow_id':'missing-workflow'})).json()
+                    self.assertEqual((narrowed['total_count'], narrowed['items']), (0, []))
+                    cleared = (await client.get('/api/v2/session-invocations', params={'session_id':'shared'})).json()
+                    self.assertEqual(len(cleared['items']), 6)
+                    for endpoint in ('execution-sessions', 'session-invocations'):
+                        invalid = await client.get('/api/v2/'+endpoint, params={'session_id':'shared', 'status':'unknown'})
+                        self.assertEqual(invalid.status_code, 422)
 
     async def test_occurrence_stages_are_lazy_paged_and_scoped_to_exact_execution(self):
         """Stage summaries avoid Artifact reads; values hydrate only the selected scoped field."""
@@ -1421,7 +1508,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             paused = await host.get_execution_trace(root.invocation_id)
             self.assertEqual(paused['invocation']['control_state'], 'paused')
             self.assertEqual(paused['active_routes'], trace['active_routes'])
-            await host.continue_execution(root)
+            await host.recover(root)
             waiting = await host.get_execution(root)
             await host.respond(root, waiting.waits[0].id, {'text': 'approved'})
             await host.join(root)
@@ -1556,6 +1643,36 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual([row["workflow_id"] for row in rows], ["a-flow", "z-flow", "b-flow", "saved-flow"])
                     self.assertEqual(rows[1]["workflow_version"], "2")
                     self.assertEqual(len({row["workflow_id"] for row in rows}), 4)
+
+    async def test_registered_catalog_filters_before_paging_and_preserves_directory_order(self):
+        """Run choices exclude unregistered groups before paging and retain directory search/order."""
+        async with self.host([workflow("archived-flow"), workflow("order-processing", "1")]) as host:
+            old = await host.get_workflow("order-processing")
+        async with self.host([workflow("order-processing", "2"), workflow("other-flow")]) as host:
+            async with self.client(create_app(host, ui=False)) as client:
+                directory = (await client.get("/api/v2/workflow-catalog")).json()["items"]
+                params = {"registered_only": "true", "limit": 1}
+                first = (await client.get("/api/v2/workflow-catalog", params=params)).json()
+                rows = list(first["items"])
+                page = first
+                while page["next_cursor"]:
+                    page = (await client.get("/api/v2/workflow-catalog", params=dict(params, cursor=page["next_cursor"]))).json()
+                    rows.extend(page["items"])
+                self.assertEqual([row["workflow_id"] for row in rows], [row["workflow_id"] for row in directory if row["current_revision_id"]])
+                self.assertEqual(len(rows), 2)
+                for search in ("ORDPROC", old["definition_hash"][:12]):
+                    matches = (await client.get("/api/v2/workflow-catalog", params=dict(params, q=search))).json()["items"]
+                    self.assertEqual([row["workflow_id"] for row in matches], ["order-processing"])
+                    self.assertNotEqual(matches[0]["current_revision_id"], old["workflow_revision_id"])
+                self.assertEqual((await client.get("/api/v2/workflow-catalog", params=dict(params, q="archived"))).json()["items"], [])
+                response = await client.get("/api/v2/workflow-catalog", params={"cursor": first["next_cursor"]})
+                self.assertEqual(response.status_code, 400)
+                full = (await client.get("/api/v2/workflow-catalog", params={"limit": 1})).json()
+                response = await client.get("/api/v2/workflow-catalog", params=dict(params, cursor=full["next_cursor"]))
+                self.assertEqual(response.status_code, 400)
+            page = await host._persistence.workflow_catalog(registered_ids=(), registered_only=True)
+            self.assertEqual(page.items, ())
+            self.assertIsNone(page.next_cursor)
 
     async def test_catalog_groups_revisions_and_keeps_registered_workflows_first(self):
         """Grouped pages retain current registration and include saved-only Workflows."""
@@ -1719,7 +1836,8 @@ class ServerSettingsTests(unittest.TestCase):
         """Server settings reject conflicting paths and invalid resource limits."""
         settings = ServerSettings.from_environment({"AUTOAGENT_SERVER_UI_DIRECTORY": "frontend"}, root=Path("/tmp/project"))
         self.assertEqual(settings.ui_directory, Path("/tmp/project/frontend"))
-        for changes in ({"port": 0}, {"ui_path": "/api/v2/ui"}, {"api_prefix": "/api/../v2"}, {"page_size": 201}, {"query_timeout_seconds": 0}):
+        for changes in ({"port": 0}, {"ui_path": "/api/v2/ui"}, {"api_prefix": "/api/../v2"}, {"page_size": 201}, {"query_timeout_seconds": 0},
+                        {"shutdown_timeout_seconds": 0}, {"shutdown_timeout_seconds": float('inf')}, {"shutdown_timeout_seconds": True}):
             with self.assertRaises(ValueError):
                 replace(settings, **changes)
 

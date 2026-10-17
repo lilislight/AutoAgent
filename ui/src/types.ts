@@ -72,12 +72,14 @@ export interface AcceptedExecution {
   accepted: true; workflow_id: string; revision_id: string; invocation_id: string; session_id: string;
 }
 
-export interface PendingResponse { invocation_id:string; wait_id:string; occurrence_id:string; created_at_us:number }
-export type ExecutionActionKind='pause'|'continue'|'cancel'|'respond'|'signal';
+export interface PendingResponse { invocation_id:string; wait_id:string; occurrence_id:string; created_at_us:number; node_id?:string|null; store_order?:number }
+export type ExecutionActionKind='pause'|'recover'|'cancel'|'respond'|'signal';
 export interface ExecutionControls {
   invocation_id:string; root_invocation_id:string; root_session_id:string; status:string; control_state:string;
-  continue_reason:'paused'|'interrupted'|null; endpoints:string[]; pending_responses:PendingResponse[]; next_cursor:string|null; frontier:number;
-  actions:Record<'pause'|'continue_execution'|'cancel'|'respond'|'signal'|'run_again',{available:boolean;reason:string|null}>;
+  recovery_reason:'paused'|'interrupted'|'failed'|'cancelled'|null; expected_version:number; recovery_count:number; endpoints:string[]; pending_responses:PendingResponse[]; next_cursor:string|null; frontier:number;
+  actions:Record<'pause'|'recover'|'cancel'|'respond'|'signal'|'run_again',{available:boolean;reason:string|null}>;
+  last_recovery_id?:string|null;
+  response_target?:{invocation_id:string;wait_id:string;status:string}|null;
 }
 export interface ExecutionOperation {
   operation_id:string; invocation_id:string; action:ExecutionActionKind; status:'running'|'succeeded'|'failed'|'unobserved';
@@ -86,13 +88,13 @@ export interface ExecutionOperation {
 export interface ExecutionActionSpec {root_invocation_id:string; action:ExecutionActionKind; input_schema:unknown; endpoints:string[]; next_sequence:number}
 export interface ExecutionActionInput {
   invocation_id:string; request_id:string; action:ExecutionActionKind; payload?:unknown; reason?:string;
-  target_invocation_id?:string; wait_id?:string; endpoint?:string; source_id?:string; sequence?:number;
+  target_invocation_id?:string; wait_id?:string; endpoint?:string; source_id?:string; sequence?:number; expected_version?:number;
 }
 
-export type InspectorTab = 'Summary' | 'Input / Output' | 'Execution' | 'Evaluations' | 'Definition';
-export interface ExecutionRecordSelection { kind: 'node' | 'call' | 'wait' | 'edge'; id: string; section?: InspectorTab }
+export type InspectorTab = 'Summary' | 'Input / Output' | 'Execution' | 'Definition' | 'Actions';
+export interface ExecutionRecordSelection { kind: 'node' | 'call' | 'wait' | 'edge'; id: string; section?: InspectorTab; waitId?: string }
 export type ExecutionView = 'graph' | 'timeline' | 'split';
-export type Selection = { kind: "node" | "edge" | "invocation" | "workflow"; id: string; record?: ExecutionRecordSelection } | null;
+export type Selection = { kind: "node" | "edge" | "invocation" | "workflow"; id: string; section?: InspectorTab; record?: ExecutionRecordSelection } | null;
 
 export interface LocationState {
   view: "workflows" | "executions";
@@ -166,6 +168,7 @@ export interface ExecutionFilters {
   query: string;
   workflowIds: string[];
   revisionIds: string[];
+  statuses: string[];
   startedFrom: string;
   startedTo: string;
 }
@@ -194,8 +197,11 @@ export interface TimelineOverview {
   observed_at_us: number; status: string | null; control_state: string | null;
   counts: { node: number; call: number; wait: number }; untimed_count: number;
   node_start_bins: number[];
+  pause_intervals?: { start_at_us: number; end_at_us: number | null }[];
+  idle?: TimelineIdle | null;
   frontier: number; view: 'durable';
 }
+export interface TimelineIdle { state: 'waiting' | 'paused'; since_at_us: number; at_us: number }
 export interface TimelineRow extends TraceRow {
   id: string; kind: 'node' | 'call' | 'wait'; occurrence_id: string;
   start_at_us: number; end_at_us: number | null; ordinal?: number; wait_kind?: string;
@@ -205,7 +211,7 @@ export interface TimelineRow extends TraceRow {
   preview_calls?: TimelineRow[];
 }
 export interface TimelinePage { items: TimelineRow[]; next_cursor: string | null; frontier: number }
-export interface TimelineMarker { event_id: string; event_name: string; sequence: number; occurred_at_us: number }
+export interface TimelineMarker { event_id: string; event_name: string; sequence: number; occurred_at_us: number; control_state?: string; invocation_status?: string }
 export interface TimelineMarkerPage { items: TimelineMarker[]; next_cursor: string | null; frontier: number }
 
 export interface TimelineEventGroup {

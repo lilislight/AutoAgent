@@ -270,7 +270,7 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
             await host.respond(ref, result.waits[0].id, {'text': 'approved'})
             self.assertEqual((await host.join(ref)).control_state, 'paused')
             await eventually(lambda: ref.session_id not in host._runtime.resident)
-            result = await host.continue_execution(ref)
+            result = await host.recover(ref)
             self.assertEqual(result.status, 'completed')
             self.assertEqual(result.output, {'text': 'approved'})
 
@@ -285,7 +285,7 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
             receipt = await host.signal(ref, 'mail', {'text': 'message'}, source_id='client', sequence=1)
             self.assertTrue(receipt.message_id)
             self.assertEqual((await host.join(ref)).control_state, 'paused')
-            result = await host.continue_execution(ref)
+            result = await host.recover(ref)
             self.assertEqual(result.status, 'completed')
 
     async def test_new_request_cancels_eviction_during_snapshot_io(self):
@@ -359,7 +359,7 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
             await host.respond(ref, waiting.waits[0].id, {'text': 'approved'})
             self.assertEqual((await host.join(ref)).control_state, 'paused')
             await eventually(lambda: ref.session_id not in host._runtime.resident)
-            self.assertEqual((await host.continue_execution(ref)).status, 'completed')
+            self.assertEqual((await host.recover(ref)).status, 'completed')
             graph = (await host._persistence.list_invocations(root_invocation_id=ref.invocation_id)).items
             children = [row for row in graph if row['parent_invocation_id'] == ref.invocation_id]
             self.assertEqual(children[0]['status'], 'completed')

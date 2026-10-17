@@ -14,8 +14,10 @@ from .runner import SkillScriptRunner, SubprocessSkillRunner
 from .skill import Skill
 from .skillset import SkillSet
 from .snapshot import SkillSnapshotFile, SkillSnapshot, SnapshotSkillSource
+from .operations import SkillLoadRequest, SkillListResourcesRequest, SkillReadResourceRequest, SkillReadTextRequest, SkillRunScriptRequest, SkillOperations
 
 __all__ = [
+    "SkillLoadRequest", "SkillListResourcesRequest", "SkillReadResourceRequest", "SkillReadTextRequest", "SkillRunScriptRequest", "SkillOperations",
     "SkillSnapshotFile", "SkillSnapshot", "SnapshotSkillSource",
     "Skill", "SkillSet", "SkillMetadata", "SkillLimits", "SkillResource",
     "SkillDocument", "SkillResourceContent", "SkillError", "SkillFormatError",

@@ -10,6 +10,7 @@ from ..commands.models import runtime_handles
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+import math
 from types import MappingProxyType
 from typing import Literal, TypeAlias, Union
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -140,6 +141,29 @@ class Recovery:
 
 
 @dataclass(frozen=True, slots=True)
+class TimeoutPolicy:
+    """Execution deadline per admitted Operator Call, including its stream.
+
+    Queueing, mappings and bindings are outside this deadline. Each Map unit
+    and each recovery attempt receives its own budget. This is not a durable
+    Wait deadline and does not forcibly stop synchronous Python code.
+    """
+
+    seconds: float
+
+    def __post_init__(self):
+        if isinstance(self.seconds, bool) or not isinstance(self.seconds, (int, float)):
+            raise ValueError("TimeoutPolicy seconds must be positive and finite.")
+        try:
+            seconds = float(self.seconds)
+        except OverflowError as error:
+            raise ValueError("TimeoutPolicy seconds must be positive and finite.") from error
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("TimeoutPolicy seconds must be positive and finite.")
+        object.__setattr__(self, "seconds", seconds)
+
+
+@dataclass(frozen=True, slots=True)
 class Stream:
     reducer: StreamReducer = field(compare=False)
 
@@ -166,6 +190,7 @@ class Node:
     stream: Stream | None = None
     user_events: tuple[UserEventMapping, ...] = ()
     recovery_mode: Recovery = field(default_factory=Recovery)
+    timeout: TimeoutPolicy | None = None
 
 
 @dataclass(slots=True)
@@ -217,6 +242,7 @@ class NodeIR:
         default=(), compare=False
     )
     recovery_mode: Recovery = field(default_factory=Recovery)
+    timeout: TimeoutPolicy | None = None
 
 
 @dataclass(frozen=True, slots=True)

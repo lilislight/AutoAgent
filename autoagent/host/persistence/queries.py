@@ -155,7 +155,7 @@ class Queries:
                 frontier,
             )
 
-    async def workflow_catalog(self, registered_ids, search, limit, cursor):
+    async def workflow_catalog(self, registered_ids, search, limit, cursor, registered_only=False):
         """Group metadata before paging, with ID fuzzy matching or hash prefixes."""
         limit_value(limit)
         revisions = meta.tables["workflow_revisions"]
@@ -185,6 +185,8 @@ class Queries:
             matches.c.workflow_registered_at_us.label("registered_at_us"),
             matches.c.matched_revision_id, ranked.label("registration_rank"),
         ).where(matches.c.position == 1)
+        if registered_only:
+            statement = statement.where(matches.c.workflow_id.in_(registered_ids))
         if cursor is not None:
             if not isinstance(cursor, (tuple, list)) or len(cursor) != 3 or type(cursor[0]) is not int or cursor[0] not in (0, 1) or type(cursor[1]) is not int or not isinstance(cursor[2], str):
                 raise ValueError("Invalid Workflow catalog cursor.")
@@ -705,7 +707,7 @@ class Queries:
             rows = [dict(row) for row in (await conn.execute(query)).mappings()]
         return Page(tuple(rows[:limit]), rows[limit - 1]["invocation_id"] if len(rows) > limit else None, frontier)
 
-    async def recovery_bundle(self, root_invocation_id):
+    async def recovery_bundle(self, root_invocation_id, *, full_history=False):
         """Read one durable Root graph and its histories from one MVCC snapshot."""
         async with self.view() as (conn, _, _, frontier):
             invocations = meta.tables["invocations"]
@@ -743,7 +745,7 @@ class Queries:
             )
             checkpoint = (
                 await self.storage.source(conn, "checkpoint", checkpoint_id)
-                if checkpoint_id
+                if checkpoint_id and not full_history
                 else None
             )
             anchors = (

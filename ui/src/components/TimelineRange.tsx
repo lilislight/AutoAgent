@@ -2,12 +2,12 @@ import { useRef, useState } from 'react';
 import { elapsedLabel, moveWindow, resizeWindow, selectedWindow, type TimeWindow } from '../timeline';
 
 interface Props {
-  full: TimeWindow; window: TimeWindow; bins: number[];
+  full: TimeWindow; window: TimeWindow; bins: number[]; activityEnd?: number;
   onChange: (window: TimeWindow) => void; onReset: () => void;
   onPreview: (window: TimeWindow | null) => void; replayTime?: number | null;
 }
 type Mode = 'select' | 'move' | 'start' | 'end';
-export function TimelineRange({ full, window, bins, onChange, onReset, onPreview, replayTime }: Props) {
+export function TimelineRange({ full, window, bins, onChange, onReset, onPreview, replayTime, activityEnd }: Props) {
   const track = useRef<HTMLDivElement>(null);
   const drag = useRef<{ pointer: number; mode: Mode; x: number; time: number; initial: TimeWindow; draft: TimeWindow } | null>(null);
   const [draft, setDraft] = useState<TimeWindow | null>(null);
@@ -60,7 +60,7 @@ export function TimelineRange({ full, window, bins, onChange, onReset, onPreview
         if (Math.abs(event.clientX - start.x) >= 3 || start.mode === 'start' || start.mode === 'end') onChange(start.draft);
         stop(); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
       }} onPointerCancel={stop} onLostPointerCapture={stop}>
-      <svg className="timeline-density" viewBox="0 0 640 32" preserveAspectRatio="none" aria-hidden="true">{bins.map((count, index) => count ? <rect key={index} x={index * 640 / bins.length + 1} y={32 - count / maximum * 27} width={Math.max(1, 640 / bins.length - 2)} height={count / maximum * 27} rx="1" /> : null)}</svg>
+      <svg className="timeline-density" style={{width:`${Math.max(0,Math.min(100,((activityEnd ?? full.end)-full.start)/total*100))}%`}} viewBox="0 0 640 32" preserveAspectRatio="none" aria-hidden="true">{bins.map((count, index) => count ? <rect key={index} x={index * 640 / bins.length + 1} y={32 - count / maximum * 27} width={Math.max(1, 640 / bins.length - 2)} height={count / maximum * 27} rx="1" /> : null)}</svg>
       <div className="timeline-overview-shade" style={{ left: 0, width: `${left}%` }} /><div className="timeline-overview-shade" style={{ left: `${right}%`, right: 0 }} />
       <div className="timeline-overview-window" data-range-action="move" style={{ left: `${left}%`, width: `${right - left}%` }} tabIndex={0} role="slider" aria-label="Selected time range" aria-valuemin={0} aria-valuemax={total - (current.end - current.start)} aria-valuenow={current.start - full.start} aria-valuetext={`${elapsedLabel(current.start - full.start)} to ${elapsedLabel(current.end - full.start)}`}
         onKeyDown={event => {

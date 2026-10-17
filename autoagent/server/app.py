@@ -13,7 +13,7 @@ from collections.abc import Awaitable
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from autoagent import RuntimeTransitionError
 from autoagent.host import AutoAgentHost, HostCapacityError, HostError, HostNotFoundError, HostRunConflict
@@ -73,6 +73,10 @@ async def _query(operation: Awaitable, settings: ServerSettings):
         raise HTTPException(504, detail={"code": "query_timeout", "message": "Workflow query timed out."}) from exc
     except TraceResetRequired as exc:
         raise HTTPException(409, detail={"code": "trace_reset", "message": str(exc)}) from exc
+    except ValidationError as exc:
+        errors = [dict(path=list(error['loc']), code=error['type'], message=error['msg'])
+            for error in exc.errors(include_url=False, include_input=False, include_context=False)]
+        raise HTTPException(422, detail={"code": "invalid_input", "message": "Input validation failed.", "errors": errors}) from exc
     except ValueError as exc:
         raise HTTPException(400, detail={"code": "invalid_request", "message": str(exc)}) from exc
 
@@ -117,15 +121,21 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
     operations = ExecutionOperations(host, settings)
     @asynccontextmanager
     async def watch_lifespan(_app):
+        hubs = getattr(_app.state, '_autoagent_trace_hubs', None)
+        if hubs is None:
+            hubs = _app.state._autoagent_trace_hubs = set()
+        hubs.add(hub)
         try:
             yield
         finally:
-            await operations.close()
             await hub.close()
+            await operations.close()
+            hubs.discard(hub)
     router = APIRouter(prefix=settings.api_prefix, tags=["AutoAgent Workflows"], lifespan=watch_lifespan)
 
     @router.get('/execution-controls')
-    async def execution_controls(invocation_id: str=Query(min_length=1,max_length=4096),cursor: str|None=Query(None,max_length=16384)):
+    async def execution_controls(invocation_id: str=Query(min_length=1,max_length=4096),cursor: str|None=Query(None,max_length=16384),
+        target_invocation_id: str|None=Query(None,min_length=1,max_length=4096),wait_id: str|None=Query(None,min_length=1,max_length=4096)):
         position=None
         if cursor:
             try:
@@ -134,7 +144,7 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
                     raise ValueError
             except (ValueError,TypeError,binascii.Error):
                 raise HTTPException(400,detail='Invalid response cursor.') from None
-        result=await _query(host.get_execution_controls(invocation_id,cursor=position),settings)
+        result=await _query(host.get_execution_controls(invocation_id,cursor=position,target_invocation_id=target_invocation_id,wait_id=wait_id),settings)
         if result['next_cursor']:
             result['next_cursor']=base64.urlsafe_b64encode(json.dumps([invocation_id,result['next_cursor']]).encode()).decode().rstrip('=')
         return result
@@ -172,7 +182,8 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
             ref = await _query(host.execute_json(body.workflow_id, body.input,
                 revision_id=body.revision_id, entry_node_id=body.entry_node_id,
                 session_id=body.session_id, session_context=body.session_context,
-                require_existing_session=body.session_mode == 'existing'), settings)
+                require_existing_session=body.session_mode == 'existing',
+                require_new_session=body.session_mode == 'new'), settings)
         except TypeError as exc:
             raise HTTPException(422, detail={"code": "invalid_input", "message": str(exc)}) from exc
         return dict(accepted=True, invocation_id=ref.invocation_id, session_id=ref.session_id,
@@ -181,12 +192,13 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
     @router.get("/workflow-catalog", response_model=WorkflowCatalogPage)
     async def catalog(
         q: str = Query("", max_length=512),
+        registered_only: bool = False,
         limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size),
         cursor: str | None = Query(None, max_length=16384),
     ):
         search = q.strip().lower()
-        scope = ["catalog", search]
-        page = await _query(host.browse_workflows(search=search, limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
+        scope = ["catalog", search] + (["registered"] if registered_only else [])
+        page = await _query(host.browse_workflows(search=search, limit=limit, cursor=_browse_cursor(cursor, scope), registered_only=registered_only), settings)
         return WorkflowCatalogPage(items=[WorkflowCatalogEntry.model_validate(row) for row in page.items], next_cursor=_browse_encode(page.next_cursor, scope))
 
     @router.get("/workflow-revisions", response_model=WorkflowPage)
@@ -234,6 +246,7 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         q: str = Query("", max_length=512),
         workflow_id: list[Annotated[str, Field(min_length=1, max_length=512)]] | None = Query(None, max_length=64),
         revision_id: list[Annotated[str, Field(min_length=1, max_length=4096)]] | None = Query(None, max_length=64),
+        status: list[Annotated[str, Field(pattern='^(created|running|waiting|paused|settling|completed|failed|cancelled)$')]] | None = Query(None, max_length=8),
         session_id: str | None = Query(None, min_length=1, max_length=4096),
         started_after_us: int | None = Query(None, ge=0, le=9007199254740991),
         started_before_us: int | None = Query(None, ge=0, le=9007199254740991),
@@ -241,9 +254,10 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         cursor: str | None = Query(None, max_length=16384),
     ):
         workflows, revisions = sorted(set(workflow_id or ())), sorted(set(revision_id or ()))
-        scope = ["execution-sessions", q.strip().lower(), _filter_scope(workflows, revisions), session_id, started_after_us, started_before_us]
+        statuses = sorted(set(status or ()))
+        scope = ["execution-sessions", q.strip().lower(), _filter_scope(workflows, revisions), session_id, started_after_us, started_before_us, statuses]
         page = await _query(host.list_execution_sessions(
-            search=scope[1], workflow_ids=workflows, revision_ids=revisions,
+            search=scope[1], workflow_ids=workflows, revision_ids=revisions, statuses=statuses,
             session_id=session_id, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=_browse_cursor(cursor, scope),
         ), settings)
         return trace_page(page, scope)
@@ -254,15 +268,17 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         q: str = Query("", max_length=512),
         workflow_id: list[Annotated[str, Field(min_length=1, max_length=512)]] | None = Query(None, max_length=64),
         revision_id: list[Annotated[str, Field(min_length=1, max_length=4096)]] | None = Query(None, max_length=64),
+        status: list[Annotated[str, Field(pattern='^(created|running|waiting|paused|settling|completed|failed|cancelled)$')]] | None = Query(None, max_length=8),
         started_after_us: int | None = Query(None, ge=0, le=9007199254740991),
         started_before_us: int | None = Query(None, ge=0, le=9007199254740991),
         limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size),
         cursor: str | None = Query(None, max_length=16384),
     ):
         workflows, revisions = sorted(set(workflow_id or ())), sorted(set(revision_id or ()))
-        scope = ["session-invocations", session_id, q.strip().lower(), _filter_scope(workflows, revisions), started_after_us, started_before_us]
+        statuses = sorted(set(status or ()))
+        scope = ["session-invocations", session_id, q.strip().lower(), _filter_scope(workflows, revisions), started_after_us, started_before_us, statuses]
         page = await _query(host.list_session_invocations(
-            session_id, search=scope[2], workflow_ids=workflows, revision_ids=revisions,
+            session_id, search=scope[2], workflow_ids=workflows, revision_ids=revisions, statuses=statuses,
             started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=_browse_cursor(cursor, scope),
         ), settings)
         return trace_page(page, scope)
@@ -298,10 +314,12 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
                 yield 'retry: 1500\n\n'
                 while True:
                     kind, value = await queue.get()
+                    if kind == 'closed':
+                        break
                     body = {k:v for k,v in value.items() if k != 'revision'}
                     identity = f"id: {value['cursor']}\n" if 'cursor' in value else ''
                     yield f'{identity}event: {kind}\ndata: {json.dumps(body, separators=(",", ":"))}\n\n'
-                    if kind == 'unavailable' or value.get('active') is False:
+                    if kind == 'unavailable':
                         break
             finally:
                 await hub.unsubscribe(invocation_id, queue)
@@ -426,7 +444,7 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         return await _query(host.get_execution_stage_value(invocation_id, occurrence_id, event_id, field), settings)
 
     @router.get("/execution-value")
-    async def execution_value(invocation_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(invocation|node|call|wait)$"), identity: str = Query(min_length=1, max_length=4096), field: str = Query(pattern="^(input|output|error|metrics|definition|request|response)$")):
+    async def execution_value(invocation_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(invocation|node|call|wait)$"), identity: str = Query(min_length=1, max_length=4096), field: str = Query(pattern="^(input|output|error|metrics|definition|request|response|cancel_reason)$")):
         return await _query(host.get_execution_value(invocation_id, kind, identity, field), settings)
 
     @router.get("/workflow-revisions/{revision_id:path}", response_model=WorkflowDetail)

@@ -1,0 +1,4 @@
+# Optional LiteLLM backend; constraints remain in pyproject.toml.
+# For the complete development environment, combine both requirements files:
+#   uv pip install --python .venv/bin/python -r requirements-dev.txt -r requirements-litellm.txt
+-e .[litellm]

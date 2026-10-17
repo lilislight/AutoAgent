@@ -20,8 +20,8 @@ from .models import ConflictError, FormatError
 from .projections import ProjectionBatch, light_record
 from .schema import meta
 
-FORMAT_VERSION = 3
-PROJECTION_VERSION = 3
+FORMAT_VERSION = 4
+PROJECTION_VERSION = 4
 SOURCES = {
     "workflow_revision": ("workflow_revisions", "revision_id", "snapshot_text"),
     "operator_definition": ("operator_definitions", "definition_id", "definition_text"),

@@ -134,3 +134,6 @@ __all__ += ["StateDelta", "TransitionPlanner", "NodeExecutionState", "InputMappe
 
 from .graph_checkpoint import RuntimeGraphCheckpoint
 __all__ += ["RuntimeGraphCheckpoint"]
+
+from .recovery import RecoverySource
+__all__ += ["RecoverySource"]

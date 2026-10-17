@@ -41,8 +41,22 @@ async def seed_replay_review(host, rounds):
     return ref
 
 
-async def main(*, pagination=False, maps_only=False, children_count=5, replay_rounds=None):
+async def seed_parallel_waits(host):
+    """Create twenty persisted pending responses without resolving them."""
+    ref = await host.execute("parallel-approvals", {"subject": "Release readiness review"}, entry_node_id="prepare")
+    result = await host.join(ref)
+    if result.status != "waiting" or len(result.waits) != 20:
+        raise RuntimeError(f"Expected twenty parallel Waits; got {result.status}, {len(result.waits)} Waits")
+    print("Parallel approvals:", result.status, "Pending Waits:", len(result.waits),
+          "Invocation:", ref.invocation_id, "Session:", ref.session_id)
+    return ref
+
+
+async def main(*, pagination=False, maps_only=False, children_count=5, replay_rounds=None, parallel_waits=False):
     async with AutoAgentHost.from_project(Path(__file__).parent) as host:
+        if parallel_waits:
+            await seed_parallel_waits(host)
+            return
         if replay_rounds is not None:
             await seed_replay_review(host, replay_rounds)
             return
@@ -97,10 +111,11 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--replay-rounds', type=int, help='Only create a Loop replay example with 1–200 passes (120 yields over 500 Events).')
     mode.add_argument('--maps-only', action='store_true', help='Only execute the Map and Map Spawn example.')
+    mode.add_argument('--parallel-waits', action='store_true', help='Only create one Invocation with twenty pending external approvals.')
     parser.add_argument('--children', type=int, default=5, help='Number of review Child Tasks (1–200, default: 5).')
     args = parser.parse_args()
     if args.replay_rounds is not None and not 1 <= args.replay_rounds <= 200:
         parser.error('--replay-rounds must be between 1 and 200')
     if not 1 <= args.children <= 200:
         parser.error('--children must be between 1 and 200')
-    asyncio.run(main(pagination=args.pagination, maps_only=args.maps_only, children_count=args.children, replay_rounds=args.replay_rounds))
+    asyncio.run(main(pagination=args.pagination, maps_only=args.maps_only, children_count=args.children, replay_rounds=args.replay_rounds, parallel_waits=args.parallel_waits))

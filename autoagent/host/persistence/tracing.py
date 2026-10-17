@@ -54,11 +54,20 @@ def filter_identities(values, max_length):
     return tuple(sorted(set(values)))
 
 
-def invocation_match(invocations, definitions, search, workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None):
+def invocation_match(invocations, definitions, search, workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, statuses=()):
     """Match identities without reading definitions or business values."""
     predicates = []
     workflow_ids = filter_identities(workflow_ids, 512)
     revision_ids = filter_identities(revision_ids, 4096)
+    statuses = filter_identities(statuses, 16)
+    if any(status not in ('created', 'running', 'waiting', 'paused', 'settling', 'completed', 'failed', 'cancelled') for status in statuses):
+        raise ValueError('Unknown Invocation status filter.')
+    if statuses:
+        choices = [invocations.c.control_state == 'paused'] if 'paused' in statuses else []
+        regular = tuple(status for status in statuses if status != 'paused')
+        if regular:
+            choices.append(and_(invocations.c.status.in_(regular), or_(invocations.c.control_state.is_(None), invocations.c.control_state != 'paused')))
+        predicates.append(or_(*choices))
     for value in (started_after_us, started_before_us):
         if value is not None and (type(value) is not int or not 0 <= value <= 9007199254740991):
             raise ValueError('Start times must be nonnegative integer microseconds.')
@@ -242,12 +251,12 @@ class TraceQueries:
             reader = await SourceReader.open(self.storage, conn, 'runtime_event', event_id)
             return {'available': True, 'value': await reader.read(('payload', field))}
 
-    async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
+    async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
         """Page Sessions containing matching Invocations, retaining whole-Session counts."""
         limit_value(limit)
         trace_cursor(cursor)
         inv, defs, events = (meta.tables[n] for n in ('invocations', 'workflow_revisions', 'runtime_events'))
-        match = invocation_match(inv, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us)
+        match = invocation_match(inv, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses)
         source = inv.join(defs, inv.c.workflow_revision_id == defs.c.revision_id).outerjoin(
             events, and_(events.c.session_id == inv.c.session_id, events.c.sequence == inv.c.last_sequence)
         )
@@ -261,7 +270,7 @@ class TraceQueries:
         ).select_from(source).where(inv.c.status.is_not(None)).group_by(inv.c.session_id)
         if session_id is not None:
             statement = statement.where(inv.c.session_id == session_id)
-        elif search or workflow_ids or revision_ids or started_after_us is not None or started_before_us is not None:
+        elif search or workflow_ids or revision_ids or statuses or started_after_us is not None or started_before_us is not None:
             statement = statement.having(func.sum(case((match, 1), else_=0)) > 0)
         if cursor is not None:
             position = tuple_(activity, inv.c.session_id)
@@ -275,7 +284,7 @@ class TraceQueries:
         position = (chosen[-1]['updated_at_us'], chosen[-1]['session_id']) if len(rows) > limit else None
         return Page(tuple(dict(r) for r in chosen), position, frontier, total_count=total)
 
-    async def page(self, kind, iid=None, *, node_id=None, occurrence_id=None, call_id=None, edge_id=None, session_id=None, workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, search='', status=None, order='desc', limit=50, cursor=None):
+    async def page(self, kind, iid=None, *, node_id=None, occurrence_id=None, call_id=None, edge_id=None, session_id=None, workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, search='', status=None, order='desc', limit=50, cursor=None):
         limit_value(limit)
         if order not in ('asc', 'desc'):
             raise ValueError('Expected ascending or descending execution order.')
@@ -294,7 +303,7 @@ class TraceQueries:
                 source = table.join(defs, table.c.workflow_revision_id == defs.c.revision_id)
                 columns = [*table.c, defs.c.workflow_id, defs.c.workflow_version]
                 if kind == 'session':
-                    where.extend((table.c.session_id == session_id, table.c.status.is_not(None), invocation_match(table, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us)))
+                    where.extend((table.c.session_id == session_id, table.c.status.is_not(None), invocation_match(table, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses)))
                 else:
                     where.append(table.c.parent_invocation_id.is_(None) if kind == 'root' else table.c.parent_invocation_id == iid)
                 if kind == 'child':
@@ -461,8 +470,10 @@ class TraceQueries:
 
     async def value(self, iid, kind, identity, field):
         names = {'invocation': ('invocations', 'invocation_id'), 'node': ('node_executions', 'occurrence_id'), 'call': ('operator_calls', 'call_id'), 'wait': ('waits', 'wait_id')}
-        if kind not in names or field not in ('input', 'output', 'error', 'metrics', 'definition', 'request', 'response'):
+        if kind not in names or field not in ('input', 'output', 'error', 'metrics', 'definition', 'request', 'response', 'cancel_reason'):
             raise ValueError('Unknown trace value.')
+        if field == 'cancel_reason' and kind != 'invocation':
+            raise ValueError('Cancellation reasons belong to Invocations.')
         async with self.queries.view() as (conn, _, _, _):
             inv = await self.storage.row(conn, 'invocations', invocation_id=iid)
             if inv is None:
@@ -471,6 +482,19 @@ class TraceQueries:
             row = inv if kind == 'invocation' and identity == iid else await self.storage.row(conn, name, invocation_id=iid, **{key:identity}) if kind != 'invocation' else None
             if row is None:
                 return None
+            if field == 'cancel_reason':
+                if row['status'] != 'cancelled' and row.get('pending_outcome') != 'cancelled':
+                    return {'available': False, 'value': None}
+                events = meta.tables['runtime_events']
+                event_id = await conn.scalar(select(events.c.event_id).where(
+                    events.c.invocation_id == iid,
+                    events.c.event_name == 'invocation.cancelled',
+                ).order_by(events.c.sequence.desc()).limit(1))
+                if event_id is None:
+                    return {'available': False, 'value': None}
+                reader = await SourceReader.open(self.storage, conn, 'runtime_event', event_id)
+                reason = await reader.read(('payload', 'reason')) if reader else None
+                return {'available': reason is not None, 'value': reason}
             if field == 'definition':
                 if kind != 'call' or not row.get('operator_definition_id'):
                     return {'available': False, 'value': None}

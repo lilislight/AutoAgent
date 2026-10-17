@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   ReactFlow, Background, Controls, ControlButton, MiniMap, Handle, Position, BaseEdge,
   MarkerType, useNodesState, getSmoothStepPath,
@@ -33,7 +33,7 @@ function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
         : <><rect x="2" y="2" width="12" height="12" rx="3" /><path d="m6 5 3 3-3 3m4 0h2" /></>}
     </svg>{data.kind === "operator" ? "Operator" : data.kind === "capability" ? "Capability" : "System Command"}
       {data.mapped ? <span className="node-flag">Map{data.callCount !== undefined ? <small className="map-call-count" title="Operator Calls started across this Node’s occurrences">×{data.callCount}</small> : null}</span> : null}
-      {data.status ? <span className={`node-state status-${data.status}`} title={`${data.occurrences ?? 0} occurrences`}><NodeStateIcon state={data.status} />{executionStateLabel(data.status)}{(data.occurrences ?? 0) > 1 ? ` ×${data.occurrences}` : ""}</span> : null}</div>
+      {data.status ? <span className={`node-state status-${data.status}`} title={`${data.occurrences ?? 0} occurrences`}><NodeStateIcon state={data.status} />{executionStateLabel(data.status)}{(data.occurrences ?? 0) > 1 ? <small className="node-occurrence-count">×{data.occurrences}</small> : null}</span> : null}</div>
     <strong title={data.label}>{data.label}</strong>
     <div className="node-bottom"><span title={data.executable}>{data.executable}</span>
       {data.entry ? <span className="entry-tag">Entry</span> : null}
@@ -53,20 +53,24 @@ function RoutedEdge(props: EdgeProps) {
   ] : undefined;
   const path = routed ? roundedRoutePath(routed) : smooth;
   const label = routed ? routeMidpoint(routed) : { x: labelX, y: labelY };
+  const evaluations = Number(props.data?.evaluations);
+  const countWidth = Math.max(26, String(evaluations).length * 6.5 + 17);
+  const countOffset = props.data?.conditional ? 12 + countWidth / 2 : 0;
+  const crossOffset = props.data?.conditional ? -19 : evaluations > 1 ? -countWidth / 2 - 10 : 0;
   const edgeState = props.data?.executionState as string | undefined;
   return <g className={`routed-edge ${props.data?.failure ? "fail-edge" : ""}`} style={{ '--edge-color': props.data?.color } as CSSProperties}>
     <path className="edge-hover-halo" d={path} fill="none" />
     <BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={props.style} interactionWidth={48} />
     {edgeState === 'active' ? <><path className="edge-flow-trail" d={path} fill="none" /><path className="edge-flow-overlay" d={path} fill="none" /></> : null}
-    {edgeState === 'not-taken' ? <g className="edge-not-taken" transform={`translate(${label.x + (props.data?.conditional ? -23 : 0)}, ${label.y})`}><title>Not taken</title><circle r="9" /><path d="M-3 -3 3 3M3 -3-3 3" /></g> : null}
+    {edgeState === 'not-taken' ? <g className="edge-not-taken" transform={`translate(${label.x + crossOffset}, ${label.y})`}><title>Not taken</title><circle r="6.5" /><path d="M-2 -2 2 2M2 -2-2 2" /></g> : null}
     {props.data?.conditional ? <g className="condition-marker" transform={`translate(${label.x}, ${label.y})`}>
       <title>Conditional edge</title>
-      <circle className="condition-background" r="12" />
-      <path className="condition-outline" d="M0 -6 6 0 0 6 -6 0Z" />
+      <circle className="condition-background" r="9" />
+      <path className="condition-outline" d="M0 -4.5 4.5 0 0 4.5 -4.5 0Z" />
     </g> : null}
-    {Number(props.data?.evaluations) > 1 ? <g className="edge-occurrence-count" transform={`translate(${label.x + (props.data?.conditional ? 29 : 0)}, ${label.y})`}>
+    {evaluations > 1 ? <g className="edge-occurrence-count" transform={`translate(${label.x + countOffset}, ${label.y})`}>
       <title>{String(props.data?.evaluations)} evaluations · Click to explore</title>
-      <rect x="-18" y="-11" width="36" height="22" rx="5" />
+      <rect x={-countWidth / 2} y="-9" width={countWidth} height="18" />
       <text textAnchor="middle" dominantBaseline="central">×{String(props.data?.evaluations)}</text>
     </g> : null}
   </g>;
@@ -89,11 +93,20 @@ const executionEdgeColors = {
 function GraphLegend({ execution }: { execution: boolean }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  const [availableHeight, setAvailableHeight] = useState<number>();
   const container = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    const control = container.current, graph = control?.closest('.graph-shell');
+    if (!open || !control || !graph) return;
+    const measure = () => setAvailableHeight(Math.max(0, graph.getBoundingClientRect().bottom - control.getBoundingClientRect().top - 52));
+    measure(); const observer = new ResizeObserver(measure); observer.observe(graph);
+    return () => observer.disconnect();
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const outside = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.execution-split-divider')) return;
       if (event.target instanceof window.Node && !container.current?.contains(event.target)) setOpen(false);
     };
     const escape = (event: KeyboardEvent) => {
@@ -107,7 +120,7 @@ function GraphLegend({ execution }: { execution: boolean }) {
     <button ref={button} className="graph-help-button" aria-label="Graph legend" title="Graph legend" aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={() => setOpen(current => !current)}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 1 1 4.1 1.9c-.9.7-1.6 1.1-1.6 2.6" /><path d="M12 16.5v.2" strokeWidth="2.4" strokeLinecap="round" /></svg>
     </button>
-    {open ? <div className="graph-legend" id={panelId} role="dialog" aria-labelledby={`${panelId}-title`}>
+    {open ? <div className="graph-legend" style={{maxHeight:availableHeight}} id={panelId} role="dialog" aria-labelledby={`${panelId}-title`}>
       <div className="graph-legend-heading"><strong id={`${panelId}-title`}>Graph legend</strong><button aria-label="Close graph legend" onClick={() => { setOpen(false); button.current?.focus(); }}>×</button></div>
       <div className="legend-row"><span className="edge-key"><i className="complete-key" style={execution ? { borderColor: 'var(--muted)' } : undefined} /></span><div><strong>Complete edge</strong><p>Solid line. Follows a completed source node.</p></div></div>
       <div className="legend-row"><span className="edge-key"><i className="fail-key" style={execution ? { borderColor: 'var(--muted)' } : undefined} /></span><div><strong>Fail edge</strong><p>Dashed line. Follows a failed source node.</p></div></div>
@@ -131,6 +144,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   const initialFitComplete = useRef(false);
   const [ready, setReady] = useState(false);
   const lastFocus = useRef(0);
+  const focusedAt = useRef(-Infinity);
   const requestedFocus = useRef(focusRequest); requestedFocus.current = focusRequest;
   const container = useRef<HTMLDivElement>(null);
 
@@ -150,8 +164,11 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
       if (!changed || returning || wasHidden && requestedFocus.current) return;
       clearTimeout(resizeTimer);
       // Fit after a sidebar transition settles, without changing node positions.
-      resizeTimer = setTimeout(() => void instance.current?.fitView({ ...FIT_VIEW_OPTIONS,
-        duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 250 }), 150);
+      resizeTimer = setTimeout(() => {
+        if (performance.now() - focusedAt.current < 650) return;
+        void instance.current?.fitView({ ...FIT_VIEW_OPTIONS,
+          duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 250 });
+      }, 150);
     });
     observer.observe(container.current);
     return () => { observer.disconnect(); clearTimeout(resizeTimer); };
@@ -242,13 +259,19 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
     const points = selection.kind === 'edge' ? routes?.[selection.id] : null;
     const point = points?.length ? routeMidpoint(points) : node ? { x: node.position.x + NODE_WIDTH / 2, y: node.position.y + NODE_HEIGHT / 2 } : null;
     if (!point || !instance.current) return;
-    lastFocus.current = focusRequest;
     const bounds = container.current?.getBoundingClientRect();
-    const inspector = container.current?.closest('.execution-workspace')?.querySelector('.inspector-presence:not(.is-hidden) .inspector')?.getBoundingClientRect();
-    const visibleWidth = bounds && inspector && inspector.left > bounds.left && inspector.left < bounds.right ? inspector.left - bounds.left - 16 : bounds?.width;
+    const presence = container.current?.closest('.flow-loading-surface')?.querySelector<HTMLElement>('.inspector-presence:not(.is-hidden)');
+    const inspectorParent = presence?.offsetParent as HTMLElement | null;
+    const inspectorLeft = presence && inspectorParent ? inspectorParent.getBoundingClientRect().left + presence.offsetLeft : null;
+    const right = bounds && inspectorLeft != null && inspectorLeft > bounds.left && inspectorLeft < bounds.right ? inspectorLeft - 16 : bounds?.right;
+    const notices = container.current?.parentElement?.querySelector('.graph-pending-actions')?.getBoundingClientRect();
+    const left = bounds && notices && right && right - notices.right > 96 ? notices.right + 12 : bounds?.left;
+    const visibleWidth = right != null && left != null ? right - left : undefined;
     if (!bounds || !visibleWidth) return;
+    lastFocus.current = focusRequest;
+    focusedAt.current = performance.now();
     const zoom = Math.min(1, Math.max(.65, instance.current.getZoom()), Math.max(.15, visibleWidth / (NODE_WIDTH + 80)));
-    void instance.current.setViewport({ x: visibleWidth / 2 - point.x * zoom, y: bounds.height / 2 - point.y * zoom, zoom }, { duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220 });
+    void instance.current.setViewport({ x: left! - bounds.left + visibleWidth / 2 - point.x * zoom, y: bounds.height / 2 - point.y * zoom, zoom }, { duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220 });
   }, [ready, focusRequest, selection, selectedRecord, nodes, routes]);
 
   return <div ref={container} className="graph-shell" aria-label="Workflow definition graph">
@@ -278,7 +301,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7" /></svg>
         </ControlButton>
       </Controls>
-      <MiniMap pannable zoomable nodeColor="var(--minimap-node)" maskColor="var(--minimap-mask)" />
+      <MiniMap style={{ width:140, height:94 }} pannable zoomable nodeColor="var(--minimap-node)" maskColor="var(--minimap-mask)" />
     </ReactFlow>
     {layoutWarning ? <div className="canvas-notice">Automatic layout unavailable. Using a basic layout.</div> : null}
     <GraphLegend execution={Boolean(trace)} />

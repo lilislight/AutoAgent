@@ -6,8 +6,9 @@ import { SearchIcon, WorkflowIcon } from "./Sidebar";
 import { EnglishDateTimeInput } from './EnglishDateTimeInput';
 import { parseLocalDateTime } from '../localDateTime';
 
-export const EMPTY_EXECUTION_FILTERS: ExecutionFilters = { query: "", workflowIds: [], revisionIds: [], startedFrom: '', startedTo: '' };
-export const executionFilterCount = (filters: ExecutionFilters) => Number(Boolean(filters.query)) + filters.workflowIds.length + filters.revisionIds.length + Number(Boolean(filters.startedFrom || filters.startedTo));
+export const EMPTY_EXECUTION_FILTERS: ExecutionFilters = { query: "", workflowIds: [], revisionIds: [], statuses: [], startedFrom: '', startedTo: '' };
+export const executionFilterCount = (filters: ExecutionFilters) => Number(Boolean(filters.query)) + filters.workflowIds.length + filters.revisionIds.length + filters.statuses.length + Number(Boolean(filters.startedFrom || filters.startedTo));
+const INVOCATION_STATUSES = ['created', 'running', 'waiting', 'paused', 'settling', 'completed', 'failed', 'cancelled'];
 const toggleId = (ids: string[], id: string) => ids.includes(id) ? ids.filter(value => value !== id) : [...ids, id];
 const revisionWorkflow = (id: string) => id.slice(0, id.lastIndexOf(":"));
 
@@ -45,7 +46,7 @@ export function ExecutionFilterDialog({ filters, anchor, onApply, onClose }: {
     return !date || date.getTime() < 0 || !Number.isSafeInteger(date.getTime() * 1000);
   });
   const invalidRange = Boolean(draft.startedFrom && draft.startedTo && Date.parse(draft.startedFrom) > Date.parse(draft.startedTo));
-  const [expanded, setExpanded] = useState<"workflows" | "revisions" | null>(null);
+  const [expanded, setExpanded] = useState<"workflows" | "revisions" | "statuses" | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const workflows = useInfiniteQuery({
@@ -96,7 +97,7 @@ export function ExecutionFilterDialog({ filters, anchor, onApply, onClose }: {
   }}><form onSubmit={event => {
     event.preventDefault();
     if (invalidRange || invalidTime) return;
-    onApply({ ...draft, query: draft.query.trim().toLowerCase(), workflowIds: [...draft.workflowIds].sort(), revisionIds: [...draft.revisionIds].sort() });
+    onApply({ ...draft, query: draft.query.trim().toLowerCase(), workflowIds: [...draft.workflowIds].sort(), revisionIds: [...draft.revisionIds].sort(), statuses: [...draft.statuses].sort() });
     onClose();
   }}>
     <div className="filter-search"><SearchIcon /><input ref={searchInput} type="search" aria-label="Search session, invocation, workflow or revision" placeholder="Session, invocation, workflow, revision…" maxLength={512} value={draft.query} onChange={event => setDraft(current => ({ ...current, query: event.target.value }))} /></div>
@@ -114,6 +115,12 @@ export function ExecutionFilterDialog({ filters, anchor, onApply, onClose }: {
       <button type="button" className="filter-select-trigger" aria-expanded={expanded === "revisions"} aria-controls="filter-revision-options" onClick={() => setExpanded(current => current === "revisions" ? null : "revisions")}><span>Revisions</span><small>{draft.revisionIds.length ? `${draft.revisionIds.length} selected` : "All"}</small><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button>
       {expanded === "revisions" ? <div className="filter-options" id="filter-revision-options" role="group" aria-label="Revision choices">
         {draft.workflowIds.length ? draft.workflowIds.map(id => <RevisionOptions key={id} workflowId={id} selected={draft.revisionIds} onToggle={revision => setDraft(current => ({ ...current, revisionIds: toggleId(current.revisionIds, revision) }))} />) : <p className="filter-hint">Select workflows to list their revisions.</p>}
+      </div> : null}
+    </div>
+    <div className="filter-select">
+      <button type="button" className="filter-select-trigger" aria-expanded={expanded === 'statuses'} aria-controls="filter-status-options" onClick={() => setExpanded(current => current === 'statuses' ? null : 'statuses')}><span>Invocation status</span><small>{draft.statuses.length ? `${draft.statuses.length} selected` : 'All'}</small><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button>
+      {expanded === 'statuses' ? <div className="filter-options" id="filter-status-options" role="group" aria-label="Invocation status choices">
+        {INVOCATION_STATUSES.map(status => <label className="filter-option" key={status}><input type="checkbox" checked={draft.statuses.includes(status)} onChange={() => setDraft(current => ({ ...current, statuses: toggleId(current.statuses, status) }))} /><span>{status[0].toUpperCase() + status.slice(1)}</span></label>)}
       </div> : null}
     </div>
     <fieldset className="filter-time-range"><legend>Invocation start time</legend>

@@ -20,6 +20,25 @@ EmbeddingInput = (
 )
 
 
+class EmbeddingProviderOptions(Model):
+    """JSON API options scoped to an embedding connection, never SDK controls."""
+
+    protocol: Literal["openai.embeddings"] = "openai.embeddings"
+    provider_id: NonEmpty | None = None
+    values: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _reserved_fields(self):
+        from .llm import _RESERVED_OPTIONS
+
+        reserved = _RESERVED_OPTIONS | {"dimensions", "encoding_format", "user"}
+        overlap = reserved.intersection(self.values)
+        if overlap:
+            raise ValueError("Embedding options cannot override normalized fields or SDK controls: "
+                             + ", ".join(sorted(overlap)))
+        return self
+
+
 class EmbeddingRequest(Model):
     """One text/token sequence or a homogeneous batch, using OpenAI semantics.
 
@@ -33,6 +52,7 @@ class EmbeddingRequest(Model):
     dimensions: int | None = Field(default=None, gt=0)
     encoding_format: Literal["float", "base64"] = "float"
     user: str | None = None
+    provider_options: EmbeddingProviderOptions | None = None
 
     @property
     def input_count(self) -> int:
@@ -76,6 +96,6 @@ class EmbeddingResponse(Model):
 
 
 __all__ = [
-    "EmbeddingInput", "EmbeddingRequest", "EmbeddingResponse",
+    "EmbeddingInput", "EmbeddingProviderOptions", "EmbeddingRequest", "EmbeddingResponse",
     "EmbeddingUsage", "EmbeddingVector",
 ]

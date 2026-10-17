@@ -145,7 +145,17 @@ class WaitRuntime:
                     raise self._drive_errors[target]
             inv = self._repository.state(handle.session_id).invocation
             terminal = inv.terminal and not any(self._task_runtime.is_live(target) for target in sessions)
-            waiting = inv.status in {'waiting', 'settling'} and not inv.stopping and not self._task_runtime.is_live(handle.session_id) and bool(self._runtime_waits(sessions))
+            quiescent = not self._task_runtime.is_live(handle.session_id) and not any(
+                self._task_runtime.is_live(target) and self._repository.state(target).invocation.status in {'created', 'running'}
+                for target in sessions[1:])
+            waiting = inv.status in {'waiting', 'settling'} and not inv.stopping and quiescent and any(w.kind != 'child' for w in self._runtime_waits(sessions))
+            if waiting:
+                # A nested Await whose condition is already satisfied is a
+                # pending wake, not an externally observable Wait boundary.
+                waiting = not any(self._ready_condition(target, wait.kind, wait.request) is not None
+                    for target in sessions
+                    for wait in self._repository.state(target).invocation.scheduler.waits.values()
+                    if wait.status == 'waiting' and wait.kind != 'external')
             if not (terminal or waiting):
                 return None
             observation = self._runtime_observation(handle, sessions)

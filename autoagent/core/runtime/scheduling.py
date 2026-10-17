@@ -24,6 +24,11 @@ def occurrence_key(node_id: str, scope: ExecutionScope = ()) -> str:
     return f"{node_id}@{scope_key(scope)}"
 
 
+def current_occurrence_key(scheduler, node_id: str, scope: ExecutionScope = ()) -> str:
+    key = occurrence_key(node_id, scope)
+    return scheduler.occurrence_ids.get(key, key)
+
+
 def resolution_key(edge_id: str, target_scope: ExecutionScope = ()) -> str:
     return f"{edge_id}@{scope_key(target_scope)}"
 

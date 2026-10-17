@@ -128,6 +128,9 @@ _RESERVED_OPTIONS = frozenset({
     "max_output_tokens", "max_tokens", "max_completion_tokens", "temperature",
     "top_p", "modalities", "audio", "response_format", "text", "stream",
     "stream_options", "n", "extra_body",
+    "api_key", "api_base", "base_url", "client", "timeout", "headers",
+    "extra_headers", "num_retries", "max_retries", "fallbacks", "drop_params",
+    "custom_llm_provider", "mock_response", "caching", "logger_fn",
 })
 
 
@@ -139,6 +142,7 @@ class LLMProviderOptions(Model):
     """
 
     protocol: OpenAIProtocol
+    provider_id: NonEmpty | None = None
     values: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")

@@ -67,12 +67,6 @@ class ToolSet:
             for value in self._definitions if allowed is None or value.name in allowed
         )
 
-    def _check_core_hooks(self):
-        if any(isinstance(value, Tool) and not value.is_async for value in self._tools.values()):
-            for callback in (self.policy, self.hooks.before, self.hooks.after, self.hooks.on_error):
-                if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(getattr(callback, "__call__", None)):
-                    raise TypeError("Core sync Tools require sync policies/hooks; use async Tools with async hooks.")
-
     def __len__(self) -> int:
         return len(self._tools)
 

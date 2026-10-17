@@ -7,7 +7,6 @@ import { Inspector } from "./components/Inspector";
 import { InspectorPresence } from './components/InspectorFrame';
 import { WorkflowDirectory, WorkflowIcon } from "./components/WorkflowDirectory";
 import { WorkflowToolbar } from "./components/WorkflowToolbar";
-import { RunWorkflowPanel } from './components/RunWorkflowPanel';
 import { Sidebar } from "./components/Sidebar";
 import { ExecutionDirectory } from "./components/ExecutionDirectory";
 import { ExecutionWorkspace } from "./components/ExecutionWorkspace";
@@ -73,9 +72,7 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   const inspectorOpen = Boolean(location.selection);
   const executionMode = location.view === "executions";
   const isAccepted = accepted?.invocation_id===location.execution;
-  const [runTarget,setRunTarget]=useState<WorkflowGraphData|null>(null);
-  useEffect(()=>{if(!active)setRunTarget(null);},[active]);
-  useEffect(()=>setRunTarget(null),[location.workflow,location.revision]);
+  const [workflowFocus, setWorkflowFocus] = useState(0);
   const trace = useQuery({
     queryKey: ["execution-trace", location.execution],
     queryFn: ({ signal }) => getExecutionTrace(location.execution!, signal),
@@ -119,23 +116,23 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   const chooseObject = useCallback((selection: Selection) => {
     navigate({ ...location, selection });
   }, [location, navigate]);
-  const openFamilyMember = useCallback((row: TraceRow) => {
-    navigate({ ...location, execution: row.invocation_id, session: row.session_id ?? null, selection: selections.current.get(row.invocation_id)?.selection ?? null });
+  const openFamilyMember = useCallback((row: TraceRow, selected?: Selection) => {
+    navigate({ ...location, execution: row.invocation_id, session: row.session_id ?? null, selection: selected ?? selections.current.get(row.invocation_id)?.selection ?? null });
   }, [location, navigate]);
   const closeInspector = useCallback(() => {
     if (location.selection) navigate({ ...location, selection: null });
   }, [location, navigate]);
   useEffect(() => {
-    if (!active || !inspectorOpen || runTarget) return;
+    if (!active || !inspectorOpen) return;
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !document.querySelector("dialog[open]")) closeInspector();
     };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [active, inspectorOpen, closeInspector, runTarget]);
+  }, [active, inspectorOpen, closeInspector ]);
   return <div className={`workspace workspace-tab ${active ? "" : "is-inactive"}`} data-workspace-view={location.view} aria-hidden={!active} inert={!active}>
       <Sidebar view={location.view} onChange={changeView}>{executionMode
-        ? <ExecutionDirectory session={traceSession ?? location.session} invocation={location.execution}
+        ? <ExecutionDirectory onRunAccepted={onRunAccepted} session={traceSession ?? location.session} invocation={location.execution}
           onSession={session => navigate({ ...location, session, execution: null, selection: null })}
           onInvocation={(execution, session) => navigate({ ...location, execution, session, selection: null })} />
         : <WorkflowDirectory workflowId={location.workflow} revisionId={location.revision} onSelect={select} />}</Sidebar>
@@ -146,14 +143,13 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
             const selection = snapshot.key === flowKey ? location.selection
               : snapshot.trace ? selections.current.get(snapshot.trace.invocation.invocation_id)?.selection ?? null : null;
             return snapshot.trace ? <ExecutionWorkspace onRunAccepted={onRunAccepted} active={active && snapshot.key === flowKey} trace={snapshot.trace} workflow={snapshot.workflow} selection={selection} onSelect={chooseObject} onOpenExecution={openFamilyMember} onRefresh={async () => { await trace.refetch({ throwOnError: true, cancelRefetch: false }); }} view={location.executionView ?? getExecutionLayout().view} onChangeView={mode => navigate({ ...location, executionView: mode })} theme={theme} /> : <>
-              <WorkflowToolbar workflow={snapshot.workflow} onRun={()=>setRunTarget(snapshot.workflow)} onRevision={revision => {setRunTarget(null);select({ workflow_id: snapshot.workflow.workflow_id, revision_id: revision });}} onDefinition={() => chooseObject({ kind: "workflow", id: snapshot.workflow.workflow_revision_id })} />
-              <FlowLoadingSurface><Suspense fallback={null}><WorkflowGraph workflow={snapshot.workflow} selection={selection} onSelect={chooseObject} theme={theme} /></Suspense>
-                <InspectorPresence open={Boolean(selection)} hidden={Boolean(runTarget)}>{selection ? <Inspector workflow={snapshot.workflow} selection={selection} onClose={closeInspector} /> : null}</InspectorPresence></FlowLoadingSurface>
+              <WorkflowToolbar workflow={snapshot.workflow} onRevision={revision => select({ workflow_id: snapshot.workflow.workflow_id, revision_id: revision })} onDefinition={() => chooseObject({ kind: "workflow", id: snapshot.workflow.workflow_revision_id })} />
+              <FlowLoadingSurface><Suspense fallback={null}><WorkflowGraph workflow={snapshot.workflow} selection={selection} onSelect={chooseObject} theme={theme} focusRequest={workflowFocus} /></Suspense>
+                <InspectorPresence open={Boolean(selection)}>{selection ? <Inspector workflow={snapshot.workflow} selection={selection} onClose={closeInspector} onRunAccepted={onRunAccepted} onEntry={id => { chooseObject({ kind: "node", id }); setWorkflowFocus(value => value + 1); }} /> : null}</InspectorPresence></FlowLoadingSurface>
             </>;
           }}
           fallback={<FlowLoadingSurface loadingLabel={waitingForTrace?'Run accepted · Waiting for saved trace':undefined}><div className="empty-state"><div className="empty-glyph"><WorkflowIcon /></div><h2>{waitingForTrace?'Waiting for saved trace':executionMode ? trace.isFetching || detail.isFetching ? "Loading execution" : trace.error || detail.error ? "Could not load execution" : "Explore workflow executions" : detail.isFetching ? "Loading workflow definition" : detail.error ? "Could not load definition" : "Explore workflow definitions"}</h2><p>{waitingForTrace?'The Run was accepted. Its trace will appear after persistence commits.':(executionMode ? trace.error?.message : null) ?? detail.error?.message ?? (executionMode ? location.session ? "Select an invocation from this session to inspect its execution." : "Select a session, then an invocation to inspect its execution." : "Select a workflow to explore its nodes, edges, and execution rules.")}</p>{!waitingForTrace && (trace.error || detail.error) ? <button className="refresh-button" onClick={() => { if (trace.error) void trace.refetch(); else void detail.refetch(); }}>Retry</button> : null}</div></FlowLoadingSurface>}
         />
-        {runTarget && active?<RunWorkflowPanel key={runTarget.workflow_revision_id} workflow={runTarget} onClose={()=>setRunTarget(null)} onAccepted={receipt=>{setRunTarget(null);onRunAccepted(receipt);}} />:null}
       </main>
   </div>;
 }

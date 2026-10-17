@@ -5,7 +5,7 @@ export const config: Config = element?.textContent
   : { apiPrefix: "/api/v2", uiBase: "/", pageSize: 50 };
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly fields: import("./jsonSchema").FieldError[] = []) { super(message); }
 }
 export async function request<T>(path: string, signal: AbortSignal, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -21,7 +21,8 @@ export async function request<T>(path: string, signal: AbortSignal, init?: Reque
     const message = typeof detail === "string" ? detail
       : detail && typeof detail === "object" && "message" in detail ? String(detail.message)
       : `Request failed (${response.status})`;
-    throw new ApiError(message, response.status);
+    const fields = detail && typeof detail === "object" && "errors" in detail && Array.isArray(detail.errors) ? detail.errors : [];
+    throw new ApiError(message, response.status, fields);
   }
   return await response.json() as T;
 }

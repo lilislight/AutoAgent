@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from ..models import (
     EmbeddingRequest, EmbeddingResponse, EmbeddingUsage, EmbeddingVector,
 )
-from ._common import raw_object
+from ._common import raw_object, unsupported
 from ._openai_client import OpenAIClientOwner
 from .base import EmbeddingProvider, EmbeddingProviderError
 from .config import OpenAIProviderConfig
@@ -27,7 +27,12 @@ class OpenAIEmbeddingAdapter:
 
     def encode_request(self, request: EmbeddingRequest, *, provider_id: str) -> dict:
         # Passing an explicit format also prevents implicit SDK base64 decoding.
-        return request.model_dump(mode="json", exclude_none=True)
+        params = request.model_dump(mode="json", exclude_none=True, exclude={"provider_options"})
+        if request.provider_options is not None:
+            if request.provider_options.provider_id not in {None, provider_id}:
+                unsupported("Embedding options target another connection.", provider_id, self.protocol)
+            params["extra_body"] = dict(request.provider_options.values)
+        return params
 
     def decode_response(
         self, raw: dict, *, provider_id: str, request: EmbeddingRequest,
@@ -96,6 +101,10 @@ class OpenAIEmbeddingProvider(OpenAIClientOwner, EmbeddingProvider):
     def protocol(self) -> str:
         return self.adapter.protocol
 
+    async def _raw_embedding(self, params):
+        value = await self._get_client().embeddings.with_raw_response.create(**params)
+        return raw_object(value.http_response.json()), value.headers.get("x-request-id")
+
     async def ainvoke(self, request: EmbeddingRequest) -> EmbeddingResponse:
         self._bind_loop()
         self._active += 1
@@ -108,9 +117,7 @@ class OpenAIEmbeddingProvider(OpenAIClientOwner, EmbeddingProvider):
             # The SDK's typed Embedding currently declares only list[float].
             # Read raw JSON to retain explicit base64 output and reject values
             # (such as bools) before SDK coercion can hide protocol errors.
-            value = await self._get_client().embeddings.with_raw_response.create(**params)
-            request_id = value.headers.get("x-request-id")
-            raw = raw_object(value.http_response.json())
+            raw, request_id = await self._raw_embedding(params)
             if request_id is not None:
                 raw["_request_id"] = request_id
             response = EmbeddingResponse.model_validate(self.adapter.decode_response(

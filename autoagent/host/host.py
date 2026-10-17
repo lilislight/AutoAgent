@@ -295,13 +295,13 @@ class AutoAgentHost(ExecutionControls):
             return Page(tuple(chosen), (chosen[-1]["workflow_id"], chosen[-1]["revision_id"]) if len(rows) > limit else None)
         return await self._perform(query)
 
-    async def browse_workflows(self, *, search="", limit=100, cursor=None):
+    async def browse_workflows(self, *, search="", limit=100, cursor=None, registered_only=False):
         """Browse grouped saved Workflows with current registration metadata."""
         async def query():
             if not isinstance(search, str) or len(search) > 512:
                 raise ValueError("search must be a string of at most 512 characters.")
             current = self._runtime.workflow_ids
-            page = await self._persistence.workflow_catalog(registered_ids=tuple(current), search=search.strip().lower(), limit=limit, cursor=cursor)
+            page = await self._persistence.workflow_catalog(registered_ids=tuple(current), search=search.strip().lower(), limit=limit, cursor=cursor, registered_only=registered_only)
             rows = []
             for row in page.items:
                 revision = current.get(row["workflow_id"])
@@ -358,23 +358,23 @@ class AutoAgentHost(ExecutionControls):
             raise ValueError("Unknown execution status.")
         return await self._perform(lambda: self._persistence.trace_page("root", search=search.strip(), status=status, limit=limit, cursor=cursor))
 
-    async def list_execution_sessions(self, *, search="", workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
+    async def list_execution_sessions(self, *, search="", workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
         """Browse persisted Session history without loading Core State."""
         if not isinstance(search, str) or len(search) > 512:
             raise ValueError("search must have at most 512 characters.")
         return await self._perform(lambda: self._persistence.execution_sessions(
-            search=search.strip().lower(), workflow_ids=workflow_ids, revision_ids=revision_ids,
+            search=search.strip().lower(), workflow_ids=workflow_ids, revision_ids=revision_ids, statuses=statuses,
             session_id=session_id, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor,
         ))
 
-    async def list_session_invocations(self, session_id, *, search="", workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, limit=50, cursor=None):
+    async def list_session_invocations(self, session_id, *, search="", workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, limit=50, cursor=None):
         """Read one Session's cross-Workflow history with optional identity matching."""
         if not isinstance(search, str) or len(search) > 512:
             raise ValueError("search must have at most 512 characters.")
         async def query():
             page = await self._persistence.trace_page(
                 "session", session_id=session_id, search=search.strip().lower(),
-                workflow_ids=workflow_ids, revision_ids=revision_ids, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor,
+                workflow_ids=workflow_ids, revision_ids=revision_ids, statuses=statuses, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor,
             )
             if page is None:
                 raise HostNotFoundError("Unknown persisted Session.")
@@ -603,14 +603,16 @@ class AutoAgentHost(ExecutionControls):
         return await self._execute(workflow_id, value, revision_id=revision_id, session_id=session_id,
             session_context=session_context, entry_node_id=entry_node_id)
 
-    async def execute_json(self, workflow_id, value, *, revision_id, entry_node_id, session_id=None, session_context=None, require_existing_session=False):
+    async def execute_json(self, workflow_id, value, *, revision_id, entry_node_id, session_id=None, session_context=None, require_existing_session=False, require_new_session=False):
         """Decode JSON against the registered Entry contract before normal Root admission."""
         return await self._execute(workflow_id, value, revision_id=revision_id, session_id=session_id,
             session_context=session_context, entry_node_id=entry_node_id, json_input=True,
-            require_existing_session=require_existing_session)
+            require_existing_session=require_existing_session, require_new_session=require_new_session)
 
-    async def _execute(self, workflow_id, value, *, revision_id=None, session_id=None, session_context=None, entry_node_id=None, json_input=False, require_existing_session=False):
+    async def _execute(self, workflow_id, value, *, revision_id=None, session_id=None, session_context=None, entry_node_id=None, json_input=False, require_existing_session=False, require_new_session=False):
         async def execute():
+            if require_new_session and require_existing_session:
+                raise ValueError("Choose either a new or an existing Session.")
             if self._runtime.residency.fault is not None:
                 raise HostCapacityError("Host residency persistence failed; admission is stopped.") from self._runtime.residency.fault
             revision = revision_id or self._runtime.workflow_ids.get(workflow_id)
@@ -634,6 +636,17 @@ class AutoAgentHost(ExecutionControls):
             item.users += 1
             try:
                 async with self._runtime.coordinated(sid):
+                    # Generated UUIDs take the ordinary admission path. Explicit
+                    # IDs must never silently reuse a warm or buffered Session.
+                    if require_new_session and session_id:
+                        exists = self._runtime.repository.state(sid).session is not None or sid in self._runtime.resident or sid in self._runtime.owners
+                        if not exists:
+                            exists = await self._persistence.get_session(sid, view="accepted") is not None
+                        if not exists:
+                            planned = await self._persistence.list_invocations(session_id=sid, include_planned=True, limit=1, view="accepted")
+                            exists = bool(planned.items)
+                        if exists:
+                            raise HostRunConflict("session_exists", "Session ID already exists. Choose another ID or select Existing session.")
                     if require_existing_session:
                         eligibility = await self._run_session(sid)
                         if not eligibility["available"]:
@@ -642,7 +655,12 @@ class AutoAgentHost(ExecutionControls):
                             raise HostRunConflict("session_context_existing", "Session context can only be set for a new Session.")
                     if sid in self._runtime.resident:
                         await self._runtime.residency.admit_resident(sid)
-                    await self._runtime.prepare_session(sid)
+                    if require_new_session:
+                        # A fresh generated UUID needs no existence preflight;
+                        # explicit IDs were checked under the Session lock above.
+                        await self._runtime.residency.reserve(sid)
+                    else:
+                        await self._runtime.prepare_session(sid)
                     previous = self._runtime.resident.get(sid)
                     old_children = tuple(child for child, owner in self._runtime.owners.items() if owner == sid)
                     submission = await self._runtime.app.asubmit_invoke(
@@ -707,7 +725,7 @@ class AutoAgentHost(ExecutionControls):
                 result = await self._stored_result(ref)
                 if result.status in ("completed", "failed", "cancelled") or result.control_state == "paused" or result.waits:
                     return result
-                raise HostError("Invocation is not active in this Host; use continue_execution.")
+                raise HostError("Invocation is not active in this Host; use recover.")
         return await self._perform(wait)
 
     async def respond(self, execution, wait_id, response):
@@ -732,10 +750,11 @@ class AutoAgentHost(ExecutionControls):
                 return _result_view(await self._runtime.app.apause(ref, timeout=timeout))
         return await self._perform(pause, control=True)
 
-    async def continue_execution(self, execution):
+    async def recover(self, execution, *, request_id: str | None = None, expected_version: int | None = None):
+        """Recover the same Root graph, hydrating released values from Persistence as needed."""
         async def recover():
             async with self._execution(execution, load=True, touch=True) as ref:
-                return _result_view(await self._runtime.activate(ref, force=True))
+                return _result_view(await self._runtime.activate(ref, force=True, request_id=request_id, expected_version=expected_version))
         return await self._perform(recover, control=True)
 
     async def cancel(self, execution, *, reason=None):

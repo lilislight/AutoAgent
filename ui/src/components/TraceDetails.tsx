@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useObservationClock } from './useObservationClock';
+import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getExecutionValue, getStageValue } from "../api";
 import type { TraceRow } from "../types";
@@ -22,15 +23,16 @@ export function StatusBadge({ row }: { row: Pick<TraceRow, "status" | "control_s
   return <span className={`status-badge status-${status}`}>{status}</span>;
 }
 export function RowDetails({ row }: { row: TraceRow }) {
-  const {nowUs} = useExecutionNavigation();
-  const open = row.completed_at_us == null && ['running','waiting'].includes(row.status ?? '');
-  const elapsed = row.started_at_us != null ? row.completed_at_us != null ? row.completed_at_us - row.started_at_us : open && nowUs!=null ? Math.max(0,nowUs-row.started_at_us) : null : null;
+  const navigation = useExecutionNavigation();
+  const open = row.completed_at_us == null && ['ready', 'running', 'waiting', 'settling'].includes(row.status ?? '');
+  const nowUs=useObservationClock(navigation.clock,navigation.active && !navigation.replaying && open,0);
+  const elapsed = row.started_at_us != null ? row.completed_at_us != null ? row.completed_at_us - row.started_at_us : open && nowUs>0 ? Math.max(0,nowUs-row.started_at_us) : null : null;
   return <><dl className="trace-facts">
-    {row.occurrence_id ? <><dt>Occurrence</dt><dd><CopyId value={row.occurrence_id} /></dd></> : null}
-    {row.call_id ? <><dt>Call</dt><dd><CopyId value={row.call_id} /></dd><dt>{isSystemCall(row) ? 'Command' : 'Operator'}</dt><dd>{row.operator_id}</dd><dt>Unit index</dt><dd>{String(row.unit_index)}</dd></> : null}
-    <dt>Status</dt><dd><StatusBadge row={row} /></dd>{row.phase && row.phase !== 'none' ? <><dt>Phase</dt><dd>{String(row.phase)}</dd></> : null}
-    {row.ready_at_us != null ? <><dt>Ready</dt><dd>{formatTime(row.ready_at_us, true)}</dd></> : null}<dt>Started</dt><dd>{formatTime(row.started_at_us, true)}</dd><dt>Completed</dt><dd>{formatTime(row.completed_at_us, true)}</dd><dt>Total elapsed</dt><dd title="Elapsed time including waits">{open && elapsed!=null?'~ ':''}{duration(elapsed)}</dd>
-    {executionTiming(row) != null ? <><dt>Execution time</dt><dd title="Measured calling and result-processing duration; separate from the recorded start-to-end interval">{duration(executionTiming(row))}</dd></> : null}
+    {row.occurrence_id ? <><dt>Occurrence ID</dt><dd><CopyId value={row.occurrence_id} /></dd></> : null}
+    {row.call_id ? <><dt>Call ID</dt><dd><CopyId value={row.call_id} /></dd><dt>{isSystemCall(row) ? 'Command' : 'Operator'}</dt><dd>{row.operator_id}</dd><dt>Unit index</dt><dd>{String(row.unit_index)}</dd></> : null}
+    {row.phase && row.phase !== 'none' ? <><dt>Phase</dt><dd>{String(row.phase)}</dd></> : null}
+    {row.ready_at_us != null ? <><dt>Ready</dt><dd>{formatTime(row.ready_at_us, true)}</dd></> : null}<dt>Started</dt><dd>{formatTime(row.started_at_us, true)}</dd><dt>Completed</dt><dd>{formatTime(row.completed_at_us, true)}</dd><dt>Total elapsed</dt><dd title="Wall time including waiting, pauses and interruptions">{open && elapsed!=null?'~ ':''}{duration(elapsed)}</dd>
+    {executionTiming(row) != null ? <><dt>Processing time</dt><dd title="Measured calling and result-processing duration; separate from the recorded start-to-end interval">{duration(executionTiming(row))}</dd></> : null}
     {row.queue_duration_ns != null && (!isSystemCall(row) || row.queue_duration_ns > 0) ? <><dt>Queue time</dt><dd>{duration(row.queue_duration_ns / 1000)}</dd></> : null}
     {row.call_count != null ? <><dt>Calls</dt><dd>{row.call_count}</dd></> : null}
     {row.peak_parallelism != null ? <><dt>Peak parallelism</dt><dd title="Peak number of active processing units">{row.peak_parallelism}</dd></> : null}
@@ -48,6 +50,7 @@ export function LoadedValue({ invocationId, kind, identity, field, occurrenceId,
   return <JsonValue value={query.data.value} label={label ?? field} />;
 }
 export function LazyValue(props: ValueProps) {
+  const contentId = useId();
   const key = JSON.stringify([props.invocationId, props.valueKey ?? [props.kind, props.identity, props.field, props.occurrenceId]]);
   const [open, setOpen] = useState(() => openValues.get(key) ?? false);
   const toggle = () => {
@@ -57,7 +60,7 @@ export function LazyValue(props: ValueProps) {
     while (openValues.size > 128) openValues.delete(openValues.keys().next().value!);
   };
   const title = props.label ?? props.field;
-  return <section className={`lazy-value ${open ? 'is-open' : ''}`}><header className="value-heading"><div><h3>{title}</h3>{props.description ? <p>{props.description}</p> : null}</div>{props.badge ? <span className="inspector-chip">{props.badge}</span> : null}<button type="button" className="value-toggle" aria-expanded={open} aria-label={`${open ? 'Hide' : 'Load'} ${title}`} onClick={toggle}>{open ? 'Hide' : 'Load'}</button></header>{open ? <div className="value-body"><LoadedValue {...props} /></div> : null}</section>;
+  return <section className={`lazy-value ${open ? 'is-open' : ''}`}><button type="button" className="value-heading value-toggle-row" aria-expanded={open} aria-controls={open ? contentId : undefined} aria-label={`${open ? 'Hide' : 'Load'} ${title}`} onClick={toggle}><span className="value-heading-copy"><span className="value-title">{title}</span>{props.description ? <span className="value-description">{props.description}</span> : null}</span>{props.badge ? <span className="inspector-chip">{props.badge}</span> : null}<span className="value-toggle">{open ? 'Hide' : 'Load'}</span></button>{open ? <div id={contentId} className="value-body"><LoadedValue {...props} /></div> : null}</section>;
 }
 export function MissingValue({ title, message }: { title: string; message: string }) {
   return <section className="missing-value"><h3>{title}</h3><p>{message}</p></section>;

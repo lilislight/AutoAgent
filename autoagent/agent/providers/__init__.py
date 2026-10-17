@@ -13,8 +13,12 @@ from .openai import (
 from .protocol import OpenAIProtocolAdapter
 from .files import OpenAIFileClient
 from .responses import ResponsesAdapter
+from .deepseek import DeepSeekProviderConfig, DeepSeekProvider, DeepSeekChatCompletionsAdapter, DeepSeekResponsesAdapter
+from .litellm import LiteLLMProviderConfig, LiteLLMProvider, LiteLLMEmbeddingProvider, LiteLLMChatCompletionsAdapter
 
 __all__ = [
+    "DeepSeekProviderConfig", "DeepSeekProvider", "DeepSeekChatCompletionsAdapter", "DeepSeekResponsesAdapter",
+    "LiteLLMProviderConfig", "LiteLLMProvider", "LiteLLMEmbeddingProvider", "LiteLLMChatCompletionsAdapter",
     "OpenAIFileClient",
     "EmbeddingProvider", "EmbeddingProviderError", "OpenAIEmbeddingAdapter",
     "OpenAIEmbeddingProvider", "ProviderError",

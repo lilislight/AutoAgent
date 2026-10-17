@@ -1,0 +1,4 @@
+# Full V2 runtime, excluding the optional LiteLLM backend.
+# Version constraints remain in pyproject.toml; install from the repository root:
+#   uv pip install --python .venv/bin/python -r requirements.txt
+-e .[agent,skills,mcp,server,host,persistence]

@@ -1,5 +1,5 @@
 """Accepted control metadata, without loading Event values or Core Sessions."""
-from sqlalchemy import JSON, and_, cast, func, or_, select, type_coerce
+from sqlalchemy import JSON, and_, cast, func, or_, select, tuple_, type_coerce
 from .schema import meta
 
 
@@ -26,9 +26,9 @@ class ControlQueries:
             invs, waits = meta.tables['invocations'], meta.tables['waits']
             unfinished = lambda r: r.get('status') not in ('completed','failed','cancelled') and r.get('ownership_phase') not in ('abandoned','terminal')
             missing, _ = await q._rows(conn, overlay, 'invocations', {'root_invocation_id':root_id}, ('invocation_id',), 1,
-                extra_where=(invs.c.workflow_revision_id.not_in(registered), or_(invs.c.status.is_(None), invs.c.status.not_in(('completed','failed','cancelled'))),
-                    or_(invs.c.ownership_phase.is_(None), invs.c.ownership_phase.not_in(('abandoned','terminal')))),
-                extra_filter=lambda r: unfinished(r) and r['workflow_revision_id'] not in registered)
+                extra_where=(invs.c.workflow_revision_id.not_in(registered), or_(invs.c.status.is_(None), invs.c.status!='completed'),
+                    or_(invs.c.ownership_phase.is_(None), invs.c.ownership_phase.not_in(('abandoned','terminal')), and_(invs.c.status.in_(('failed','cancelled')), root['status'] in ('failed','cancelled')))),
+                extra_filter=lambda r: (unfinished(r) or root['status'] in ('failed','cancelled') and r.get('status') in ('failed','cancelled')) and r['workflow_revision_id'] not in registered)
             changed_ids = {r['invocation_id'] for r in overlay.rows.get('invocations',{}).values() if r and r['root_invocation_id']==root_id}
             wait_ids = {r['invocation_id'] for r in overlay.rows.get('waits',{}).values() if r}
             if wait_ids:
@@ -37,6 +37,17 @@ class ControlQueries:
             waiting, next_cursor = await q._rows(conn, overlay, 'waits', {'kind':'external','status':'waiting'}, ('invocation_id','wait_id'), 20, cursor,
                 extra_where=(or_(waits.c.invocation_id.in_(family),waits.c.invocation_id.in_(changed_ids)),),
                 extra_filter=lambda r:r['invocation_id'] in changed_ids)
+            # Notification labels are small projection metadata; never resolve
+            # Wait request values just to render a pending-action card.
+            nodes = meta.tables['node_executions']
+            keys = {(item['invocation_id'], item['occurrence_id']) for item in waiting}
+            labels = {}
+            if keys:
+                records = (await conn.execute(select(nodes.c.invocation_id, nodes.c.occurrence_id, nodes.c.node_id).where(
+                    tuple_(nodes.c.invocation_id, nodes.c.occurrence_id).in_(keys)))).mappings()
+                labels.update({(item['invocation_id'], item['occurrence_id']):item['node_id'] for item in records})
+                labels.update({key:item['node_id'] for key,item in overlay.rows.get('node_executions',{}).items() if key in keys and item})
+            waiting = [dict(item, node_id=labels.get((item['invocation_id'], item['occurrence_id']))) for item in waiting]
             target, wait, node = None, None, None
             if wait_id:
                 target = await row('invocations', invocation_id=target_iid or iid)

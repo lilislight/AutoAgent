@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 from autoagent.agent import (
     Tool, ToolContext, ToolHooks, ToolSet, LLMToolCall, LLMToolResult,
@@ -155,14 +156,26 @@ class ToolContextTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await app.aclose()
 
-    def test_core_rejects_async_hooks_for_sync_tools_before_execution(self):
-        """Unsupported executor combinations fail before introducing an unowned worker."""
-        def lookup(value: int) -> int:
-            return value
+    async def test_core_supports_async_hooks_for_sync_tools_on_owned_workers(self):
+        """Async hooks run before synchronous Tools dispatched through the Core bridge."""
+        import threading
+        from autoagent import AutoAgentApp, Node, Workflow
+        events = []
+        def lookup(value: int) -> str:
+            events.append("execute")
+            return threading.current_thread().name
         async def before(call, ctx):
-            pass
-        with self.assertRaisesRegex(TypeError, "Core sync Tools"):
-            ToolSet([Tool(lookup)], hooks=ToolHooks(before=before)).as_operator()
+            events.append("before")
+        tools = ToolSet([Tool(lookup)], hooks=ToolHooks(before=before))
+        app = AutoAgentApp()
+        try:
+            with patch("asyncio.to_thread", side_effect=AssertionError("Unexpected executor")):
+                result = await app.ainvoke(Workflow("async-hooks", nodes=[Node("tool", tools.as_operator())]), call())
+            self.assertEqual(result.status, "completed", result.error)
+            self.assertTrue(result.output["content"][0]["text"].startswith("autoagent-operator-"))
+            self.assertEqual(events, ["before", "execute"])
+        finally:
+            await app.aclose()
 
     async def test_nested_explicit_context_cannot_bypass_parent_restriction(self):
         """A nested Tool cannot widen its parent's permissions by replacing context."""

@@ -21,6 +21,7 @@ from .models import (
     OutputBinding,
     OutputBindingContext,
     Recovery,
+    TimeoutPolicy,
     Stream,
     StreamContext,
     SubWorkflow,
@@ -32,6 +33,7 @@ from .models import (
 from .hooks import HookVersion, workflow_hook, workflow_hook_version
 
 __all__ = [
+    "TimeoutPolicy",
     "Aggregation",
     "AggregationContext",
     "Capability",

@@ -53,7 +53,8 @@ MCP 使用真实 SDK，通过本地子进程或 `127.0.0.1` HTTP 服务通信。
 | [mcp_http.py](mcp_http.py) | 自动启动 HTTP/SSE Server，验证 Bearer 后调用 Tool | 无，需要本地端口 |
 | [mcp_auth.py](mcp_auth.py) | OAuth 配置、存储与回调验证，以及外部 Bearer/OAuth 入口 | 默认离线；真实认证见下文 |
 | [skills.py](skills.py) | 发现、目录、正文、分页、资源、Snapshot、权限收窄、脚本、模型侧 Tools | 无 |
-| [nodes.py](nodes.py) | 12 种 Node 用法、自定义 Operator 内组合能力、Node 超时 | 无 |
+| [nodes.py](nodes.py) | LLM/Embedding 标准 Capability、12 种 Node 用法、Operator 内组合、超时 | 无 |
+| [capabilities.py](capabilities.py) | Host 默认注册契约、Provider 绑定、普通/流式共用 LLM Capability | 需要 `host` extra |
 | [recording.py](recording.py) | 无数据库调用、自定义 Recorder、Host 自动记录 LLM 与 Embedding | 需要 `host` extra |
 
 ## LLM 的基本用法
@@ -332,14 +333,50 @@ Skill 名称、脚本路径、解释器和需要暂存的资源，然后交给 `
 
 | 能力 | Node executable |
 |---|---|
-| LLM | `provider.ainvoke` |
-| 流式 LLM | `provider.astream`，加 `Stream(LLMStreamReducer())` |
-| Embedding | `embeddings.ainvoke` |
+| LLM | `LLM_CALL` 默认聚合为 `LLMResponse`，无需配置 Stream；普通实现只产生完成 chunk |
+| 流式 LLM | 同一个 `LLM_CALL` 和 reducer；流式实现额外产生 delta/item |
+| Embedding | `EMBEDDING` |
 | ToolSet | `tools.as_operator()` |
 | MCP Tool Registry | `registry.as_operator()` |
 | 单个流式 MCP Tool | `mcp_tool.as_operator(streaming=True)`，加 `Stream(MCPToolStreamReducer())` |
 | MCP Resource / Prompt | `MCPOperations(client).as_operator("read_resource" / "get_prompt")` |
 | Skill | `SkillOperations(skills).as_operator("load" / "read_text" / "run_script" 等)` |
+
+`LLM_CALL` 的 ID 是 `llm.call`，`EMBEDDING` 的 ID 是 `embedding.call`。
+Host 启动时自动向 Core App 注册这两个契约；Provider 实现仍在 lifespan 中绑定：
+
+```python
+from contextlib import asynccontextmanager
+from autoagent.agent import (
+    LLM_CALL, EMBEDDING, OpenAIResponsesProvider, OpenAIEmbeddingProvider,
+    llm_call_operator, embedding_operator,
+)
+
+@asynccontextmanager
+async def resources(setup):
+    async with OpenAIResponsesProvider() as llm, OpenAIEmbeddingProvider() as embeddings:
+        setup.register_operator(
+            llm_call_operator(llm, streaming=True),
+            capability_id=LLM_CALL.id, default=True,
+        )
+        setup.register_operator(
+            embedding_operator(embeddings),
+            capability_id=EMBEDDING.id, default=True,
+        )
+        yield
+```
+
+将 `resources` 传给 `AutoAgentHost(lifespan=resources, ...)`。
+这个片段使用 OpenAI 配置；本地离线完整版本见 `capabilities.py`。
+`streaming=False`（默认）调用 Provider 的 `ainvoke`，`True` 调用 `astream`；
+两种实现共享输入及 chunk 契约，由 Capability 的默认 Reducer 得到完整 `LLMResponse`。
+普通 `Node("call", LLM_CALL)` 即可使用，无需在 Node 上配置 `LLMStreamReducer`。
+Host 还可以通过 `AUTOAGENT_LLM_*`、`AUTOAGENT_EMBEDDING_*` 创建和绑定默认 Provider；
+没有配置 MODEL 或自定义实现时，调用会明确失败。项目注册的自定义实现优先。
+
+单独使用 Core App 时，用 `app.register_capability(...)` 注册契约，
+再用 `app.register_operator(...)` 绑定实现。`nodes.py` 手动切换普通默认实现的启用状态，
+分别演示普通与流式调用，不需要 Resolver。
 
 Provider 和 MCP client 使用 `AutoAgentApp(runtime_lifespan=...)` 创建和关闭，
 确保资源与 Core 的 Runtime loop 一致。不要先在调用方 event loop 连接好 client，再交给 Core。
@@ -357,7 +394,9 @@ Skill 和 Tool 的普通定义可以在外部创建，活跃资源及服务仍�
 
 Runtime 的 `InvocationResult.output` 是可移植记录。需要业务类型时，使用
 `ValueContract.create(LLMResponse, location="output").restore(result.output)` 等方式恢复。
-`app.ainvoke` 会消费并归约流；需要对外发送增量时，另外配置 Core 的 User Event 映射和消费接口。
+`app.ainvoke` 会消费并归约流。只有 Node 配置了 `user_events` Mapper 才会产生 User Event；
+同一个 Mapper 接收 Chunk 和最终 Output，返回 `UserEventSpec` 或 `None`。
+Reducer 与 User Event 相互独立；Host 会持久化显式产生的事件。
 
 ## 调用记录
 
@@ -366,7 +405,11 @@ Runtime 的 `InvocationResult.output` 是可移植记录。需要业务类型时
 按 `llm_call_id` 更新。`llm_recording_context` 可为独立调用补充应用上下文。
 
 通过 Host 执行时，自动附加真实 Workflow、revision、Node、Operator、Session、Invocation 等身份。
-`recording.py` 在同一 Operator 中执行 Embedding 和 LLM，随后检查临时 SQLite 的两行记录。
+`recording.py` 在同一次 Invocation 的两个 Capability Node 中依次执行 Embedding 和 LLM，
+随后检查临时 SQLite 的两行记录，验证它们具有相同 Workflow/revision/Invocation 身份、
+不同的 Node 和 Operator Call 身份。入口 Node 有 Input Mapping 时，示例显式传入
+`request.model_dump(mode="json")` 作为 Invocation 输入，再在映射中恢复类型。
+自定义 Operator 内直接调用 Provider 的方式见 `nodes.py`。
 示例直接使用诊断 SQL，没有引入产品查询 API。
 
 记录包含模型、状态、耗时和上游报告的 Token usage，不包含 Prompt、生成正文、媒体或凭证。

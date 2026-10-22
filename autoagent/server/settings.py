@@ -31,11 +31,11 @@ class ServerSettings:
     trace_max_subscribers: int = 128
     trace_coalesce_ms: float = 100
     trace_heartbeat_seconds: float = 10
-    operation_concurrency: int = 32
-    operation_receipts: int = 256
-    operation_ttl_seconds: float = 300
+    access_log: bool = True
 
     def __post_init__(self):
+        if type(self.access_log) is not bool:
+            raise ValueError("Server access_log must be bool.")
         if not isinstance(self.host, str) or not self.host.strip():
             raise ValueError("Server host cannot be empty.")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
@@ -48,13 +48,6 @@ class ServerSettings:
             raise ValueError("Page sizes must be between 1 and 1000.")
         if self.page_size > self.max_page_size:
             raise ValueError("Default page size cannot exceed the maximum.")
-        for name in ('operation_concurrency','operation_receipts'):
-            if type(getattr(self,name)) is not int or getattr(self,name)<1:
-                raise ValueError(f'{name} must be a positive integer.')
-        if self.operation_receipts<self.operation_concurrency:
-            raise ValueError('operation_receipts cannot be smaller than operation_concurrency.')
-        if isinstance(self.operation_ttl_seconds,bool) or not math.isfinite(self.operation_ttl_seconds) or self.operation_ttl_seconds<=0:
-            raise ValueError('operation_ttl_seconds must be positive and finite.')
         if type(self.trace_max_subscribers) is not int or self.trace_max_subscribers < 1:
             raise ValueError('trace_max_subscribers must be a positive integer.')
         for name in ('trace_coalesce_ms', 'trace_heartbeat_seconds'):
@@ -68,6 +61,9 @@ class ServerSettings:
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str], *, root: Path | None = None):
+        access = env.get("AUTOAGENT_SERVER_ACCESS_LOG", "true").strip().lower()
+        if access not in {"true", "false", "1", "0"}:
+            raise ValueError("Server access log environment value must be true, false, 1 or 0.")
         directory = env.get("AUTOAGENT_SERVER_UI_DIRECTORY", "").strip()
         path = Path(directory).expanduser() if directory else None
         if path is not None and not path.is_absolute():
@@ -85,7 +81,5 @@ class ServerSettings:
             trace_max_subscribers=int(env.get('AUTOAGENT_SERVER_TRACE_MAX_SUBSCRIBERS', '128')),
             trace_coalesce_ms=float(env.get('AUTOAGENT_SERVER_TRACE_COALESCE_MS', '100')),
             trace_heartbeat_seconds=float(env.get('AUTOAGENT_SERVER_TRACE_HEARTBEAT_SECONDS', '10')),
-            operation_concurrency=int(env.get('AUTOAGENT_SERVER_OPERATION_CONCURRENCY','32')),
-            operation_receipts=int(env.get('AUTOAGENT_SERVER_OPERATION_RECEIPTS','256')),
-            operation_ttl_seconds=float(env.get('AUTOAGENT_SERVER_OPERATION_TTL_SECONDS','300')),
+            access_log=access in {"true", "1"},
         )

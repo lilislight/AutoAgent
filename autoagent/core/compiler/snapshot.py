@@ -21,7 +21,7 @@ from ..workflow import Capability, WorkflowIR, workflow_hook_version
 from ._hooks import resolve_hook_contract
 
 
-WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION = 1
+WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,21 +184,14 @@ def workflow_semantic_definition(
                     if node.stream is not None
                     else None
                 ),
-                "user_events": [
-                    {
-                        "kind": mapping.kind,
-                        "mapper": _hook_definition(mapping.mapper),
-                        "output_contract": _contract_definition(
-                            mapping.output_contract
-                        ),
-                    }
-                    for mapping in node.user_events
-                ],
+                "user_events": _hook_definition(node.user_events),
                 "recovery": {
                     "mode": node.recovery_mode.mode,
                     "max_attempts": node.recovery_mode.max_attempts,
                 },
                 **({"timeout": asdict(node.timeout)} if node.timeout is not None else {}),
+                "retry": asdict(node.retry) if node.retry is not None else None,
+                "resource": asdict(node.resource),
             }
             for node in nodes
         ],

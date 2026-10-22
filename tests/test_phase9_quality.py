@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import TypedDict
 
 from autoagent import (
+    ResourcePolicy,
     AppCheckpoint,
     AutoAgentApp,
     Capability,
@@ -39,7 +40,8 @@ from autoagent import (
     Stream,
     StreamContext,
     UserEvent,
-    UserEventMapping,
+    UserEventContext,
+    UserEventSpec,
     Workflow,
     WorkflowCompiler,
 )
@@ -108,8 +110,16 @@ def bind_route_flag(_context: OutputBindingContext) -> ContextPatch:
     )
 
 
-def map_output_event(context: OutputBindingContext) -> Value:
-    return context.output  # type: ignore[return-value]
+def map_output_event(context: UserEventContext) -> UserEventSpec | None:
+    if context.phase == "output":
+        return UserEventSpec(kind="node.output", payload=context.value)
+    return None
+
+
+def map_chunk_event(context: UserEventContext) -> UserEventSpec | None:
+    if context.phase == "chunk":
+        return UserEventSpec(kind="chunk", payload=context.value)
+    return None
 
 
 def route_from_bound_context(context: ConditionContext) -> bool:
@@ -122,7 +132,7 @@ def fail(_value: Value) -> Value:
 
 def error_mapping(context: InputMappingContext) -> ErrorValue:
     error = next(iter(context.incoming.values()))
-    return {"message": error["message"]}  # type: ignore[index]
+    return {"message": error["error"]["message"]}  # type: ignore[index]
 
 
 def accept_error(value: ErrorValue) -> ErrorValue:
@@ -310,9 +320,7 @@ class QualityTests(unittest.TestCase):
                         Node(
                             "node",
                             identity,
-                            user_events=(
-                                UserEventMapping("node.output", map_output_event),
-                            ),
+                            user_events=map_output_event,
                         )
                     ],
                 ),
@@ -374,7 +382,7 @@ class QualityTests(unittest.TestCase):
             result = app.invoke(
                 Workflow(
                     "ports",
-                    nodes=[Node("stream", chunks, stream=Stream(SumReducer()))],
+                    nodes=[Node("stream", chunks, stream=Stream(SumReducer()), user_events=map_chunk_event)],
                 ),
                 {"value": 2},
             )
@@ -413,7 +421,7 @@ class QualityTests(unittest.TestCase):
             result = app.invoke(
                 Workflow(
                     "user-events",
-                    nodes=[Node("stream", chunks, stream=Stream(SumReducer()))],
+                    nodes=[Node("stream", chunks, stream=Stream(SumReducer()), user_events=map_chunk_event)],
                 ),
                 {"value": 3},
             )
@@ -479,13 +487,13 @@ class QualityTests(unittest.TestCase):
         finally:
             no_route.close()
 
-        limited = AutoAgentApp(max_node_executions_per_invocation=3)
+        limited = AutoAgentApp()
         try:
             workflow = Workflow(
                 "limited",
                 nodes=[
                     Node("start", identity),
-                    Node("header", identity),
+                    Node("header", identity, resource=ResourcePolicy(max_executions_per_invocation=2)),
                     Node("finish", identity),
                 ],
                 edges=[
@@ -496,7 +504,7 @@ class QualityTests(unittest.TestCase):
             )
             result = limited.invoke(workflow, {"value": 1})
             self.assertEqual(result.status, "failed")
-            self.assertEqual(result.error.type, "InvocationExecutionLimitExceeded")
+            self.assertEqual(result.error.type, "NodeExecutionLimitExceeded")
         finally:
             limited.close()
 
@@ -522,7 +530,7 @@ class QualityTests(unittest.TestCase):
         finally:
             unresolved.close()
 
-        resolved = AutoAgentApp(capability_resolver=lambda _capability, _value: two)
+        resolved = AutoAgentApp(capability_resolvers={"choice": lambda _capability, _value: two})
         try:
             resolved.register_operator(one, capability_id="choice")
             resolved.register_operator(two, capability_id="choice")

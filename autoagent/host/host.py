@@ -25,6 +25,12 @@ from autoagent.core.app._residency import retained_size
 from .project import Project, environment_scope, import_scope, load_project_environment
 from .runtime import Runtime
 from .controls import ExecutionControls
+from .checkpoints import CheckpointControls
+from .exploration import Exploration
+from .observation import ExecutionObservation
+from .history import HistoryQueries
+from .forks import ForkControls
+from .operations import ExecutionOperations, OperationControls
 
 _json_output = TypeAdapter(object)
 
@@ -34,11 +40,13 @@ def _result_view(result):
     return replace(result, output=_json_output.dump_python(result.output, mode="json"))
 
 
-class AutoAgentHost(ExecutionControls):
+class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Exploration, ExecutionObservation, HistoryQueries, ForkControls):
     """Own runtime and persistence behind business operations, in one caller loop.
 
-    CLI/Server use ``async with host``. Checkpoint, loading, residency and durable
-    flushing are internal policies, not user-facing controls.
+    CLI/Server use ``async with host``. Loading and residency are automatic;
+    explicit Checkpoint metadata controls support debugging and retention.
+    ``read_only=True`` opens existing history without importing project code,
+    starting Core, executing lifespan, or acquiring writer ownership.
     """
 
     def __init__(
@@ -50,6 +58,7 @@ class AutoAgentHost(ExecutionControls):
         operators=(),
         environment=None,
         root=None,
+        read_only=False,
     ):
         self.root = Path(root or Path.cwd()).expanduser().resolve()
         self.environment = MappingProxyType(
@@ -59,6 +68,9 @@ class AutoAgentHost(ExecutionControls):
         self._workflows, self._operators = tuple(workflows), tuple(operators)
         self._lifespan = lifespan
         self._project = None
+        if type(read_only) is not bool:
+            raise ValueError("read_only must be a boolean.")
+        self._read_only = read_only
         self._state = "new"
         self._loop = None
         self._opening_task = None
@@ -68,6 +80,7 @@ class AutoAgentHost(ExecutionControls):
         self._control_requests = 0
         self._runtime = None
         self._persistence = None
+        self._execution_operations = None
         self._environment_context = None
         self._import_context = None
 
@@ -81,6 +94,7 @@ class AutoAgentHost(ExecutionControls):
         use_env_file=True,
         environment=None,
         lifespan=None,
+        read_only=False,
     ):
         project = Project.find(path)
         env = load_project_environment(
@@ -90,7 +104,7 @@ class AutoAgentHost(ExecutionControls):
             environ=environment,
         )
         host = cls(
-            settings=settings, environment=env, root=project.root, lifespan=lifespan
+            settings=settings, environment=env, root=project.root, lifespan=lifespan, read_only=read_only
         )
         host._project = project
         return host
@@ -142,6 +156,12 @@ class AutoAgentHost(ExecutionControls):
 
     async def _open(self):
         try:
+            if self._read_only:
+                self._persistence = await DatabaseSink.open(self.settings.resolved_database_url(self.root),
+                    config=self.settings.persistence, read_only=True)
+                if self._state != "closing":
+                    self._state = "ready"
+                return
             self._environment_context = environment_scope(self.environment)
             self._environment_context.__enter__()
             workflows, lifespan = self._workflows, self._lifespan
@@ -166,6 +186,7 @@ class AutoAgentHost(ExecutionControls):
             self._persistence = await DatabaseSink.open(
                 url, config=self.settings.persistence
             )
+            self._execution_operations = ExecutionOperations(self)
             self._runtime = Runtime(
                 self._persistence,
                 self.settings,
@@ -201,6 +222,7 @@ class AutoAgentHost(ExecutionControls):
                 except BaseException:  # noqa: BLE001 -- opening already released every resource
                     return
             if self._runtime is not None:
+                await self._execution_operations.close()
                 await self._runtime.residency.stop()
                 try:
                     await self._runtime.shutdown()
@@ -233,6 +255,8 @@ class AutoAgentHost(ExecutionControls):
         self._check_loop()
         if self._state != "ready":
             raise HostError("Host is not accepting operations.")
+        if self._read_only and (control or payload is not None):
+            raise HostRunConflict("read_only", "This Host is open for read-only inspection.")
         size = retained_size((payload,)) if payload is not None else 0
         count = self._control_requests if control else len(self._operations) - self._control_requests
         limit = self.settings.control_request_reserve if control else self.settings.max_requests
@@ -257,6 +281,8 @@ class AutoAgentHost(ExecutionControls):
 
     async def check_workflows(self, workflow_ids=None):
         """Compile project definitions without opening Core or Persistence."""
+        if self._read_only:
+            raise HostError("Use check_project for offline source compilation.")
         if self._state not in ("new", "ready"):
             raise HostError("Host cannot check Workflows in its current lifecycle state.")
         with environment_scope(self.environment), import_scope(self.root):
@@ -280,13 +306,13 @@ class AutoAgentHost(ExecutionControls):
                 raise ValueError("limit must be between 1 and 1000.")
             if include_history:
                 page = await self._persistence.list_workflows(workflow_id=workflow_id, limit=limit, cursor=cursor)
-                rows = tuple(dict(row, runnable=row["revision_id"] in self._runtime.revisions) for row in page.items)
+                rows = tuple(dict(row, runnable=self._runtime is not None and row["revision_id"] in self._runtime.revisions) for row in page.items)
                 return Page(rows, page.next_cursor, page.frontier)
             rows = sorted(({
                 "workflow_id": wid, "revision_id": revision,
                 "workflow_version": self._runtime.revisions[revision].workflow_version,
                 "runnable": True,
-            } for wid, revision in self._runtime.workflow_ids.items() if workflow_id is None or wid == workflow_id), key=lambda row: (row["workflow_id"], row["revision_id"]))
+            } for wid, revision in (self._runtime.workflow_ids.items() if self._runtime else ()) if workflow_id is None or wid == workflow_id), key=lambda row: (row["workflow_id"], row["revision_id"]))
             if cursor is not None:
                 if not isinstance(cursor, (tuple, list)) or len(cursor) != 2:
                     raise ValueError("Invalid Workflow cursor.")
@@ -300,7 +326,7 @@ class AutoAgentHost(ExecutionControls):
         async def query():
             if not isinstance(search, str) or len(search) > 512:
                 raise ValueError("search must be a string of at most 512 characters.")
-            current = self._runtime.workflow_ids
+            current = self._runtime.workflow_ids if self._runtime else {}
             page = await self._persistence.workflow_catalog(registered_ids=tuple(current), search=search.strip().lower(), limit=limit, cursor=cursor, registered_only=registered_only)
             rows = []
             for row in page.items:
@@ -318,18 +344,18 @@ class AutoAgentHost(ExecutionControls):
             if prefix is not None and (not isinstance(prefix, str) or len(prefix) > 512):
                 raise ValueError("prefix must be a string of at most 512 characters.")
             page = await self._persistence.workflow_revisions(workflow_id, prefix=prefix.strip().lower() if prefix else None, limit=limit, cursor=cursor)
-            return Page(tuple(dict(row, runnable=row["revision_id"] in self._runtime.revisions) for row in page.items), page.next_cursor, page.frontier)
+            return Page(tuple(dict(row, runnable=self._runtime is not None and row["revision_id"] in self._runtime.revisions) for row in page.items), page.next_cursor, page.frontier)
         return await self._perform(query)
 
     async def get_workflow(self, workflow_id, *, revision_id=None):
         async def query():
-            revision = revision_id or self._runtime.workflow_ids.get(workflow_id)
+            revision = revision_id or (self._runtime.workflow_ids.get(workflow_id) if self._runtime else None)
             if revision is None:
                 raise HostNotFoundError(f"Unknown registered Workflow: {workflow_id}")
             record = await self._persistence.get_workflow(revision)
             if record is None or record["workflow_id"] != workflow_id:
                 raise HostNotFoundError("Unknown Workflow Revision.")
-            return dict(record, runnable=revision in self._runtime.revisions)
+            return dict(record, runnable=self._runtime is not None and revision in self._runtime.revisions)
         return await self._perform(query)
 
     async def get_workflow_graph(self, revision_id):
@@ -338,7 +364,7 @@ class AutoAgentHost(ExecutionControls):
             record = await self._persistence.workflow_graph(revision_id)
             if record is None:
                 raise HostNotFoundError("Unknown Workflow Revision.")
-            return dict(record, runnable=revision_id in self._runtime.revisions)
+            return dict(record, runnable=self._runtime is not None and revision_id in self._runtime.revisions)
         return await self._perform(query)
 
     async def get_workflow_object(self, revision_id, kind, identity):
@@ -350,13 +376,16 @@ class AutoAgentHost(ExecutionControls):
             return record
         return await self._perform(query)
 
-    async def list_executions(self, *, search="", status=None, limit=50, cursor=None):
+    async def list_executions(self, *, search="", status=None, workflow_ids=(), revision_ids=(), statuses=(), session_id=None,
+                              started_after_us=None, started_before_us=None, limit=50, cursor=None):
         """Browse recent persisted Root executions without activating Sessions."""
         if not isinstance(search, str) or len(search) > 512:
             raise ValueError("search must have at most 512 characters.")
         if status not in (None, "created", "running", "waiting", "settling", "completed", "failed", "cancelled", "paused"):
             raise ValueError("Unknown execution status.")
-        return await self._perform(lambda: self._persistence.trace_page("root", search=search.strip(), status=status, limit=limit, cursor=cursor))
+        return await self._perform(lambda: self._persistence.trace_page("root", search=search.strip(),
+            workflow_ids=workflow_ids, revision_ids=revision_ids, statuses=tuple(statuses) + ((status,) if status else ()),
+            session_id=session_id, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor))
 
     async def list_execution_sessions(self, *, search="", workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
         """Browse persisted Session history without loading Core State."""
@@ -507,17 +536,17 @@ class AutoAgentHost(ExecutionControls):
             return record
         return await self._perform(query)
 
-    async def list_node_executions(self, invocation_id, node_id, *, limit=50, cursor=None):
-        return await self._trace_page("node", invocation_id, node_id=node_id, limit=limit, cursor=cursor)
+    async def list_node_executions(self, invocation_id, node_id=None, *, status=None, limit=50, cursor=None):
+        return await self._trace_page("node", invocation_id, node_id=node_id, status=status, limit=limit, cursor=cursor)
 
-    async def list_operator_calls(self, invocation_id, *, occurrence_id=None, limit=50, cursor=None):
-        return await self._trace_page("call", invocation_id, occurrence_id=occurrence_id, limit=limit, cursor=cursor)
+    async def list_operator_calls(self, invocation_id, *, occurrence_id=None, status=None, limit=50, cursor=None):
+        return await self._trace_page("call", invocation_id, occurrence_id=occurrence_id, status=status, limit=limit, cursor=cursor)
 
-    async def list_edge_evaluations(self, invocation_id, edge_id, *, occurrence_id=None, limit=50, cursor=None):
+    async def list_edge_evaluations(self, invocation_id, edge_id=None, *, occurrence_id=None, limit=50, cursor=None):
         return await self._trace_page("edge", invocation_id, edge_id=edge_id, occurrence_id=occurrence_id, limit=limit, cursor=cursor)
 
-    async def list_execution_waits(self, invocation_id, *, occurrence_id=None, limit=50, cursor=None):
-        return await self._trace_page("wait", invocation_id, occurrence_id=occurrence_id, limit=limit, cursor=cursor)
+    async def list_execution_waits(self, invocation_id, *, occurrence_id=None, status=None, limit=50, cursor=None):
+        return await self._trace_page("wait", invocation_id, occurrence_id=occurrence_id, status=status, limit=limit, cursor=cursor)
 
     async def list_child_executions(self, invocation_id, *, occurrence_id=None, call_id=None, order="desc", limit=50, cursor=None):
         return await self._trace_page("child", invocation_id, occurrence_id=occurrence_id, call_id=call_id, order=order, limit=limit, cursor=cursor)
@@ -530,10 +559,10 @@ class AutoAgentHost(ExecutionControls):
             return family
         return await self._perform(query)
 
-    async def get_execution_value(self, invocation_id, kind, identity, field):
+    async def get_execution_value(self, invocation_id, kind, identity, field, *, pointer=None):
         """Resolve one scoped Input, Output, Error, Metrics or Call definition."""
         async def query():
-            record = await self._persistence.trace_value(invocation_id, kind, identity, field)
+            record = await self._persistence.trace_value(invocation_id, kind, identity, field, pointer=pointer)
             if record is None:
                 raise HostNotFoundError("Unknown execution object.")
             return record
@@ -547,9 +576,9 @@ class AutoAgentHost(ExecutionControls):
             return page
         return await self._perform(query)
 
-    async def get_execution_stage_value(self, invocation_id, occurrence_id, event_id, field):
+    async def get_execution_stage_value(self, invocation_id, occurrence_id, event_id, field, *, pointer=None):
         async def query():
-            value = await self._persistence.execution_stage_value(invocation_id, occurrence_id, event_id, field)
+            value = await self._persistence.execution_stage_value(invocation_id, occurrence_id, event_id, field, pointer=pointer)
             if value is None:
                 raise HostNotFoundError('Unknown execution stage.')
             return value
@@ -574,7 +603,7 @@ class AutoAgentHost(ExecutionControls):
     async def get_workflow_run_spec(self, workflow_id, *, revision_id, session_id=None, entry_node_id=None):
         """Describe exact registered Entry inputs and optional Session admission eligibility."""
         async def query():
-            ir = self._runtime.workflow_irs.get(revision_id)
+            ir = self._runtime.workflow_irs.get(revision_id) if self._runtime else None
             if ir is None or ir.workflow_id != workflow_id:
                 graph = await self._persistence.workflow_graph(revision_id)
                 if graph is None or graph["workflow_id"] != workflow_id:
@@ -681,6 +710,8 @@ class AutoAgentHost(ExecutionControls):
 
     @asynccontextmanager
     async def _execution(self, execution, *, load=False, touch=False):
+        if self._runtime is None:
+            raise HostRunConflict("read_only", "Runtime operations require a writable Host.")
         ref = await self._runtime.reference(execution)
         item = self._runtime.residency.touch(ref.session_id) if touch else self._runtime.residency.entry(ref.session_id)
         item.users += 1
@@ -720,6 +751,9 @@ class AutoAgentHost(ExecutionControls):
                 if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout < 0:
                     raise ValueError("timeout must be finite and nonnegative.")
             async with self._execution(execution) as ref:
+                pending_fork = self._runtime.fork_tasks.get(ref.invocation_id)
+                if pending_fork is not None:
+                    return _result_view(await asyncio.wait_for(asyncio.shield(pending_fork), timeout))
                 if self._runtime.resident.get(ref.session_id) == ref:
                     return _result_view(await self._runtime.app.ajoin(ref, timeout=timeout))
                 result = await self._stored_result(ref)

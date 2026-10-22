@@ -41,7 +41,9 @@ class HostSettings:
     database_url: str = "sqlite+aiosqlite:///.autoagent/runtime.db"
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     max_operator_concurrency: int = 32
-    max_node_executions_per_invocation: int = 1000
+    operation_concurrency: int = 32
+    operation_receipts: int = 256
+    operation_ttl_seconds: float = 300
 
     memory_budget_bytes: int = 0
     memory_target_ratio: float = 0.65
@@ -55,6 +57,7 @@ class HostSettings:
     checkpoint_tail_events: int = 2048
     checkpoint_tail_bytes: int = 16777216
     checkpoint_interval_seconds: float = 300
+    checkpoint_keep_latest: int = 1
     max_resident_graphs: int = 128
     max_requests: int = 128
     control_request_reserve: int = 8
@@ -64,11 +67,18 @@ class HostSettings:
     background_retry_seconds: float = 5
 
     def __post_init__(self):
+        for name in ('operation_concurrency','operation_receipts'):
+            if type(getattr(self,name)) is not int or getattr(self,name)<1:
+                raise ValueError(f'{name} must be a positive integer.')
+        if self.operation_receipts<self.operation_concurrency:
+            raise ValueError('operation_receipts cannot be smaller than operation_concurrency.')
+        if isinstance(self.operation_ttl_seconds,bool) or not isinstance(self.operation_ttl_seconds, (int, float)) or not math.isfinite(self.operation_ttl_seconds) or self.operation_ttl_seconds<=0:
+            raise ValueError('operation_ttl_seconds must be positive and finite.')
         url = make_url(self.database_url)
         if url.drivername not in ("sqlite+aiosqlite", "postgresql+asyncpg"):
             raise ValueError("Host requires async SQLite or PostgreSQL.")
         for name in (
-            "max_operator_concurrency", "max_node_executions_per_invocation",
+            "max_operator_concurrency",
             "max_resident_graphs", "max_requests", "control_request_reserve", "max_request_bytes",
             "unload_concurrency", "background_batch_size", "checkpoint_tail_events",
             "checkpoint_tail_bytes",
@@ -78,6 +88,8 @@ class HostSettings:
 
         if type(self.memory_budget_bytes) is not int or self.memory_budget_bytes < 0:
             raise ValueError("memory_budget_bytes must be nonnegative (0 means automatic).")
+        if type(self.checkpoint_keep_latest) is not int or self.checkpoint_keep_latest < 1:
+            raise ValueError("checkpoint_keep_latest must be a positive integer.")
         for name in (
             "cold_after_seconds", "max_idle_seconds", "min_residency_seconds",
             "short_timer_seconds", "residency_interval_seconds",
@@ -105,6 +117,9 @@ class HostSettings:
             return float(env.get(key, str(default)))
 
         return cls(
+            operation_concurrency=integer("AUTOAGENT_HOST_OPERATION_CONCURRENCY", 32),
+            operation_receipts=integer("AUTOAGENT_HOST_OPERATION_RECEIPTS", 256),
+            operation_ttl_seconds=number("AUTOAGENT_HOST_OPERATION_TTL_SECONDS", 300),
             memory_budget_bytes=integer("AUTOAGENT_HOST_MEMORY_BUDGET_BYTES", 0),
             memory_target_ratio=number("AUTOAGENT_HOST_MEMORY_TARGET_RATIO", 0.65),
             memory_high_ratio=number("AUTOAGENT_HOST_MEMORY_HIGH_RATIO", 0.8),
@@ -117,6 +132,7 @@ class HostSettings:
             checkpoint_tail_events=integer("AUTOAGENT_HOST_CHECKPOINT_TAIL_EVENTS", 2048),
             checkpoint_tail_bytes=integer("AUTOAGENT_HOST_CHECKPOINT_TAIL_BYTES", 16777216),
             checkpoint_interval_seconds=number("AUTOAGENT_HOST_CHECKPOINT_INTERVAL_SECONDS", 300),
+            checkpoint_keep_latest=integer("AUTOAGENT_HOST_CHECKPOINT_KEEP_LATEST", 1),
             max_resident_graphs=integer("AUTOAGENT_HOST_MAX_RESIDENT_GRAPHS", 128),
             max_requests=integer("AUTOAGENT_HOST_MAX_REQUESTS", 128),
             control_request_reserve=integer("AUTOAGENT_HOST_CONTROL_REQUEST_RESERVE", 8),
@@ -126,9 +142,6 @@ class HostSettings:
             background_retry_seconds=number("AUTOAGENT_HOST_BACKGROUND_RETRY_SECONDS", 5),
             database_url=env.get("AUTOAGENT_DATABASE_URL", cls().database_url),
             max_operator_concurrency=integer("AUTOAGENT_MAX_OPERATOR_CONCURRENCY", 32),
-            max_node_executions_per_invocation=integer(
-                "AUTOAGENT_MAX_NODE_EXECUTIONS_PER_INVOCATION", 1000
-            ),
             persistence=PersistenceConfig(
                 mode=env.get("AUTOAGENT_PERSISTENCE_MODE", "durable"),
                 artifact_threshold_bytes=integer(
@@ -146,12 +159,22 @@ class HostSettings:
                 ),
                 trace_snapshot_bytes=integer("AUTOAGENT_TRACE_SNAPSHOT_BYTES", 134217728),
                 trace_snapshot_ttl_seconds=number("AUTOAGENT_TRACE_SNAPSHOT_TTL_SECONDS", 300),
+                inspection_scan_events=integer("AUTOAGENT_INSPECTION_SCAN_EVENTS", 100000),
+                inspection_read_bytes=integer("AUTOAGENT_INSPECTION_READ_BYTES", 67108864),
+                inspection_result_bytes=integer("AUTOAGENT_INSPECTION_RESULT_BYTES", 1048576),
                 retry_attempts=integer("AUTOAGENT_RETRY_ATTEMPTS", 3),
                 retry_delay_ms=float(env.get("AUTOAGENT_RETRY_DELAY_MS", "50")),
             ),
         )
 
     def resolved_database_url(self, root: Path) -> str:
+        for name in ('operation_concurrency','operation_receipts'):
+            if type(getattr(self,name)) is not int or getattr(self,name)<1:
+                raise ValueError(f'{name} must be a positive integer.')
+        if self.operation_receipts<self.operation_concurrency:
+            raise ValueError('operation_receipts cannot be smaller than operation_concurrency.')
+        if isinstance(self.operation_ttl_seconds,bool) or not math.isfinite(self.operation_ttl_seconds) or self.operation_ttl_seconds<=0:
+            raise ValueError('operation_ttl_seconds must be positive and finite.')
         url = make_url(self.database_url)
         if url.drivername == "sqlite+aiosqlite" and url.database not in (
             None,

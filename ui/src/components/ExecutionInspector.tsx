@@ -71,6 +71,7 @@ function NodeInspector({ iid, id, record, trace, workflow, onClose, onReselect, 
   if (canAct) tabs.unshift('Actions');
   return <InspectorFrame kind="node-execution" title={id} initial={returnTab ?? initial} context={<>
     {row ? <StatusBadge row={row} /> : null}
+    {row && trace.fork && ['completed','failed','cancelled','skipped'].includes(trace.fork.inherited_occurrences[row.occurrence_id!] ?? '') ? <span className="inspector-chip" title={`Source Invocation ${trace.fork.source_invocation_id} · through Event #${trace.fork.source_sequence}`}>Inherited execution</span> : null}
     {count > 1 ? <button className="occurrence-switch" onClick={onReselect}>{row?.ordinal != null || row?.ui_ordinal != null ? `Occurrence #${String(row.ordinal ?? row.ui_ordinal)}` : 'Choose occurrence'} · ×{count}</button> : null}
   </>} tabs={tabs} onClose={onClose}>
     {(tab, selectTab) => {
@@ -90,7 +91,7 @@ function NodeInspector({ iid, id, record, trace, workflow, onClose, onReselect, 
   </InspectorFrame>;
 }
 function EvaluationSummary({ row }: { row: TraceRow }) {
-  return <><div className={`evaluation-result ${row.condition_result ? 'is-taken' : 'is-not-taken'}`}><span className="evaluation-result-icon" aria-hidden="true">{row.condition_result ? '✓' : '×'}</span><div><strong>{row.condition_result ? 'Selected' : 'Not selected'}</strong><small>Recorded condition result</small></div></div><dl className="trace-facts"><dt>Source occurrence ID</dt><dd><CopyId value={row.source_occurrence_id} /></dd><dt>Source outcome</dt><dd>{row.source_status === 'complete' ? 'Completed' : row.source_status === 'error' ? 'Failed' : String(row.source_status ?? '—')}</dd><dt>Recorded</dt><dd>{formatTime(row.occurred_at_us as number, true)}</dd><dt>Processing time</dt><dd>{duration(row.duration_ns == null ? null : row.duration_ns / 1000)}</dd><dt>Event sequence</dt><dd>#{row.sequence}</dd></dl></>;
+  return <><div className={`evaluation-result ${row.condition_result ? 'is-taken' : 'is-not-taken'}`}><span className="evaluation-result-icon" aria-hidden="true">{row.condition_result ? '✓' : '×'}</span><div><strong>{row.condition_result ? 'Selected' : 'Not selected'}</strong><small>{row.inherited ? 'Inherited condition result' : 'Recorded condition result'}</small></div></div><dl className="trace-facts"><dt>Source occurrence ID</dt><dd><CopyId value={row.source_occurrence_id} /></dd><dt>Source outcome</dt><dd>{row.source_status === 'complete' ? 'Completed' : row.source_status === 'error' ? 'Failed' : String(row.source_status ?? '—')}</dd><dt>Recorded</dt><dd>{formatTime(row.occurred_at_us as number, true)}</dd><dt>Processing time</dt><dd>{duration(row.duration_ns == null ? null : row.duration_ns / 1000)}</dd><dt>{row.inherited ? 'Source Event sequence' : 'Event sequence'}</dt><dd>#{row.sequence}</dd></dl></>;
 }
 function SourceOccurrence({ iid, occurrence, sourceId }: { iid: string; occurrence: string; sourceId?: string }) {
   const navigation = useExecutionNavigation();

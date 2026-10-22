@@ -20,7 +20,7 @@ from .models import ConflictError, FormatError
 from .projections import ProjectionBatch, light_record
 from .schema import meta
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5
 PROJECTION_VERSION = 4
 SOURCES = {
     "workflow_revision": ("workflow_revisions", "revision_id", "snapshot_text"),
@@ -58,7 +58,7 @@ def prepare(entries, config):
                 entry.kind,
                 entry.identity,
                 encoded,
-                light_record(record, availability=entry.kind == "checkpoint"),
+                light_record(record, availability=entry.kind == "checkpoint" or record.get('event_name') in ('invocation.forked','fork.state_imported')),
                 entry.binding,
                 entry.anchor,
             )
@@ -69,18 +69,21 @@ def prepare(entries, config):
 
 
 class Storage:
-    def __init__(self, url):
+    def __init__(self, url, *, read_only=False):
         parsed = make_url(url)
         if parsed.drivername not in ("sqlite+aiosqlite", "postgresql+asyncpg"):
             raise ValueError("Use sqlite+aiosqlite or postgresql+asyncpg.")
         self.sqlite = parsed.drivername == "sqlite+aiosqlite"
         self.memory = self.sqlite and parsed.database in (None, "", ":memory:")
         self.url = parsed
+        self.read_only = read_only
         self.engine = None
         self._lock_file = None
         self._pg_lock = None
 
     async def open(self):
+        if self.read_only:
+            return await self._open_reader()
         if self.sqlite and not self.memory:
             import fcntl
 
@@ -131,46 +134,82 @@ class Storage:
                 conn.exec_driver_sql("BEGIN")
 
         async with self.engine.begin() as conn:
-            names = await conn.run_sync(lambda c: inspect(c).get_table_names())
-            if names:
-                if not set(meta.tables).issubset(names):
-                    raise FormatError("Database is not a complete Persistence schema.")
-                info = (
-                    (await conn.execute(select(meta.tables["persistence_meta"].c.format_version,
-                                               meta.tables["persistence_meta"].c.projection_version)))
-                    .mappings()
-                    .all()
+            await self._validate_schema(conn, create=True)
+
+    async def _open_reader(self):
+        """Open an existing database without writer ownership, DDL or registration."""
+        if self.memory:
+            raise ValueError("Read-only inspection requires an existing database.")
+        url, arguments = self.url, {}
+        if self.sqlite:
+            from pathlib import Path
+            from urllib.parse import quote
+            path = Path(self.url.database).expanduser().resolve()
+            if not path.is_file():
+                raise FileNotFoundError(f"Persistence database does not exist: {path}")
+            url = self.url.set(database="file:" + quote(str(path), safe="/"),
+                query={**self.url.query, "mode": "ro", "uri": "true"})
+            arguments = {"cached_statements": 0}
+        else:
+            arguments = {"server_settings": {"default_transaction_read_only": "on"}}
+        self.engine = create_async_engine(url, connect_args=arguments)
+        if self.sqlite:
+            @event.listens_for(self.engine.sync_engine, "connect")
+            def configure_reader(dbapi_connection, _):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA query_only=ON")
+                cursor.close()
+                dbapi_connection.isolation_level = None
+
+            @event.listens_for(self.engine.sync_engine, "begin")
+            def begin_reader(conn):
+                conn.exec_driver_sql("BEGIN")
+        async with self.engine.connect() as conn:
+            await self._validate_schema(conn, create=False)
+
+    async def _validate_schema(self, conn, *, create):
+        names = await conn.run_sync(lambda c: inspect(c).get_table_names())
+        if names:
+            if not set(meta.tables).issubset(names):
+                raise FormatError("Database is not a complete Persistence schema.")
+            info = (
+                (await conn.execute(select(meta.tables["persistence_meta"].c.format_version,
+                                           meta.tables["persistence_meta"].c.projection_version)))
+                .mappings()
+                .all()
+            )
+            if (
+                len(info) != 1
+                or info[0]["format_version"] != FORMAT_VERSION
+                or info[0]["projection_version"] != PROJECTION_VERSION
+            ):
+                raise FormatError(
+                    "Unsupported Persistence format/projection version."
                 )
-                if (
-                    len(info) != 1
-                    or info[0]["format_version"] != FORMAT_VERSION
-                    or info[0]["projection_version"] != PROJECTION_VERSION
-                ):
-                    raise FormatError(
-                        "Unsupported Persistence format/projection version."
-                    )
-                expected = {t.name: set(t.columns.keys()) for t in meta.tables.values()}
-                actual = await conn.run_sync(
-                    lambda c: {
-                        name: {col["name"] for col in inspect(c).get_columns(name)}
-                        for name in expected
-                    }
+            expected = {t.name: set(t.columns.keys()) for t in meta.tables.values()}
+            actual = await conn.run_sync(
+                lambda c: {
+                    name: {col["name"] for col in inspect(c).get_columns(name)}
+                    for name in expected
+                }
+            )
+            if actual != expected:
+                raise FormatError(
+                    "Persistence columns do not match the format version."
                 )
-                if actual != expected:
-                    raise FormatError(
-                        "Persistence columns do not match the format version."
-                    )
-            else:
-                await conn.run_sync(meta.create_all)
-                await conn.execute(
-                    insert(meta.tables["persistence_meta"]).values(
-                        id=1,
-                        format_version=FORMAT_VERSION,
-                        projection_version=PROJECTION_VERSION,
-                        last_store_order=0,
-                        store_id=uuid4().hex,
-                    )
+        else:
+            if not create:
+                raise FormatError("Database is not a complete Persistence schema.")
+            await conn.run_sync(meta.create_all)
+            await conn.execute(
+                insert(meta.tables["persistence_meta"]).values(
+                    id=1,
+                    format_version=FORMAT_VERSION,
+                    projection_version=PROJECTION_VERSION,
+                    last_store_order=0,
+                    store_id=uuid4().hex,
                 )
+            )
 
     async def close(self):
         if self._pg_lock is not None:

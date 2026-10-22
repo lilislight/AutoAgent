@@ -13,17 +13,19 @@ from ..runtime._context_index import context_previews
 from contextlib import AbstractAsyncContextManager, nullcontext
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
+from typing import Literal
 from uuid import uuid4
 
 from ..runtime._execution_index import ExecutionIndex
 from ..errors import RuntimeInfrastructureError, RuntimeTransitionError
-from ..operators import Operator
+from ..operators import Operator, ValueContract
 from ..operators.context import OperatorCallContext, operator_call_context
 from ..commands import SignalReceipt, SignalBatch, SelfHandle, OwnerHandle
 from ..commands.signals import SendSignalRequest, ReceiveSignalRequest
-from ..workflow import InputMappingContext
+from ..workflow import InputMappingContext, UserEventContext, UserEventSpec
 from ..commands import CancelReceipt, TimerRequest, TimerResult
 from ..runtime.clocks import unix_time_us
 from ..commands import CommandIR, RuntimeHandle, RuntimeObservation, ResumeReceipt
@@ -60,10 +62,13 @@ from ..workflow import (
     Capability,
     ErrorInfo,
     NodeIR,
-    OutputBindingContext,
     WorkflowIR,
 )
 from .node_executor import NodeExecutor, UserCallableCancelledError
+
+
+_USER_EVENT_CONTRACT = ValueContract.create(UserEventSpec, location="User Event")
+_log = logging.getLogger(__name__)
 
 
 CapabilityResolver = Callable[[Capability, object], Operator | Awaitable[Operator]]
@@ -95,8 +100,7 @@ class WorkflowExecutor:
         emit_user: EmitUserEvent,
         start_child: StartChild,
         ensure_child_durable: EnsureChildDurable,
-        max_node_executions_per_invocation: int,
-        capability_resolver: CapabilityResolver | None = None,
+        capability_resolvers: Mapping[str, CapabilityResolver] | None = None,
         suspend_command=None,
         clock_us=unix_time_us,
         status_runtime=None,
@@ -133,8 +137,7 @@ class WorkflowExecutor:
         self._start_child = start_child
         self._ensure_child_durable = ensure_child_durable
         self._child_admission = child_admission or (lambda *_: nullcontext())
-        self._max_node_executions = max_node_executions_per_invocation
-        self._capability_resolver = capability_resolver
+        self._capability_resolvers = capability_resolvers if capability_resolvers is not None else {}
         self._completion_locks: dict[str, asyncio.Lock] = {}
 
     def _execution_index(self, session_id):
@@ -170,7 +173,6 @@ class WorkflowExecutor:
                 if invocation is None or invocation.terminal or invocation.status == "settling":
                     return
                 index = self._execution_index(session_id)
-                execution_count = index.started_count
                 dispatchable = tuple(dict.fromkeys((*invocation.scheduler.ready, *index.running)))
                 for occurrence_id in dispatchable:
                     async with self._node_admission(session_id) as admitted:
@@ -180,21 +182,21 @@ class WorkflowExecutor:
                             continue
                         occurrence = invocation.scheduler.occurrences[occurrence_id]
                         node = workflow.node(occurrence.node_id)
-                        if occurrence.started_sequence is None and execution_count >= self._max_node_executions:
-                            await self._emit(
-                                session_id,
-                                invocation.id,
-                                InvocationFailed(
-                                    RuntimeErrorInfo(
-                                        "InvocationExecutionLimitExceeded",
-                                        "Invocation exceeded its Node execution limit.",
-                                    )
-                                ),
-                            )
+                        limit = node.resource.max_executions_per_invocation
+                        current = self._repository.state(session_id).invocation
+                        if (occurrence.started_sequence is None and limit is not None
+                                and current.scheduler.node_executions.get(node.id, 0) >= limit):
+                            await self._emit(session_id, invocation.id, InvocationFailed(RuntimeErrorInfo(
+                                "NodeExecutionLimitExceeded",
+                                f"Node {node.id!r} exceeded its limit of {limit} executions in this Invocation.",
+                            )))
                             return
                         if occurrence.started_sequence is None:
-                            await self._emit(session_id, invocation.id, NodeStarted(occurrence_id))
-                            execution_count += 1
+                            incoming = self._incoming_values(current, occurrence_id, detach=False)
+                            raw_input = {"invocation_input": current.input
+                                if node.input_mapping is not None or not incoming else None, "incoming": incoming}
+                            await self._emit(session_id, invocation.id, NodeStarted(occurrence_id, raw_input))
+                            incoming = raw_input = None
                         tasks[occurrence_id] = asyncio.create_task(
                             self._execute_occurrence(workflow, session_id, occurrence_id)
                         )
@@ -308,12 +310,14 @@ class WorkflowExecutor:
             if execution.fault is not None:
                 await self._finish_node_error(workflow, node, session_id, occurrence_id, execution.fault)
                 return
-            failed_call = next((call for call in self._occurrence_calls(session_id, occurrence_id)
-                if call.occurrence_id == occurrence_id and call.status == "failed"
+            latest_calls = {call.unit_index: call for call in self._occurrence_calls(session_id, occurrence_id)}
+            failed_call = next((call for call in latest_calls.values()
+                if call.status == "failed" and call.retry_at_us is None
                 and call.error is not None and call.error.type != "CancelledError"), None)
             if failed_call is not None:
-                await emit(NodeFaulted(occurrence_id, "operator", failed_call.error))
-                await self._finish_node_error(workflow, node, session_id, occurrence_id, failed_call.error)
+                error = replace(failed_call.error, phase="operator")
+                await emit(NodeFaulted(occurrence_id, "operator", error))
+                await self._finish_node_error(workflow, node, session_id, occurrence_id, error)
                 return
             resumed = next((item for item in self._occurrence_waits(session_id, occurrence_id)
                 if item.occurrence_id == occurrence_id and item.status == "resumed"), None)
@@ -334,10 +338,9 @@ class WorkflowExecutor:
                     values = [thaw(unit.input) for unit in child_plan.units]
                     mapped = self._restore_mapped(node, values if node.map is not None else values[0])
                 else:
-                    incoming = self._incoming_values(invocation, occurrence_id)
-                    invocation_input = (
-                        thaw(invocation.input) if node.input_mapping is not None or not incoming else None
-                    )
+                    saved = self._repository.state(session_id).invocation.scheduler.occurrences[occurrence_id].raw_input
+                    incoming = thaw(saved["incoming"])
+                    invocation_input = thaw(saved["invocation_input"])
                     mapped, duration = await self._node_executor.timed(self._node_executor.map_input, node,
                         invocation_input=invocation_input, incoming=incoming,
                         invocation_context=invocation.context, session_context=state.session.context)
@@ -374,23 +377,24 @@ class WorkflowExecutor:
                     output = await self._execute_command(node, occurrence_id, mapped, session_id)
                 else:
                     async def emit_chunk(chunk):
-                        try:
-                            await self._emit_user(session_id, invocation_id, "stream.chunk", chunk, occurrence_id)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:
-                            return
+                        call = OperatorCallContext.current()
+                        await self._emit_mapped_user_events(node, session_id=session_id,
+                            invocation_id=invocation_id, occurrence_id=occurrence_id,
+                            phase="chunk", value=chunk, invocation_context=invocation_context,
+                            session_context=session_context, call=call)
                     calls = self._occurrence_calls(session_id, occurrence_id)
                     completed = {item.unit_index: item for item in calls
                         if item.occurrence_id == occurrence_id and item.status == "completed"}
                     execution_options = {}
+                    execution_options['previous_calls'] = {item.unit_index: item for item in calls}
                     if type(self._node_executor) is NodeExecutor and (node.map is None or node.map.aggregate is None):
                         # This path forwards accepted immutable Call records below;
                         # no user aggregator consumes the transient Python outputs.
                         execution_options['_retain_outputs'] = False
                     result = await self._node_executor.execute(executable_node, occurrence_id, mapped,
                         invocation_context=invocation_context, session_context=session_context,
-                        on_call_event=emit, on_stream_chunk=emit_chunk, completed_calls=completed, aggregate=False,
+                        on_call_event=emit, on_stream_chunk=emit_chunk if node.user_events is not None else None,
+                        completed_calls=completed, aggregate=False,
                         **execution_options)
                     output, metrics = result.output, result.metrics
                     if node.map is not None and node.map.aggregate is not None:
@@ -417,7 +421,7 @@ class WorkflowExecutor:
             # Intermediate raw results are no longer needed once final output
             # exists. In particular, a small Map aggregate must not pin its rows
             # through later binding, routing or user-event hooks.
-            incoming = invocation_input = mapped = calls = completed = result = None
+            incoming = invocation_input = mapped = calls = completed = result = saved = latest_calls = None
             aggregate_context = accepted = record = resumed = execution = None
             state = invocation = occurrence = child_plan = values = None
             invocation_context = session_context = None
@@ -451,7 +455,7 @@ class WorkflowExecutor:
                         metrics={"call_count": metrics.call_count, "peak_parallelism": metrics.peak_parallelism} if metrics else None))
             latest = current = execution = patch = accepted = None
             await self._emit_mapped_user_events(node, session_id=session_id, invocation_id=invocation_id,
-                occurrence_id=occurrence_id, output=output, invocation_context=candidate_invocation,
+                occurrence_id=occurrence_id, phase="output", value=output, invocation_context=candidate_invocation,
                 session_context=candidate_session)
         except CommandSuspended:
             return
@@ -462,7 +466,7 @@ class WorkflowExecutor:
             current = latest.invocation
             if current is None or current.terminal or current.scheduler.occurrences[occurrence_id].status == "completed":
                 return
-            error = _runtime_error(exc)
+            error = replace(_runtime_error(exc), phase=phase)
             if isinstance(node.executable, (CommandIR, Wait)):
                 for call in self._occurrence_calls(session_id, occurrence_id):
                     if call.status == 'running':
@@ -949,7 +953,8 @@ class WorkflowExecutor:
             raise RuntimeError(
                 f"Capability {node.executable.id!r} has no enabled Operator."
             )
-        if self._capability_resolver is None:
+        resolver = self._capability_resolvers.get(node.executable.id)
+        if resolver is None:
             default = self._operator_registry.default_for_capability(
                 node.executable.id
             )
@@ -974,7 +979,7 @@ class WorkflowExecutor:
                 selected_operator = preferred[0]
         else:
             selected_operator = await self._node_executor.call_hook(
-                self._capability_resolver, node.executable, value
+                resolver, node.executable, value
             )
             registered_operator = next(
                 (
@@ -998,57 +1003,37 @@ class WorkflowExecutor:
         session_id: str,
         invocation_id: str,
         occurrence_id: str,
-        output: object,
+        phase: Literal["chunk", "output"],
+        value: object,
         invocation_context: object,
         session_context: object,
+        call: OperatorCallContext | None = None,
     ) -> None:
-        if not node.user_events:
+        if node.user_events is None:
             return
-        context = OutputBindingContext(
-            invocation_context=(
-                invocation_context if isinstance(invocation_context, Mapping) else {}
-            ),
-            session_context=(
-                session_context if isinstance(session_context, Mapping) else {}
-            ),
-            output=thaw(output),
-        )
-        for mapping in node.user_events:
-            try:
-                payload = await self._node_executor.call_hook(mapping.mapper, context)
-                payload = mapping.output_contract.to_record(payload)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                try:
-                    await self._emit_user(
-                        session_id,
-                        invocation_id,
-                        "user_event.mapping_failed",
-                        {
-                            "mapping_kind": mapping.kind,
-                            "error_type": type(error).__name__,
-                            "message": str(error) or type(error).__name__,
-                        },
-                        occurrence_id,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
-                continue
-            try:
-                await self._emit_user(
-                    session_id,
-                    invocation_id,
-                    mapping.kind,
-                    payload,
-                    occurrence_id,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+        try:
+            context = UserEventContext(
+                invocation_context=freeze(invocation_context if isinstance(invocation_context, Mapping) else {}),
+                session_context=freeze(session_context if isinstance(session_context, Mapping) else {}),
+                phase=phase, value=freeze(value), session_id=session_id,
+                invocation_id=invocation_id, node_id=node.id, occurrence_id=occurrence_id,
+                operator_id=call.operator_id if call is not None else None,
+                operator_call_id=call.operator_call_id if call is not None else None,
+                unit_index=call.unit_index if call is not None else None,
+            )
+            spec = await self._node_executor.call_hook(node.user_events, context)
+            if spec is None:
+                return
+            if not isinstance(spec, UserEventSpec):
+                raise TypeError("User Event Mapper must return UserEventSpec or None.")
+            record = _USER_EVENT_CONTRACT.to_record(spec)
+            await self._emit_user(session_id, invocation_id, record["kind"], record["payload"], occurrence_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _log.warning("User Event delivery failed: node=%s occurrence=%s phase=%s error=%s: %s",
+                        node.id, occurrence_id, phase, type(error).__name__, str(error))
+            _log.debug("User Event failure details", exc_info=True)
 
     async def _open_compiled(
         self,
@@ -1230,20 +1215,31 @@ class WorkflowExecutor:
         )
 
     @staticmethod
-    def _incoming_values(invocation, occurrence_id: str) -> dict[str, object]:
+    def _incoming_values(invocation, occurrence_id: str, *, detach=True) -> dict[str, object]:
         occurrence = invocation.scheduler.occurrences[occurrence_id]
+        materialize = thaw if detach else lambda value: value
         result: dict[str, object] = {}
         for activation in occurrence.activations:
             source = invocation.scheduler.occurrences[
                 activation.source_occurrence_id
             ]
-            result[activation.edge_id] = (
-                thaw(source.output)
-                if source.status == "completed"
-                else {"type": source.error.type, "message": source.error.message}
-                if source.error is not None
-                else None
-            )
+            if source.status == "completed":
+                result[activation.edge_id] = materialize(source.output)
+            elif source.error is not None:
+                latest_calls = {call.unit_index: call for call in invocation.scheduler.operator_calls.values()
+                    if call.occurrence_id == source.id}
+                failed_unit = next((call.unit_index for call in latest_calls.values()
+                    if call.status == "failed"
+                    and call.error is not None and source.error.phase == "operator"
+                    and call.error.type == source.error.type and call.error.message == source.error.message), None)
+                result[activation.edge_id] = {
+                    "node_id": source.node_id, "occurrence_id": source.id,
+                    "error": {"type": source.error.type, "message": source.error.message,
+                        "phase": source.error.phase, "unit_index": failed_unit},
+                    "input": materialize(source.raw_input),
+                }
+            else:
+                result[activation.edge_id] = None
         return result
 
 

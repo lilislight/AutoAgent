@@ -14,7 +14,7 @@ from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 16
+RUNTIME_EVENT_SCHEMA_VERSION = 17
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +63,49 @@ class InvocationStarted:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input", freeze(self.input))
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationForked:
+    """Initialize a new identity from a frozen, independently owned historical cut."""
+    kind: ClassVar[str] = 'invocation.forked'
+    workflow_id: str
+    workflow_revision_id: str
+    entry_node_id: str
+    source_session_id: str
+    source_invocation_id: str
+    source_sequence: int
+    source_event_id: str
+    source_root_invocation_id: str
+    root_invocation_id: str
+    source_call_ids: DurableValue = field(default_factory=dict)
+    inherited_occurrences: DurableValue = field(default_factory=dict)
+    initialization_events: int = 1
+
+    def __post_init__(self):
+        object.__setattr__(self, 'source_call_ids', freeze(self.source_call_ids))
+        object.__setattr__(self, 'inherited_occurrences', freeze(self.inherited_occurrences))
+
+
+@dataclass(frozen=True, slots=True)
+class ForkStateImported(InvocationForked):
+    kind: ClassVar[str] = 'fork.state_imported'
+
+
+@dataclass(frozen=True, slots=True)
+class ForkInitialized:
+    """Root boundary after every member of the new graph is initialized."""
+    kind: ClassVar[str] = 'fork.initialized'
+    root_invocation_id: str
+    session_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SignalInherited:
+    kind: ClassVar[str] = 'signal.inherited'
+    message_id: str
+    source_message_id: str
+    endpoint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +181,10 @@ class ChildCompacted:
 class NodeStarted:
     kind: ClassVar[str] = "node_occurrence.started"
     occurrence_id: str
+    input: DurableValue = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "input", freeze(self.input))
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +196,11 @@ class OperatorCallStarted:
     unit_index: int
     input: DurableValue
     queue_duration_ns: int = 0
+    retry_attempt: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.retry_attempt) is not int or self.retry_attempt < 0:
+            raise ValueError("retry_attempt must be nonnegative.")
         if self.unit_index < 0:
             raise ValueError("Operator Call unit_index cannot be negative.")
         object.__setattr__(self, "input", freeze(self.input))
@@ -173,6 +223,11 @@ class OperatorCallFailed:
     call_id: str
     error: RuntimeErrorInfo
     execution_duration_ns: int = 0
+    retry_at_us: int | None = None
+
+    def __post_init__(self):
+        if self.retry_at_us is not None and (type(self.retry_at_us) is not int or self.retry_at_us < 0):
+            raise ValueError("retry_at_us must be nonnegative or None.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,7 +495,10 @@ class NodeFaulted:
 
 
 RuntimeEventPayload: TypeAlias = (
-    GraphPauseRequested
+    InvocationForked
+    | ForkInitialized
+    | SignalInherited
+    | GraphPauseRequested
     | GraphPaused
     | GraphResumed
     | InputMapped
@@ -478,6 +536,8 @@ RuntimeEventPayload: TypeAlias = (
 )
 
 _PAYLOAD_TYPES = (
+    ForkStateImported, ForkInitialized, SignalInherited,
+    InvocationForked,
     GraphPauseRequested, GraphPaused, GraphResumed,
     InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
     SessionOpened,
@@ -535,6 +595,9 @@ class RuntimeEvent:
         if self.schema_version != RUNTIME_EVENT_SCHEMA_VERSION:
             raise ValueError("Unsupported Runtime Event schema.")
         validate_payload(self.payload)
+        if isinstance(self.payload, InvocationForked) and ((type(self.payload) is InvocationForked and self.sequence != 1) or
+                type(self.payload.source_sequence) is not int or self.payload.source_sequence < 1):
+            raise ValueError('Fork initialization requires branch Sequence #1 and a positive source Sequence.')
         if self.delta is not None and not isinstance(self.delta, StateDelta):
             raise TypeError("Runtime Event delta must be StateDelta or None.")
 
@@ -574,7 +637,9 @@ class RuntimeEvent:
 def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
     if isinstance(payload, (GraphPauseRequested, GraphPaused, GraphResumed)):
         return {}
-    if isinstance(payload, (RecoveryPrepared, InvocationReopened, ChildCompacted)):
+    if isinstance(payload, InvocationForked):
+        return {item.name:_encode_payload_value(getattr(payload,item.name)) for item in fields(payload)}
+    if isinstance(payload, (ForkInitialized, SignalInherited, RecoveryPrepared, InvocationReopened, ChildCompacted)):
         return {item.name: getattr(payload, item.name) for item in fields(payload)}
     if isinstance(payload, (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
         return {item.name: _encode_payload_value(getattr(payload, item.name)) for item in fields(payload)}
@@ -596,7 +661,7 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
             "reason": payload.reason,
         }
     if isinstance(payload, NodeStarted):
-        return {"occurrence_id": payload.occurrence_id}
+        return {"occurrence_id": payload.occurrence_id, "input": thaw(payload.input)}
     if isinstance(payload, CommandAwakened):
         return {"wait_id": payload.wait_id, "output": thaw(payload.output), "message_ids": list(payload.message_ids)}
     if isinstance(payload, WaitRequested):
@@ -667,7 +732,7 @@ def _payload_from_record(
             if "conditions" in values:
                 values["conditions"] = tuple(EdgeConditionResult(**item) for item in values["conditions"])
             return cls(**values)
-    for cls in (RecoveryPrepared, InvocationReopened):
+    for cls in (InvocationForked, ForkStateImported, ForkInitialized, SignalInherited, RecoveryPrepared, InvocationReopened):
         if event_name == cls.kind:
             return cls(**record)
     if event_name == ChildCompacted.kind:
@@ -695,7 +760,7 @@ def _payload_from_record(
             else None,
         )
     if event_name == NodeStarted.kind:
-        return NodeStarted(_required_string(record, "occurrence_id"))
+        return NodeStarted(_required_string(record, "occurrence_id"), _required_value(record, "input"))
     if event_name == CommandAwakened.kind:
         return CommandAwakened(record["wait_id"], record["output"], tuple(record["message_ids"]))
     if event_name == WaitRequested.kind:
@@ -901,6 +966,13 @@ def _duration(value: object) -> None:
 
 def validate_payload(payload: RuntimeEventPayload) -> None:
     """Validate small event-local data without traversing the Runtime State."""
+    if isinstance(payload, InvocationForked):
+        if type(payload.initialization_events) is not int or payload.initialization_events < 1:
+            raise ValueError('Fork initialization requires a positive Event count.')
+        if not isinstance(payload.source_call_ids,Mapping) or not isinstance(payload.inherited_occurrences,Mapping):
+            raise TypeError('Fork provenance must contain mappings.')
+    if isinstance(payload,ForkInitialized) and (type(payload.session_count) is not int or payload.session_count < 2):
+        raise ValueError('A graph Fork boundary requires at least two Sessions.')
     if isinstance(payload, (RecoveryPrepared, InvocationReopened)):
         if not isinstance(payload.request_id, str) or not payload.request_id.strip():
             raise ValueError('Recovery requires a request identity.')

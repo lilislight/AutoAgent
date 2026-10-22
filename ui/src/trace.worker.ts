@@ -17,6 +17,7 @@ self.onmessage=(event:MessageEvent)=>{
     else{const model=datasets.get(key);if(!model)throw new Error('Trace data is not loaded.');
       if(op==='data')value=model.data;
       else if(op==='overview')value=model.overview(args.observed);
+      else if(op==='activity')value=model.activityBins(args);
       else if(op==='apply'){const trace=model.apply(args as TraceDataset);value={trace,manifest:model.data.manifest,bytesDelta:model.bytesDelta};}
       else if(op==='page')value=model.page(args);
       else if(op==='position')value=model.position(args);

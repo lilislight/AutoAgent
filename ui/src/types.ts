@@ -91,7 +91,7 @@ export interface ExecutionActionInput {
   target_invocation_id?:string; wait_id?:string; endpoint?:string; source_id?:string; sequence?:number; expected_version?:number;
 }
 
-export type InspectorTab = 'Summary' | 'Input / Output' | 'Execution' | 'Definition' | 'Actions';
+export type InspectorTab = 'Summary' | 'Input / Output' | 'Execution' | 'Definition' | 'Actions' | 'Changes' | 'Details';
 export interface ExecutionRecordSelection { kind: 'node' | 'call' | 'wait' | 'edge'; id: string; section?: InspectorTab; waitId?: string }
 export type ExecutionView = 'graph' | 'timeline' | 'split';
 export type Selection = { kind: "node" | "edge" | "invocation" | "workflow"; id: string; section?: InspectorTab; record?: ExecutionRecordSelection } | null;
@@ -104,6 +104,7 @@ export interface LocationState {
   session: string | null;
   selection: Selection;
   executionView?: ExecutionView;
+  compareBase?: string;
 }
 
 export interface TraceRow {
@@ -174,6 +175,7 @@ export interface ExecutionFilters {
 }
 
 export interface ExecutionTrace {
+  fork?: ForkOrigin | null;
   source_id?: string;
   invocation_version?: number;
   observed_at_us: number;
@@ -185,6 +187,20 @@ export interface ExecutionTrace {
   child_count: number;
   frontier: number;
   view: "durable";
+}
+export interface ForkOrigin {
+  source_session_id:string; source_invocation_id:string; source_sequence:number; source_event_id:string;
+  source_root_invocation_id:string; root_invocation_id:string;
+  inherited_occurrences:Record<string,string>;
+}
+export interface ForkPlan {
+  available:boolean; reason:string|null; code:string|null; invocation_id:string; sequence:number;
+  members?:{source_invocation_id:string;source_session_id:string;source_sequence:number}[];
+  replay_calls?:{operator_id:string;call_id:string;occurrence_id:string}[];
+}
+export interface AcceptedFork extends AcceptedExecution {
+  root_invocation_id:string; selected_invocation_id:string; selected_session_id:string;
+  source_invocation_id:string; source_sequence:number;
 }
 export interface RecordedValue { available: boolean; value: unknown }
 export interface ExecutionFamily {
@@ -205,6 +221,7 @@ export interface TimelineIdle { state: 'waiting' | 'paused'; since_at_us: number
 export interface TimelineRow extends TraceRow {
   id: string; kind: 'node' | 'call' | 'wait'; occurrence_id: string;
   start_at_us: number; end_at_us: number | null; ordinal?: number; wait_kind?: string;
+  timeline_visible?: boolean;
   activations?: { edge_id: string; source_occurrence_id: string }[];
   wait_count?: number;
   wait?: TimelineRow | null;
@@ -228,6 +245,7 @@ export interface ReplayEvent extends TimelineMarker {
   routes: Omit<ExecutionTrace['active_routes'][number], 'status'>[];
   child_ids: string[];
   call_starts: { node_id: string; count: number }[];
+  initial_edges?: ExecutionTrace['edges'];
 }
 export interface ReplayWindow {
   history_complete: boolean;
@@ -255,3 +273,32 @@ export interface TraceHead { invocation_id: string; root_invocation_id: string; 
 export interface TraceDatasetPage { items: (TimelineRow | TimelineMarker | ReplayEvent | TraceEdgeUpdate)[]; snapshot_id: string; section: string; page: number; next_page: number | null }
 export interface TraceDataset { manifest: TraceDatasetManifest; node: TimelineRow[]; call: TimelineRow[]; wait: TimelineRow[]; event: TimelineMarker[]; edge?: TraceEdgeUpdate[] }
 export interface LocalReplayResult { frame: ExecutionTrace; marker: TimelineMarker; previous: TimelineMarker | null; next: TimelineMarker | null; cursorTime: number }
+
+export type RevisionChangeStatus = 'added' | 'removed' | 'modified';
+export interface RevisionChange { kind: 'workflow' | 'node' | 'edge'; id: string; status: RevisionChangeStatus; fields: string[]; ordinal: number }
+export interface RevisionComparisonPage {
+  items: RevisionChange[]; next_cursor: string | null; total_count: number; frontier: number;
+  counts: Record<RevisionChangeStatus | 'workflow' | 'node' | 'edge', number>;
+}
+export interface ComparisonObject { fields_only?: boolean; base: { present: boolean; value: unknown }; target: { present: boolean; value: unknown } }
+export interface SessionInformation {
+  session_id: string; created_at_us: number | null; updated_at_us: number | null;
+  latest_invocation_id: string | null; parent_invocation_id: string | null;
+  invocation_count: number; workflow_count: number; revision_count: number; durable_sequence: number; frontier: number;
+}
+export interface SessionHistoryRow extends TraceRow { ordinal: number; opening_sequence: number | null; recovery_count: number }
+export interface SessionWorkflow {
+  workflow_id: string; workflow_version: string; workflow_revision_id: string; invocation_count: number;
+  first_sequence: number; first_started_at_us: number | null; last_started_at_us: number | null; runnable: boolean;
+}
+export interface MetadataPage<T> { items: T[]; next_cursor: string | null; total_count: number; frontier: number }
+export interface CheckpointMember {
+  session_id: string; invocation_id: string | null; workflow_revision_id: string | null; sequence: number;
+}
+export interface SessionCheckpoint {
+  checkpoint_id: string; root_session_id: string; captured_at_us: number; digest: string;
+  pinned: boolean; created_reason: string; members: CheckpointMember[]; sequence: number;
+}
+export interface CheckpointDetails extends Omit<SessionCheckpoint, 'sequence'> {
+  delete_blockers: string[]; deletable: boolean;
+}

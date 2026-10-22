@@ -42,6 +42,49 @@ class TimelineQueries:
         from .replay import replay_window
         return await replay_window(self, iid, **position)
 
+    def _wait_end(self, table, iid):
+        changes = meta.tables['graph_changes']
+        cancelled = select(func.max(changes.c.occurred_at_us)).where(
+            changes.c.invocation_id == iid,changes.c.entity_type == 'wait',changes.c.entity_id == table.c.wait_id,
+            changes.c.change['status'].as_string() == 'cancelled').correlate(table).scalar_subquery()
+        return case((table.c.status == 'cancelled',cancelled),else_=table.c.resumed_at_us)
+
+    def _timeline_visible(self, kind, table, iid, *, end=None):
+        """Inherited facts feed Graph/Inspector, but are not work done in this branch."""
+        changes, events = meta.tables['graph_changes'], meta.tables['runtime_events']
+        bootstrap = ('invocation.forked', 'fork.state_imported')
+        inherited_node = select(changes.c.event_id).join(events,changes.c.event_id == events.c.event_id).where(
+            changes.c.invocation_id == iid,changes.c.entity_type == 'node',
+            changes.c.entity_id == table.c.occurrence_id,
+            changes.c.change['status'].as_string().in_(('completed','failed','cancelled','skipped')),
+            events.c.event_name.in_(bootstrap)).correlate(table).exists()
+        if kind == 'node':
+            return ~inherited_node
+        reference = table.c.input_ref if kind == 'call' else table.c.request_ref
+        imported_at = select(events.c.occurred_at_us).where(reference['kind'].as_string() == 'runtime_event',
+            events.c.event_id == reference['id'].as_string(),events.c.event_name.in_(bootstrap)
+        ).correlate(table).scalar_subquery()
+        # A null imported Input/Wait request has no value reference. A real new
+        # Call/Wait always records its start/request Event, even for JSON null.
+        fork_at = select(events.c.occurred_at_us).where(events.c.invocation_id == iid,
+            events.c.sequence == 1,events.c.event_name == 'invocation.forked').correlate(table).scalar_subquery()
+        started = table.c.started_at_us if kind == 'call' else table.c.created_at_us
+        imported_at = func.coalesce(imported_at,case((and_(reference.is_(None),started == fork_at),fork_at)))
+        def local_result(value):
+            return select(events.c.event_id).where(value['kind'].as_string() == 'runtime_event',
+                events.c.event_id == value['id'].as_string(),events.c.invocation_id == iid,
+                events.c.event_name.not_in(bootstrap)).correlate(table).exists()
+        if kind == 'call':
+            # An unknown ordinary Call is replayed with a new Call ID. A durable
+            # command can instead keep waiting and finish under its imported ID.
+            continuing = and_(table.c.operator_id.startswith('system_command:',autoescape=True),or_(
+                table.c.status == 'running',table.c.completed_at_us > imported_at,
+                local_result(table.c.output_ref),local_result(table.c.error_ref)))
+        else:
+            continuing = or_(table.c.status == 'waiting',end > imported_at,
+                local_result(table.c.response_ref))
+        return and_(~inherited_node,func.coalesce(or_(imported_at.is_(None),continuing),False))
+
     def spans(self, kind, iid, *, after_order=None):
         """Select timing columns explicitly, keeping references off Timeline pages."""
         if kind not in ('node', 'call', 'wait'):
@@ -52,9 +95,9 @@ class TimelineQueries:
             calls = meta.tables['operator_calls']
             waits = meta.tables['waits']
             call_count = select(func.count()).where(calls.c.invocation_id == iid,
-                calls.c.occurrence_id == t.c.occurrence_id).correlate(t).scalar_subquery()
+                calls.c.occurrence_id == t.c.occurrence_id,self._timeline_visible('call',calls,iid)).correlate(t).scalar_subquery()
             wait_count = select(func.count()).where(waits.c.invocation_id == iid,
-                waits.c.occurrence_id == t.c.occurrence_id).correlate(t).scalar_subquery()
+                waits.c.occurrence_id == t.c.occurrence_id,self._timeline_visible('wait',waits,iid,end=self._wait_end(waits,iid))).correlate(t).scalar_subquery()
             begin = func.coalesce(t.c.started_at_us, t.c.ready_at_us, t.c.completed_at_us)
             end, identity = t.c.completed_at_us, t.c.occurrence_id
             order = func.coalesce(t.c.ready_at_us, t.c.started_at_us, t.c.completed_at_us)
@@ -68,17 +111,13 @@ class TimelineQueries:
                        t.c.queue_duration_ns, t.c.execution_duration_ns, t.c.error_type, t.c.error_code]
         else:
             begin, identity, order = t.c.created_at_us, t.c.wait_id, t.c.created_at_us
-            g = meta.tables['graph_changes']
             # A cancelled Wait has no resumed_at_us. Its cancellation boundary
             # is recorded in the lightweight history, not the Invocation end.
-            cancelled = select(func.max(g.c.occurred_at_us)).where(
-                g.c.invocation_id == iid, g.c.entity_type == 'wait', g.c.entity_id == identity,
-                g.c.change['status'].as_string() == 'cancelled',
-            ).correlate(t).scalar_subquery()
-            end = case((t.c.status == 'cancelled', cancelled), else_=t.c.resumed_at_us)
+            end = self._wait_end(t,iid)
             columns = [identity, t.c.kind.label('wait_kind'), t.c.created_at_us, t.c.resumed_at_us, t.c.deadline_at_us]
         statement = select(*common, *columns, identity.label('id'), begin.label('start_at_us'),
-                           end.label('end_at_us'), order.label('_order')).where(t.c.invocation_id == iid)
+                           end.label('end_at_us'), order.label('_order'),
+                           self._timeline_visible(kind,t,iid,end=end).label('timeline_visible')).where(t.c.invocation_id == iid)
         if after_order is not None:
             statement = statement.where(t.c.updated_store_order > after_order)
         return statement.subquery()
@@ -98,7 +137,7 @@ class TimelineQueries:
             spans = self.spans(kind, iid)
             statement = select(func.min(spans.c.start_at_us),
                 func.max(func.coalesce(spans.c.end_at_us, spans.c.start_at_us)),
-                func.count(), func.count(spans.c.start_at_us))
+                func.count(), func.count(spans.c.start_at_us)).where(spans.c.timeline_visible)
             if kind == 'node':
                 statement = statement.where(spans.c.status != 'skipped')
             row = (await conn.execute(statement)).one()
@@ -115,13 +154,13 @@ class TimelineQueries:
                    *([observed] if not terminal and start is not None else [])], default=start)
         bins = [0] * OVERVIEW_BINS
         if start is not None:
-            nodes = meta.tables['node_executions']
-            begin = func.coalesce(nodes.c.started_at_us, nodes.c.ready_at_us, nodes.c.completed_at_us)
+            nodes = self.spans('node',iid)
+            begin = nodes.c.start_at_us
             # Fixed-size SQL aggregation covers the whole history, including
             # Nodes outside the current page. No Event or value is loaded.
             bucket = cast(func.floor((begin - start) * 1.0 * OVERVIEW_BINS / max(1, end - start)), Integer)
             histogram = select(bucket.label('bucket'), func.count().label('count')).where(
-                nodes.c.invocation_id == iid, nodes.c.status != 'skipped', begin.is_not(None),
+                nodes.c.timeline_visible,nodes.c.status != 'skipped', begin.is_not(None),
             ).group_by(bucket)
             for row in (await conn.execute(histogram)).mappings():
                 bins[max(0, min(OVERVIEW_BINS - 1, row['bucket']))] += row['count']
@@ -135,7 +174,7 @@ class TimelineQueries:
         waits = {}
         if ids:
             spans = self.spans('wait', iid)
-            for row in (await conn.execute(select(spans).where(spans.c.id.in_(ids)))).mappings():
+            for row in (await conn.execute(select(spans).where(spans.c.id.in_(ids),spans.c.timeline_visible))).mappings():
                 waits[row['id']] = timing_item(row, 'wait')
         for call in calls:
             wait = waits.get(call['id'])
@@ -160,7 +199,7 @@ class TimelineQueries:
                     return None
             # Half-open windows include crossing spans and instantaneous records,
             # but exclude a completed span ending exactly at the left boundary.
-            predicates = [overlaps(spans, kind, start_us, end_us)]
+            predicates = [spans.c.timeline_visible,overlaps(spans, kind, start_us, end_us)]
             if kind == 'node':
                 predicates.append(spans.c.status != 'skipped')
             if occurrence_id is not None:
@@ -180,6 +219,7 @@ class TimelineQueries:
                 ranked = select(calls, func.row_number().over(partition_by=calls.c.occurrence_id,
                     order_by=(calls.c._order, calls.c.id)).label('_rank')).where(
                         calls.c.occurrence_id.in_([row['id'] for row in items]),
+                        calls.c.timeline_visible,
                         overlaps(calls, 'call', start_us, end_us),
                     ).subquery()
                 previews = [timing_item(row, 'call') for row in (await conn.execute(select(ranked)
@@ -204,7 +244,7 @@ class TimelineQueries:
         if page_index is not None and (type(page_index) is not int or not 0 <= page_index <= MAX_TIME):
             raise ValueError('Invalid page index.')
         spans = self.spans(kind, iid)
-        predicates = [overlaps(spans, kind, start_us, end_us)]
+        predicates = [spans.c.timeline_visible,overlaps(spans, kind, start_us, end_us)]
         if kind == 'node':
             predicates.append(spans.c.status != 'skipped')
         if occurrence_id is not None:
@@ -318,7 +358,7 @@ class TimelineQueries:
         headers = select(e.c.event_id, e.c.event_name, e.c.sequence, e.c.occurred_at_us).where(e.c.invocation_id == iid)
         first = (await conn.execute(headers.order_by(e.c.sequence).limit(1))).mappings().first()
         last = (await conn.execute(headers.order_by(e.c.sequence.desc()).limit(1))).mappings().first()
-        if first is None or first['event_name'] != 'invocation.started':
+        if first is None or first['event_name'] not in ('invocation.started','invocation.forked'):
             return {'history_complete': False, 'trace': None, 'boundary': None, 'previous': None, 'next': None, 'first': None, 'last': dict(last) if last else None, 'frontier': frontier}
         target = headers
         if sequence is not None:
@@ -365,20 +405,8 @@ class TimelineQueries:
         decisions = select(edge_id.label('edge_id'), selected.label('condition_result'),
             func.row_number().over(partition_by=edge_id, order_by=(g.c.sequence.desc(), g.c.change_index.desc())).label('_rank')
         ).where(g.c.invocation_id == iid, g.c.sequence <= seq, g.c.entity_type == 'edge', edge_id.is_not(None), selected.is_not(None)).subquery()
-        evaluations, events = meta.tables['edge_evaluations'], meta.tables['runtime_events']
-        ranked_evaluations = select(*(evaluations.c[name] for name in ('edge_id', 'condition_result',
-            'event_id', 'result_index', 'source_occurrence_id', 'source_status', 'duration_ns')),
-            events.c.sequence, events.c.occurred_at_us,
-            func.count().over(partition_by=evaluations.c.edge_id).label('evaluations'),
-            func.row_number().over(partition_by=evaluations.c.edge_id,
-                order_by=(events.c.sequence.desc(), evaluations.c.result_index.desc())).label('_rank')
-        ).join(events, evaluations.c.event_id == events.c.event_id).where(
-            evaluations.c.invocation_id == iid, events.c.sequence <= seq).subquery()
-        by_edge = {}
-        for row in (await conn.execute(select(*(c for c in ranked_evaluations.c if c.name != '_rank')).where(
-            ranked_evaluations.c._rank == 1))).mappings():
-            by_edge[row['edge_id']] = {'edge_id': row['edge_id'], 'condition_result': row['condition_result'],
-                'evaluations': row['evaluations'], 'evaluation': dict(row, invocation_id=iid, values=[])}
+        from .tracing import edge_states as inherited_edge_states
+        by_edge = {row['edge_id']:row for row in await inherited_edge_states(self.storage,conn,iid,sequence=seq,details=True)}
         for row in (await conn.execute(select(decisions.c.edge_id, decisions.c.condition_result).where(decisions.c._rank == 1))).mappings():
             by_edge.setdefault(row['edge_id'], {'edge_id': row['edge_id'], 'evaluations': 0}).update(condition_result=row['condition_result'])
         edge_states = list(by_edge.values())
@@ -421,16 +449,19 @@ class TimelineQueries:
                 raise ValueError('Invalid Edge evaluation identity.') from None
             edges, events, nodes = (meta.tables[n] for n in ('edge_evaluations', 'runtime_events', 'node_executions'))
             async with self.queries.view() as (conn, _, _, _):
+                from .tracing import edge_scope
+                scope, position = await edge_scope(self.storage,conn,iid)
                 row = (await conn.execute(select(*edges.c, events.c.sequence, events.c.occurred_at_us,
-                    nodes.c.node_id).join(events, edges.c.event_id == events.c.event_id)
+                    nodes.c.node_id,position.label('_position')).join(events, edges.c.event_id == events.c.event_id)
                     .join(nodes, and_(nodes.c.invocation_id == iid, nodes.c.occurrence_id == edges.c.source_occurrence_id))
-                    .where(edges.c.invocation_id == iid, edges.c.event_id == event_id, edges.c.result_index == index))).mappings().first()
+                    .where(scope, edges.c.event_id == event_id, edges.c.result_index == index))).mappings().first()
                 if row is None:
                     return None
                 result = summary(row)
+                result.update(invocation_id=iid,inherited=row['invocation_id'] != iid)
                 result['ordinal'] = 1 + await conn.scalar(select(func.count()).select_from(edges.join(events, edges.c.event_id == events.c.event_id)).where(
-                    edges.c.invocation_id == iid, edges.c.edge_id == row['edge_id'],
-                    tuple_(events.c.sequence, edges.c.result_index) < (row['sequence'], row['result_index'])))
+                    scope, edges.c.edge_id == row['edge_id'],
+                    tuple_(position, edges.c.result_index) < (row['_position'], row['result_index'])))
                 return result
         if kind not in ('node', 'call', 'wait'):
             raise ValueError('Unknown execution record kind.')
@@ -444,6 +475,9 @@ class TimelineQueries:
                 result = (await TraceQueries(self.queries)._node_summaries(conn, [row]))[0]
                 spans = self.spans('node', iid)
                 result['ordinal'] = await conn.scalar(select(spans.c.ordinal).where(spans.c.id == identity))
+                from .tracing import fork_metadata, inherited_metadata
+                origin = await fork_metadata(self.storage,conn,iid)
+                result['inherited_from'] = await inherited_metadata(self.storage,conn,iid,kind,row,origin)
                 return result
             result = summary(row)
             nodes = meta.tables['node_executions']
@@ -452,4 +486,7 @@ class TimelineQueries:
             if kind == 'wait':
                 spans = self.spans('wait', iid)
                 result['end_at_us'] = await conn.scalar(select(spans.c.end_at_us).where(spans.c.id == identity))
+            from .tracing import fork_metadata, inherited_metadata
+            origin = await fork_metadata(self.storage,conn,iid)
+            result['inherited_from'] = await inherited_metadata(self.storage,conn,iid,kind,row,origin)
             return result

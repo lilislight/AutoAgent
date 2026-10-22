@@ -117,7 +117,7 @@ class TraceDatasets:
                                        nodes=[], edges=[], active_routes=[], child_count=0, last_event=None)
                         first = (await conn.execute(select(events.c.event_name).where(events.c.invocation_id == iid,
                             events.c.sequence <= upper).order_by(events.c.sequence).limit(1))).scalar()
-                        history_complete = first == 'invocation.started'
+                        history_complete = first in ('invocation.started','invocation.forked')
                         overview = base['manifest']['overview'] if base else await timeline._overview(conn, frontier, iid)
                     else:
                         initial, history_complete = None, None
@@ -152,7 +152,7 @@ class TraceDatasets:
                         if not replay:
                             batch = [{key: value for key, value in row.items() if value is not None} for row in batch]
                         if replay:
-                            batch = list((await replay_events(conn, iid, batch)).values())
+                            batch = list((await replay_events(conn, iid, batch, self.queries.storage)).values())
                         await write('event', batch)
                     manifest = dict(schema_version=2, source_id=store_id, invocation_id=iid, snapshot_id=uuid4().hex,
                         version=f"2:{(trace['last_event'] or {}).get('event_id', iid)}:{trace['frontier']}:{0 if trace['invocation']['status'] in ('completed','failed','cancelled') else trace['observed_at_us']}",
@@ -178,7 +178,8 @@ class TraceDatasets:
         revision = (await conn.execute(select(definitions.c.workflow_id, definitions.c.workflow_version).where(definitions.c.revision_id == inv['workflow_revision_id']))).mappings().one()
         last = (await conn.execute(select(events.c.event_id, events.c.event_name, events.c.sequence, events.c.occurred_at_us).where(events.c.invocation_id == iid).order_by(events.c.sequence.desc()).limit(1))).mappings().first()
         children = await conn.scalar(select(func.count()).select_from(invs).where(invs.c.parent_invocation_id == iid))
-        return dict(invocation=summary(inv) | dict(revision), nodes=[], edges=[], active_routes=[], child_count=children, frontier=frontier, last_event=dict(last) if last else None, observed_at_us=time.time_ns() // 1000, view='durable')
+        from .tracing import fork_metadata
+        return dict(invocation=summary(inv) | dict(revision), nodes=[], edges=[], active_routes=[], child_count=children, frontier=frontier, last_event=dict(last) if last else None, observed_at_us=time.time_ns() // 1000, view='durable',fork=await fork_metadata(self.queries.storage,conn,iid,occurrences=True))
 
     def _overview_header(self, trace):
         inv = trace['invocation']

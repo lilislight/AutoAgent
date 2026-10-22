@@ -41,9 +41,10 @@ class Entry:
 class Writer:
     """All mutable state and SQLAlchemy objects belong to this dedicated loop."""
 
-    def __init__(self, url, config):
+    def __init__(self, url, config, *, read_only=False):
         self.config = config
-        self.storage = Storage(url)
+        self.read_only = read_only
+        self.storage = Storage(url, read_only=read_only)
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
             target=self._thread_main, name="autoagent-persistence", daemon=True
@@ -84,7 +85,8 @@ class Writer:
                 self.store_order = await conn.scalar(
                     select(meta.tables["persistence_meta"].c.last_store_order)
                 )
-            self.task = asyncio.create_task(self._worker())
+            if not self.read_only:
+                self.task = asyncio.create_task(self._worker())
         except BaseException:
             await self.storage.close()
             self.executor.shutdown(wait=True)
@@ -122,6 +124,8 @@ class Writer:
             raise
 
     def check_open(self):
+        if self.read_only:
+            raise PersistenceError("Persistence is read-only.")
         if self.fault is not None:
             raise PersistenceError("Persistence writer faulted.") from self.fault
         if self.state != "open":

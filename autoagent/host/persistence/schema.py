@@ -4,6 +4,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    false,
     CheckConstraint,
     Column,
     ForeignKey,
@@ -25,13 +26,13 @@ J = JSON(none_as_null=True).with_variant(
 B = BigInteger().with_variant(Integer(), "sqlite")
 
 
-def c(name, type_=Text, nullable=True, pk=False, fk=None):
+def c(name, type_=Text, nullable=True, pk=False, fk=None, **options):
     # Cursor comparisons and accepted overlays must use the same ordering on
     # databases whose default text collations differ.
     if type_ is Text:
         type_ = Text(collation="C").with_variant(Text(collation="BINARY"), "sqlite")
     args = [ForeignKey(fk)] if fk else []
-    return Column(name, type_, *args, nullable=nullable, primary_key=pk)
+    return Column(name, type_, *args, nullable=nullable, primary_key=pk, **options)
 
 
 def table(name, *cols):
@@ -139,6 +140,8 @@ table(
     c("root_session_id", Text, False),
     c("captured_at_us", B, False),
     c("digest", Text, False),
+    c("pinned", Boolean, False, server_default=false()),
+    c("created_reason", Text, False, server_default="automatic"),
     c("checkpoint_text", Text, False),
     UniqueConstraint("digest"),
 )
@@ -347,6 +350,9 @@ indexes = {
     ],
     "checkpoints": [
         ("checkpoint_root_time", ["root_session_id", "captured_at_us", "checkpoint_id"])
+    ],
+    "checkpoint_sessions": [
+        ("checkpoint_session_position", ["session_id", "sequence", "checkpoint_id"])
     ],
     "invocations": [
         (

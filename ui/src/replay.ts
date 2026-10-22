@@ -87,6 +87,7 @@ export class ReplayAccumulator {
   }
   apply(event: ReplayWindow['events'][number]) {
     this.boundary = event;
+    if (event.initial_edges) this.edges = new Map(event.initial_edges.map(row=>[row.edge_id,{...row}]));
     for (const started of event.call_starts) this.callCounts.set(started.node_id, (this.callCounts.get(started.node_id) ?? 0) + started.count);
     for (const evaluation of event.evaluations) {
       const previous = this.edges.get(evaluation.edge_id);

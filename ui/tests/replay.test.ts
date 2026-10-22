@@ -50,3 +50,13 @@ test('Map Call counts follow start boundaries across batches and rewind without 
   assert.equal(replayFrame(batch,4)!.nodes[0].call_count,10);
   assert.equal(batch.baseline.trace.nodes[0].call_count,7);
 });
+test('Fork initialization seeds inherited Edge counts once and new evaluations remain independently replayable', () => {
+  const inherited=event(1,[]);
+  inherited.initial_edges=[{edge_id:'choice',condition_result:true,evaluations:17}];
+  const next=event(2,[]);next.evaluations=[{edge_id:'choice',condition_result:false}];
+  const batch={...window,baseline:{...window.baseline!,trace:{...trace,edges:[]}},events:[inherited,next]};
+  assert.deepEqual(replayFrame(batch,1)!.edges,[{edge_id:'choice',condition_result:true,evaluations:17}]);
+  assert.equal(replayFrame(batch,2)!.edges[0].evaluations,18);
+  assert.equal(replayFrame(batch,2)!.edges[0].condition_result,false);
+  assert.equal(replayFrame(batch,1)!.edges[0].evaluations,17);
+});

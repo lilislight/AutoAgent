@@ -39,6 +39,20 @@ class SourceReader:
     async def read(self, path=(), *, deep=True):
         return await self._read(self.record, self.refs, tuple(path), deep, frozenset())
 
+    async def read_pointer(self, pointer=None, *, base=()):
+        """Resolve an RFC 6901 path, hydrating only the selected subtree."""
+        path = tuple(base)
+        for token in pointer_tokens(pointer):
+            parent = await self.read(path, deep=False)
+            if isinstance(parent, list):
+                if not token.isascii() or not token.isdigit() or len(token) > 1 and token.startswith("0"):
+                    raise KeyError(token)
+                token = int(token)
+            elif not isinstance(parent, dict):
+                raise KeyError(token)
+            path += (token,)
+        return await self.read(path)
+
     async def present(self, path):
         return await self._read(self.record, self.refs, tuple(path), "present", frozenset())
 
@@ -80,3 +94,15 @@ class SourceReader:
             child = await self._read(None, {"": digest}, (), True, loading)
             value = assign(value, key, child)
         return value
+
+
+def pointer_tokens(pointer):
+    if pointer in (None, ""):
+        return ()
+    if not isinstance(pointer, str) or not pointer.startswith("/") or len(pointer) > 8192:
+        raise ValueError("JSON Pointer must be empty or start with '/', with at most 8192 characters.")
+    tokens = pointer[1:].split("/")
+    import re
+    if any(re.search(r"~(?![01])", token) for token in tokens):
+        raise ValueError("Invalid JSON Pointer escape; use ~0 for '~' and ~1 for '/'.")
+    return tuple(token.replace("~1", "/").replace("~0", "~") for token in tokens)

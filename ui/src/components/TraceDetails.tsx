@@ -23,11 +23,13 @@ export function StatusBadge({ row }: { row: Pick<TraceRow, "status" | "control_s
   return <span className={`status-badge status-${status}`}>{status}</span>;
 }
 export function RowDetails({ row }: { row: TraceRow }) {
+  const source=row.inherited_from as {invocation_id:string;identity:string;through_sequence:number}|null|undefined;
   const navigation = useExecutionNavigation();
   const open = row.completed_at_us == null && ['ready', 'running', 'waiting', 'settling'].includes(row.status ?? '');
   const nowUs=useObservationClock(navigation.clock,navigation.active && !navigation.replaying && open,0);
   const elapsed = row.started_at_us != null ? row.completed_at_us != null ? row.completed_at_us - row.started_at_us : open && nowUs>0 ? Math.max(0,nowUs-row.started_at_us) : null : null;
   return <><dl className="trace-facts">
+    {source?<><dt>Inherited from</dt><dd><CopyId value={source.invocation_id}/></dd><dt>Source record</dt><dd><CopyId value={source.identity}/></dd><dt>Source boundary</dt><dd>Event #{source.through_sequence}</dd></>:null}
     {row.occurrence_id ? <><dt>Occurrence ID</dt><dd><CopyId value={row.occurrence_id} /></dd></> : null}
     {row.call_id ? <><dt>Call ID</dt><dd><CopyId value={row.call_id} /></dd><dt>{isSystemCall(row) ? 'Command' : 'Operator'}</dt><dd>{row.operator_id}</dd><dt>Unit index</dt><dd>{String(row.unit_index)}</dd></> : null}
     {row.phase && row.phase !== 'none' ? <><dt>Phase</dt><dd>{String(row.phase)}</dd></> : null}

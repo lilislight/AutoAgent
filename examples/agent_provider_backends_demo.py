@@ -14,10 +14,11 @@ import json
 import os
 from unittest.mock import patch
 
-from autoagent import AutoAgentApp, Node, ValueContract, Workflow
+from autoagent import AutoAgentApp, Node, Stream, ValueContract, Workflow
 from autoagent.agent import (
     DeepSeekProvider, DeepSeekProviderConfig, LiteLLMProvider, LiteLLMProviderConfig,
-    LLMMessage, LLMProviderOptions, LLMRequest, LLMResponse, TextContent,
+    LLM_CALL, LLMMessage, LLMProviderOptions, LLMRequest, LLMResponse,
+    LLMStreamReducer, TextContent, llm_call_operator,
 )
 
 
@@ -49,10 +50,12 @@ async def main(backend: str):
             yield
 
     app = AutoAgentApp(runtime_lifespan=resources)
+    app.register_capability(LLM_CALL)
+    app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
     try:
         with patch.object(httpx.AsyncClient, "send", send):
             await app.aprepare()
-            result = await app.ainvoke(Workflow("provider_demo", nodes=[Node("llm", provider.ainvoke)]), LLMRequest(
+            result = await app.ainvoke(Workflow("provider_demo", nodes=[Node("llm", LLM_CALL, stream=Stream(LLMStreamReducer()))]), LLMRequest(
                 model="deepseek-flash", input=(LLMMessage(role="user", content=(TextContent(text="Hello"),)),),
                 provider_options=LLMProviderOptions(protocol="openai.responses", values={"reasoning": {"effort": "max"}})))
             if result.status != "completed":

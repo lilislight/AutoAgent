@@ -178,10 +178,10 @@ class ProjectionBatch:
             {"session_id": sid},
             {
                 "created_at_us": stamp
-                if name == "session.opened"
+                if name in ("session.opened", "invocation.forked")
                 else (sess or {}).get("created_at_us"),
                 "latest_invocation_id": iid
-                if name == "invocation.started"
+                if name in ("invocation.started", "invocation.forked")
                 else (sess or {}).get("latest_invocation_id"),
                 "durable_sequence": seq,
                 "history_start_sequence": (sess or {}).get("history_start_sequence", 1),
@@ -195,7 +195,7 @@ class ProjectionBatch:
             if values:
                 changes.append((typ, identity, values))
 
-        if name == "invocation.started":
+        if name in ("invocation.started", "invocation.forked"):
             previous = await self.get("invocations", invocation_id=iid)
             await self.put(
                 "invocations",
@@ -213,7 +213,7 @@ class ProjectionBatch:
                     "recovery_pending": False,
                     "started_at_us": stamp,
                     "last_sequence": seq,
-                    "input_ref": ref("payload", "input"),
+                    "input_ref": ref("payload", "input") if name == 'invocation.started' else ref('delta','operations',1,'value','input'),
                 },
             )
 
@@ -235,6 +235,24 @@ class ProjectionBatch:
             defaults["phase"] = workspace.get("phase", "none")
             if previous is None and 'input_mapped' in workspace.get('completed_stages', ()):
                 defaults['input_ref'] = ref(*path, 'execution', 'mapped_input')
+            if name in ('invocation.forked','fork.state_imported'):
+                for field in ('output','metrics','error'):
+                    if value.get(field) is not None:
+                        defaults[field+'_ref'] = ref(*path,field)
+                original = await self.get('node_executions',invocation_id=payload['source_invocation_id'],occurrence_id=oid)
+                input_ref = (original or {}).get('input_ref')
+                if input_ref:
+                    # Keep the exact original Mapping value reference. A live
+                    # source may already have moved past this historical cut.
+                    valid = True
+                    if input_ref['kind'] == 'runtime_event':
+                        events = meta.tables['runtime_events']
+                        position = (await self.connection.execute(select(events.c.invocation_id,events.c.sequence)
+                            .where(events.c.event_id == input_ref['id']))).mappings().first()
+                        valid = position is not None and (position['invocation_id'] != payload['source_invocation_id'] or
+                            position['sequence'] <= payload['source_sequence'])
+                    if valid:
+                        defaults['input_ref'] = input_ref
             if value.get("error"):
                 defaults.update(
                     error_type=value["error"]["type"],
@@ -277,7 +295,7 @@ class ProjectionBatch:
                         },
                     )
 
-        async def call(cid, value):
+        async def call(cid, value, path=None):
             values = {
                 k: value.get(k)
                 for k in (
@@ -296,11 +314,20 @@ class ProjectionBatch:
                     error_type=value["error"]["type"],
                     error_code=value["error"].get("code"),
                 )
+            if path is not None:
+                for field in ('input','output','error'):
+                    if value.get(field) is not None:
+                        values[field+'_ref'] = ref(*path,field)
+                old_id = payload.get('source_call_ids',{}).get(cid)
+                if old_id:
+                    original = await self.get('operator_calls',invocation_id=payload['source_invocation_id'],call_id=old_id)
+                    if original:
+                        values['operator_definition_id'] = original['operator_definition_id']
             await self.put(
                 "operator_calls", {"invocation_id": iid, "call_id": cid}, values
             )
 
-        async def wait(wid, value):
+        async def wait(wid, value, path=None):
             previous = await self.get("waits", invocation_id=iid, wait_id=wid)
             values = {
                 k: value.get(k)
@@ -313,6 +340,10 @@ class ProjectionBatch:
                     "deadline_at_us",
                 )
             }
+            if path is not None:
+                for field in ('request','response'):
+                    if value.get(field) is not None:
+                        values[field+'_ref'] = ref(*path,field)
             await self.put("waits", {"invocation_id": iid, "wait_id": wid}, values)
             if not previous or previous["status"] != values["status"]:
                 change(
@@ -410,12 +441,15 @@ class ProjectionBatch:
                 )
 
         async def scheduler(value, path):
+            if name in ('invocation.forked','fork.state_imported'):
+                for oid,item in value.get('retired_occurrences',{}).items():
+                    await node(oid,item,(*path,'retired_occurrences',oid))
             for oid, item in value.get("occurrences", {}).items():
                 await node(oid, item, (*path, "occurrences", oid))
             for cid, item in value.get("operator_calls", {}).items():
-                await call(cid, item)
+                await call(cid, item, (*path,'operator_calls',cid) if name in ('invocation.forked','fork.state_imported') else None)
             for wid, item in value.get("waits", {}).items():
-                await wait(wid, item)
+                await wait(wid, item, (*path,'waits',wid) if name in ('invocation.forked','fork.state_imported') else None)
             for field in ("resolutions", "boundary_resolutions"):
                 for rid, item in value.get(field, {}).items():
                     edge(rid, item)
@@ -488,6 +522,10 @@ class ProjectionBatch:
                     if k in value
                 }
                 values['recovery_pending'] = bool(value.get('pending_recovery'))
+                if name in ('invocation.forked','fork.state_imported'):
+                    for field in ('input','output','error'):
+                        if value.get(field) is not None:
+                            values[field+'_ref'] = ref('delta','operations',index,'value',field)
                 if name == 'invocation.reopened':
                     values.update(error_ref=None, error_type=None, error_code=None, output_ref=None)
                 await self.put("invocations", {"invocation_id": iid}, values)
@@ -554,6 +592,16 @@ class ProjectionBatch:
                 if path[1] in ("status", "pending_outcome", "control_state"):
                     change("invocation", iid, {path[1]: value})
 
+        if name == 'fork.state_imported' or name == 'invocation.forked' and payload.get('initialization_events',1) == 1:
+            graph = meta.tables['graph_changes']
+            rows = (await self.connection.execute(select(graph.c.entity_id,graph.c.change).where(
+                graph.c.invocation_id == payload['source_invocation_id'],graph.c.entity_type == 'edge',
+                graph.c.sequence <= payload['source_sequence']).order_by(graph.c.sequence,graph.c.change_index))).mappings()
+            merged = {}
+            for row in rows:
+                merged.setdefault(row['entity_id'],{}).update(row['change'])
+            for key,values in merged.items():
+                change('edge',key,values)
         inv = await self.get("invocations", invocation_id=iid)
         if inv is None:
             raise ValueError(

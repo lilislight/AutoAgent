@@ -19,7 +19,7 @@ async def replay_window(timeline, iid, *, sequence=None, at_us=None, through_seq
             headers = headers.where(e.c.sequence <= through_sequence)
         first = (await conn.execute(headers.order_by(e.c.sequence).limit(1))).mappings().first()
         last = (await conn.execute(headers.order_by(e.c.sequence.desc()).limit(1))).mappings().first()
-        if first is None or first['event_name'] != 'invocation.started':
+        if first is None or first['event_name'] not in ('invocation.started','invocation.forked'):
             return dict(history_complete=False, baseline=None, events=[], boundary=None, previous=None, next=None, time_from_us=0, time_until_us=None,
                         first=None, last=dict(last) if last else None, frontier=frontier)
         target = headers
@@ -57,7 +57,7 @@ async def replay_window(timeline, iid, *, sequence=None, at_us=None, through_seq
             and_(n.c.invocation_id == iid, n.c.occurrence_id == ranked.c.occurrence_id)).where(ranked.c._rank == 1,
             or_(ranked.c.status.in_(('ready', 'running', 'waiting')), ranked.c.occurrence_id.in_(retained), ranked.c.occurrence_id.in_(latest_terminal)))
         occurrences = [dict(r) for r in (await conn.execute(initial)).mappings()]
-        batches = await replay_events(conn, iid, page)
+        batches = await replay_events(conn, iid, page, timeline.storage)
         children = {child for batch in batches.values() for child in batch['child_ids']}
         known = list((await conn.execute(select(g.c.entity_id).where(g.c.invocation_id == iid, g.c.sequence <= base_seq,
             g.c.entity_type == 'invocation', g.c.entity_id.in_(children), g.c.change['parent_invocation_id'].as_string() == iid).distinct())).scalars()) if children else []
@@ -69,7 +69,7 @@ async def replay_window(timeline, iid, *, sequence=None, at_us=None, through_seq
             first=dict(first), last=dict(last), frontier=frontier)
 
 
-async def replay_events(conn, iid, page):
+async def replay_events(conn, iid, page, storage):
     """Export only the changes needed to render Graph history."""
     e, g, n, evaluations = (meta.tables[k] for k in ('runtime_events', 'graph_changes', 'node_executions', 'edge_evaluations'))
     ids = [r['event_id'] for r in page]
@@ -78,6 +78,10 @@ async def replay_events(conn, iid, page):
     touched = {r['entity_id'] for r in changes if r['entity_type'] == 'node'}
     names = dict((await conn.execute(select(n.c.occurrence_id, n.c.node_id).where(n.c.invocation_id == iid, n.c.occurrence_id.in_(touched)))).all()) if touched else {}
     batches = {r['event_id']: dict(r, changes=[], evaluations=[], routes=[], child_ids=[], call_starts=[]) for r in page}
+    from .tracing import edge_states
+    for event in page:
+        if event['event_name'] in ('invocation.forked','fork.state_imported'):
+            batches[event['event_id']]['initial_edges'] = await edge_states(storage,conn,iid,sequence=event['sequence'])
     calls = meta.tables['operator_calls']
     started_event = calls.c.input_ref['id'].as_string()
     starts = select(started_event.label('event_id'), n.c.node_id, func.count().label('count')).select_from(

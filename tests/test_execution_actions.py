@@ -1,5 +1,6 @@
 """Root control admission, bounded HTTP receipts and parent/child interaction."""
 import asyncio
+from dataclasses import replace
 import tempfile
 import threading
 import time
@@ -13,7 +14,7 @@ from autoagent import Edge,Node,ReceiveSignal,SignalEndpoint,Spawn,Wait,Workflow
 from autoagent.host import AutoAgentHost,HostSettings,HostCapacityError
 from autoagent.host.persistence.reading import SourceReader
 from autoagent.server import create_app,ServerSettings
-from autoagent.server.operations import ExecutionOperations
+from autoagent.host.operations import ExecutionOperations
 from tests.postgres import POSTGRES_TEST_URL,PostgreSQLDatabase
 from tests.test_server import Value,identity
 
@@ -51,6 +52,31 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
 
     def client(self,host):
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(host,ui=False)),base_url='http://test')
+
+    async def test_operation_settings_are_host_owned_and_environment_configurable(self):
+        """Operation budgets apply equally to embedded and HTTP Hosts, with strict environment validation."""
+        settings = HostSettings.from_environment(dict(AUTOAGENT_HOST_OPERATION_CONCURRENCY='2',
+            AUTOAGENT_HOST_OPERATION_RECEIPTS='4', AUTOAGENT_HOST_OPERATION_TTL_SECONDS='600'))
+        self.assertEqual((settings.operation_concurrency, settings.operation_receipts, settings.operation_ttl_seconds), (2, 4, 600))
+        for values in (dict(operation_concurrency=0), dict(operation_receipts=1), dict(operation_ttl_seconds=0), dict(operation_ttl_seconds=float('nan'))):
+            with self.assertRaises(ValueError):
+                replace(HostSettings(), **values)
+
+    async def test_operation_admission_does_not_charge_payload_twice(self):
+        """A response within the Host request budget survives the asynchronous receipt adapter."""
+        from autoagent.core.app._residency import retained_size
+        wf = Workflow('receipt-payload-budget', nodes=[Node('ask', Wait(Value, Value))])
+        async with self.host([wf]) as host:
+            root = await host.execute(wf.id, {'text': 'ask'}, entry_node_id='ask')
+            waiting = await host.join(root)
+            payload = {'text': 'x' * 256}
+            host.settings = replace(host.settings, max_request_bytes=retained_size((payload,)) + 1)
+            receipt = await host.submit_execution_operation(dict(invocation_id=root.invocation_id,
+                action='respond', request_id=uuid4().hex, target_invocation_id=root.invocation_id,
+                wait_id=waiting.waits[0].id, payload=payload))
+            await asyncio.gather(*tuple(host._execution_operations.tasks))
+            self.assertEqual((await host.get_execution_operation(receipt['operation_id']))['status'], 'succeeded')
+            self.assertEqual((await host.join(root)).output, payload)
 
     async def operation(self,client,body):
         if body['action']=='recover':
@@ -163,7 +189,8 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
                 rejected=await client.post('/api/v2/execution-actions',json=dict(invocation_id=root.invocation_id,action='respond',request_id=uuid4().hex,
                     target_invocation_id=root.invocation_id,wait_id=wait['wait_id'],payload={'approved':'wrong'}))
                 self.assertIn(rejected.status_code,(400,422),rejected.text)
-            manager=ExecutionOperations(host,ServerSettings(operation_concurrency=1,operation_receipts=2,operation_ttl_seconds=.05))
+            host.settings=replace(host.settings,operation_concurrency=1,operation_receipts=2,operation_ttl_seconds=.05)
+            manager=ExecutionOperations(host)
             try:
                 op=await manager.submit(dict(invocation_id=root.invocation_id,action='signal',request_id=uuid4().hex,
                     endpoint='message',source_id='bad-sequence',sequence=2,payload={'approved':True}))
@@ -182,7 +209,8 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
         wf=Workflow('control-detach',nodes=[Node('work',gated),Node('ask',Wait(Value,Value))],edges=[Edge('work','ask')])
         async with self.host([wf]) as host:
             first=await host.execute(wf.id,{'text':'first'},entry_node_id='work')
-            manager=ExecutionOperations(host,ServerSettings(operation_concurrency=1,operation_receipts=2))
+            host.settings=replace(host.settings,operation_concurrency=1,operation_receipts=2)
+            manager=ExecutionOperations(host)
             pause=await manager.submit(dict(invocation_id=first.invocation_id,action='pause',request_id=uuid4().hex))
             for _ in range(100):
                 if (await host.get_execution_controls(first.invocation_id))['control_state']=='pausing':break
@@ -198,6 +226,7 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
             # The separately admitted Host task survived cancellation of its HTTP observer.
             await host.perform_execution_action(first.invocation_id,'recover')
             self.assertEqual((await host.join(first)).status,'waiting')
+            host.settings=replace(host.settings,operation_concurrency=32,operation_receipts=256)
             GATE.clear()
             second=await host.execute(wf.id,{'text':'second'},entry_node_id='work')
             async with self.client(host) as client:
@@ -279,11 +308,10 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(controls['recovery_count'],1)
             self.assertEqual(controls['last_recovery_id'],request['request_id'])
             self.assertFalse(controls['actions']['recover']['available'])
-            # A new Server has no HTTP receipt; the durable Core request ID
-            # still prevents repeating already accepted business work.
+            # A new router reads the same temporary Host receipt and cannot repeat business work.
             async with self.client(host) as client:
                 missing=await client.get('/api/v2/execution-operations/'+request['request_id'])
-                self.assertEqual(missing.status_code,404)
+                self.assertEqual(missing.status_code,200)
                 restored=(await client.get('/api/v2/execution-controls',params={'invocation_id':root.invocation_id})).json()
                 self.assertEqual(restored['last_recovery_id'],request['request_id'])
                 op=await self.operation(client,request)
@@ -319,9 +347,9 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(last['wait_id'],[row['wait_id'] for row in before.json()['pending_responses']])
                 operation=await self.operation(client,params|dict(action='respond',request_id=uuid4().hex,payload={'text':'approved'}))
                 await self.finished(client,operation)
-            # A new router has no operation receipts but shares authoritative Host state.
+            # Routers share Host receipts; changing HTTP adapters does not lose admission history.
             async with self.client(host) as client:
-                self.assertEqual((await client.get('/api/v2/execution-operations/'+operation['operation_id'])).status_code,404)
+                self.assertEqual((await client.get('/api/v2/execution-operations/'+operation['operation_id'])).status_code,200)
                 with patch.object(SourceReader,'read',side_effect=AssertionError('Metadata only')):
                     after=(await client.get('/api/v2/execution-controls',params=params)).json()
                     unknown=(await client.get('/api/v2/execution-controls',params=params|{'wait_id':'missing'})).json()

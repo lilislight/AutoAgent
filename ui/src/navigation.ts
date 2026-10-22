@@ -17,6 +17,7 @@ export function readLocation(search: string): LocationState {
     session: view === "executions" ? params.get("session") : null,
     selection: node ? { kind: "node", id: node } : edge ? { kind: "edge", id: edge } : view === "executions" && params.has("invocation") ? { kind: "invocation", id: params.get("invocation")! } : view === "workflows" && params.has("definition") ? { kind: "workflow", id: params.get("definition")! } : null,
   };
+  if (view === 'workflows' && params.get('compare')) state.compareBase = params.get('compare')!;
   if (view === 'executions') {
     const pane = params.get('pane');
     if (pane === 'graph' || pane === 'timeline' || pane === 'split') state.executionView = pane;
@@ -44,6 +45,7 @@ export function writeLocation(state: LocationState): string {
   if (state.view === "executions") { params.set("view", "executions"); if (state.execution) params.set("execution", state.execution); }
   if (state.view === "workflows" && state.workflow) params.set("workflow", state.workflow);
   if (state.view === "workflows" && state.revision) params.set("revision", state.revision);
+  if (state.view === "workflows" && state.compareBase) params.set("compare", state.compareBase);
   if (state.view === "executions") {
     if (state.session) params.set("session", state.session);
     if (state.executionView) params.set("pane", state.executionView);

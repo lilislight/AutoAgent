@@ -3,6 +3,7 @@ import { spanGeometry } from './timeline.js';
 import { ReplayAccumulator } from './replay.js';
 import { LiveGraph } from './liveGraph.js';
 import { appendPauseIntervals, pauseIntervals, TimelineActivity, type PauseInterval } from './liveObservation.js';
+const visible = (row:TimelineRow) => row.timeline_visible !== false;
 
 export class TraceModel {
   readonly nodes = new Map<string, TimelineRow>();
@@ -10,6 +11,7 @@ export class TraceModel {
   readonly waits = new Map<string, TimelineRow>();
   private callIndex = new Map<string,TimelineRow>();
   private eventIds = new Set<string>();
+  private eventOrder: number[];
   private starts: number[] = [];
   private counts = {node:0,call:0,wait:0};
   private untimed = 0;
@@ -29,10 +31,13 @@ export class TraceModel {
     for (const rows of this.calls.values()) rows.sort((a,b)=>a.start_at_us-b.start_at_us || a.id.localeCompare(b.id));
     data.node.sort((a,b)=>(a.ready_at_us ?? a.start_at_us)-(b.ready_at_us ?? b.start_at_us) || a.id.localeCompare(b.id));
     data.event.sort((a,b)=>a.sequence-b.sequence);
+    this.eventOrder = data.event.map((_, index) => index);
+    if (!data.event.every((event,index)=>!index || data.event[index-1].occurred_at_us<=event.occurred_at_us))
+      this.eventOrder.sort((a,b)=>data.event[a].occurred_at_us-data.event[b].occurred_at_us || data.event[a].sequence-data.event[b].sequence);
     for(const row of data.event)this.eventIds.add(row.event_id);
     this.pauses = pauseIntervals(data.event);
     this.activity.append(data.event);
-    this.starts=data.node.filter(row=>row.status!=='skipped' && row.start_at_us!=null).map(row=>row.start_at_us);
+    this.starts=data.node.filter(row=>visible(row) && row.status!=='skipped' && row.start_at_us!=null).map(row=>row.start_at_us);
     for(const kind of ['node','call','wait'] as const)for(const row of data[kind])this.timing(kind,row,1);
     this.starts.sort((a,b)=>a-b);
     this.graph=new LiveGraph(data);
@@ -40,7 +45,17 @@ export class TraceModel {
   private lower(value:number) {
     let lo=0,hi=this.starts.length;while(lo<hi){const mid=(lo+hi)>>>1;if(this.starts[mid]<value)lo=mid+1;else hi=mid;}return lo;
   }
+  private eventLower(value:number) {
+    let lo=0,hi=this.eventOrder.length;
+    while(lo<hi){const mid=(lo+hi)>>>1;if(this.data.event[this.eventOrder[mid]].occurred_at_us<value)lo=mid+1;else hi=mid;}
+    return lo;
+  }
+  activityBins(args:{start:number;end:number;buckets:number}) {
+    const count=Math.max(1,Math.min(512,Math.round(args.buckets))), width=Math.max(1,args.end-args.start);
+    return Array.from({length:count},(_,index)=>this.lower(args.start+width*(index+1)/count)-this.lower(args.start+width*index/count));
+  }
   private timing(kind:'node'|'call'|'wait',row:TimelineRow,sign:number) {
+    if(!visible(row))return;
     if(kind==='node' && row.status==='skipped')return;
     this.counts[kind]+=sign;
     if(row.start_at_us==null)this.untimed+=sign;
@@ -81,8 +96,8 @@ export class TraceModel {
       this.bytesDelta+=(JSON.stringify(row).length-(previous?JSON.stringify(previous).length:0))*2;
       if(previous)this.timing(kind,previous,-1);
       if(kind==='node'){
-        if(previous && previous.status!=='skipped' && previous.start_at_us!=null){const at=this.lower(previous.start_at_us);if(this.starts[at]===previous.start_at_us)this.starts.splice(at,1);}
-        if(row.status!=='skipped' && row.start_at_us!=null)this.starts.splice(this.lower(row.start_at_us),0,row.start_at_us);
+        if(previous && visible(previous) && previous.status!=='skipped' && previous.start_at_us!=null){const at=this.lower(previous.start_at_us);if(this.starts[at]===previous.start_at_us)this.starts.splice(at,1);}
+        if(visible(row) && row.status!=='skipped' && row.start_at_us!=null)this.starts.splice(this.lower(row.start_at_us),0,row.start_at_us);
         this.graph.node(row,previous);
       }
       this.timing(kind,row,1);
@@ -102,7 +117,14 @@ export class TraceModel {
       }
     }
     for(const id of callGroups)this.calls.get(id)!.sort((a,b)=>a.start_at_us-b.start_at_us || a.id.localeCompare(b.id));
-    for(const marker of delta.event){this.bytesDelta+=JSON.stringify(marker).length*2;this.eventIds.add(marker.event_id);this.data.event.push(marker);}
+    for(const marker of delta.event){
+      this.bytesDelta+=JSON.stringify(marker).length*2;this.eventIds.add(marker.event_id);
+      const index=this.data.event.length;
+      // Normal live appends are O(1); clock regressions insert into the time index.
+      const last=this.data.event[this.eventOrder.at(-1) ?? -1];
+      const position=!last || last.occurred_at_us<=marker.occurred_at_us?this.eventOrder.length:this.eventLower(marker.occurred_at_us);
+      this.data.event.push(marker);this.eventOrder.splice(position,0,index);
+    }
     if(delta.event.some(event=>event.control_state || event.invocation_status))this.pauses=appendPauseIntervals(this.pauses,delta.event);
     this.activity.append(delta.event);
     this.graph.updateEdges(delta.edge ?? []);
@@ -112,16 +134,17 @@ export class TraceModel {
   }
   rows(args: { kind: string; start: number; end: number; occurrence?: string | null; nodeId?: string | null }) {
     const all = args.kind === 'node' ? this.data.node : args.kind === 'call' ? this.calls.get(args.occurrence ?? '') ?? [] : this.data.wait.filter(row=>row.occurrence_id===args.occurrence);
-    return all.filter(row=>!(args.kind==='node' && row.status==='skipped') && (!args.nodeId || row.node_id===args.nodeId) && spanGeometry(row,{start:args.start,end:args.end},Math.max(args.end,this.data.manifest.overview.observed_at_us)).visible);
+    return all.filter(row=>visible(row) && !(args.kind==='node' && row.status==='skipped') && (!args.nodeId || row.node_id===args.nodeId) && spanGeometry(row,{start:args.start,end:args.end},Math.max(args.end,this.data.manifest.overview.observed_at_us)).visible);
   }
   call(row: TimelineRow): TimelineRow {
-    return { ...row, node_id:this.nodes.get(row.occurrence_id)?.node_id, wait:this.waits.get(row.id) ?? null };
+    const wait=this.waits.get(row.id);
+    return { ...row, node_id:this.nodes.get(row.occurrence_id)?.node_id, wait:wait && visible(wait) ? wait : null };
   }
   page(args: Parameters<TraceModel['rows']>[0] & { cursor?: string | null }): TimelinePage {
     const rows=this.rows(args), size=args.kind==='node'?50:20, index=Number(args.cursor ?? 0);
     if (!Number.isSafeInteger(index) || index<0) throw new Error('Invalid local Timeline cursor.');
-    const items=rows.slice(index,index+size).map(row=>args.kind==='call'?this.call(row):args.kind==='node'?{...row, call_count:this.calls.get(row.id)?.length ?? row.call_count,
-      preview_calls:(this.calls.get(row.id)??[]).filter(call=>spanGeometry(call,{start:args.start,end:args.end},Math.max(args.end,this.data.manifest.overview.observed_at_us)).visible).slice(0,6).map(call=>this.call(call))}:row);
+    const items=rows.slice(index,index+size).map(row=>args.kind==='call'?this.call(row):args.kind==='node'?{...row, call_count:this.calls.get(row.id)?.filter(visible).length ?? row.call_count,
+      preview_calls:(this.calls.get(row.id)??[]).filter(call=>visible(call) && spanGeometry(call,{start:args.start,end:args.end},Math.max(args.end,this.data.manifest.overview.observed_at_us)).visible).slice(0,6).map(call=>this.call(call))}:row);
     return { items,next_cursor:index+size<rows.length?String(index+size):null,frontier:this.data.manifest.frontier };
   }
   position(args: Parameters<TraceModel['rows']>[0] & { identity: string; pageIndex?: number }) {
@@ -131,14 +154,17 @@ export class TraceModel {
     return {cursor:page?String(page*size):null,page_index:page,frontier:this.data.manifest.frontier};
   }
   markers(args: {start:number;end:number;cursor?:string|null;through?:number}) {
-    const rows=this.data.event.filter(e=>e.occurred_at_us>=args.start && e.occurred_at_us<args.end && (args.through===undefined || e.sequence<=args.through));
+    const rows=this.eventOrder.slice(this.eventLower(args.start),this.eventLower(args.end)).map(index=>this.data.event[index])
+      .filter(e=>args.through===undefined || e.sequence<=args.through).sort((a,b)=>a.sequence-b.sequence);
     const index=Number(args.cursor??0);
     return {items:rows.slice(index,index+100),next_cursor:index+100<rows.length?String(index+100):null,frontier:this.data.manifest.frontier};
   }
   groups(args: {start:number;end:number;buckets:number;through:number}) {
     const buckets=new Map<number,TimelineEventGroup>();let total=0;
-    for(const e of this.data.event) {
-      if(e.sequence>args.through || e.occurred_at_us<args.start || e.occurred_at_us>=args.end)continue;
+    const until=this.eventLower(args.end);
+    for(let index=this.eventLower(args.start);index<until;index++) {
+      const e=this.data.event[this.eventOrder[index]];
+      if(e.sequence>args.through)continue;
       total++; const key=Math.floor((e.occurred_at_us-args.start)*args.buckets/(args.end-args.start)), old=buckets.get(key);
       if(!old)buckets.set(key,{count:1,names:{[e.event_name]:1},occurred_at_us:e.occurred_at_us,start_us:e.occurred_at_us,end_us:e.occurred_at_us+1,first_sequence:e.sequence,last_sequence:e.sequence,marker:e});
       else {old.occurred_at_us+=(e.occurred_at_us-old.occurred_at_us)/(old.count+1);old.count++;old.names[e.event_name]=(old.names[e.event_name]??0)+1;old.start_us=Math.min(old.start_us,e.occurred_at_us);old.end_us=Math.max(old.end_us,e.occurred_at_us+1);old.first_sequence=Math.min(old.first_sequence,e.sequence);old.last_sequence=Math.max(old.last_sequence,e.sequence);old.marker=null;}

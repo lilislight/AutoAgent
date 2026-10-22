@@ -59,6 +59,16 @@ export function elapsedLabel(us: number): string {
   return `${Math.floor(us / 60_000_000)}m ${Number((us % 60_000_000 / 1_000_000).toFixed(2))}s`;
 }
 
+/** Keep distinct ticks readable when examining microseconds late in a long run. */
+export function elapsedPosition(us: number, span: number): string {
+  if (span >= 1_000_000 || us < 1_000_000) return elapsedLabel(us);
+  const digits=Math.min(6,Math.max(2,Math.ceil(Math.log10(4_000_000/Math.max(1,span)))));
+  const precision=10**(6-digits), rounded=Math.round(us/precision)*precision;
+  const hours=Math.floor(rounded/3_600_000_000), minutes=Math.floor(rounded/60_000_000)%60;
+  const seconds=(rounded%60_000_000/1_000_000).toFixed(digits).padStart(3+digits,'0');
+  return `${hours?`${hours}:`:''}${String(minutes).padStart(hours?2:1,'0')}:${seconds}`;
+}
+
 export function timelineScale(window: TimeWindow) {
   const width = window.end - window.start;
   return width < 1_000_000 ? { unit: 'ms', divisor: 1000 }

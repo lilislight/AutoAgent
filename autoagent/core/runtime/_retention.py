@@ -47,5 +47,6 @@ def released_outputs(before, after, delta, occurrence_id, output_node_ids, index
     return tuple(key for key, change in changes.items()
                  if index.output_consumers.get(key, 0) + change == 0
                  and (item := after.occurrences.get(key)) is not None
-                 and item.status == 'completed' and item.output is not None
+                 and ((item.status == 'completed' and item.output is not None)
+                      or (item.status == 'failed' and item.raw_input is not None))
                  and item.node_id not in output_node_ids)

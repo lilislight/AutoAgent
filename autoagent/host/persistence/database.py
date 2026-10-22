@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from autoagent.core.compiler.snapshot import WorkflowDefinitionSnapshot
 from autoagent.core.operators import Operator
 from autoagent.core.runtime.events import RuntimeEvent
 from autoagent.core.runtime.graph_checkpoint import RuntimeGraphCheckpoint
 from autoagent.core.runtime.user_events import UserEvent
 
+from .checkpoints import Checkpoints, checkpoint_key
 from .maintenance import Maintenance
 from .models import OperatorDefinition, PersistenceConfig, ReadView
 from .queries import Queries
+from .exploration import RevisionComparison, SessionInformation
 from .tracing import TraceQueries
 from .timeline import TimelineQueries
 from .writer import Writer
@@ -19,25 +23,29 @@ from .watching import TraceHeads
 
 
 class DatabaseSink:
-    """One Host-owned writer; async methods can be called from different loops.
+    """Host-owned database access; async methods can be called from different loops.
 
     Create with ``await DatabaseSink.open(url, config=...)``. Register historical
     definitions before connecting this object to Core's event sink ports. Host
     owns runtime residency and must unload a stopped Graph before purging it.
+    ``read_only=True`` opens an existing store without a writer lease or worker;
+    mutations are rejected and SQL transactions are read-only.
     """
 
-    def __init__(self, url: str, *, config: PersistenceConfig | None = None):
+    def __init__(self, url: str, *, config: PersistenceConfig | None = None, read_only=False):
         self.config = config or PersistenceConfig()
-        self._writer = Writer(url, self.config)
+        self._writer = Writer(url, self.config, read_only=read_only)
         self._queries = Queries(self._writer)
         self._traces = TraceQueries(self._queries)
         self._maintenance = Maintenance(self._writer)
+        self._checkpoints = Checkpoints(self._queries, self._maintenance)
+        self._checkpoint_guard = None
         self._datasets = TraceDatasets(self._queries, self.config, url)
         self._llm_calls = None
 
     @classmethod
-    async def open(cls, url: str, *, config: PersistenceConfig | None = None):
-        result = cls(url, config=config)
+    async def open(cls, url: str, *, config: PersistenceConfig | None = None, read_only=False):
+        result = cls(url, config=config, read_only=read_only)
         try:
             await result._writer.ready()
         except BaseException:
@@ -131,36 +139,113 @@ class DatabaseSink:
             await self._llm_calls.write(record)
         await self._writer.run(write)
 
-    async def _checkpoint(self, checkpoint, anchor):
+    def _checkpoint_lock(self):
+        # Created and used only on the Writer loop, including cross-loop callers.
+        if self._checkpoint_guard is None:
+            self._checkpoint_guard = asyncio.Lock()
+        return self._checkpoint_guard
+
+    async def _checkpoint(self, checkpoint, anchor, *, pinned=False, reason="automatic", keep_latest=None):
         if not isinstance(checkpoint, RuntimeGraphCheckpoint):
             raise TypeError("Expected complete RuntimeGraphCheckpoint.")
-
-        # Core's full bundle validation includes ownership and causal closure.
-        def validate():
-            return RuntimeGraphCheckpoint.from_record(
-                checkpoint.to_record()
-            ).to_record()["digest"]
+        if type(pinned) is not bool:
+            raise ValueError("pinned must be a boolean.")
+        if keep_latest is not None and (type(keep_latest) is not int or keep_latest < 1):
+            raise ValueError("keep_latest must be a positive integer.")
+        if reason not in ("automatic", "manual", "unload", "shutdown", "import"):
+            raise ValueError("Unknown Checkpoint creation reason.")
 
         async def save():
-            identity = await self._writer.cpu(validate)
-            await self._writer.accept(
-                "checkpoint", identity, checkpoint, anchor=anchor, durable=True
-            )
-            return identity
-
+            async with self._checkpoint_lock():
+                identity = checkpoint_key(checkpoint)
+                exists = await self._checkpoints.exists(identity)
+                if not exists:
+                    # Validate ownership and causal closure only for new versions.
+                    await self._writer.cpu(lambda: RuntimeGraphCheckpoint.from_record(checkpoint.to_record()))
+                    await self._writer.accept("checkpoint", identity, checkpoint, anchor=anchor, durable=True)
+                await self._maintenance.run(
+                    self._checkpoints.configure, identity, pinned, reason if not exists else None, keep_latest
+                )
+                return identity
         return await self._writer.run(save)
 
-    async def save_checkpoint(self, checkpoint) -> str:
-        return await self._checkpoint(checkpoint, False)
+    async def save_checkpoint(self, checkpoint, *, pinned=False, reason="automatic", keep_latest=None) -> str:
+        return await self._checkpoint(checkpoint, False, pinned=pinned, reason=reason, keep_latest=keep_latest)
 
     async def import_checkpoint(self, checkpoint) -> str:
-        return await self._checkpoint(checkpoint, True)
+        return await self._checkpoint(checkpoint, True, reason="import")
+
+    async def checkpoint_info(self, checkpoint_id):
+        """Read metadata and safety dependencies without decoding snapshot bodies."""
+        return await self._writer.run(self._checkpoints.info, checkpoint_id)
+
+    async def read_checkpoint_position(self, session_id, sequence, *, full_history=False):
+        return await self._writer.run(self._checkpoints.historical_bundle, session_id, sequence, full_history=full_history)
+
+    async def initialize_fork(self, events):
+        """Admit the entire new ownership graph in one durable transaction."""
+        from types import SimpleNamespace
+        from .storage import prepare
+        entries = [SimpleNamespace(kind='runtime_event', identity=e.id, value=e,
+            binding=None, anchor=False) for e in events]
+        async def write(conn):
+            # prepare() is batch bounded; every batch still belongs to this one
+            # transaction. A conflict cannot leave a partially admitted family.
+            pending = entries
+            while pending:
+                encoded = await self._writer.cpu(prepare, pending, self._writer.config)
+                await self._writer.storage.write_transaction(conn, encoded)
+                pending = pending[len(encoded):]
+        return await self._writer.run(self._maintenance.run, write)
+
+    async def fork_position(self, session_id, sequence):
+        from sqlalchemy import select
+        from .schema import meta
+        async def read():
+            async with self._queries.view() as (conn, _, _, _):
+                row = (await conn.execute(select(meta.tables['runtime_events'].c.event_id,
+                    meta.tables['runtime_events'].c.invocation_id,meta.tables['runtime_events'].c.event_name,
+                    meta.tables['runtime_events'].c.payload_text).where(
+                    meta.tables['runtime_events'].c.session_id == session_id,
+                    meta.tables['runtime_events'].c.sequence == sequence))).mappings().first()
+                if row is None:
+                    return None
+                import json
+                data = dict(row)
+                data['initialization_events'] = json.loads(data.pop('payload_text')).get('initialization_events',1)
+                return data
+        return await self._writer.run(read)
+
+    async def set_checkpoint_pinned(self, checkpoint_id, pinned):
+        if type(pinned) is not bool:
+            raise ValueError("pinned must be a boolean.")
+        async def change():
+            async with self._checkpoint_lock():
+                if not await self._maintenance.run(self._checkpoints.pin, checkpoint_id, pinned):
+                    return None
+                return await self._checkpoints.info(checkpoint_id)
+        return await self._writer.run(change)
 
     async def get_checkpoint(self, checkpoint_id):
         record = await self._writer.run(
             self._queries.source_record, "checkpoint", checkpoint_id
         )
         return RuntimeGraphCheckpoint.from_record(record) if record else None
+
+    async def compare_workflow_revisions(self, base, target, **options):
+        return await self._writer.run(RevisionComparison(self._queries).page, base, target, **options)
+
+    async def revision_comparison_object(self, base, target, kind, identity):
+        return await self._writer.run(RevisionComparison(self._queries).object, base, target, kind, identity)
+
+    async def session_information(self, session_id):
+        return await self._writer.run(SessionInformation(self._queries).info, session_id)
+
+    async def session_history(self, session_id, **options):
+        return await self._writer.run(SessionInformation(self._queries).history, session_id, **options)
+
+    async def session_workflows(self, session_id, **options):
+        return await self._writer.run(SessionInformation(self._queries).workflows, session_id, **options)
 
     async def workflow_graph(self, revision_id):
         return await self._writer.run(self._traces.graph, revision_id)
@@ -219,14 +304,39 @@ class DatabaseSink:
     async def execution_record(self, invocation_id, kind, identity):
         return await self._writer.run(TimelineQueries(self._queries).record, invocation_id, kind, identity)
 
-    async def trace_value(self, invocation_id, kind, identity, field):
-        return await self._writer.run(self._traces.value, invocation_id, kind, identity, field)
+    async def history_identity(self):
+        from .history import History
+        return await self._writer.run(History(self._queries).identity)
+
+    async def execution_diagnosis(self, invocation_id, *, limit=20):
+        from .diagnostics import Diagnostics
+        return await self._writer.run(Diagnostics(self._queries).read, invocation_id, limit=limit)
+
+    async def invocation_summary(self, invocation_id):
+        from .history import History
+        return await self._writer.run(History(self._queries).invocation, invocation_id)
+
+    async def inspect_execution_state(self, invocation_id, *, sequence, scope=None, pointer=None):
+        from .inspection import StateInspection
+        return await self._writer.run(StateInspection(self._queries, self.config).read,
+            invocation_id, sequence=sequence, scope=scope, pointer=pointer)
+
+    async def execution_events(self, invocation_id, **options):
+        from .history import History
+        return await self._writer.run(History(self._queries).events, invocation_id, **options)
+
+    async def execution_event(self, invocation_id, event_id, **options):
+        from .history import History
+        return await self._writer.run(History(self._queries).event, invocation_id, event_id, **options)
+
+    async def trace_value(self, invocation_id, kind, identity, field, *, pointer=None):
+        return await self._writer.run(self._traces.value, invocation_id, kind, identity, field, pointer=pointer)
 
     async def execution_stages(self, invocation_id, occurrence_id, **filters):
         return await self._writer.run(self._traces.stages, invocation_id, occurrence_id, **filters)
 
-    async def execution_stage_value(self, invocation_id, occurrence_id, event_id, field):
-        return await self._writer.run(self._traces.stage_value, invocation_id, occurrence_id, event_id, field)
+    async def execution_stage_value(self, invocation_id, occurrence_id, event_id, field, *, pointer=None):
+        return await self._writer.run(self._traces.stage_value, invocation_id, occurrence_id, event_id, field, pointer=pointer)
 
     async def get_workflow(self, revision_id):
         return await self._writer.run(
@@ -266,9 +376,9 @@ class DatabaseSink:
             self._queries.definitions, "operator_definition", operator_id, limit, cursor
         )
 
-    async def list_checkpoints(self, root_session_id, *, limit=100, cursor=None):
+    async def list_checkpoints(self, session_id, *, limit=100, cursor=None):
         return await self._writer.run(
-            self._queries.checkpoints, root_session_id, limit, cursor
+            self._checkpoints.page, session_id, limit, cursor
         )
 
     async def runtime_events(
@@ -357,6 +467,10 @@ class DatabaseSink:
     async def control_metadata(self, invocation_id, registered, **options):
         from .controls import ControlQueries
         return await self._writer.run(ControlQueries(self._queries).read, invocation_id, registered, **options)
+
+    async def execution_state(self, invocation_id):
+        from .execution_state import ExecutionState
+        return await self._writer.run(ExecutionState(self._queries).read, invocation_id)
 
     async def get_session(self, session_id, *, view: ReadView = "durable"):
         return await self._writer.run(
@@ -508,9 +622,10 @@ class DatabaseSink:
         await self._writer.close()
 
     async def delete_checkpoint(self, checkpoint_id):
-        await self._writer.run(
-            self._maintenance.run, self._maintenance.delete_checkpoint, checkpoint_id
-        )
+        async def remove():
+            async with self._checkpoint_lock():
+                return await self._maintenance.run(self._maintenance.delete_checkpoint, checkpoint_id)
+        return await self._writer.run(remove)
 
     async def delete_workflow(self, revision_id):
         await self._writer.run(

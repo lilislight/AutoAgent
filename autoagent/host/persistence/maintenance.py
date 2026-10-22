@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, literal, or_, select, update
 
 from .models import ConflictError
 from .projections import ProjectionBatch, light_record
@@ -98,54 +98,62 @@ class Maintenance:
         )
         await self.gc(conn)
 
-    async def delete_checkpoint(self, conn, identity):
-        members = meta.tables["checkpoint_sessions"]
-        covered = (
-            await conn.execute(
-                select(members.c.session_id, members.c.sequence).where(
-                    members.c.checkpoint_id == identity
-                )
-            )
-        ).all()
-        for sid, sequence in covered:
-            session = await self.storage.row(conn, "sessions", session_id=sid)
-            if session and session["history_start_sequence"] > 1:
-                other = await conn.scalar(
-                    select(members.c.checkpoint_id)
-                    .where(
-                        members.c.session_id == sid,
-                        members.c.checkpoint_id != identity,
-                        members.c.sequence >= session["history_start_sequence"] - 1,
-                    )
-                    .limit(1)
-                )
-                if not other:
-                    raise ConflictError("Cannot delete the only recovery anchor.")
-        # Import-seeded detail references must remain valid even with another anchor.
-        for name in ("invocations", "node_executions", "operator_calls", "waits"):
+    async def checkpoint_blockers(self, conn, identity):
+        """Check only graph metadata and indexed member Invocations, never bodies."""
+        members, sessions = (meta.tables[name] for name in ('checkpoint_sessions', 'sessions'))
+        covered = (await conn.execute(
+            select(members.c.session_id, sessions.c.history_start_sequence)
+            .join(sessions, sessions.c.session_id == members.c.session_id)
+            .where(members.c.checkpoint_id == identity)
+        )).all()
+        for sid, start in covered:
+            if start > 1 and not await conn.scalar(
+                select(members.c.checkpoint_id).where(
+                    members.c.session_id == sid, members.c.checkpoint_id != identity,
+                    members.c.sequence >= start - 1,
+                ).limit(1)
+            ):
+                return ['required_anchor']
+        # Only imported snapshots seed detail references. Their referenced
+        # objects belong to these member Invocations, all indexed by ID.
+        invocations = select(members.c.invocation_id).where(members.c.checkpoint_id == identity)
+        for name in ('invocations', 'node_executions', 'operator_calls', 'waits'):
             table = meta.tables[name]
-            for col in table.columns:
-                if col.name.endswith("_ref") and await conn.scalar(
-                    select(func.count())
-                    .select_from(table)
-                    .where(
-                        col["kind"].as_string() == "checkpoint",
-                        col["id"].as_string() == identity,
-                    )
-                ):
-                    raise ConflictError(
-                        "Checkpoint is referenced by execution details."
-                    )
+            refs = [col for col in table.columns if col.name.endswith('_ref')]
+            if refs and await conn.scalar(
+                select(literal(1)).select_from(table).where(
+                    table.c.invocation_id.in_(invocations),
+                    or_(*((col['kind'].as_string() == 'checkpoint') &
+                           (col['id'].as_string() == identity) for col in refs)),
+                ).limit(1)
+            ):
+                return ['referenced_details']
+        return []
+
+    async def delete_checkpoint(self, conn, identity, *, collect=True):
+        table = meta.tables['checkpoints']
+        if not await conn.scalar(select(table.c.checkpoint_id).where(table.c.checkpoint_id == identity)):
+            return False
+        blockers = await self.checkpoint_blockers(conn, identity)
+        if blockers:
+            message = ('Cannot delete the only recovery anchor.' if blockers[0] == 'required_anchor'
+                       else 'Checkpoint is referenced by execution details.')
+            raise ConflictError(message)
+        members = meta.tables['checkpoint_sessions']
         await conn.execute(delete(members).where(members.c.checkpoint_id == identity))
         await self._refs_delete(conn, "checkpoint", [identity])
-        await conn.execute(
-            delete(meta.tables["checkpoints"]).where(
-                meta.tables["checkpoints"].c.checkpoint_id == identity
-            )
-        )
-        await self.gc(conn)
+        await conn.execute(delete(table).where(table.c.checkpoint_id == identity))
+        if collect:
+            await self.gc(conn)
+        return True
 
     async def purge(self, conn, root):
+        from .codec import canonical
+        events = meta.tables['runtime_events']
+        reference = canonical({'source_root_invocation_id':root}).decode()[1:-1]
+        if await conn.scalar(select(events.c.event_id).where(events.c.event_name == 'invocation.forked',
+                events.c.payload_text.contains(reference, autoescape=True)).limit(1)):
+            raise ConflictError('Source history is referenced by a Fork; delete dependent Fork histories first.')
         inv = meta.tables["invocations"]
         sessions = meta.tables["sessions"]
         row = await self.storage.row(conn, "invocations", invocation_id=root)

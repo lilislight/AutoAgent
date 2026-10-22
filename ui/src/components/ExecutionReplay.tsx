@@ -24,6 +24,7 @@ export function useExecutionReplay(trace: ExecutionTrace, active: boolean) {
     }).catch(error=>{if(!abort.signal.aborted)setState(current=>({...current,loading:false,error:error instanceof Error?error.message:'Could not load Replay.'}));});
   };
   const stop=()=>{cancel();releaseLocalReplay(pinned.current);pinned.current=null;setState({enabled:false,loading:false,error:null,result:null});};
+  useEffect(()=>{if(active){const requested=replayPositions.takeRequested(positionKey);if(requested)seek(requested);}},[active,positionKey]);
   const step=(direction:-1|1)=>{const marker=direction===-1?state.result?.previous:state.result?.next;if(marker)seek({sequence:marker.sequence});};
   return {...state,resumePosition:()=>replayPositions.read(positionKey),invocationId:trace.invocation.invocation_id,frame:state.result?.frame??null,marker:state.result?.marker??null,cursorTime:state.result?.cursorTime??null,previous:state.result?.previous??null,next:state.result?.next??null,seek,stop,step};
 }

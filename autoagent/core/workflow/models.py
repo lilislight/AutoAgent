@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import math
 from types import MappingProxyType
 from typing import Literal, TypeAlias, Union
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ..operators import Operator, OperatorContract, StreamReducer, ValueContract
 from ..context import ContextPatch
@@ -91,24 +91,53 @@ OutputBinding = Callable[
 ]
 Condition = Callable[[ConditionContext], bool | Awaitable[bool]]
 Aggregation = Callable[[AggregationContext], object | Awaitable[object]]
-UserEventMapper = Callable[[OutputBindingContext], object | Awaitable[object]]
 
 
 @dataclass(frozen=True, slots=True)
-class UserEventMapping:
-    kind: str
-    mapper: UserEventMapper = field(compare=False)
+class UserEventContext(Context):
+    """One immutable Chunk record or committed Node output for an opt-in Mapper.
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.kind, str) or not self.kind.strip():
-            raise ValueError("User Event kind cannot be empty.")
+    Output is emitted once per Node occurrence, after Map aggregation and Output
+    Binding. Chunk callbacks identify the individual Operator Call/Map unit.
+    Values are read-only durable records, just like other Core hook views.
+    """
+
+    phase: Literal["chunk", "output"]
+    value: object
+    session_id: str
+    invocation_id: str
+    node_id: str
+    occurrence_id: str
+    operator_id: str | None = None
+    operator_call_id: str | None = None
+    unit_index: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class UserEventMappingIR:
-    kind: str
-    mapper: UserEventMapper = field(compare=False)
-    output_contract: ValueContract
+class UserEventSpec(BaseModel):
+    """User-selected event content; Core supplies delivery identities and time."""
+
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True,
+        revalidate_instances="always", allow_inf_nan=False,
+    )
+
+    kind: str = Field(min_length=1, pattern=r"\S")
+    payload: JsonValue
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _owned_json_payload(cls, value: object) -> object:
+        from ..runtime.values import freeze, thaw
+
+        try:
+            return thaw(freeze(value))
+        except TypeError as error:
+            raise ValueError(str(error)) from error
+
+
+UserEventMapper = Callable[
+    [UserEventContext], UserEventSpec | None | Awaitable[UserEventSpec | None]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +193,97 @@ class TimeoutPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class BackoffPolicy:
+    """Delay before retries; jitter never exceeds the capped base delay."""
+
+    mode: Literal["fixed", "linear", "exponential"] = "exponential"
+    initial_seconds: float = 0.5
+    max_seconds: float = 30.0
+    multiplier: float = 2.0
+    jitter: Literal["none", "full", "equal"] = "full"
+
+    def __post_init__(self):
+        if self.mode not in {"fixed", "linear", "exponential"}:
+            raise ValueError("Invalid BackoffPolicy mode.")
+        if self.jitter not in {"none", "full", "equal"}:
+            raise ValueError("Invalid BackoffPolicy jitter.")
+        for name in ("initial_seconds", "max_seconds", "multiplier"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"BackoffPolicy {name} must be finite and nonnegative.")
+            try:
+                value = float(value)
+            except OverflowError as error:
+                raise ValueError(f"BackoffPolicy {name} must be finite.") from error
+            if not math.isfinite(value) or value < 0 or (name == "multiplier" and value < 1):
+                raise ValueError(f"Invalid BackoffPolicy {name}.")
+            object.__setattr__(self, name, value)
+        if self.max_seconds < self.initial_seconds:
+            raise ValueError("BackoffPolicy max_seconds must cover initial_seconds.")
+
+    def delay(self, retry_attempt: int) -> float:
+        """Return the delay for an extra attempt numbered from one."""
+        import random
+        if not _positive_int(retry_attempt):
+            raise ValueError("retry_attempt must be positive.")
+        if self.initial_seconds == 0:
+            return 0.0
+        if self.mode == "fixed":
+            delay = self.initial_seconds
+        elif self.mode == "linear":
+            try:
+                delay = self.initial_seconds * retry_attempt
+            except OverflowError:
+                delay = self.max_seconds
+        else:
+            try:
+                delay = self.initial_seconds * self.multiplier ** (retry_attempt - 1)
+            except OverflowError:
+                delay = self.max_seconds
+        delay = min(delay, self.max_seconds)
+        if self.jitter == "full":
+            return random.uniform(0, delay)
+        if self.jitter == "equal":
+            return random.uniform(delay / 2, delay)
+        return delay
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """Extra attempts per Map unit, excluding the initial call.
+
+    retry_on matches exception class names along their inheritance chain.
+    Only execution exceptions and deadlines are eligible; contract, reducer,
+    cancellation and Runtime failures never qualify. Emitted streams and
+    outstanding synchronous work also prevent automatic retry.
+    """
+
+    max_attempts: int = 1
+    backoff: BackoffPolicy = field(default_factory=BackoffPolicy)
+    retry_on: tuple[str, ...] = ("Exception",)
+
+    def __post_init__(self):
+        if type(self.max_attempts) is not int or self.max_attempts < 0:
+            raise ValueError("RetryPolicy max_attempts must be nonnegative.")
+        if not isinstance(self.backoff, BackoffPolicy):
+            raise TypeError("RetryPolicy backoff must be BackoffPolicy.")
+        if not isinstance(self.retry_on, tuple) or not all(isinstance(x, str) and x.strip() for x in self.retry_on):
+            raise TypeError("RetryPolicy retry_on must be a tuple of exception names.")
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcePolicy:
+    """Maximum starts of this Node ID in one Invocation, independent of Calls."""
+
+    max_executions_per_invocation: int | None = 1000
+
+    def __post_init__(self):
+        value = self.max_executions_per_invocation
+        if value is not None and not _positive_int(value):
+            raise ValueError("ResourcePolicy max_executions_per_invocation must be positive or None.")
+
+
+@dataclass(frozen=True, slots=True)
 class Stream:
     reducer: StreamReducer = field(compare=False)
 
@@ -172,12 +292,15 @@ class Stream:
 class Capability:
     id: str
     contract: OperatorContract
+    stream: Stream | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
             raise ValueError("Capability id cannot be empty.")
         if not isinstance(self.contract, OperatorContract):
             raise TypeError("Capability contract must be OperatorContract.")
+        if self.stream is not None and not isinstance(self.stream, Stream):
+            raise TypeError("Capability stream must be Stream or None.")
 
 
 @dataclass(slots=True)
@@ -188,9 +311,11 @@ class Node:
     output_binding: OutputBinding | None = None
     map: Map | None = None
     stream: Stream | None = None
-    user_events: tuple[UserEventMapping, ...] = ()
+    user_events: UserEventMapper | None = field(default=None, compare=False)
     recovery_mode: Recovery = field(default_factory=Recovery)
     timeout: TimeoutPolicy | None = None
+    retry: RetryPolicy | None = None
+    resource: ResourcePolicy = field(default_factory=ResourcePolicy)
 
 
 @dataclass(slots=True)
@@ -234,15 +359,16 @@ class NodeIR:
     executable: Operator | Wait | CommandIR | Capability
     input_contract: ValueContract | None
     output_contract: ValueContract | None
+    stream_output_contract: ValueContract | None = field(default=None, compare=False)
     input_mapping: InputMapping | None = field(default=None, compare=False)
     output_binding: OutputBinding | None = field(default=None, compare=False)
     map: Map | None = field(default=None, compare=False)
     stream: Stream | None = field(default=None, compare=False)
-    user_events: tuple[UserEventMappingIR, ...] = field(
-        default=(), compare=False
-    )
+    user_events: UserEventMapper | None = field(default=None, compare=False)
     recovery_mode: Recovery = field(default_factory=Recovery)
     timeout: TimeoutPolicy | None = None
+    retry: RetryPolicy | None = None
+    resource: ResourcePolicy = field(default_factory=ResourcePolicy)
 
 
 @dataclass(frozen=True, slots=True)

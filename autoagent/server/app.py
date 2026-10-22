@@ -20,8 +20,7 @@ from autoagent.host import AutoAgentHost, HostCapacityError, HostError, HostNotF
 from autoagent.host.persistence.models import CapacityError
 from autoagent.host.persistence.trace_cursor import TraceResetRequired
 from .watching import TraceWatchHub
-from .operations import ExecutionOperations
-from .models import ExecutionActionRequest
+from .models import CreateCheckpointRequest, PinCheckpointRequest, ExecutionActionRequest, ForkRequest
 from .models import TracePage, WorkflowGraph, WorkflowCatalogEntry, WorkflowCatalogPage, WorkflowDetail, WorkflowPage, WorkflowSummary, RunWorkflowRequest
 from .settings import ServerSettings
 from .ui import mount_ui
@@ -118,7 +117,6 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
     """
     settings = settings or ServerSettings.from_environment(host.environment, root=host.root)
     hub = TraceWatchHub(host, settings)
-    operations = ExecutionOperations(host, settings)
     @asynccontextmanager
     async def watch_lifespan(_app):
         hubs = getattr(_app.state, '_autoagent_trace_hubs', None)
@@ -129,9 +127,79 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
             yield
         finally:
             await hub.close()
-            await operations.close()
             hubs.discard(hub)
     router = APIRouter(prefix=settings.api_prefix, tags=["AutoAgent Workflows"], lifespan=watch_lifespan)
+
+    @router.get("/workflow-comparison")
+    async def workflow_comparison(base_revision_id: str = Query(min_length=1, max_length=4096),
+        target_revision_id: str = Query(min_length=1, max_length=4096),
+        limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size),
+        cursor: str | None = Query(None, max_length=16384)):
+        scope = ["workflow-comparison", base_revision_id, target_revision_id]
+        result = await _query(host.compare_workflow_revisions(base_revision_id, target_revision_id,
+            limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
+        return dict(result, next_cursor=_browse_encode(result['next_cursor'], scope))
+
+    @router.get("/workflow-comparison-object")
+    async def workflow_comparison_object(base_revision_id: str = Query(min_length=1, max_length=4096),
+        target_revision_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(workflow|node|edge)$"),
+        identity: str = Query(min_length=1, max_length=4096)):
+        return await _query(host.get_revision_comparison_object(base_revision_id, target_revision_id, kind, identity), settings)
+
+    @router.get("/session-information")
+    async def session_information(session_id: str = Query(min_length=1, max_length=4096)):
+        return await _query(host.get_session_information(session_id), settings)
+
+    @router.get("/session-history", response_model=TracePage)
+    async def session_history(session_id: str = Query(min_length=1, max_length=4096),
+        revision_id: list[str] = Query(default=[], max_length=64),
+        workflow_id: list[str] = Query(default=[], max_length=64),
+        status: list[str] = Query(default=[], max_length=64),
+        q: str = Query('', max_length=512),
+        started_after_us: int | None = Query(None, ge=0, le=9007199254740991),
+        started_before_us: int | None = Query(None, ge=0, le=9007199254740991),
+        limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size),
+        cursor: str | None = Query(None, max_length=16384)):
+        revisions, workflows, statuses = sorted(set(revision_id)), sorted(set(workflow_id)), sorted(set(status))
+        search = q.strip().lower()
+        scope = ['session-history', session_id, _filter_scope(workflows, revisions), statuses, search, started_after_us, started_before_us]
+        page = await _query(host.list_session_history(session_id, revision_ids=revisions, workflow_ids=workflows,
+            statuses=statuses, search=search, started_after_us=started_after_us, started_before_us=started_before_us,
+            limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
+        return TracePage(items=list(page.items), next_cursor=_browse_encode(page.next_cursor, scope), frontier=page.frontier, total_count=page.total_count)
+
+    @router.get("/session-workflows", response_model=TracePage)
+    async def session_workflows(session_id: str = Query(min_length=1, max_length=4096),
+        limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size),
+        cursor: str | None = Query(None, max_length=16384)):
+        scope = ["session-workflows", session_id]
+        page = await _query(host.list_session_workflows(session_id, limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
+        return TracePage(items=list(page.items), next_cursor=_browse_encode(page.next_cursor, scope), frontier=page.frontier, total_count=page.total_count)
+
+    @router.get("/session-checkpoints", response_model=TracePage)
+    async def session_checkpoints(session_id: str = Query(min_length=1, max_length=4096),
+        limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size),
+        cursor: str | None = Query(None, max_length=16384)):
+        scope = ["session-checkpoints", session_id]
+        page = await _query(host.list_checkpoints(session_id, limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
+        return TracePage(items=list(page.items), next_cursor=_browse_encode(page.next_cursor, scope),
+            frontier=page.frontier, total_count=page.total_count)
+
+    @router.post("/session-checkpoints", status_code=200)
+    async def create_checkpoint(body: CreateCheckpointRequest):
+        return await _query(host.create_checkpoint(body.session_id, sequence=body.sequence, pinned=body.pinned), settings)
+
+    @router.get("/checkpoints/{checkpoint_id}")
+    async def checkpoint_metadata(checkpoint_id: str):
+        return await _query(host.get_checkpoint(checkpoint_id), settings)
+
+    @router.delete("/checkpoints/{checkpoint_id}", status_code=204)
+    async def delete_checkpoint(checkpoint_id: str):
+        await _query(host.delete_checkpoint(checkpoint_id), settings)
+
+    @router.put("/checkpoints/{checkpoint_id}/pin")
+    async def pin_checkpoint(checkpoint_id: str, body: PinCheckpointRequest):
+        return await _query(host.set_checkpoint_pinned(checkpoint_id, body.pinned), settings)
 
     @router.get('/execution-controls')
     async def execution_controls(invocation_id: str=Query(min_length=1,max_length=4096),cursor: str|None=Query(None,max_length=16384),
@@ -149,6 +217,14 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
             result['next_cursor']=base64.urlsafe_b64encode(json.dumps([invocation_id,result['next_cursor']]).encode()).decode().rstrip('=')
         return result
 
+    @router.get('/execution-state')
+    async def execution_state(invocation_id: str = Query(min_length=1, max_length=4096),
+        until: str = Query("none", pattern="^(none|boundary|terminal)$"),
+        timeout: float = Query(1, ge=0, le=5)):
+        # A bounded observation request never owns or cancels an execution.
+        duration = min(timeout, settings.query_timeout_seconds / 2)
+        return await _query(host.wait_execution(invocation_id, until=until, timeout=duration), settings)
+
     @router.get('/execution-action-spec')
     async def execution_action_spec(invocation_id: str=Query(min_length=1,max_length=4096),action: str=Query(pattern='^(respond|signal)$'),
         target_invocation_id: str|None=Query(None,max_length=4096),wait_id: str|None=Query(None,max_length=4096),
@@ -159,22 +235,35 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
     @router.post('/execution-actions',status_code=202)
     async def execution_action(body: ExecutionActionRequest):
         try:
-            return await _query(operations.submit(body.model_dump(mode='json')),settings)
+            return await _query(host.submit_execution_operation(body.model_dump(mode='json')),settings)
         except TypeError as exc:
             raise HTTPException(422,detail={'code':'invalid_input','message':str(exc)}) from exc
 
     @router.get('/execution-operations/{operation_id}')
     async def execution_operation(operation_id: str):
         try:
-            return operations.get(operation_id)
-        except HostNotFoundError as exc:
-            raise HTTPException(404,detail={'code':'operation_unavailable','message':str(exc)}) from exc
+            return await _query(host.get_execution_operation(operation_id), settings)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            raise HTTPException(404,detail={'code':'operation_unavailable',
+                'message':'Operation receipt is unavailable or expired. Check execution state before retrying.'}) from exc
 
     @router.get('/workflow-run-spec')
     async def workflow_run_spec(workflow_id: str = Query(min_length=1, max_length=512),
         revision_id: str = Query(min_length=1, max_length=4096), session_id: str | None = Query(None, min_length=1, max_length=512),
         entry_node_id: str | None = Query(None, min_length=1, max_length=4096)):
         return await _query(host.get_workflow_run_spec(workflow_id, revision_id=revision_id, session_id=session_id, entry_node_id=entry_node_id), settings)
+
+    @router.get('/execution-fork-plan')
+    async def fork_plan(invocation_id: str = Query(min_length=1, max_length=4096),
+        sequence: int = Query(ge=1, le=9007199254740991)):
+        return await _query(host.plan_fork(invocation_id, sequence=sequence), settings)
+
+    @router.post('/execution-forks', status_code=202)
+    async def fork_execution(body: ForkRequest):
+        return await _query(host.fork(body.invocation_id, sequence=body.sequence,
+            session_id=body.session_id), settings)
 
     @router.post('/executions', status_code=202)
     async def run_workflow(body: RunWorkflowRequest):
@@ -241,6 +330,35 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
     def trace_page(page, scope):
         return TracePage(items=list(page.items), next_cursor=_browse_encode(page.next_cursor, scope), frontier=page.frontier, total_count=page.total_count)
 
+    @router.get('/history-store')
+    async def history_store():
+        return await _query(host.get_history_identity(), settings)
+
+    @router.get('/invocation-summary')
+    async def invocation_summary(invocation_id: str = Query(min_length=1, max_length=4096)):
+        return await _query(host.get_invocation_summary(invocation_id), settings)
+
+    @router.get('/invocation-diagnosis')
+    async def invocation_diagnosis(invocation_id: str = Query(min_length=1, max_length=4096),
+        limit: int = Query(20, ge=1, le=100)):
+        return await _query(host.diagnose_execution(invocation_id, limit=limit), settings)
+
+    @router.get('/invocation-events', response_model=TracePage)
+    async def invocation_events(invocation_id: str = Query(min_length=1, max_length=4096),
+        after: int = Query(0, ge=0, le=9007199254740991), name: list[Annotated[str, Field(min_length=1, max_length=512)]] | None = Query(None, max_length=64),
+        limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size), cursor: str | None = Query(None, max_length=16384)):
+        names = sorted(set(name or ()))
+        scope = ['invocation-events', invocation_id, after, names]
+        page = await _query(host.list_execution_events(invocation_id, after=after, names=names, limit=limit,
+            cursor=_browse_cursor(cursor, scope)), settings)
+        return trace_page(page, scope)
+
+    @router.get('/invocation-event')
+    async def invocation_event(invocation_id: str = Query(min_length=1, max_length=4096),
+        event_id: str = Query(min_length=1, max_length=4096), field: str | None = Query(None, pattern='^(payload|delta)$'),
+        pointer: str | None = Query(None, max_length=8192)):
+        return await _query(host.get_execution_event(invocation_id, event_id, field=field, pointer=pointer), settings)
+
     @router.get("/execution-sessions", response_model=TracePage)
     async def execution_sessions(
         q: str = Query("", max_length=512),
@@ -284,9 +402,19 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         return trace_page(page, scope)
 
     @router.get("/executions", response_model=TracePage)
-    async def executions(q: str = Query("", max_length=512), status: str | None = None, limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size), cursor: str | None = Query(None, max_length=16384)):
-        scope = ["executions", q.strip().lower(), status]
-        page = await _query(host.list_executions(search=scope[1], status=status, limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
+    async def executions(q: str = Query("", max_length=512),
+        workflow_id: list[Annotated[str, Field(min_length=1, max_length=512)]] | None = Query(None, max_length=64),
+        revision_id: list[Annotated[str, Field(min_length=1, max_length=4096)]] | None = Query(None, max_length=64),
+        status: list[str] | None = Query(None, max_length=8),
+        session_id: str | None = Query(None, min_length=1, max_length=4096),
+        started_after_us: int | None = Query(None, ge=0, le=9007199254740991),
+        started_before_us: int | None = Query(None, ge=0, le=9007199254740991),
+        limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size), cursor: str | None = Query(None, max_length=16384)):
+        workflows, revisions, statuses = sorted(set(workflow_id or ())), sorted(set(revision_id or ())), sorted(set(status or ()))
+        scope = ["executions", q.strip().lower(), workflows, revisions, statuses, session_id, started_after_us, started_before_us]
+        page = await _query(host.list_executions(search=scope[1], workflow_ids=workflows, revision_ids=revisions, statuses=statuses,
+            session_id=session_id, started_after_us=started_after_us, started_before_us=started_before_us,
+            limit=limit, cursor=_browse_cursor(cursor, scope)), settings)
         return trace_page(page, scope)
 
     @router.get("/execution-trace")
@@ -412,21 +540,21 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         return await _query(host.get_execution_record(invocation_id, kind, identity), settings)
 
     @router.get("/execution-items", response_model=TracePage)
-    async def execution_items(invocation_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(node|call|edge|child|wait)$"), node_id: str | None = Query(None, max_length=4096), occurrence_id: str | None = Query(None, max_length=4096), call_id: str | None = Query(None, max_length=4096), edge_id: str | None = Query(None, max_length=4096), order: str = Query("desc", pattern="^(asc|desc)$"), limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size), cursor: str | None = Query(None, max_length=16384)):
-        if (kind == "node" and not node_id) or (kind == "edge" and not edge_id):
-            raise HTTPException(400, detail="A Node or Edge ID is required.")
+    async def execution_items(invocation_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(node|call|edge|child|wait)$"), node_id: str | None = Query(None, max_length=4096), occurrence_id: str | None = Query(None, max_length=4096), call_id: str | None = Query(None, max_length=4096), edge_id: str | None = Query(None, max_length=4096), order: str = Query("desc", pattern="^(asc|desc)$"), status: str | None = None, limit: int = Query(settings.page_size, ge=1, le=settings.max_page_size), cursor: str | None = Query(None, max_length=16384)):
+        if status is not None and kind not in ('node', 'call', 'wait'):
+            raise HTTPException(400, detail='Status filtering is supported for Nodes, Calls and Waits.')
         if call_id is not None and kind != 'child':
             raise HTTPException(400, detail='A Call filter is only valid for child executions.')
         if order != 'desc' and kind != 'child':
             raise HTTPException(400, detail='Collection ordering is only supported for child executions.')
-        scope = ["execution-items", invocation_id, kind, node_id, occurrence_id, call_id, edge_id, order]
+        scope = ["execution-items", invocation_id, kind, node_id, occurrence_id, call_id, edge_id, order, status]
         position = _browse_cursor(cursor, scope)
         if kind == "node":
-            operation = host.list_node_executions(invocation_id, node_id, limit=limit, cursor=position)
+            operation = host.list_node_executions(invocation_id, node_id, status=status, limit=limit, cursor=position)
         elif kind == "call":
-            operation = host.list_operator_calls(invocation_id, occurrence_id=occurrence_id, limit=limit, cursor=position)
+            operation = host.list_operator_calls(invocation_id, occurrence_id=occurrence_id, status=status, limit=limit, cursor=position)
         elif kind == "wait":
-            operation = host.list_execution_waits(invocation_id, occurrence_id=occurrence_id, limit=limit, cursor=position)
+            operation = host.list_execution_waits(invocation_id, occurrence_id=occurrence_id, status=status, limit=limit, cursor=position)
         elif kind == "edge":
             operation = host.list_edge_evaluations(invocation_id, edge_id, occurrence_id=occurrence_id, limit=limit, cursor=position)
         else:
@@ -440,12 +568,12 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         return trace_page(page, scope)
 
     @router.get('/execution-stage-value')
-    async def execution_stage_value(invocation_id: str = Query(min_length=1, max_length=4096), occurrence_id: str = Query(min_length=1, max_length=4096), event_id: str = Query(min_length=1, max_length=4096), field: str = Query(pattern='^(mapped_input|output|patch|conditions|error)$')):
-        return await _query(host.get_execution_stage_value(invocation_id, occurrence_id, event_id, field), settings)
+    async def execution_stage_value(invocation_id: str = Query(min_length=1, max_length=4096), occurrence_id: str = Query(min_length=1, max_length=4096), event_id: str = Query(min_length=1, max_length=4096), field: str = Query(pattern='^(mapped_input|output|patch|conditions|error)$'), pointer: str | None = Query(None, max_length=8192)):
+        return await _query(host.get_execution_stage_value(invocation_id, occurrence_id, event_id, field, pointer=pointer), settings)
 
     @router.get("/execution-value")
-    async def execution_value(invocation_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(invocation|node|call|wait)$"), identity: str = Query(min_length=1, max_length=4096), field: str = Query(pattern="^(input|output|error|metrics|definition|request|response|cancel_reason)$")):
-        return await _query(host.get_execution_value(invocation_id, kind, identity, field), settings)
+    async def execution_value(invocation_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(invocation|node|call|wait)$"), identity: str = Query(min_length=1, max_length=4096), field: str = Query(pattern="^(input|output|error|metrics|definition|request|response|cancel_reason)$"), pointer: str | None = Query(None, max_length=8192)):
+        return await _query(host.get_execution_value(invocation_id, kind, identity, field, pointer=pointer), settings)
 
     @router.get("/workflow-revisions/{revision_id:path}", response_model=WorkflowDetail)
     async def revision(revision_id: str):
@@ -467,6 +595,8 @@ def create_app(
     project=".",
     settings: ServerSettings | None = None,
     ui: bool = True,
+    env_file=None,
+    use_env_file: bool = True,
 ) -> FastAPI:
     """Create standalone API + UI, or borrow an already-open Host.
 
@@ -474,14 +604,21 @@ def create_app(
     With `host`, the caller owns its lifecycle, just as for create_router.
     """
     owns_host = host is None
-    host = host if host is not None else AutoAgentHost.from_project(project)
+    host = host if host is not None else AutoAgentHost.from_project(project, env_file=env_file, use_env_file=use_env_file)
     settings = settings or ServerSettings.from_environment(host.environment, root=host.root)
 
     @asynccontextmanager
     async def lifespan(app):
         if owns_host:
-            async with host:
-                yield
+            entered = False
+            try:
+                async with host:
+                    entered = True
+                    yield
+            except BaseException as error:
+                if not entered:
+                    app.state.autoagent_startup_error = error
+                raise
         else:
             yield
 

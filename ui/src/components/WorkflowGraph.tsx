@@ -10,11 +10,18 @@ import { useFlowReady } from "./FlowLoadingBoundary";
 import { layoutWorkflow } from "../layoutWorker";
 import type { ExecutionTrace, Selection, TraceRow, WorkflowGraphData } from "../types";
 import type { Theme } from "../theme";
+import type { ComparisonMarks } from "../revisionComparison";
 import type { StackAnchor } from "../stackMotion";
 import { executionGraphStates, executionStateLabel } from '../executionGraphState';
+import { cameraFromViewport, sameGraphCamera, viewportFromCamera, type GraphCamera } from '../graphCamera';
+
+export interface LinkedGraphView {
+  layout: Layout; camera: GraphCamera; onCamera: (camera: GraphCamera) => void;
+  onReset: () => void; onReady: () => void; layoutWarning?: boolean;
+}
 
 type DefinitionNode = Node<{
-  label: string; kind: string; executable: string; entry: boolean; exit: boolean; mapped: boolean; callCount?: number; status?: string; occurrences?: number; recordBadge?: string; recordTitle?: string; related?: boolean;
+  inherited?: boolean; change?: string; label: string; kind: string; executable: string; entry: boolean; exit: boolean; mapped: boolean; callCount?: number; status?: string; occurrences?: number; recordBadge?: string; recordTitle?: string; related?: boolean;
 }, "definition">;
 
 function NodeStateIcon({ state }: { state: string }) {
@@ -23,7 +30,8 @@ function NodeStateIcon({ state }: { state: string }) {
 }
 
 function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
-  return <div className={`workflow-node ${data.kind} ${selected ? "selected" : ""} ${data.related ? "record-related" : ""} ${data.status ? `execution-${data.status}` : ""}`}>
+  return <div className={`workflow-node ${data.kind} ${data.change ? `comparison-${data.change}` : ""} ${selected ? "selected" : ""} ${data.related ? "record-related" : ""} ${data.status ? `execution-${data.status}` : ""}`}>
+    {data.change ? <span className={`graph-change-badge change-${data.change}`} title={data.change}>{data.change === "added" ? "+" : data.change === "removed" ? "−" : "~"}</span> : null}
     {data.status ? <span className="node-state-overlay" aria-hidden="true" /> : null}
     {data.recordBadge ? <span className="graph-record-badge" title={data.recordTitle}>{data.recordBadge}</span> : null}
     <Handle type="target" position={Position.Left} />
@@ -36,7 +44,7 @@ function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
       {data.status ? <span className={`node-state status-${data.status}`} title={`${data.occurrences ?? 0} occurrences`}><NodeStateIcon state={data.status} />{executionStateLabel(data.status)}{(data.occurrences ?? 0) > 1 ? <small className="node-occurrence-count">×{data.occurrences}</small> : null}</span> : null}</div>
     <strong title={data.label}>{data.label}</strong>
     <div className="node-bottom"><span title={data.executable}>{data.executable}</span>
-      {data.entry ? <span className="entry-tag">Entry</span> : null}
+      {data.inherited ? <span className="inherited-tag" title="Completed work inherited from the source execution">Inherited</span> : null}{data.entry ? <span className="entry-tag">Entry</span> : null}
       {data.exit ? <span className="exit-tag">Exit</span> : null}</div>
     <Handle type="source" position={Position.Right} />
   </div>;
@@ -68,6 +76,7 @@ function RoutedEdge(props: EdgeProps) {
       <circle className="condition-background" r="9" />
       <path className="condition-outline" d="M0 -4.5 4.5 0 0 4.5 -4.5 0Z" />
     </g> : null}
+    {props.data?.comparison ? <g className={`edge-change-marker change-${props.data.comparison}`} transform={`translate(${label.x + (props.data?.conditional ? 22 : 0)}, ${label.y})`}><rect x="-9" y="-9" width="18" height="18" rx="5" /><text textAnchor="middle" dominantBaseline="central">{props.data.comparison === "added" ? "+" : props.data.comparison === "removed" ? "−" : "~"}</text></g> : null}
     {evaluations > 1 ? <g className="edge-occurrence-count" transform={`translate(${label.x + countOffset}, ${label.y})`}>
       <title>{String(props.data?.evaluations)} evaluations · Click to explore</title>
       <rect x={-countWidth / 2} y="-9" width={countWidth} height="18" />
@@ -130,8 +139,10 @@ function GraphLegend({ execution }: { execution: boolean }) {
   </div>;
 }
 
-export default function WorkflowGraph({ workflow, selection, onSelect, theme, trace, selectedRecord, focusRequest = 0 }: {
-  workflow: WorkflowGraphData; selection: Selection; onSelect: (selection: Selection, anchor?: StackAnchor) => void; theme: Theme; trace?: ExecutionTrace; selectedRecord?: TraceRow; focusRequest?: number;
+export default function WorkflowGraph({ workflow, selection, onSelect, theme, trace, selectedRecord, focusRequest = 0, comparison, linkedView, hideLegend = false }: {
+  comparison?: ComparisonMarks; workflow: WorkflowGraphData; selection: Selection; onSelect: (selection: Selection, anchor?: StackAnchor) => void; theme: Theme; trace?: ExecutionTrace; selectedRecord?: TraceRow; focusRequest?: number;
+  linkedView?: LinkedGraphView;
+  hideLegend?: boolean;
 }) {
   const markReady = useFlowReady();
   const flowId = useId();
@@ -147,6 +158,15 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   const focusedAt = useRef(-Infinity);
   const requestedFocus = useRef(focusRequest); requestedFocus.current = focusRequest;
   const container = useRef<HTMLDivElement>(null);
+  const linked = useRef(linkedView); linked.current = linkedView;
+  const applyLinkedCamera = () => {
+    if (!linked.current || !instance.current || !container.current) return;
+    const { width, height } = container.current.getBoundingClientRect();
+    if (!width || !height) return;
+    const next = viewportFromCamera(linked.current.camera, { width, height });
+    const current = instance.current.getViewport();
+    if (Math.abs(next.x-current.x)>.01 || Math.abs(next.y-current.y)>.01 || Math.abs(next.zoom-current.zoom)>.0001) void instance.current.setViewport(next);
+  };
 
   useEffect(() => {
     if (!container.current) return;
@@ -159,6 +179,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
       const wasHidden = previousSize && (!previousSize.width || !previousSize.height);
       previousSize = { width, height };
       if (!width || !height) return;
+      if (linked.current) { applyLinkedCamera(); return; }
       const returning = visibleOnce && wasHidden;
       visibleOnce = true;
       if (!changed || returning || wasHidden && requestedFocus.current) return;
@@ -175,6 +196,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   }, []);
 
   useEffect(() => {
+    if (linkedView) { setLayout(linkedView.layout); setLayoutWarning(Boolean(linkedView.layoutWarning)); setMoved(false); return; }
     const controller = new AbortController();
     setLayout(null);
     setLayoutWarning(false);
@@ -187,7 +209,9 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
         setLayoutWarning(true);
       });
     return () => controller.abort();
-  }, [workflow.definition_hash, workflow.definition]);
+  }, [workflow.definition_hash, workflow.definition, linkedView?.layout, linkedView?.layoutWarning]);
+
+  useEffect(() => { if (ready) applyLinkedCamera(); }, [linkedView?.camera, ready]);
 
   useEffect(() => {
     if (!layout) return;
@@ -205,11 +229,12 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
     // Wait for React Flow to receive restored positions before fitting the viewport.
     let cancelled = false;
     const finish = () => {
-      if (!cancelled) { initialFitComplete.current = true; setReady(true); markReady(); }
+      if (!cancelled) { initialFitComplete.current = true; setReady(true); if (linked.current) linked.current.onReady(); else markReady(); }
     };
     let fitFrame = 0;
     const fit = () => {
       if (!instance.current) { fitFrame = requestAnimationFrame(fit); return; }
+      if (linked.current) { applyLinkedCamera(); finish(); return; }
       void instance.current.fitView({ ...FIT_VIEW_OPTIONS,
         duration: !initialFitComplete.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 250 }).then(finish, finish);
     };
@@ -220,6 +245,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   }, [layout, workflow.definition, setNodes, layoutVersion, markReady]);
 
   const restoreLayout = () => {
+    if (linked.current) { linked.current.onReset(); return; }
     setMoved(false);
     setLayoutVersion(current => current + 1);
   };
@@ -229,13 +255,13 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   const executionStates = useMemo(() => trace ? executionGraphStates(trace) : null, [trace]);
   const displayNodes = useMemo<DefinitionNode[]>(() => nodes.map(node => ({ ...node,
     selected: selection?.kind === "node" && selection.id === node.id,
-    data: { ...node.data, status: executionStates ? executionStates.nodes.get(node.id) ?? executionStates.unrecordedNode : undefined, occurrences: nodeStates.get(node.id)?.occurrences, callCount: trace ? nodeStates.get(node.id)?.call_count ?? 0 : undefined,
+    data: { ...node.data, inherited: Boolean(trace?.fork && ['completed','skipped','failed','cancelled'].includes(trace.fork.inherited_occurrences[nodeStates.get(node.id)?.occurrence_id ?? ''] ?? '')), change: comparison?.nodes[node.id], status: executionStates ? executionStates.nodes.get(node.id) ?? executionStates.unrecordedNode : undefined, occurrences: nodeStates.get(node.id)?.occurrences, callCount: trace ? nodeStates.get(node.id)?.call_count ?? 0 : undefined,
       related: selection?.record?.kind === 'edge' && selectedRecord?.node_id === node.id,
       recordBadge: selectedRecord?.node_id === node.id ? selection?.record?.kind === 'edge' ? 'Source'
         : selection?.record?.kind === 'call' ? `Unit ${selectedRecord.unit_index ?? 0}`
         : selection?.record?.kind === 'wait' ? 'Wait' : `Occurrence #${selectedRecord.ordinal ?? selectedRecord.ui_ordinal ?? '—'}` : undefined,
       recordTitle: selectedRecord?.node_id === node.id ? `${selectedRecord.occurrence_id ?? selectedRecord.source_occurrence_id}` : undefined },
-  })), [nodes, selection, executionStates, nodeStates, selectedRecord, trace]);
+  })), [nodes, selection, executionStates, nodeStates, selectedRecord, trace, comparison]);
   const routes = useMemo(() => moved
     ? routeDefinition(workflow.definition, Object.fromEntries(nodes.map(node => [node.id, node.position])))
     : layout?.routes, [moved, nodes, workflow.definition, layout]);
@@ -244,14 +270,14 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
     const color = state ? executionEdgeColors[theme][state] : edgeColors[theme][edge.on === 'error' ? 'fail' : 'complete'];
     return {
     id: edge.id, source: edge.source, target: edge.target, type: "routed",
-    selected: selection?.kind === "edge" && selection.id === edge.id,
+    selected: selection?.kind === "edge" && selection.id === (comparison?.aliases[edge.id] ?? edge.id),
     ariaLabel: `${edge.id}: ${edge.on === "error" ? "Fail" : "Complete"} edge${edge.conditional ? ", conditional" : ""}, ${edge.source} to ${edge.target}${state ? ', ' + executionStateLabel(state) : ''}`,
     className: state ? `execution-edge-${state}` : undefined,
-    data: { points: routes?.[edge.id], conditional: Boolean(edge.conditional), failure: edge.on === "error", evaluations: edgeStates.get(edge.id)?.evaluations, executionState: state, color },
+    data: { comparison: comparison?.edges[edge.id], points: routes?.[edge.id], conditional: Boolean(edge.conditional), failure: edge.on === "error", evaluations: edgeStates.get(edge.id)?.evaluations, executionState: state, color },
     markerEnd: { type: MarkerType.ArrowClosed, color },
     style: { stroke: 'var(--edge-color)',
       strokeDasharray: edge.on === "error" ? "5 4" : undefined },
-  }; }), [workflow.definition.edges, routes, selection, theme, executionStates, edgeStates]);
+  }; }), [workflow.definition.edges, routes, selection, theme, executionStates, edgeStates, comparison]);
 
   useEffect(() => {
     if (!ready || !focusRequest || lastFocus.current === focusRequest || !selection) return;
@@ -280,7 +306,14 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
         if (changes.some(change => change.type === "position" && change.position)) setMoved(true);
         onNodesChange(changes);
       }}
-      onInit={flow => { instance.current = flow; if (layout) void flow.fitView(FIT_VIEW_OPTIONS); }}
+      onInit={flow => { instance.current = flow; if (layout && !linked.current) void flow.fitView(FIT_VIEW_OPTIONS); }}
+      onMove={(_event, viewport) => {
+        if (!linked.current || !container.current) return;
+        const next = cameraFromViewport(viewport, container.current.getBoundingClientRect());
+        // Minimap and focus moves have no source Event. Compare world centres
+        // instead, to propagate them without echoing our own linked updates.
+        if (!sameGraphCamera(next, linked.current.camera)) linked.current.onCamera(next);
+      }}
       onNodeClick={(event, node) => {
         const rect = event.currentTarget.getBoundingClientRect();
         onSelect({ kind: "node", id: node.id }, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height });
@@ -292,8 +325,8 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
         onSelect({ kind: "edge", id: edge.id }, { x: pointer ? event.clientX : rect.left + rect.width / 2,
           y: pointer ? event.clientY : rect.top + rect.height / 2, width: 36 * zoom, height: 22 * zoom });
       }}
-      onPaneClick={() => onSelect(null)} nodesConnectable={false} edgesReconnectable={false}
-      deleteKeyCode={null} minZoom={0.15} maxZoom={MAX_ZOOM} fitView fitViewOptions={FIT_VIEW_OPTIONS}
+      onPaneClick={() => onSelect(null)} nodesConnectable={false} edgesReconnectable={false} nodesDraggable={!linkedView}
+      deleteKeyCode={null} minZoom={0.15} maxZoom={MAX_ZOOM} fitView={!linkedView} fitViewOptions={FIT_VIEW_OPTIONS}
       proOptions={{ hideAttribution: true }}>
       <Background color="var(--canvas-dot)" gap={22} size={1} />
       <Controls position="top-right" showZoom={false} showFitView={false} showInteractive={false}>
@@ -304,6 +337,6 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
       <MiniMap style={{ width:140, height:94 }} pannable zoomable nodeColor="var(--minimap-node)" maskColor="var(--minimap-mask)" />
     </ReactFlow>
     {layoutWarning ? <div className="canvas-notice">Automatic layout unavailable. Using a basic layout.</div> : null}
-    <GraphLegend execution={Boolean(trace)} />
+    {hideLegend ? null : <GraphLegend execution={Boolean(trace)} />}
   </div>;
 }

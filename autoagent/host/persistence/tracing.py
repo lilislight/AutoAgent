@@ -7,7 +7,7 @@ from sqlalchemy import JSON, Text, and_, case, cast, func, literal, or_, select,
 
 from .models import Page
 from .queries import limit_value
-from .reading import SourceReader
+from .reading import SourceReader, pointer_tokens
 from .schema import meta
 
 
@@ -43,6 +43,87 @@ def summary(row):
 def value_key(ref):
     """Share UI values by canonical source reference rather than projection name."""
     return json.dumps([ref['kind'], ref['id'], ref['path']], ensure_ascii=False, separators=(',', ':'))
+
+
+async def fork_metadata(storage, conn, iid, *, occurrences=False):
+    """Read only lineage metadata, never the initial Runtime State or Call bodies."""
+    events = meta.tables['runtime_events']
+    event_id = await conn.scalar(select(events.c.event_id).where(events.c.invocation_id == iid,
+        events.c.sequence == 1,events.c.event_name == 'invocation.forked'))
+    if event_id is None:
+        return None
+    reader = await SourceReader.open(storage,conn,'runtime_event',event_id)
+    fields = ('source_session_id','source_invocation_id','source_sequence','source_event_id',
+        'source_root_invocation_id','root_invocation_id','initialization_events')
+    if occurrences:
+        fields += ('inherited_occurrences',)
+    return {field:await reader.read(('payload',field)) for field in fields}
+
+
+async def fork_scopes(storage, conn, iid, *, sequence=None):
+    """Return ordered source prefixes followed by this branch's own prefix."""
+    scopes, seen, current = [(iid,sequence)], {iid}, iid
+    while (origin := await fork_metadata(storage,conn,current)) is not None:
+        if current == iid and sequence is not None and sequence < origin['initialization_events']:
+            break
+        current = origin['source_invocation_id']
+        if current in seen:
+            raise ValueError('Cyclic Fork lineage.')
+        seen.add(current)
+        scopes.append((current,origin['source_sequence']))
+    return list(reversed(scopes))
+
+
+async def edge_scope(storage, conn, iid, *, sequence=None):
+    """Scope referenced Edge evaluations without copying source projection rows."""
+    edges, events = meta.tables['edge_evaluations'], meta.tables['runtime_events']
+    scopes = await fork_scopes(storage,conn,iid,sequence=sequence)
+    conditions, ordering, offset = [], [], 0
+    for target,upper in scopes:
+        conditions.append(and_(edges.c.invocation_id == target,
+            events.c.sequence <= upper if upper is not None else literal(True)))
+        ordering.append((edges.c.invocation_id == target,events.c.sequence+offset))
+        offset += upper or 0
+    position = events.c.sequence if len(scopes) == 1 else case(*ordering,else_=events.c.sequence)
+    return or_(*conditions), position
+
+
+async def edge_states(storage, conn, iid, *, sequence=None, details=False):
+    edges, events = meta.tables['edge_evaluations'], meta.tables['runtime_events']
+    scope, position = await edge_scope(storage,conn,iid,sequence=sequence)
+    ranked = select(*edges.c,events.c.sequence,events.c.occurred_at_us,
+        func.count().over(partition_by=edges.c.edge_id).label('evaluations'),
+        func.row_number().over(partition_by=edges.c.edge_id,
+            order_by=(position.desc(),edges.c.result_index.desc())).label('_rank')).join(
+                events,edges.c.event_id == events.c.event_id).where(scope).subquery()
+    result = []
+    for row in (await conn.execute(select(*(c for c in ranked.c if c.name != '_rank')).where(ranked.c._rank == 1))).mappings():
+        item=dict(edge_id=row['edge_id'],condition_result=row['condition_result'],evaluations=row['evaluations'])
+        if details:
+            item['evaluation']=dict(summary(row),invocation_id=iid,evaluations=row['evaluations'],inherited=row['invocation_id'] != iid)
+        result.append(item)
+    return result
+
+
+async def inherited_metadata(storage, conn, iid, kind, row, origin):
+    if not origin:
+        return None
+    identity = row.get('occurrence_id') if kind == 'node' else row.get('call_id',row.get('wait_id'))
+    events = meta.tables['runtime_events']
+    event_id = await conn.scalar(select(events.c.event_id).where(events.c.invocation_id == iid,events.c.sequence == 1))
+    reader = await SourceReader.open(storage,conn,'runtime_event',event_id)
+    try:
+        if kind == 'node':
+            status = await reader.read(('payload','inherited_occurrences',identity))
+            if status not in {'completed','failed','cancelled','skipped'}:
+                return None
+            source_id = identity
+        else:
+            source_id = await reader.read(('payload','source_call_ids',identity))
+    except KeyError:
+        return None
+    return dict(invocation_id=origin['source_invocation_id'],identity=source_id,
+        through_sequence=origin['source_sequence'])
 
 
 def filter_identities(values, max_length):
@@ -190,21 +271,28 @@ class TraceQueries:
         limit_value(limit)
         trace_cursor(cursor)
         events, changes = (meta.tables[n] for n in ('runtime_events', 'graph_changes'))
-        linked = select(changes.c.event_id).where(
-            changes.c.invocation_id == iid, changes.c.entity_type == 'node',
-            changes.c.entity_id == oid,
-        ).distinct()
-        statement = select(events.c.event_id, events.c.event_name, events.c.sequence,
-                           events.c.occurred_at_us).where(
-            events.c.invocation_id == iid, events.c.event_id.in_(linked),
-            events.c.event_name.in_(STAGE_VALUES),
-        )
-        if cursor is not None:
-            statement = statement.where(tuple_(events.c.sequence, events.c.event_id) > tuple(cursor))
         async with self.queries.view() as (conn, _, _, frontier):
             if await self.storage.row(conn, 'node_executions', invocation_id=iid, occurrence_id=oid) is None:
                 return None
-            rows = (await conn.execute(statement.order_by(events.c.sequence, events.c.event_id).limit(limit + 1))).mappings().all()
+            # Referenced ancestor stages remain exact original records. The
+            # cursor orders ancestor prefixes before this branch's own Events.
+            scopes = await fork_scopes(self.storage,conn,iid)
+            seen = {target for target,_ in scopes}
+            conditions, ordering, offset = [], [], 0
+            for target,upper in scopes:
+                conditions.append(and_(events.c.invocation_id == target,
+                    events.c.sequence <= upper if upper is not None else literal(True)))
+                ordering.append((events.c.invocation_id == target, events.c.sequence+offset))
+                offset += upper or 0
+            position_key = events.c.sequence if len(scopes) == 1 else case(*ordering,else_=events.c.sequence)
+            linked = select(changes.c.event_id).where(changes.c.invocation_id.in_(seen),
+                changes.c.entity_type == 'node',changes.c.entity_id == oid).distinct()
+            statement = select(events.c.event_id,events.c.event_name,events.c.sequence,events.c.occurred_at_us,
+                events.c.invocation_id,position_key.label('_order')).where(or_(*conditions),
+                events.c.event_id.in_(linked),events.c.event_name.in_(STAGE_VALUES))
+            if cursor is not None:
+                statement = statement.where(tuple_(position_key,events.c.event_id)>tuple(cursor))
+            rows = (await conn.execute(statement.order_by(position_key,events.c.event_id).limit(limit+1))).mappings().all()
             details_by_event = {}
             if rows:
                 details = (await conn.execute(select(changes.c.event_id, changes.c.change,
@@ -216,7 +304,7 @@ class TraceQueries:
                     details_by_event.setdefault(detail['event_id'], []).append(detail)
             items = []
             for row in rows[:limit]:
-                item = dict(row, invocation_id=iid, occurrence_id=oid,
+                item = dict(row, occurrence_id=oid, inherited=row['invocation_id'] != iid,
                             status='failed' if row['event_name'] == 'node.faulted' else 'completed',
                             values=list(STAGE_VALUES[row['event_name']]),
                             value_keys={field: value_key({'kind': 'runtime_event', 'id': row['event_id'], 'path': ['payload', field]}) for field in STAGE_VALUES[row['event_name']]})
@@ -232,11 +320,13 @@ class TraceQueries:
                     for field in ('capability_id', 'operator_id'):
                         item[field] = await reader.read(('payload', field))
                 items.append(item)
-        position = (rows[limit - 1]['sequence'], rows[limit - 1]['event_id']) if len(rows) > limit else None
+                item.pop('_order',None)
+        position = (rows[limit - 1]['_order'], rows[limit - 1]['event_id']) if len(rows) > limit else None
         return Page(tuple(items), position, frontier)
 
-    async def stage_value(self, iid, oid, event_id, field):
+    async def stage_value(self, iid, oid, event_id, field, *, pointer=None):
         """Read one stage value only after verifying its exact Occurrence scope."""
+        pointer_tokens(pointer)
         events, changes = (meta.tables[n] for n in ('runtime_events', 'graph_changes'))
         async with self.queries.view() as (conn, _, _, _):
             name = await conn.scalar(select(events.c.event_name).where(
@@ -249,7 +339,10 @@ class TraceQueries:
             if field not in STAGE_VALUES.get(name, ()):
                 raise ValueError('Unknown value for this execution stage.')
             reader = await SourceReader.open(self.storage, conn, 'runtime_event', event_id)
-            return {'available': True, 'value': await reader.read(('payload', field))}
+            try:
+                return {'available': True, 'value': await reader.read_pointer(pointer, base=('payload', field))}
+            except (KeyError, IndexError, TypeError):
+                return {'available': False, 'value': None}
 
     async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
         """Page Sessions containing matching Invocations, retaining whole-Session counts."""
@@ -290,6 +383,11 @@ class TraceQueries:
             raise ValueError('Expected ascending or descending execution order.')
         if kind not in ('root', 'child', 'session', 'node', 'call', 'edge', 'wait'):
             raise ValueError('Unknown trace collection.')
+        allowed = {'node': ('ready', 'running', 'waiting', 'completed', 'failed', 'skipped', 'cancelled'),
+                   'call': ('running', 'completed', 'failed', 'lost', 'cancelled'),
+                   'wait': ('waiting', 'resumed', 'cancelled')}
+        if status is not None and kind in allowed and status not in allowed[kind]:
+            raise ValueError('Unknown collection status filter.')
         async with self.queries.view() as (conn, _, _, frontier):
             if iid is not None and await self.storage.row(conn, 'invocations', invocation_id=iid) is None:
                 return None
@@ -306,6 +404,10 @@ class TraceQueries:
                     where.extend((table.c.session_id == session_id, table.c.status.is_not(None), invocation_match(table, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses)))
                 else:
                     where.append(table.c.parent_invocation_id.is_(None) if kind == 'root' else table.c.parent_invocation_id == iid)
+                if kind == 'root':
+                    where.append(invocation_match(table, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses))
+                    if session_id is not None:
+                        where.append(table.c.session_id == session_id)
                 if kind == 'child':
                     changes = meta.tables['graph_changes']
                     created = select(func.min(changes.c.sequence)).where(
@@ -332,7 +434,7 @@ class TraceQueries:
                 time, identity = func.coalesce(table.c.started_at_us, 0), table.c.invocation_id
                 if kind == 'child' and order == 'asc':
                     time = func.coalesce(created, 0)
-                if search and kind != 'session':
+                if search and kind == 'child':
                     pattern = '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_').lower() + '%'
                     where.append(or_(*(func.lower(c).like(pattern, escape='\\') for c in (defs.c.workflow_id, table.c.session_id, table.c.invocation_id))))
                 if status:
@@ -344,21 +446,26 @@ class TraceQueries:
                 events = meta.tables['runtime_events']
                 source = table.join(events, table.c.event_id == events.c.event_id)
                 columns = [*table.c, events.c.occurred_at_us, events.c.sequence]
-                where = [table.c.invocation_id == iid, table.c.edge_id == edge_id]
+                scope, time = await edge_scope(self.storage,conn,iid)
+                where = [scope]
+                if edge_id is not None:
+                    where.append(table.c.edge_id == edge_id)
                 if occurrence_id is not None:
                     where.append(table.c.source_occurrence_id == occurrence_id)
-                time = events.c.sequence
                 identity = table.c.event_id + literal(':') + cast(table.c.result_index, Text)
             else:
                 source, columns = table, list(table.c)
                 where = [table.c.invocation_id == iid]
                 if kind == 'node':
-                    where.append(table.c.node_id == node_id)
+                    if node_id is not None:
+                        where.append(table.c.node_id == node_id)
                     time, identity = func.coalesce(table.c.ready_at_us, 0), table.c.occurrence_id
                 else:
                     if occurrence_id is not None:
                         where.append(table.c.occurrence_id == occurrence_id)
                     time, identity = (table.c.created_at_us, table.c.wait_id) if kind == 'wait' else (table.c.started_at_us, table.c.call_id)
+                if status is not None:
+                    where.append(table.c.status == status)
             if cursor is not None:
                 trace_cursor(cursor)
                 position = tuple_(time, identity)
@@ -367,6 +474,17 @@ class TraceQueries:
             page = rows[:limit]
             position = (page[-1]['_time'], page[-1]['_id']) if len(rows) > limit else None
             items = await self._node_summaries(conn, page) if kind == 'node' else tuple(summary(r) for r in page)
+            if kind == 'edge':
+                for item,row in zip(items,page):
+                    item['inherited'] = row['invocation_id'] != iid
+                    item['invocation_id'] = iid
+            if kind in ('node','call','wait'):
+                origin = await fork_metadata(self.storage,conn,iid)
+                if origin:
+                    for item,row in zip(items,page):
+                        source = await inherited_metadata(self.storage,conn,iid,kind,row,origin)
+                        if source:
+                            item['inherited_from'] = source
             return Page(items, position, frontier)
 
     async def family(self, iid):
@@ -440,10 +558,7 @@ class TraceQueries:
         call_counts = await node_call_counts(conn, iid)
         for row in node_states:
             row['call_count'] = call_counts.get(row['node_id'], 0)
-        ranked_edges = select(edges.c.edge_id, edges.c.condition_result,
-            func.count().over(partition_by=edges.c.edge_id).label('evaluations'),
-            func.row_number().over(partition_by=edges.c.edge_id, order_by=(events.c.sequence.desc(), edges.c.result_index.desc())).label('_rank')).select_from(edges.join(events, edges.c.event_id == events.c.event_id)).where(edges.c.invocation_id == iid).subquery()
-        edge_states = [dict(r) for r in (await conn.execute(select(*(c for c in ranked_edges.c if c.name != '_rank')).where(ranked_edges.c._rank == 1))).mappings()]
+        current_edges = await edge_states(self.storage,conn,iid)
         # Routing decisions include unconditional and source-status mismatches;
         # condition evaluations alone do not describe whether every Edge ran.
         changes = meta.tables['graph_changes']
@@ -453,10 +568,10 @@ class TraceQueries:
             func.row_number().over(partition_by=edge_id, order_by=(changes.c.sequence.desc(), changes.c.change_index.desc())).label('_rank'),
         ).where(changes.c.invocation_id == iid, changes.c.entity_type == 'edge',
             edge_id.is_not(None), changes.c.change['selected'].as_boolean().is_not(None)).subquery()
-        by_edge = {row['edge_id']: row for row in edge_states}
+        by_edge = {row['edge_id']: row for row in current_edges}
         for row in (await conn.execute(select(decisions.c.edge_id, decisions.c.condition_result).where(decisions.c._rank == 1))).mappings():
             by_edge.setdefault(row['edge_id'], {'edge_id': row['edge_id'], 'evaluations': 0}).update(condition_result=row['condition_result'])
-        edge_states = list(by_edge.values())
+        current_edges = list(by_edge.values())
         children = await conn.scalar(select(func.count()).select_from(meta.tables['invocations']).where(meta.tables['invocations'].c.parent_invocation_id == iid))
         definitions = meta.tables['workflow_revisions']
         revision = (await conn.execute(select(definitions.c.workflow_id, definitions.c.workflow_version).where(definitions.c.revision_id == inv['workflow_revision_id']))).mappings().one()
@@ -465,10 +580,12 @@ class TraceQueries:
             events.c.sequence, events.c.occurred_at_us).where(events.c.invocation_id == iid)
             .order_by(events.c.sequence.desc()).limit(1))).mappings().first()
         store_id = await conn.scalar(select(meta.tables['persistence_meta'].c.store_id))
-        return {'source_id': store_id, 'invocation': summary(inv) | {k:revision[k] for k in ('workflow_id', 'workflow_version')}, 'nodes': node_states, 'edges': edge_states, 'active_routes': active_routes, 'child_count': children, 'frontier': frontier, 'view': 'durable',
-                'last_event': dict(last_event) if last_event else None, 'observed_at_us': time.time_ns() // 1000}
+        fork = await fork_metadata(self.storage,conn,iid,occurrences=True)
+        return {'source_id': store_id, 'invocation': summary(inv) | {k:revision[k] for k in ('workflow_id', 'workflow_version')}, 'nodes': node_states, 'edges': current_edges, 'active_routes': active_routes, 'child_count': children, 'frontier': frontier, 'view': 'durable',
+                'last_event': dict(last_event) if last_event else None, 'observed_at_us': time.time_ns() // 1000, 'fork':fork}
 
-    async def value(self, iid, kind, identity, field):
+    async def value(self, iid, kind, identity, field, *, pointer=None):
+        pointer_tokens(pointer)
         names = {'invocation': ('invocations', 'invocation_id'), 'node': ('node_executions', 'occurrence_id'), 'call': ('operator_calls', 'call_id'), 'wait': ('waits', 'wait_id')}
         if kind not in names or field not in ('input', 'output', 'error', 'metrics', 'definition', 'request', 'response', 'cancel_reason'):
             raise ValueError('Unknown trace value.')
@@ -493,18 +610,24 @@ class TraceQueries:
                 if event_id is None:
                     return {'available': False, 'value': None}
                 reader = await SourceReader.open(self.storage, conn, 'runtime_event', event_id)
-                reason = await reader.read(('payload', 'reason')) if reader else None
+                try:
+                    reason = await reader.read_pointer(pointer, base=('payload', 'reason')) if reader else None
+                except (KeyError, IndexError, TypeError):
+                    return {'available': False, 'value': None}
                 return {'available': reason is not None, 'value': reason}
             if field == 'definition':
                 if kind != 'call' or not row.get('operator_definition_id'):
                     return {'available': False, 'value': None}
                 reader = await SourceReader.open(self.storage, conn, 'operator_definition', row['operator_definition_id'])
-                return {'available': reader is not None, 'value': await reader.read() if reader else None}
+                try:
+                    return {'available': reader is not None, 'value': await reader.read_pointer(pointer) if reader else None}
+                except (KeyError, IndexError, TypeError):
+                    return {'available': False, 'value': None}
             ref = row.get(field + '_ref')
             if not ref:
                 return {'available': False, 'value': None}
             reader = await SourceReader.open(self.storage, conn, ref['kind'], ref['id'])
             try:
-                return {'available': reader is not None, 'value': await reader.read(ref['path']) if reader else None}
+                return {'available': reader is not None, 'value': await reader.read_pointer(pointer, base=ref['path']) if reader else None}
             except (KeyError, IndexError, TypeError):
                 return {'available': False, 'value': None}

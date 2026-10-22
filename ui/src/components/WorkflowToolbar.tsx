@@ -4,9 +4,9 @@ import { listWorkflowRevisions } from "../api";
 import type { WorkflowGraphData } from "../types";
 import { formatTime } from "./TraceDetails";
 
-export function WorkflowToolbar({ workflow, onRevision, onDefinition }: {
+export function WorkflowToolbar({ workflow, onRevision, onDefinition, onCompare }: {
   workflow: WorkflowGraphData; onRevision: (id: string) => void;
-  onDefinition: () => void;
+  onDefinition: () => void; onCompare: (base: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
@@ -38,6 +38,34 @@ export function WorkflowToolbar({ workflow, onRevision, onDefinition }: {
         {revisions.hasNextPage ? <button className="load-more" disabled={revisions.isFetchingNextPage} onClick={() => void revisions.fetchNextPage()}>More revisions</button> : null}
       </div> : null}
     </div></div>
-
+    <CompareButton workflow={workflow} onCompare={onCompare} />
   </header>;
+}
+
+
+function CompareButton({ workflow, onCompare }: { workflow: WorkflowGraphData; onCompare: (base: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const controller = useRef<AbortController | null>(null);
+  useEffect(() => { setMessage(''); setBusy(false); return () => controller.current?.abort(); }, [workflow.workflow_revision_id]);
+  const compare = async () => {
+    controller.current?.abort(); const abort = new AbortController(); controller.current = abort;
+    setBusy(true); setMessage('');
+    try {
+      let cursor: string | null = null, found = false, newer: string | null = null;
+      do {
+        const page = await listWorkflowRevisions(workflow.workflow_id, null, cursor, abort.signal);
+        for (const row of page.items) {
+          if (found) { onCompare(row.revision_id); return; }
+          if (row.revision_id === workflow.workflow_revision_id) found = true;
+          else newer = row.revision_id;
+        }
+        cursor = page.next_cursor;
+      } while (cursor);
+      if (found && newer) onCompare(newer);
+      else setMessage('At least two saved Revisions are needed.');
+    } catch (error) { if (!abort.signal.aborted) setMessage(error instanceof Error ? error.message : 'Could not load Revisions.'); }
+    finally { if (!abort.signal.aborted) setBusy(false); }
+  };
+  return <div className="comparison-launch"><button type="button" className="toolbar-action" disabled={busy} onClick={() => void compare()}>{busy ? 'Finding Revisions…' : 'Compare revisions'}</button>{message ? <span className="comparison-launch-message" role="status">{message}</span> : null}</div>;
 }

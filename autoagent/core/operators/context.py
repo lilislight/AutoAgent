@@ -22,6 +22,7 @@ class OperatorCallContext:
     operator_call_id: str | None = None
     unit_index: int | None = None
     attempt: int = 1
+    retry_attempt: int = 0
 
     @classmethod
     def current(cls) -> OperatorCallContext | None:

@@ -12,6 +12,8 @@ def decode_input(contract, value):
 
 class ExecutionControls:
     async def _control_view(self, iid, **options):
+        if self._read_only:
+            raise HostRunConflict('read_only', 'Execution controls require a running Host.')
         data=await self._persistence.control_metadata(iid,tuple(self._runtime.revisions),**options)
         if data is None:
             raise HostNotFoundError('Unknown execution.')

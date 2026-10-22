@@ -137,3 +137,7 @@ __all__ += ["RuntimeGraphCheckpoint"]
 
 from .recovery import RecoverySource
 __all__ += ["RecoverySource"]
+
+from .fork import ForkPlan
+from .events import InvocationForked
+__all__ += ['ForkPlan', 'InvocationForked']

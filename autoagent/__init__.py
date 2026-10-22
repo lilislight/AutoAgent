@@ -41,15 +41,20 @@ from .core.workflow import (
     OutputBindingContext,
     Recovery,
     TimeoutPolicy,
+    RetryPolicy,
+    BackoffPolicy,
+    ResourcePolicy,
     Stream,
     StreamContext,
     SubWorkflow,
-    UserEventMapping,
+    UserEventContext,
+    UserEventSpec,
     Workflow,
     workflow_hook,
 )
 
 __all__ = [
+    "RetryPolicy", "BackoffPolicy", "ResourcePolicy",
     "TimeoutPolicy", "NodeTimeoutError", "run_sync",
     "AggregationContext",
     "AppCheckpoint",
@@ -86,7 +91,8 @@ __all__ = [
     "StreamReducer",
     "SubWorkflow",
     "UserEvent",
-    "UserEventMapping",
+    "UserEventContext",
+    "UserEventSpec",
     "ValueContract",
     "Wait",
     "Workflow",
@@ -119,3 +125,6 @@ __all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "Se
 
 from .core.runtime.recovery import RecoverySource
 __all__ += ["RecoverySource"]
+
+from .core.runtime.fork import ForkPlan
+__all__ += ['ForkPlan']

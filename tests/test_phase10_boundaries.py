@@ -33,7 +33,7 @@ from autoagent import (
     Recovery,
     RuntimeErrorInfo,
     UserEvent,
-    UserEventMapping,
+    UserEventSpec,
     Wait,
     Workflow,
     WorkflowCompiler,
@@ -72,10 +72,6 @@ def other(value: OtherValue) -> OtherValue:
 
 def fail(_value: Value) -> Value:
     raise RuntimeError("expected failure")
-
-
-def map_user_event(context) -> Value:
-    return context.output
 
 
 class DefinitionBoundaryTests(unittest.TestCase):
@@ -208,7 +204,7 @@ class DefinitionBoundaryTests(unittest.TestCase):
             lambda: Recovery(max_attempts=True),
             lambda: NodeExecutor(max_operator_concurrency=True),
             lambda: AutoAgentApp(max_operator_concurrency=True),
-            lambda: AutoAgentApp(max_node_executions_per_invocation=True),
+            lambda: __import__("autoagent").ResourcePolicy(max_executions_per_invocation=True),
         )
         for factory in factories:
             with self.subTest(factory=factory):
@@ -229,13 +225,13 @@ class DefinitionBoundaryTests(unittest.TestCase):
             executor.close()
 
     def test_public_definition_identifiers_are_strict_strings(self) -> None:
-        """Verify Operator, Wait, Capability, and UserEventMapping reject invalid IDs."""
+        """Verify Operator, Wait, Capability, and UserEventSpec reject invalid IDs."""
         operator = Operator(identity)
         cases = (
             lambda: Operator(identity, id=1),
             lambda: Wait(Value, Value, id=1),
             lambda: Capability(1, operator.contract),
-            lambda: UserEventMapping(1, map_user_event),
+            lambda: UserEventSpec(kind=1, payload={}),
         )
         for factory in cases:
             with self.subTest(factory=factory):

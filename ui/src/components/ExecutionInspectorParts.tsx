@@ -43,7 +43,7 @@ export function CallChoice({ row, onPick }: { row: TraceRow; onPick: (row: Trace
   return <RecordChoice type={isSystemCall(row) ? 'command' : 'call'} title={row.operator_id ?? 'Call'} caption={`Unit ${row.unit_index ?? 0}${isSystemCall(row) ? ' · System command' : ''}`} badge={<StatusBadge row={row} />} durationLabel={duration(row.started_at_us != null && row.completed_at_us != null ? row.completed_at_us - row.started_at_us : null)} onClick={() => onPick(row)} />;
 }
 export function StageChoice({ row, onPick }: { row: TraceRow; onPick: (row: TraceRow) => void }) {
-  return <RecordChoice title={STAGE_LABELS[String(row.event_name)] ?? String(row.event_name)} caption={`Event #${row.sequence}${row.error_phase ? ` · ${String(row.error_phase)}` : ''}`} type={row.event_name === 'node.faulted' ? 'failure' : 'stage'} durationLabel={duration(row.duration_ns == null ? null : row.duration_ns / 1000)} badge={row.event_name === 'node.faulted' ? <StatusBadge row={row} /> : undefined} onClick={() => onPick(row)} />;
+  return <RecordChoice title={STAGE_LABELS[String(row.event_name)] ?? String(row.event_name)} caption={`${row.inherited ? 'Source Event' : 'Event'} #${row.sequence}${row.error_phase ? ` · ${String(row.error_phase)}` : ''}`} type={row.event_name === 'node.faulted' ? 'failure' : 'stage'} durationLabel={duration(row.duration_ns == null ? null : row.duration_ns / 1000)} badge={row.event_name === 'node.faulted' ? <StatusBadge row={row} /> : undefined} onClick={() => onPick(row)} />;
 }
 export function RouteChoice({ edge, onPick }: { edge: GraphEdge; onPick: (id: string) => void }) {
   return <RecordChoice title={edge.target} caption={`${edge.on === 'error' ? 'Fail' : 'Complete'} edge${edge.conditional ? ' · Conditional' : ''}`} type="edge" onClick={() => onPick(edge.id)} />;
@@ -68,7 +68,7 @@ export function CallInspector({ row, workflow, frontier, onBack, onClose, backLa
     catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
   }, enabled: active && command && !spawning, staleTime: Infinity, gcTime: 30_000, refetchOnWindowFocus: false });
   const status = callPresentation(record, wait.data);
-  return <InspectorFrame kind={command ? 'system-command' : 'call'} title={record.operator_id?.replace(/^system_command:/, '') ?? record.call_id!} initial={initial} context={<><StatusBadge row={status} /><span>Unit {String(record.unit_index ?? 0)}</span></>} tabs={command && (spawning || wait.data) ? ['Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Input / Output', 'Definition']} onClose={onClose} onBack={onBack} backLabel={backLabel}>
+  return <InspectorFrame kind={command ? 'system-command' : 'call'} title={record.operator_id?.replace(/^system_command:/, '') ?? record.call_id!} initial={initial} context={<><StatusBadge row={status} />{record.inherited_from ? <span className="inspector-chip">Inherited execution</span> : null}<span>Unit {String(record.unit_index ?? 0)}</span></>} tabs={command && (spawning || wait.data) ? ['Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Input / Output', 'Definition']} onClose={onClose} onBack={onBack} backLabel={backLabel}>
     {tab => {
       switch (tab) {
         case 'Summary': return <>

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from '@tanstack/react-query';
 import { parentRecord, recordMatches, selectedInterval, selectRecord, selectResponseNode } from '../executionSelection';
 import { getExecutionRecord } from '../api';
@@ -20,6 +20,7 @@ import type { ObservationClock } from '../liveObservation';
 import { duration, StatusBadge } from "./TraceDetails";
 import { OccurrenceStack, type StackTarget } from "./OccurrenceStack";
 import { ExecutionFamilyBar } from './ExecutionFamilyBar';
+import { ExecutionFork, ForkDialog, ForkHistory, type ForkTarget, type OpenFork } from './ExecutionFork';
 import { PendingActionCards } from './PendingActionCards';
 import { useExecutionLayout, setExecutionLayout, persistExecutionLayout } from './useExecutionLayout';
 import { graphRatioAt } from '../executionLayout';
@@ -49,6 +50,8 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
 }) {
   const inv = trace.invocation;
   const snapshot = useExecutionSnapshot();
+  const [forkTarget,setForkTarget]=useState<ForkTarget|null>(null);
+  const openFork:OpenFork=(sequence,anchor,returnFocus=anchor)=>setForkTarget({sequence,bounds:anchor.getBoundingClientRect(),returnFocus});
   const replay = useExecutionReplay(trace, active);
   const live = useLiveTrace(trace, metadataReady, active, replay.enabled || snapshot.refreshing, onApplied);
   const [actionNavigationError, setActionNavigationError] = useState<string | null>(null);
@@ -73,7 +76,7 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
   const autoSplitReplay = useRef(false);
   const endReplay = () => { replay.stop(); if (autoSplitReplay.current && view === 'split') onChangeView('timeline'); autoSplitReplay.current = false; };
   const replayControls = { ...replay, stop: endReplay };
-  const graphTrace = replay.frame ?? trace;
+  const graphTrace = useMemo(() => replay.frame ? { ...replay.frame, fork: trace.fork } : trace, [replay.frame, trace]);
   const seekReplay = (position: { sequence?: number; at_us?: number }) => {
     replay.seek(position);
     if (!replay.enabled && view === 'timeline') { autoSplitReplay.current = true; onChangeView('split'); }
@@ -182,7 +185,7 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
   };
   return <ExecutionNavigationContext.Provider value={{ active, invocationId:inv.invocation_id, replaying:replay.enabled, paused:actions.paused, onRunAccepted, sendAction:actions.send, actionBusy:actions.busy, actionError:actions.error, actionErrors:actions.fieldErrors, clearActionError:actions.clearError, clock:live.clock, respondToWait:row=>void openResponse({invocation_id:row.invocation_id,wait_id:String(row.wait_id),occurrence_id:String(row.occurrence_id),created_at_us:Number(row.created_at_us ?? 0)}), canRespond:actions.canRespond, pendingResponses:actions.pendingResponses, replaySequence: replay.enabled ? replay.marker?.sequence : undefined, openChild: onOpenExecution, pickRecord: pickedRecord, exact: Boolean(selectedRecord), inspectorKind, setSection: section, showTimeline: selectedRecord?.status !== 'skipped' ? () => revealTimeline() : undefined, showGraph: () => { if (view === 'timeline') onChangeView('graph'); setGraphFocus(current => current + 1); } }}><div className="execution-workspace"><header className="execution-header">
     <div className="execution-heading"><button className="execution-title" title="Inspect invocation" onClick={() => choose({ kind: 'invocation', id: inv.invocation_id })}>{inv.workflow_id}</button><span className="execution-revision" title={workflow.workflow_revision_id}><span>v{workflow.workflow_version}</span><code>{workflow.definition_hash.slice(0, 8)}</code></span><StatusBadge row={inv} /><ExecutionElapsed row={inv} clock={live.clock} active={active && !replay.enabled} observed={trace.observed_at_us} /></div>
-    {!metadataReady ? <span className="trace-loading-status" role="status" title={metadataError}>{metadataStatus}{metadataError ? <button onClick={onRetryMetadata}>Retry</button> : null}</span> : null}{actions.toolbar}<LiveTraceStatus live={live} /><ExecutionSnapshotStatus compact trace={trace} active={active && !replay.enabled && !live.updating} /><nav className="execution-view-switch" aria-label="Execution view">{(['graph', 'timeline'] as const).map(mode => <button key={mode} aria-pressed={view === mode} onClick={() => changeView(mode)}>{mode === 'graph' ? 'Graph' : 'Timeline'}</button>)}
+    {!metadataReady ? <span className="trace-loading-status" role="status" title={metadataError}>{metadataStatus}{metadataError ? <button onClick={onRetryMetadata}>Retry</button> : null}</span> : null}{actions.toolbar}<ExecutionFork sequence={replay.enabled ? replay.marker?.sequence ?? null : trace.last_event?.sequence ?? null} active={active && metadataReady} onFork={openFork}/><LiveTraceStatus live={live} /><ExecutionSnapshotStatus compact trace={trace} active={active && !replay.enabled && !live.updating} /><nav className="execution-view-switch" aria-label="Execution view">{(['graph', 'timeline'] as const).map(mode => <button key={mode} aria-pressed={view === mode} onClick={() => changeView(mode)}>{mode === 'graph' ? 'Graph' : 'Timeline'}</button>)}
       <div className={`split-choice ${view === 'split' ? 'is-active' : ''}`}>
         {view === 'split' ? <button className="split-orientation-switch" role="switch" aria-checked={layout.orientation === 'vertical'} aria-label="Vertical Split" title={layout.orientation === 'vertical' ? 'Top and bottom · Switch to side by side' : 'Side by side · Switch to top and bottom'} onClick={() => setExecutionLayout({ orientation: layout.orientation === 'horizontal' ? 'vertical' : 'horizontal' })}>
           <span className="split-switch-thumb" /><svg className="split-horizontal-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="2" y="3" width="14" height="12" rx="2" /><path d="M9 3v12" /></svg><svg className="split-vertical-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="2" y="3" width="14" height="12" rx="2" /><path d="M2 9h14" /></svg>
@@ -190,6 +193,7 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
       </div>
     </nav>
   </header>
+    <ForkHistory trace={trace} onOpen={iid=>onOpenExecution({invocation_id:iid,values:[]})}/>
     <FlowLoadingSurface><div ref={panes} className={`execution-view-area view-${view} split-${layout.orientation} ${resizing ? 'is-resizing' : ''}`}>
       <div data-pane="graph" data-motion-id="graph" className="execution-graph-pane" style={view === 'split' ? { flex: splitRatio, order: 0 } : undefined} aria-hidden={view === 'timeline'} inert={view === 'timeline'}><Suspense fallback={null}><WorkflowGraph workflow={workflow} selection={selection} onSelect={choose} theme={theme} trace={graphTrace} selectedRecord={replay.enabled ? undefined : selectedRecord} focusRequest={graphFocus} /></Suspense><GraphReplayStatus replay={replayControls} />
         {active && !replay.enabled ? <PendingActionCards waits={actions.pendingResponses} invocationId={inv.invocation_id} selected={selection?.record?.waitId} onPick={wait => void openResponse(wait)} /> : null}
@@ -207,10 +211,11 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
           event.preventDefault();
           setSplitRatio(event.key === 'Home' ? splitBounds.min : event.key === 'End' ? splitBounds.max : Math.max(splitBounds.min, Math.min(splitBounds.max, splitRatio + (decrease ? -.025 : .025)))); persistExecutionLayout();
         }}><span /></div> : null}
-      {timelineVisited ? <div data-pane="timeline" data-motion-id="timeline" className="execution-timeline-pane" style={view === 'split' ? { flex: 1 - splitRatio, order: 2 } : undefined} aria-hidden={view === 'graph'} inert={view === 'graph'}><Suspense fallback={<p className="timeline-message" role="status">Loading Timeline…</p>}><ExecutionTimeline clock={live.clock} observing={!replay.enabled && live.observing} ready={metadataReady} loadingStatus={metadataStatus} loadError={metadataError} onRetry={onRetryMetadata} replay={replayControls} onReplay={seekReplay} trace={trace} workflow={workflow} active={active && view !== 'graph'} onPick={pickTimeline} selected={target?.kind === 'edge' ? selectedRecord?.source_occurrence_id ? `node:${selectedRecord.source_occurrence_id}` : null : target ? `${target.kind}:${target.id}` : null} selectedEvent={target?.kind === 'edge' && selectedRecord ? { id: String(selectedRecord.event_id), time: selectedRecord.occurred_at_us as number, sequence: selectedRecord.sequence! } : null} focus={timelineFocus} selectedNode={!target && selection?.kind === 'node' ? selection.id : null} /></Suspense></div> : null}
+      {timelineVisited ? <div data-pane="timeline" data-motion-id="timeline" className="execution-timeline-pane" style={view === 'split' ? { flex: 1 - splitRatio, order: 2 } : undefined} aria-hidden={view === 'graph'} inert={view === 'graph'}><Suspense fallback={<p className="timeline-message" role="status">Loading Timeline…</p>}><ExecutionTimeline clock={live.clock} observing={!replay.enabled && live.observing} ready={metadataReady} loadingStatus={metadataStatus} loadError={metadataError} onRetry={onRetryMetadata} replay={replayControls} onReplay={seekReplay} onFork={openFork} trace={trace} workflow={workflow} active={active && view !== 'graph'} onPick={pickTimeline} selected={target?.kind === 'edge' ? selectedRecord?.source_occurrence_id ? `node:${selectedRecord.source_occurrence_id}` : null : target ? `${target.kind}:${target.id}` : null} selectedEvent={target?.kind === 'edge' && selectedRecord ? { id: String(selectedRecord.event_id), time: selectedRecord.occurred_at_us as number, sequence: selectedRecord.sequence! } : null} focus={timelineFocus} selectedNode={!target && selection?.kind === 'node' ? selection.id : null} /></Suspense></div> : null}
     </div>
       {stack ? <OccurrenceStack key={`${stack.kind}:${stack.id}`} invocationId={inv.invocation_id} target={{ ...stack, total: stackTotal ?? stack.total }} onClose={() => { setStack(null); setHoldInspector(false); }} onPick={row => pickedRecord(stack.kind, { ...row, ...(stack.kind === 'node' ? { node_id: stack.id } : { edge_id: stack.id }) })} /> : null}
       <InspectorPresence open={Boolean(selection) || holdInspector} hidden={!active || Boolean(stack)}>{selection && !stack ? target && !selectedRecord ? <aside className="inspector"><button className="timeline-detail-close" aria-label="Close Inspector" onClick={() => choose(null)}>×</button><p role="status">{mismatch ? 'This record belongs to a different Graph element.' : detail.error ? detail.error.message : 'Loading execution details…'}</p>{detail.error ? <button onClick={() => void detail.refetch()}>Retry</button> : null}</aside> : <ExecutionInspector key={`${inv.invocation_id}:${selection.kind}:${selection.id}:${target?.kind ?? ''}:${target?.id ?? ''}`} trace={trace} workflow={workflow} selection={selection} record={selectedRecord} onSelect={choose} onReselect={() => choose(selection)} onBack={returnToParent} onClose={() => choose(null)} /> : null}</InspectorPresence>
+    {forkTarget && active ? <ForkDialog key={`${inv.invocation_id}:${forkTarget.sequence}`} trace={trace} target={forkTarget} onClose={()=>setForkTarget(null)} onAccepted={value=>{setForkTarget(null);onRunAccepted(value.selected_invocation_id===value.invocation_id?value:{...value,invocation_id:value.selected_invocation_id,session_id:value.selected_session_id,workflow_id:inv.workflow_id,revision_id:inv.workflow_revision_id});}}/> : null}
     {actions.confirmation}
     <ExecutionFamilyBar trace={trace} visibleTrace={graphTrace} replaySequence={replay.enabled ? replay.marker?.sequence ?? 0 : undefined} active={active} onOpen={onOpenExecution} />
     </FlowLoadingSurface></div></ExecutionNavigationContext.Provider>;

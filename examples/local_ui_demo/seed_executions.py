@@ -52,7 +52,31 @@ async def seed_parallel_waits(host):
     return ref
 
 
-async def main(*, pagination=False, maps_only=False, children_count=5, replay_rounds=None, parallel_waits=False):
+async def seed_revisions():
+    """Create genuine execution history across two Revisions and two Workflows."""
+    from .revision_demo import build_revision_review
+    configured = AutoAgentHost.from_project(Path(__file__).parent)
+    async with AutoAgentHost(workflows=[build_revision_review("1")], settings=configured.settings,
+        root=configured.root, environment=configured.environment) as host:
+        ref = await host.execute("revision-review-demo", {"text": "Review using the first Revision"}, entry_node_id="prepare")
+        await host.join(ref)
+        session = ref.session_id
+        await host.create_checkpoint(session, pinned=True)
+    async with AutoAgentHost.from_project(Path(__file__).parent) as host:
+        for text in ("Review using the current Revision", "Review the follow-up"):
+            ref = await host.execute("revision-review-demo", {"text": text}, session_id=session, entry_node_id="prepare")
+            await host.join(ref)
+        await host.create_checkpoint(session, pinned=True)
+        ref = await host.execute("document-formatting", {"text": "Format the review summary"}, session_id=session, entry_node_id="format")
+        await host.join(ref)
+    print("Revision comparison Workflow: revision-review-demo (v1 and v2)")
+    print("Shared Session (2 Workflows, 3 Revisions, 4 Invocations):", session)
+
+
+async def main(*, pagination=False, maps_only=False, children_count=5, replay_rounds=None, parallel_waits=False, revisions_only=False):
+    if revisions_only:
+        await seed_revisions()
+        return
     async with AutoAgentHost.from_project(Path(__file__).parent) as host:
         if parallel_waits:
             await seed_parallel_waits(host)
@@ -111,6 +135,7 @@ if __name__ == "__main__":
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--replay-rounds', type=int, help='Only create a Loop replay example with 1–200 passes (120 yields over 500 Events).')
     mode.add_argument('--maps-only', action='store_true', help='Only execute the Map and Map Spawn example.')
+    mode.add_argument('--revisions-only', action='store_true', help='Only create Revision Compare and cross-Revision Session examples.')
     mode.add_argument('--parallel-waits', action='store_true', help='Only create one Invocation with twenty pending external approvals.')
     parser.add_argument('--children', type=int, default=5, help='Number of review Child Tasks (1–200, default: 5).')
     args = parser.parse_args()
@@ -118,4 +143,4 @@ if __name__ == "__main__":
         parser.error('--replay-rounds must be between 1 and 200')
     if not 1 <= args.children <= 200:
         parser.error('--children must be between 1 and 200')
-    asyncio.run(main(pagination=args.pagination, maps_only=args.maps_only, children_count=args.children, replay_rounds=args.replay_rounds, parallel_waits=args.parallel_waits))
+    asyncio.run(main(pagination=args.pagination, maps_only=args.maps_only, children_count=args.children, replay_rounds=args.replay_rounds, parallel_waits=args.parallel_waits, revisions_only=args.revisions_only))

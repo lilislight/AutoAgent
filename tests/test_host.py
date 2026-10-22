@@ -27,14 +27,15 @@ from typing_extensions import TypedDict
 
 from autoagent import (
     Capability,
+    InputMappingContext,
     Edge,
     Node,
     Operator,
-    OutputBindingContext,
     ReceiveSignal,
     SignalEndpoint,
     Spawn,
-    UserEventMapping,
+    UserEventContext,
+    UserEventSpec,
     Wait,
     Workflow,
 )
@@ -62,8 +63,8 @@ def failed(value: Value) -> Value:
     raise ValueError(value["text"])
 
 
-def observation(context: OutputBindingContext) -> Value:
-    return {"text": context.output["text"]}
+def observation(context: UserEventContext) -> UserEventSpec:
+    return UserEventSpec(kind=context.node_id, payload={"text": context.value["text"]})
 
 
 async def run(host, workflow_id, value, **options):
@@ -264,6 +265,61 @@ entrypoint="{name}:workflow"
                 child_row["status"] == "cancelled"
             )
 
+    async def test_capability_resolvers_use_host_environment_without_changing_defaults(self):
+        """Host strategies see parsed environment while other Capabilities retain defaults."""
+        calls = []
+        custom = Capability("custom", Operator(identity).contract)
+        ordinary = Capability("ordinary", custom.contract)
+        @asynccontextmanager
+        async def resources(setup):
+            async def selected(value: Value) -> Value:
+                return {"text": setup.environment["MODEL"] + ":" + value["text"]}
+            chosen = setup.register_operator(Operator(selected, id="selected"), capability_id="custom")
+            setup.register_operator(Operator(identity, id="unused"), capability_id="custom", default=True)
+            setup.register_operator(Operator(identity, id="ordinary"), capability_id="ordinary", default=True)
+            async def resolve(capability, value):
+                calls.append((capability.id, value["text"]))
+                return chosen
+            setup.register_capability_resolver("custom", resolve)
+            yield
+        workflow = Workflow("routing", nodes=[Node("choose", custom), Node("default", ordinary)], edges=[Edge("choose", "default")])
+        async with AutoAgentHost(workflows=[workflow], settings=self.settings, lifespan=resources,
+                                 environment={"MODEL": "configured-model"}) as host:
+            result = await run(host, "routing", {"text": "hello"})
+            self.assertEqual(result.status, "completed", result.error)
+            self.assertEqual(result.output, {"text": "configured-model:hello"})
+        self.assertEqual(calls, [("custom", "hello")])
+
+    async def test_retry_and_original_error_input_roundtrip_through_storage(self):
+        """Both database backends retain Retry ordinals and pre-mapping input snapshots."""
+        from autoagent import BackoffPolicy, ResourcePolicy, RetryPolicy
+        from autoagent.core.runtime import RuntimeEvent, StateReducer
+        calls = []
+        async def fail(value: Value) -> Value:
+            calls.append(value["text"])
+            raise OSError("provider unavailable")
+        def mapped(context: InputMappingContext) -> Value:
+            return {"text": "mapped:" + context.invocation_input["text"]}
+        def backup(context: InputMappingContext) -> Value:
+            return context.incoming["failed"]["input"]["invocation_input"]
+        workflow = Workflow("retry-storage", nodes=[Node("primary", fail, input_mapping=mapped,
+            retry=RetryPolicy(backoff=BackoffPolicy(initial_seconds=0, max_seconds=0)), resource=ResourcePolicy(1)),
+            Node("backup", identity, input_mapping=backup)], edges=[Edge("primary", "backup", on="error", id="failed")])
+        async with AutoAgentHost(workflows=[workflow], settings=self.settings) as host:
+            result = await run(host, "retry-storage", {"text": "original"})
+            self.assertEqual(result.status, "completed", result.error)
+            self.assertEqual(result.output, {"text": "original"})
+            row = await host._persistence.get_invocation(result.invocation_id)
+            page = await host._persistence.runtime_events(row["session_id"], limit=1000)
+            events = [RuntimeEvent.from_record(item) for item in page.items]
+            starts = [e.payload for e in events if e.event_name == "operator_call.started"]
+            self.assertEqual([e.retry_attempt for e in starts], [0, 1, 0])
+            snapshot = next(e.payload.input for e in events if e.event_name == "node_occurrence.started")
+            self.assertEqual(snapshot["invocation_input"]["text"], "original")
+            state = StateReducer().reduce(events)
+            self.assertEqual(dict(state.invocation.scheduler.node_executions), {"primary": 1, "backup": 1})
+        self.assertEqual(calls, ["mapped:original", "mapped:original"])
+
     async def test_async_resources_share_operator_loop_and_cleanup(self):
         """Create, use and release asynchronous resources in Core's execution loop."""
         observations = []
@@ -399,17 +455,17 @@ def second(): return Workflow("duplicate", nodes=[Node("work", work)])
                     Node(
                         "first",
                         identity,
-                        user_events=(UserEventMapping("first", observation),),
+                        user_events=observation,
                     ),
                     Node(
                         "wait",
                         Wait(Value, Value),
-                        user_events=(UserEventMapping("wait", observation),),
+                        user_events=observation,
                     ),
                     Node(
                         "last",
                         Wait(Value, Value),
-                        user_events=(UserEventMapping("last", observation),),
+                        user_events=observation,
                     ),
                 ],
                 edges=[Edge("first", "wait"), Edge("wait", "last")],
@@ -541,10 +597,10 @@ def second(): return Workflow("duplicate", nodes=[Node("work", work)])
         entered, release = asyncio.Event(), asyncio.Event()
         original = host._persistence.save_checkpoint
 
-        async def delayed(checkpoint):
+        async def delayed(checkpoint, **options):
             entered.set()
             await release.wait()
-            return await original(checkpoint)
+            return await original(checkpoint, **options)
 
         host._persistence.save_checkpoint = delayed
         waiter = asyncio.create_task(host.__aexit__(None, None, None))
@@ -683,7 +739,7 @@ class HostConfigurationTests(unittest.TestCase):
             for line in (Path(__file__).resolve().parents[1] / ".env.example")
             .read_text()
             .splitlines()
-            if line.startswith("AUTOAGENT_") and not line.startswith("AUTOAGENT_SERVER_")
+            if line.startswith("AUTOAGENT_") and not line.startswith(("AUTOAGENT_SERVER_", "AUTOAGENT_LLM_", "AUTOAGENT_EMBEDDING_", "AUTOAGENT_LOG_"))
         }
         self.assertEqual(names, documented)
 

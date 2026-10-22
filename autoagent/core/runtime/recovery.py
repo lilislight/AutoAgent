@@ -25,10 +25,19 @@ class RecoverySource:
     resolutions: Mapping
 
     @classmethod
-    def from_events(cls, events: Iterable[RuntimeEvent]) -> RecoverySource:
+    def from_events(cls, events: Iterable[RuntimeEvent], *, initial_states=None) -> RecoverySource:
         """Consume complete Session prefixes without retaining the Event collection itself."""
         reducer = StateReducer()
-        states, full, work, calls, outputs, plans, resolutions = {}, {}, {}, {}, {}, {}, {}
+        states, full, work, calls, outputs, plans, resolutions = dict(initial_states or {}), {}, {}, {}, {}, {}, {}
+        for sid,state in states.items():
+            inv = state.invocation
+            if inv is not None and not isinstance(inv, ChildResult):
+                full[sid] = state
+                work[sid] = {key:item.execution for key,item in inv.scheduler.occurrences.items()}
+                calls[sid] = dict(inv.scheduler.operator_calls)
+                outputs[sid] = {key:item.output for key,item in inv.scheduler.occurrences.items() if item.output is not None}
+                plans[sid] = dict(inv.child_plans)
+                resolutions[sid] = dict(inv.scheduler.resolutions)
         for event in events:
             if not isinstance(event, RuntimeEvent):
                 raise TypeError('RecoverySource requires Runtime Events.')
@@ -55,6 +64,8 @@ class RecoverySource:
                     item = inv.scheduler.occurrences.get(oid)
                     if item is not None and item.execution != NodeExecutionState():
                         work.setdefault(sid, {})[oid] = item.execution
+                    if item is not None and item.status == 'completed' and item.output is not None:
+                        outputs.setdefault(sid, {})[oid] = item.output
                 for cid in inv.scheduler.operator_calls if whole else touched['operator_calls']:
                     item = inv.scheduler.operator_calls.get(cid)
                     if item is not None and (item.input is not None or item.output is not None or

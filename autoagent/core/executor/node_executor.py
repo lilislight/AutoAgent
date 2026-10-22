@@ -22,7 +22,7 @@ from ..commands import CommandIR, Wait
 from ..operators import Operator, ValueContract, is_stream_value
 from ..operators.context import OperatorCallContext, operator_call_context
 from ..operators.execution import _sync_execution_scope
-from ..errors import NodeTimeoutError
+from ..errors import NodeTimeoutError, RuntimeInfrastructureError, RuntimeTransitionError
 from ..runtime.events import (
     OperatorCallCompleted,
     OperatorCallFailed,
@@ -54,10 +54,6 @@ class UserCallableCancelledError(RuntimeError):
 
 
 async def _ignore_event(_event: CallEvent) -> None:
-    return None
-
-
-async def _ignore_chunk(_chunk: object) -> None:
     return None
 
 
@@ -191,8 +187,9 @@ class NodeExecutor:
         invocation_context: object = None,
         session_context: object = None,
         on_call_event: CallEventHandler = _ignore_event,
-        on_stream_chunk: StreamChunkHandler = _ignore_chunk,
+        on_stream_chunk: StreamChunkHandler | None = None,
         completed_calls=None,
+        previous_calls=None,
         aggregate: bool = True,
         _retain_outputs: bool = True,
     ) -> NodeExecutionResult:
@@ -215,7 +212,7 @@ class NodeExecutor:
             nonlocal active, peak
             if completed_calls is not None and index in completed_calls:
                 call = completed_calls[index]
-                contract = node.output_contract if node.stream is not None else node.executable.contract.output
+                contract = node.stream_output_contract if node.stream is not None else node.executable.contract.output
                 # Loaded checkpoints still cross the original contract boundary.
                 # Discard after validation, never bypass it for recovered data.
                 restored = contract.restore(thaw(call.output))
@@ -233,6 +230,7 @@ class NodeExecutor:
                     session_context,
                     on_call_event,
                     on_stream_chunk,
+                    previous_call=(previous_calls or {}).get(index),
                 )
                 return (output if _retain_outputs else None), count
             finally:
@@ -310,22 +308,40 @@ class NodeExecutor:
         invocation_context: object,
         session_context: object,
         on_call_event: CallEventHandler,
-        on_stream_chunk: StreamChunkHandler,
+        on_stream_chunk: StreamChunkHandler | None,
+        previous_call=None,
     ) -> tuple[object, int]:
         operator = node.executable
         assert isinstance(operator, Operator)
-        output = await self._call_once(
-            node,
-            operator,
-            occurrence_id,
-            unit_index,
-            value,
-            invocation_context,
-            session_context,
-            on_call_event,
-            on_stream_chunk,
-        )
-        return output, 1
+        input_record = operator.contract.input.to_record(value) if operator.contract.accepts_input else None
+        retry_attempt = previous_call.retry_attempt if previous_call is not None else 0
+        due = previous_call.retry_at_us if previous_call is not None else None
+        count = 0
+        while True:
+            if due is not None:
+                await asyncio.sleep(max(0.0, (due - time.time_ns() // 1000) / 1_000_000))
+                retry_attempt += 1
+            due = None
+            runtime_failed = False
+            async def emit(event):
+                nonlocal due, count, runtime_failed
+                try:
+                    await on_call_event(event)
+                except BaseException:
+                    runtime_failed = True
+                    raise
+                if isinstance(event, OperatorCallStarted):
+                    count += 1
+                elif isinstance(event, OperatorCallFailed):
+                    due = event.retry_at_us
+            try:
+                output = await self._call_once(node, operator, occurrence_id, unit_index,
+                    operator.contract.input.restore(thaw(input_record)) if operator.contract.accepts_input else None,
+                    invocation_context, session_context, emit, on_stream_chunk, retry_attempt)
+                return output, count
+            except Exception:
+                if runtime_failed or due is None:
+                    raise
 
     async def _call_once(
         self,
@@ -337,7 +353,8 @@ class NodeExecutor:
         invocation_context: object,
         session_context: object,
         on_call_event: CallEventHandler,
-        on_stream_chunk: StreamChunkHandler,
+        on_stream_chunk: StreamChunkHandler | None,
+        retry_attempt: int,
     ) -> object:
         queue_started = time.perf_counter_ns()
         await self._operator_capacity.acquire()
@@ -361,6 +378,7 @@ class NodeExecutor:
                 on_stream_chunk,
                 lease,
                 queue_duration_ns,
+                retry_attempt,
             )
         finally:
             lease.close()
@@ -375,9 +393,10 @@ class NodeExecutor:
         invocation_context: object,
         session_context: object,
         on_call_event: CallEventHandler,
-        on_stream_chunk: StreamChunkHandler,
+        on_stream_chunk: StreamChunkHandler | None,
         lease: "_OperatorCapacityLease",
         queue_duration_ns: int,
+        retry_attempt: int,
     ) -> object:
         validated = (
             operator.contract.input.validate(value)
@@ -397,14 +416,32 @@ class NodeExecutor:
                     else None
                 ),
                 queue_duration_ns=queue_duration_ns,
+                retry_attempt=retry_attempt,
             )
         )
         execution_started = time.perf_counter_ns()
+        stage = "handler"
+        emitted = False
+        source_failed = False
+
+        def source_error():
+            nonlocal source_failed
+            source_failed = True
+
+        async def stream_chunk(chunk):
+            nonlocal emitted
+            emitted = True
+            if on_stream_chunk is not None:
+                record = (operator.contract.stream_chunk._to_record_validated(chunk)
+                          if operator.contract.stream_chunk is not None else chunk)
+                await on_stream_chunk(record)
 
         async def invoke_and_validate() -> tuple[object, ValueContract]:
+            nonlocal stage
             returned = await _invoke_handler(
                 self._pool, operator, validated, lease.defer
             )
+            stage = "stream" if node.stream is not None else "contract"
             if node.stream is not None:
                 returned = await self._reduce_stream(
                     node,
@@ -413,18 +450,20 @@ class NodeExecutor:
                     value,
                     invocation_context,
                     session_context,
-                    on_stream_chunk,
+                    stream_chunk,
                     lease,
+                    source_error,
                 )
             elif is_stream_value(returned):
                 raise TypeError("Streaming Operator requires Node.stream.")
             contract = (
-                node.output_contract
+                node.stream_output_contract
                 if node.stream is not None
                 else operator.contract.output
             )
             if contract is None:
                 raise TypeError("Operator output contract is unavailable.")
+            stage = "contract"
             return contract.validate(returned), contract
 
         async def run_owned_sync(handler, args, kwargs):
@@ -451,6 +490,7 @@ class NodeExecutor:
             with _sync_execution_scope(run_owned_sync), operator_call_context(replace(
                 parent_context, node_id=node.id, occurrence_id=occurrence_id,
                 operator_id=operator.id, operator_call_id=call_id, unit_index=unit_index,
+                retry_attempt=retry_attempt,
             )):
                 output, contract = await invoke_with_timeout()
             output_record = contract._to_record_validated(output)
@@ -474,7 +514,15 @@ class NodeExecutor:
             raise user_error from cancelled
         except BaseException as exc:
             error = RuntimeErrorInfo(type(exc).__name__, str(exc) or type(exc).__name__)
-            await on_call_event(OperatorCallFailed(call_id, error, time.perf_counter_ns() - execution_started))
+            policy = node.retry
+            eligible = (isinstance(exc, Exception)
+                and not isinstance(exc, (UserCallableCancelledError, RuntimeInfrastructureError, RuntimeTransitionError))
+                and (stage == "handler" or source_failed or isinstance(exc, NodeTimeoutError))
+                and not emitted and not lease.has_deferred_work)
+            matches = policy is not None and any(base.__name__ in policy.retry_on for base in type(exc).__mro__)
+            due = (time.time_ns() // 1000 + int(policy.backoff.delay(retry_attempt + 1) * 1_000_000)
+                if eligible and matches and retry_attempt < policy.max_attempts else None)
+            await on_call_event(OperatorCallFailed(call_id, error, time.perf_counter_ns() - execution_started, retry_at_us=due))
             raise
         await on_call_event(OperatorCallCompleted(call_id, output_record, time.perf_counter_ns() - execution_started))
         return output
@@ -489,6 +537,7 @@ class NodeExecutor:
         session_context: object,
         on_stream_chunk: StreamChunkHandler,
         lease: "_OperatorCapacityLease",
+        on_source_error: Callable[[], None],
     ) -> object:
         if not is_stream_value(returned):
             raise TypeError("Stream Node Operator must return Iterator or AsyncIterator.")
@@ -508,55 +557,28 @@ class NodeExecutor:
                 context,
                 defer_release=lease.defer,
             )
-            if hasattr(returned, "__anext__"):
-                async for chunk in returned:  # type: ignore[union-attr]
-                    if operator.contract.stream_chunk is not None:
-                        chunk = operator.contract.stream_chunk.validate(
-                            chunk
-                        )
-                        emitted_chunk = operator.contract.stream_chunk._to_record_validated(
-                            chunk
-                        )
+            asynchronous = hasattr(returned, "__anext__")
+            iterator = returned if asynchronous else iter(returned)
+            while True:
+                try:
+                    if asynchronous:
+                        chunk = await anext(iterator)
+                        present = True
                     else:
-                        emitted_chunk = chunk
-                    await _emit_stream_chunk(on_stream_chunk, emitted_chunk)
-                    state = await _invoke(
-                        self._pool,
-                        reducer.add,
-                        context,
-                        state,
-                        chunk,
-                        defer_release=lease.defer,
-                    )
-            else:
-                iterator = iter(returned)  # type: ignore[arg-type]
-                while True:
-                    present, chunk = await _run_sync(
-                        self._pool,
-                        _next_item,
-                        iterator,
-                        defer_release=lease.defer,
-                    )
-                    if not present:
-                        break
-                    if operator.contract.stream_chunk is not None:
-                        chunk = operator.contract.stream_chunk.validate(
-                            chunk
-                        )
-                        emitted_chunk = operator.contract.stream_chunk._to_record_validated(
-                            chunk
-                        )
-                    else:
-                        emitted_chunk = chunk
-                    await _emit_stream_chunk(on_stream_chunk, emitted_chunk)
-                    state = await _invoke(
-                        self._pool,
-                        reducer.add,
-                        context,
-                        state,
-                        chunk,
-                        defer_release=lease.defer,
-                    )
+                        present, chunk = await _run_sync(self._pool, _next_item, iterator,
+                            defer_release=lease.defer)
+                except StopAsyncIteration:
+                    break
+                except BaseException:
+                    on_source_error()
+                    raise
+                if not present:
+                    break
+                if operator.contract.stream_chunk is not None:
+                    chunk = operator.contract.stream_chunk.validate(chunk)
+                await _emit_stream_chunk(on_stream_chunk, chunk)
+                state = await _invoke(self._pool, reducer.add, context, state, chunk,
+                    defer_release=lease.defer)
         except BaseException as error:
             stream_error = error
             raise

@@ -2,6 +2,9 @@ export type ReplayPosition = { sequence?: number; at_us?: number };
 /** Small per-source bookmarks; no Replay frames or business values are retained. */
 export class ReplayPositions {
   private readonly entries = new Map<string, ReplayPosition>();
+  private requested: {key:string;position:ReplayPosition}|null = null;
+  request(key:string,position:ReplayPosition) { this.write(key,position);this.requested={key,position:{...position}}; }
+  takeRequested(key:string) { if(this.requested?.key!==key)return;const value=this.requested.position;this.requested=null;return value; }
   constructor(private readonly limit = 128) {}
   read(key: string): ReplayPosition | undefined {
     const value = this.entries.get(key);

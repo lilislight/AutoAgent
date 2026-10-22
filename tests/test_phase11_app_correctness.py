@@ -77,7 +77,7 @@ def fail(_value: Value) -> Value:
 
 def error_mapping(context: InputMappingContext) -> ErrorValue:
     error = next(iter(context.incoming.values()))
-    return {"message": error["message"]}  # type: ignore[index]
+    return {"message": error["error"]["message"]}  # type: ignore[index]
 
 
 def accept_error(value: ErrorValue) -> ErrorValue:
@@ -560,7 +560,7 @@ class AppCorrectnessTests(unittest.TestCase):
         forged = Operator(forged_identity, id="implementation", version="1")
         capability = Capability("value-capability", registered.contract)
         app = AutoAgentApp(
-            capability_resolver=lambda _capability, _value: forged,
+            capability_resolvers={capability.id: lambda _capability, _value: forged},
         )
         try:
             app.register_operator(registered, capability_id=capability.id)

@@ -1,15 +1,15 @@
-"""Bounded operation receipts; HTTP disconnects never cancel a Host command."""
+"""Host-owned short-lived receipts; disconnects never cancel an admitted command."""
 import asyncio
 import hashlib
 import json
 import time
 from collections import OrderedDict
-from autoagent.host import HostCapacityError, HostNotFoundError, HostRunConflict
+from .models import HostCapacityError, HostNotFoundError, HostRunConflict
 
 
 class ExecutionOperations:
-    def __init__(self,host,settings):
-        self.host,self.settings=host,settings
+    def __init__(self,host):
+        self.host,self.settings=host,host.settings
         self.entries=OrderedDict()
         self.tasks=set()
         self.closed=False
@@ -54,6 +54,8 @@ class ExecutionOperations:
         self.expire(reserve=True)
         entry=dict(operation_id=body['request_id'],invocation_id=body['invocation_id'],action=body['action'],status='running',
             result=None,error=None,_fingerprint=fingerprint,_finished=0)
+        if body['action']=='recover':
+            entry['expected_version']=body['expected_version']
         self.entries[body['request_id']]=entry
         task=asyncio.create_task(self.run(entry,body))
         self.tasks.add(task)
@@ -91,3 +93,18 @@ class ExecutionOperations:
             task.cancel()
         await asyncio.gather(*tasks,return_exceptions=True)
         self.entries.clear()
+
+
+class OperationControls:
+    async def submit_execution_operation(self, body):
+        """Admit a command and keep a short-lived receipt in this Host's memory."""
+        # Validation and execution already account for the command's payload.
+        return await self._perform(lambda: self._execution_operations.submit(body), control=True)
+
+    async def get_execution_operation(self, operation_id):
+        """Read this running Host's temporary receipt; never infer execution outcome."""
+        async def read():
+            if self._read_only:
+                raise HostRunConflict('read_only', 'Temporary operation receipts belong to the running Host.')
+            return self._execution_operations.get(operation_id)
+        return await self._perform(read)

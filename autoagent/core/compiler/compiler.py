@@ -29,13 +29,15 @@ from ..workflow import (
     NodeIR,
     OutputBindingContext,
     Recovery,
+    RetryPolicy,
+    ResourcePolicy,
     Stream,
     StreamContext,
     SubWorkflow,
-    UserEventMapping,
+    UserEventContext,
+    UserEventSpec,
     Workflow,
     WorkflowIR,
-    UserEventMappingIR,
 )
 from ._hooks import resolve_hook_contract
 from .diagnostic import CompileResult, Diagnostic
@@ -628,6 +630,9 @@ class WorkflowCompiler:
         node: Node,
         parent_workflows: tuple[int, ...],
     ) -> NodeIR:
+        # Defaults belong to declarations; never mutate the author's Node.
+        if isinstance(node.executable, Capability) and node.stream is None:
+            node = replace(node, stream=node.executable.stream)
         if not isinstance(node.id, str) or not node.id.strip():
             raise _error("NODE_ID_EMPTY", "Node id cannot be empty.")
         for name, value, expected in (
@@ -644,17 +649,22 @@ class WorkflowCompiler:
                 "NODE_CONFIGURATION_INVALID",
                 f"Node {node.id!r} recovery_mode must be Recovery.",
             )
+        if not isinstance(node.resource, ResourcePolicy):
+            raise _error("NODE_CONFIGURATION_INVALID", "Node resource must be ResourcePolicy.")
+        if node.retry is not None:
+            if not isinstance(node.retry, RetryPolicy):
+                raise _error("NODE_CONFIGURATION_INVALID", "Node retry must be RetryPolicy.")
+            if isinstance(node.executable, SystemCommand):
+                raise _error("NODE_CONFIGURATION_INVALID", "RetryPolicy applies to Operator Calls.")
         if node.timeout is not None:
             if not isinstance(node.timeout, TimeoutPolicy):
                 raise _error("NODE_CONFIGURATION_INVALID", f"Node {node.id!r} timeout must be TimeoutPolicy.")
             if isinstance(node.executable, SystemCommand):
                 raise _error("NODE_CONFIGURATION_INVALID", "TimeoutPolicy applies to Operator Calls; use Timer/Select for durable waits.")
-        if not isinstance(node.user_events, tuple) or not all(
-            isinstance(item, UserEventMapping) for item in node.user_events
-        ):
+        if node.user_events is not None and not callable(node.user_events):
             raise _error(
                 "NODE_CONFIGURATION_INVALID",
-                f"Node {node.id!r} user_events must contain UserEventMapping values.",
+                f"Node {node.id!r} user_events must be a Mapper or None.",
             )
         executable = node.executable
         if isinstance(executable, Workflow):
@@ -758,6 +768,7 @@ class WorkflowCompiler:
 
         self._validate_input_mapping(node, input_contract)
         self._validate_output_binding(node)
+        stream_output_contract = output_contract if node.stream is not None else None
         if node.map is not None:
             if node.input_mapping is None:
                 raise _error("MAP_INPUT_MAPPING_REQUIRED", f"Map Node {node.id!r} requires Input Mapping.")
@@ -779,43 +790,33 @@ class WorkflowCompiler:
                     returned,
                     location=f"Map Node {node.id} Aggregation return",
                 )
-        user_event_kinds: set[str] = set()
-        user_events: list[UserEventMappingIR] = []
-        for mapping in node.user_events:
-            if mapping.kind in user_event_kinds:
-                raise _error(
-                    "USER_EVENT_KIND_DUPLICATE",
-                    f"Node {node.id!r} repeats User Event kind {mapping.kind!r}.",
-                )
-            user_event_kinds.add(mapping.kind)
+        if node.user_events is not None:
             returned = self._validate_hook(
-                mapping.mapper,
-                (OutputBindingContext,),
+                node.user_events,
+                (UserEventContext,),
                 code="USER_EVENT_MAPPING_SIGNATURE",
-                label=f"Node {node.id!r} User Event Mapping {mapping.kind!r}",
+                label=f"Node {node.id!r} User Event Mapper",
             )
-            user_events.append(
-                UserEventMappingIR(
-                    mapping.kind,
-                    mapping.mapper,
-                    ValueContract.create(
-                        returned,
-                        location=f"Node {node.id} User Event {mapping.kind}",
-                    ),
+            if returned is not UserEventSpec and set(get_args(returned)) != {UserEventSpec, type(None)}:
+                raise _error(
+                    "USER_EVENT_MAPPING_RETURN",
+                    f"Node {node.id!r} User Event Mapper must return UserEventSpec or UserEventSpec | None.",
                 )
-            )
         return NodeIR(
             id=node.id,
             executable=compiled_executable,  # type: ignore[arg-type]
             input_contract=input_contract,
             output_contract=output_contract,
+            stream_output_contract=stream_output_contract,
             input_mapping=node.input_mapping,
             output_binding=node.output_binding,
             map=node.map,
             stream=node.stream,
-            user_events=tuple(user_events),
+            user_events=node.user_events,
             recovery_mode=node.recovery_mode,
             timeout=node.timeout,
+            retry=node.retry,
+            resource=node.resource,
         )
 
     def _validate_input_mapping(self, node: Node, target: ValueContract | None) -> None:

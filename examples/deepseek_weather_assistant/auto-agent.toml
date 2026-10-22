@@ -1,0 +1,8 @@
+schema_version = 1
+
+[project]
+name = "deepseek-weather-assistant"
+description = "Real DeepSeek calls with local simulated city and weather Tools"
+
+[[workflows]]
+entrypoint = "weather_app.project:weather_workflow"

@@ -45,7 +45,10 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.host_settings = HostSettings(database_url="sqlite+aiosqlite:///" + str(self.root / "runtime.db"))
+        # HTTP contract tests share process RSS with all preceding suites.
+        # Memory admission thresholds are exercised in test_host_residency.
+        self.host_settings = HostSettings(database_url="sqlite+aiosqlite:///" + str(self.root / "runtime.db"),
+            memory_budget_bytes=2 * 1024 * 1024 * 1024)
         self.ui = self.root / "ui"
         self.ui.mkdir()
         (self.ui / "index.html").write_text('<html><head><!--AUTOAGENT_CONFIG--></head><body>workflow-browser</body></html>')
@@ -1836,6 +1839,9 @@ class ServerSettingsTests(unittest.TestCase):
         """Server settings reject conflicting paths and invalid resource limits."""
         settings = ServerSettings.from_environment({"AUTOAGENT_SERVER_UI_DIRECTORY": "frontend"}, root=Path("/tmp/project"))
         self.assertEqual(settings.ui_directory, Path("/tmp/project/frontend"))
+        self.assertTrue(ServerSettings().access_log)
+        self.assertTrue(settings.access_log)
+        self.assertFalse(ServerSettings.from_environment({"AUTOAGENT_SERVER_ACCESS_LOG": " false "}).access_log)
         for changes in ({"port": 0}, {"ui_path": "/api/v2/ui"}, {"api_prefix": "/api/../v2"}, {"page_size": 201}, {"query_timeout_seconds": 0},
                         {"shutdown_timeout_seconds": 0}, {"shutdown_timeout_seconds": float('inf')}, {"shutdown_timeout_seconds": True}):
             with self.assertRaises(ValueError):

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from autoagent import (
@@ -33,6 +33,7 @@ class HostSetup:
     environment: object
     workflows: list
     operators: list
+    capability_resolvers: dict = field(default_factory=dict)
 
     def register_operator(
         self, operator, *, capability_id, priority=0, enabled=True, default=False
@@ -43,6 +44,17 @@ class HostSetup:
             OperatorRegistration(operator, capability_id, priority, enabled, default)
         )
         return operator
+
+    def register_capability_resolver(self, capability_id, resolver):
+        """Stage a strategy for this Capability; others retain default selection."""
+        if not isinstance(capability_id, str) or not capability_id.strip():
+            raise ValueError("Capability id cannot be empty.")
+        if not callable(resolver):
+            raise TypeError("Capability resolver must be callable.")
+        if capability_id in self.capability_resolvers:
+            raise ValueError(f"Resolver already registered for {capability_id!r}.")
+        self.capability_resolvers[capability_id] = resolver
+        return resolver
 
     def register_workflow(self, value):
         if not isinstance(value, Workflow):
@@ -57,6 +69,7 @@ class Runtime:
     def __init__(
         self, persistence, settings, workflows, operators, lifespan, environment
     ):
+        self.settings = settings
         self.persistence = persistence
         self.setup = HostSetup(
             MappingProxyType(dict(environment)), list(workflows), list(operators)
@@ -68,6 +81,7 @@ class Runtime:
         self.workflow_irs = {}
         self.workflow_ids = {}
         self.resident = {}
+        self.fork_tasks = {}
         self.owners = {}
         self.residency = None
         self.locks = {}
@@ -77,26 +91,35 @@ class Runtime:
         self.repository = RuntimeRepository(sink=self)
         self.app = AutoAgentApp(
             max_operator_concurrency=settings.max_operator_concurrency,
-            max_node_executions_per_invocation=settings.max_node_executions_per_invocation,
             runtime_repository=self.repository,
             user_event_sink=self,
             user_event_journal=self.journal,
             runtime_lifespan=self._resources,
         )
 
+        # Agent declarations belong to Host composition, never Core imports.
+        # Register before project lifespan so conflicting contracts fail early.
+        from autoagent.agent.integration import LLM_CALL, EMBEDDING
+
+        self.app.register_capability(LLM_CALL)
+        self.app.register_capability(EMBEDDING)
+
     @asynccontextmanager
     async def _resources(self):
         from autoagent.agent.recording import runtime_llm_recorder
+        from .agent import agent_resources
 
         with runtime_llm_recorder(self.persistence):
-            if self.lifespan is None:
+            async with AsyncExitStack() as stack:
+                if self.lifespan is not None:
+                    await stack.enter_async_context(self.lifespan(self.setup))
+                await stack.enter_async_context(agent_resources(self.setup))
                 yield
-            else:
-                async with self.lifespan(self.setup):
-                    yield
 
     async def prepare(self):
         await self.app.aprepare()
+        for capability_id, resolver in self.setup.capability_resolvers.items():
+            self.app.register_capability_resolver(capability_id, resolver)
         ids = set()
         compiler = WorkflowCompiler()
         closure = {}
@@ -373,6 +396,11 @@ class Runtime:
             raise HostRunConflict('recovery_in_progress', 'Recovery is already in progress for this Root.')
         return await asyncio.shield(task)
 
+    async def save_checkpoint(self, graph, *, reason="automatic", pinned=False):
+        return await self.persistence.save_checkpoint(
+            graph, reason=reason, pinned=pinned, keep_latest=self.settings.checkpoint_keep_latest
+        )
+
     async def shutdown(self):
         cleanup_error = None
         try:
@@ -382,10 +410,14 @@ class Runtime:
             # its repeated close returns the already captured checkpoint.
             cleanup_error = error
             checkpoint = await self.app.aclose(timeout=None, capture_checkpoint=True)
+        # Core close settles running controls before its loop stops. Drain the
+        # Host activation wrappers while Persistence is still available.
+        if self.fork_tasks:
+            await asyncio.gather(*tuple(self.fork_tasks.values()), return_exceptions=True)
         self.saved_shutdown_checkpoint = checkpoint
         if checkpoint is not None:
             for graph in checkpoint.graphs:
-                await self.persistence.save_checkpoint(graph)
+                await self.save_checkpoint(graph, reason="shutdown")
         await self.persistence.flush()
         if cleanup_error is not None:
             raise cleanup_error

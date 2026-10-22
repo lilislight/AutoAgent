@@ -24,7 +24,7 @@ from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 16
+RUNTIME_STATE_SCHEMA_VERSION = 17
 InvocationStatus = Literal[
     "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
@@ -63,6 +63,8 @@ class OperatorCallState:
     completed_at_us: int | None = None
     queue_duration_ns: int = 0
     execution_duration_ns: int | None = None
+    retry_attempt: int = 0
+    retry_at_us: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +122,12 @@ class NodeOccurrenceState:
     activations: tuple[Activation, ...] = ()
     metrics: DurableValue = None
     recovery_attempts: int = 0
+    raw_input: DurableValue = None
 
 
 @dataclass(frozen=True, slots=True)
 class SchedulerState:
+    node_executions: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
     occurrence_ids: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     retired_occurrences: Mapping[str, NodeOccurrenceState] = field(default_factory=lambda: MappingProxyType({}))
     initialized: bool = False
@@ -497,6 +501,11 @@ def _validate_scheduler(
         prefix = logical + '~recover:'
         if not physical.startswith(prefix) or not physical[len(prefix):].isdecimal() or int(physical[len(prefix):]) < 1:
             raise ValueError('Invalid recovered occurrence identity.')
+    if not isinstance(scheduler.node_executions, Mapping):
+        raise TypeError("Node execution counts must be a mapping.")
+    for node_id, count in scheduler.node_executions.items():
+        _non_empty_string_value(node_id, "Node execution count identity")
+        _non_negative(count, "Node execution count")
     occurrences = scheduler.occurrences
     if not isinstance(scheduler.retired_occurrences, Mapping):
         raise TypeError('Retired activation sources must be a mapping.')
@@ -536,6 +545,11 @@ def _validate_scheduler(
                 f"Unsupported Node Occurrence status {occurrence.status!r}."
             )
         _optional_non_negative(occurrence.ready_at_us, "Node Occurrence ready_at_us")
+        if occurrence.raw_input is not None:
+            if not isinstance(occurrence.raw_input, Mapping) or set(occurrence.raw_input) != {"invocation_input", "incoming"}:
+                raise ValueError("Node raw_input must contain invocation_input and incoming.")
+            if not isinstance(occurrence.raw_input["incoming"], Mapping):
+                raise TypeError("Node raw_input incoming must be a mapping.")
         _validate_execution(occurrence.execution)
         _optional_non_negative(
             occurrence.started_at_us, "Node Occurrence started_at_us"
@@ -703,6 +717,8 @@ def _validate_operator_calls(
         occurrence = occurrences.get(call.occurrence_id)
         if occurrence is None:
             raise ValueError("Operator Call references an unknown Node Occurrence.")
+        _non_negative(call.retry_attempt, "Operator Call retry_attempt")
+        _optional_non_negative(call.retry_at_us, "Operator Call retry_at_us")
         _non_negative(call.unit_index, "Operator Call unit_index")
         _non_negative(call.queue_duration_ns, "Operator Call queue_duration_ns")
         _optional_non_negative(call.execution_duration_ns, "Operator Call execution_duration_ns")
@@ -1147,6 +1163,7 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
         },
         "child_plans": _child_plans_record(value.child_plans),
         "scheduler": {
+            "node_executions": dict(value.scheduler.node_executions),
             "occurrence_ids": dict(value.scheduler.occurrence_ids),
             "retired_occurrences": {key: _occurrence_record(item) for key,item in value.scheduler.retired_occurrences.items()},
             "initialized": value.scheduler.initialized,
@@ -1197,6 +1214,8 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
                     "occurrence_id": item.occurrence_id,
                     "operator_id": item.operator_id,
                     "unit_index": item.unit_index,
+                    "retry_attempt": item.retry_attempt,
+                    "retry_at_us": item.retry_at_us,
                     "status": item.status,
                     "input": thaw(item.input),
                     "output": thaw(item.output),
@@ -1251,6 +1270,7 @@ def _occurrence_record(value: NodeOccurrenceState) -> dict[str, object]:
         ],
         "metrics": thaw(value.metrics),
         "recovery_attempts": value.recovery_attempts,
+        "raw_input": thaw(value.raw_input),
     }
 
 
@@ -1391,6 +1411,7 @@ def _scheduler_from_record(value: object) -> SchedulerState:
     if type(initialized) is not bool:
         raise TypeError("Scheduler initialized must be bool.")
     return SchedulerState(
+        node_executions=MappingProxyType(dict(_mapping(record["node_executions"], "Node execution counts"))),
         occurrence_ids=MappingProxyType(dict(_mapping(record.get("occurrence_ids"), "Occurrence identities"))),
         retired_occurrences=runtime_mapping({key:_occurrence_from_record(item) for key,item in _mapping(record.get("retired_occurrences"), "Retired activation sources").items()}),
         initialized=initialized,
@@ -1444,6 +1465,7 @@ def _occurrence_from_record(value: object) -> NodeOccurrenceState:
         activations=tuple(_activation_from_record(item) for item in activations),
         metrics=freeze(record.get("metrics")),
         recovery_attempts=_integer(record, "recovery_attempts"),
+        raw_input=freeze(record["raw_input"]),
     )
 
 
@@ -1490,6 +1512,8 @@ def _call_from_record(value: object) -> OperatorCallState:
         occurrence_id=_string(record, "occurrence_id"),
         operator_id=_string(record, "operator_id"),
         unit_index=_integer(record, "unit_index"),
+        retry_attempt=_integer(record, "retry_attempt"),
+        retry_at_us=_optional_integer(record, "retry_at_us"),
         status=status,  # type: ignore[arg-type]
         input=freeze(record.get("input")),
         output=freeze(record.get("output")),

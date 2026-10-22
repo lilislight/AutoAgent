@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from autoagent import AutoAgentApp, Capability, Node, Operator, Stream, ValueContract, Workflow
+from autoagent import UserEventContext, UserEventSpec, AutoAgentApp, Capability, Node, Operator, Stream, ValueContract, Workflow
 from autoagent.agent import (
     ChatCompletionsAdapter, LLMRequest, LLMToolCall, LLMToolResult,
     MCPCallbacks, MCPClient, MCPClientError, MCPFileTokenStorage,
@@ -29,6 +29,13 @@ from tests.test_agent_mcp import WireServer, call, httpx2
 if httpx2 is not None:
     from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
     import mcp_types as types
+
+
+
+def mcp_events(context: UserEventContext) -> UserEventSpec | None:
+    if context.phase == "chunk":
+        return UserEventSpec(kind="mcp.chunk", payload=context.value)
+    return None
 
 
 class NormalizedOutput(BaseModel):
@@ -399,11 +406,11 @@ class ExtensionHTTPTests(unittest.IsolatedAsyncioTestCase):
         app = AutoAgentApp(runtime_lifespan=lifespan, user_event_sink=Sink())
         try:
             await app.aprepare()
-            result = await app.ainvoke(Workflow("progress", nodes=[Node("tool", Capability("mcp", prototype.contract), stream=Stream(MCPToolStreamReducer()))]), call())
+            result = await app.ainvoke(Workflow("progress", nodes=[Node("tool", Capability("mcp", prototype.contract), stream=Stream(MCPToolStreamReducer()), user_events=mcp_events)]), call())
             self.assertEqual(result.status, "completed", result.error)
             observation = ValueContract.create(LLMToolResult, location="tool").restore(result.output)
             self.assertEqual(observation.structured_content, {"sum": 6})
-            chunks = [e.to_record()["payload"] for e in events if e.kind == "stream.chunk"]
+            chunks = [e.to_record()["payload"] for e in events if e.kind == "mcp.chunk"]
             self.assertEqual([c["type"] for c in chunks], ["progress", "completed"])
         finally:
             await app.aclose()

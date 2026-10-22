@@ -93,12 +93,11 @@ class ServerShutdownTests(unittest.IsolatedAsyncioTestCase):
         from autoagent.server.__main__ import main
         app = create_app(_Host(), settings=ServerSettings(), ui=False)
         with patch('sys.argv', ['autoagent.server', '--no-ui']), \
-             patch('autoagent.server.__main__.create_app', return_value=app), \
-             patch('autoagent.server.__main__._Server') as server_type:
+             patch('autoagent.server.app.create_app', return_value=app), \
+             patch('autoagent.server.serving._Server') as server_type:
             server_type.return_value.started = False
-            with self.assertRaises(SystemExit) as error:
-                main()
-        self.assertEqual(error.exception.code, 3)
+            status = main()
+        self.assertEqual(status, 3)
 
     async def test_cli_one_signal_closes_live_streams_and_persists_waiting_sessions(self):
         """One SIGINT or SIGTERM ends HTTP streams and completes owned Host checkpoint cleanup."""
@@ -177,7 +176,7 @@ def approval():
                                     await asyncio.gather(*readers, return_exceptions=True)
                         log.seek(0)
                         output = log.read()
-                        self.assertIn('Application shutdown complete.', output)
+                        self.assertIn('Server stopped.', output)
                         self.assertNotIn('timeout graceful shutdown exceeded', output)
                         self.assertNotIn('Traceback', output)
                         with sqlite3.connect(database) as connection:

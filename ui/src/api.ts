@@ -1,6 +1,17 @@
 import type { TimelineEventGroups, ExecutionFamily, TimelinePosition, ExecutionFilters, ExecutionTrace, RecordedValue, SessionPage, TimelineMarkerPage, TimelineOverview, TimelinePage, TracePage, TraceRow, WorkflowCatalogPage, WorkflowGraphData, WorkflowPage } from "./types";
 
 import { config, request } from './http';
+export function getForkPlan(iid:string,sequence:number,signal:AbortSignal) {
+  return request<import('./types').ForkPlan>(`/execution-fork-plan?${new URLSearchParams({invocation_id:iid,sequence:String(sequence)})}`,signal);
+}
+export function listExecutionEvents(iid:string,cursor:string|null,signal:AbortSignal) {
+  const query=new URLSearchParams({invocation_id:iid,limit:'50'});if(cursor)query.set('cursor',cursor);
+  return request<TracePage>(`/invocation-events?${query}`,signal);
+}
+export function forkExecution(iid:string,sequence:number,session:string|undefined,signal:AbortSignal) {
+  return request<import('./types').AcceptedFork>('/execution-forks',signal,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({invocation_id:iid,sequence,session_id:session})});
+}
 export { ApiError, config } from './http';
 import { traceQuery } from './traceClient';
 import type { AcceptedExecution, RunWorkflowInput, WorkflowRunSpec } from './types';
@@ -93,6 +104,9 @@ export function getExecutionFamily(invocationId: string, signal: AbortSignal) {
 export function getExecutionTimeline(invocationId: string, signal: AbortSignal, observed?: number) {
   return traceQuery<TimelineOverview>(invocationId,'overview',{observed},signal);
 }
+export function getTimelineActivity(invocationId: string, start: number, end: number, signal: AbortSignal) {
+  return traceQuery<number[]>(invocationId,'activity',{start,end,buckets:128},signal);
+}
 export function getTimelineItems(invocationId: string, kind: string, start: number, end: number, occurrence: string | null, cursor: string | null, signal: AbortSignal, nodeId?: string | null) {
   return traceQuery<TimelinePage>(invocationId,'page',{kind,start,end,occurrence,cursor,nodeId},signal);
 }
@@ -127,4 +141,44 @@ export function getExecutionStages(invocationId: string, occurrenceId: string, c
 
 export function getStageValue(invocationId: string, occurrenceId: string, eventId: string, field: string, signal: AbortSignal) {
   return request<RecordedValue>(`/execution-stage-value?${new URLSearchParams({ invocation_id: invocationId, occurrence_id: occurrenceId, event_id: eventId, field })}`, signal);
+}
+
+export function compareWorkflowRevisions(base: string, target: string, cursor: string | null, signal: AbortSignal) {
+  const query = new URLSearchParams({ base_revision_id: base, target_revision_id: target, limit: String(config.pageSize) });
+  if (cursor) query.set('cursor', cursor);
+  return request<import('./types').RevisionComparisonPage>(`/workflow-comparison?${query}`, signal);
+}
+export function getRevisionComparisonObject(base: string, target: string, kind: string, identity: string, signal: AbortSignal) {
+  return request<import('./types').ComparisonObject>(`/workflow-comparison-object?${new URLSearchParams({base_revision_id:base,target_revision_id:target,kind,identity})}`, signal);
+}
+export function getSessionInformation(session: string, signal: AbortSignal) {
+  return request<import('./types').SessionInformation>(`/session-information?${new URLSearchParams({session_id:session})}`, signal);
+}
+export function getSessionHistory(session: string, cursor: string | null, revision: string | null, signal: AbortSignal) {
+  const query = new URLSearchParams({ session_id:session, limit:String(config.pageSize) });
+  if (cursor) query.set('cursor',cursor);
+  if (revision) query.set('revision_id',revision);
+  return request<import('./types').MetadataPage<import('./types').SessionHistoryRow>>(`/session-history?${query}`,signal);
+}
+export function getSessionWorkflows(session: string, cursor: string | null, signal: AbortSignal) {
+  const query = new URLSearchParams({session_id:session,limit:String(config.pageSize)});
+  if (cursor) query.set('cursor',cursor);
+  return request<import('./types').MetadataPage<import('./types').SessionWorkflow>>(`/session-workflows?${query}`,signal);
+}
+export function listSessionCheckpoints(session: string, cursor: string | null, signal: AbortSignal) {
+  const query = new URLSearchParams({session_id:session,limit:String(config.pageSize)});
+  if (cursor) query.set('cursor',cursor);
+  return request<import('./types').MetadataPage<import('./types').SessionCheckpoint>>(`/session-checkpoints?${query}`,signal);
+}
+export function getCheckpointDetails(id: string, signal: AbortSignal) {
+  return request<import('./types').CheckpointDetails>(`/checkpoints/${encodeURIComponent(id)}`,signal);
+}
+export function createSessionCheckpoint(session: string, pinned: boolean, signal: AbortSignal, sequence?: number) {
+  return request<import('./types').CheckpointDetails>('/session-checkpoints',signal,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:session,pinned,sequence})});
+}
+export function setCheckpointPinned(id: string, pinned: boolean, signal: AbortSignal) {
+  return request<import('./types').CheckpointDetails>(`/checkpoints/${encodeURIComponent(id)}/pin`,signal,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned})});
+}
+export function deleteCheckpoint(id: string, signal: AbortSignal) {
+  return request<void>(`/checkpoints/${encodeURIComponent(id)}`,signal,{method:'DELETE'});
 }

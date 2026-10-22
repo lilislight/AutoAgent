@@ -50,6 +50,7 @@ from .mcp import (
 )
 from .mcp import __all__ as _mcp_exports
 from .integration import LLMStreamReducer, LLMStreamState, tool_operator
+from .integration import LLM_CALL, EMBEDDING, llm_call_operator, embedding_operator
 from .integration import MCPToolStreamReducer, MCPToolStreamState
 from .skills import (
     SkillLoadRequest, SkillListResourcesRequest, SkillReadResourceRequest, SkillReadTextRequest, SkillRunScriptRequest, SkillOperations,
@@ -71,6 +72,7 @@ __all__ = [
     "LLMCallContext", "LLMCallRecord", "LLMCallRecorder", "llm_recording_context", "runtime_llm_recorder",
     *_media_exports,
     *_model_exports, *_provider_exports, *_tool_exports, *_mcp_exports,
+    "LLM_CALL", "EMBEDDING", "llm_call_operator", "embedding_operator",
     "LLMStreamReducer", "LLMStreamState", "tool_operator",
     "MCPToolStreamReducer", "MCPToolStreamState",
     *_skill_exports,

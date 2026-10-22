@@ -25,6 +25,13 @@ if (isMainThread) {
   const narrow=measure(()=>model.page(narrowArgs));assert.equal(narrow.value.items[0].id,`occ:${Math.floor(count*.08)}`);
   const groups=measure(()=>model.groups({start:0,end:count*100,buckets:256,through:count+2}));
   assert.equal(groups.value.total_count,count);assert.equal(groups.value.items.reduce((sum,g)=>sum+g.count,0),count);
+  const zoomQueries=measure(()=>{
+    for(let index=0;index<100;index++){
+      const start=(Math.floor(count*.8)+index)*100;
+      assert.equal(model.groups({start,end:start+1000,buckets:128,through:count+2}).total_count,10);
+      assert.equal(model.activityBins({start,end:start+1000,buckets:128}).reduce((sum,count)=>sum+count,0),2);
+    }
+  });
   const initial=new ReplayAccumulator({baseline:{trace,occurrences:[],child_ids:[]}});
   const buildReplay=measure(()=>new LocalReplay(initial,events));
   const replay=buildReplay.value,seeks=[];
@@ -50,5 +57,5 @@ if (isMainThread) {
   liveTimes.sort((a,b)=>a-b);
   const allocatedHeapMiB=+(process.memoryUsage().heapUsed/1048576).toFixed(1);
   globalThis.gc?.();
-  parentPort.postMessage({liveP50Ms:+liveTimes[50].toFixed(2),liveP95Ms:+liveTimes[95].toFixed(2),allocatedHeapMiB,events:count,nodeOccurrences:node.length,calls:call.length,indexMs:+modelTime.ms.toFixed(1),fullPageMs:+page.ms.toFixed(1),narrowPageMs:+narrow.ms.toFixed(1),groupsMs:+groups.ms.toFixed(1),replayIndexMs:+buildReplay.ms.toFixed(1),seeks,heapMiB:+(process.memoryUsage().heapUsed/1048576).toFixed(1),totalMs:+(performance.now()-started).toFixed(1)});
+  parentPort.postMessage({zoomQueryMeanMs:+(zoomQueries.ms/100).toFixed(3),liveP50Ms:+liveTimes[50].toFixed(2),liveP95Ms:+liveTimes[95].toFixed(2),allocatedHeapMiB,events:count,nodeOccurrences:node.length,calls:call.length,indexMs:+modelTime.ms.toFixed(1),fullPageMs:+page.ms.toFixed(1),narrowPageMs:+narrow.ms.toFixed(1),groupsMs:+groups.ms.toFixed(1),replayIndexMs:+buildReplay.ms.toFixed(1),seeks,heapMiB:+(process.memoryUsage().heapUsed/1048576).toFixed(1),totalMs:+(performance.now()-started).toFixed(1)});
 }

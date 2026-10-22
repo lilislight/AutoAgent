@@ -14,6 +14,9 @@ __all__ = [
     "ProjectError",
     "load_project_environment",
     "workflow",
+    "AgentSettings",
+    "llm_request",
+    "embedding_request",
 ]
 
 
@@ -31,6 +34,9 @@ def __getattr__(name):
         "HostSetup": "runtime",
         "load_project_environment": "project",
         "workflow": "project",
+        "AgentSettings": "agent",
+        "llm_request": "agent",
+        "embedding_request": "agent",
     }
     if name not in modules:
         raise AttributeError(name)

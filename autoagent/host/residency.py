@@ -247,7 +247,7 @@ class Residency:
                 version = checkpoint.version
                 events, size = item.tail_events, item.tail_bytes
                 started = time.monotonic()
-                await self.runtime.persistence.save_checkpoint(checkpoint)
+                await self.runtime.save_checkpoint(checkpoint, reason="unload" if evict else "automatic")
                 item.save_ms = max(1, (time.monotonic() - started) * 1000)
                 item.saved_version = version
                 item.tail_events = max(0, item.tail_events - events)

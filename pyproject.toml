@@ -13,7 +13,17 @@ dependencies = [
   "typing-extensions>=4.12",
 ]
 
+[project.scripts]
+autoagent = "autoagent.cli.main:main"
+
 [project.optional-dependencies]
+cli = [
+  "httpx>=0.28,<1",
+  "sqlalchemy[asyncio]>=2.0.54,<2.1",
+  "aiosqlite>=0.22,<1",
+  "asyncpg>=0.31,<1",
+  "python-dotenv>=1.1,<2",
+]
 skills = [
   "PyYAML>=6,<7",
 ]
@@ -52,7 +62,7 @@ persistence = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.host", "autoagent.host.*", "autoagent.server"]
+include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.host", "autoagent.host.*", "autoagent.server", "autoagent.cli", "autoagent.cli.*"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]

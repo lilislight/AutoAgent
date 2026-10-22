@@ -4,7 +4,7 @@ from collections.abc import Iterator
 import unittest
 import warnings
 from typing_extensions import TypedDict
-from autoagent import AutoAgentApp, Node, Stream, StreamContext, Workflow
+from autoagent import AutoAgentApp, Node, Stream, StreamContext, UserEventContext, UserEventSpec, Workflow
 from autoagent.core.runtime import UserEvent
 
 
@@ -18,6 +18,10 @@ class Chunk(TypedDict):
 
 class Total(TypedDict):
     total: int
+
+
+def mapped_event(context: UserEventContext) -> UserEventSpec:
+    return UserEventSpec(kind="observed", payload=context.value)
 
 
 class CoreUserEventSinkTests(unittest.TestCase):
@@ -60,6 +64,7 @@ class CoreUserEventSinkTests(unittest.TestCase):
                         "work",
                         stream,
                         stream=Stream(Reducer()),
+                        user_events=mapped_event,
                     )
                 ],
             )

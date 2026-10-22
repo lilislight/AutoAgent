@@ -44,6 +44,9 @@ class WorkflowRunTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     def host(self,workflows,**settings):
+        # API admission contracts must not depend on earlier suites' process RSS.
+        # Dedicated residency tests cover the actual memory thresholds.
+        settings.setdefault('memory_budget_bytes', 2 * 1024 * 1024 * 1024)
         return AutoAgentHost(workflows=workflows,settings=HostSettings(database_url=self.url,**settings),environment={})
 
     def client(self,host):

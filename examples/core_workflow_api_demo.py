@@ -30,7 +30,8 @@ from autoagent import (
     Recovery,
     RuntimeGraphCheckpoint,
     SubWorkflow,
-    UserEventMapping,
+    UserEventContext,
+    UserEventSpec,
     Wait,
     Workflow,
 )
@@ -209,12 +210,12 @@ def write_audit_record(request: AuditRequest) -> AuditRecord:
     return {"order_id": request["order_id"], "stored": True}
 
 
-def audit_event(context: OutputBindingContext) -> AuditRecord:
-    return cast(AuditRecord, context.output)
+def audit_event(context: UserEventContext) -> UserEventSpec:
+    return UserEventSpec(kind="audit.stored", payload=context.value)
 
 
-def decision_event(context: OutputBindingContext) -> Decision:
-    return cast(Decision, context.output)
+def decision_event(context: UserEventContext) -> UserEventSpec:
+    return UserEventSpec(kind="order.decided", payload=context.value)
 
 
 def build_workflow() -> Workflow:
@@ -243,7 +244,7 @@ def build_workflow() -> Workflow:
                 "write",
                 write_audit_record,
                 recovery_mode=Recovery(mode="replay_safe", max_attempts=2),
-                user_events=(UserEventMapping("audit.stored", audit_event),),
+                user_events=audit_event,
             )
         ],
     )
@@ -258,7 +259,7 @@ def build_workflow() -> Workflow:
                 "combine",
                 combine_checks,
                 input_mapping=map_combined_checks,
-                user_events=(UserEventMapping("order.decided", decision_event),),
+                user_events=decision_event,
             ),
             Node(
                 "spawn_audit",

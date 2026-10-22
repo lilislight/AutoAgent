@@ -35,6 +35,14 @@ class FormatError(PersistenceError):
     """Stored format or projection version does not match this implementation."""
 
 
+class InspectionError(PersistenceError):
+    """Historical evidence is incomplete or exceeds a bounded read budget."""
+
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class PersistenceConfig:
     mode: WriteMode = "durable"
@@ -49,6 +57,9 @@ class PersistenceConfig:
     encoding_cache_bytes: int = 16 * MIB
     trace_snapshot_bytes: int = 128 * MIB
     trace_snapshot_ttl_seconds: float = 300
+    inspection_scan_events: int = 100_000
+    inspection_read_bytes: int = 64 * MIB
+    inspection_result_bytes: int = MIB
     retry_attempts: int = 3
     retry_delay_ms: float = 50
 
@@ -63,6 +74,9 @@ class PersistenceConfig:
             "queue_bytes",
             "encoding_cache_bytes",
             "trace_snapshot_bytes",
+            "inspection_scan_events",
+            "inspection_read_bytes",
+            "inspection_result_bytes",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 1:

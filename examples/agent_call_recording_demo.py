@@ -17,8 +17,9 @@ from tempfile import TemporaryDirectory
 import httpx
 from openai import AsyncOpenAI
 
-from autoagent import Node, Workflow
-from autoagent.agent import LLMMessage, LLMRequest, LLMResponse, OpenAIResponsesProvider, TextContent
+from autoagent import Node, Stream, Workflow
+from autoagent.agent import (LLM_CALL, LLMMessage, LLMRequest, LLMStreamReducer,
+                             OpenAIResponsesProvider, TextContent, llm_call_operator)
 from autoagent.host import AutoAgentHost, HostSettings
 
 
@@ -47,18 +48,15 @@ async def run(database: Path):
     async with model_provider() as standalone:
         response = await standalone.ainvoke(request)
 
-    active = {}
-
     @asynccontextmanager
     async def resources(setup):
         async with model_provider() as provider:
-            active["provider"] = provider
+            setup.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
             yield
 
-    async def generate(value: LLMRequest) -> LLMResponse:
-        return await active["provider"].ainvoke(value)
-
-    workflow = Workflow("recording-demo", version="1", nodes=[Node("generate", generate)])
+    workflow = Workflow("recording-demo", version="1", nodes=[
+        Node("generate", LLM_CALL, stream=Stream(LLMStreamReducer())),
+    ])
     settings = HostSettings(database_url="sqlite+aiosqlite:///" + str(database.resolve()))
     async with AutoAgentHost(workflows=[workflow], settings=settings, lifespan=resources, root=database.parent) as host:
         result = await host.join(await host.execute(workflow.id, request))

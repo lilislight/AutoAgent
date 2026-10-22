@@ -195,7 +195,11 @@ class TransitionPlanner:
             if occ.started_sequence is not None:
                 raise RuntimeTransitionError("NODE_ALREADY_STARTED", "Continuation cannot start the same occurrence twice.")
             occurrence_put(replace(occ, status="running", started_at_us=occurred_at_us,
-                started_sequence=state.sequence+1, execution=replace(occ.execution, phase="started")))
+                started_sequence=state.sequence+1, raw_input=payload.input,
+                execution=replace(occ.execution, phase="started")))
+            count = sched.node_executions.get(occ.node_id, 0)
+            put((*SCHED, "node_executions", occ.node_id), count + 1,
+                "replace" if occ.node_id in sched.node_executions else "add")
             put((*SCHED, "ready"), tuple(key for key in sched.ready if key != oid))
         elif isinstance(payload, InputMapped):
             require_occ(); workspace(occ, phase="input_mapped", mapped_input=payload.mapped_input)
@@ -226,13 +230,16 @@ class TransitionPlanner:
                 raise RuntimeTransitionError("OPERATOR_CALL_DUPLICATE", "Operator Call already exists.")
             put((*SCHED, "operator_calls", payload.call_id), OperatorCallState(
                 payload.call_id, oid, payload.operator_id, payload.unit_index, "running", payload.input,
-                started_at_us=occurred_at_us, queue_duration_ns=payload.queue_duration_ns), "add")
+                started_at_us=occurred_at_us, queue_duration_ns=payload.queue_duration_ns,
+                retry_attempt=payload.retry_attempt), "add")
             workspace(occ, phase="executing")
         elif isinstance(payload, (OperatorCallCompleted, OperatorCallFailed)):
             call = sched.operator_calls.get(payload.call_id)
             if call is None or call.status != "running":
                 raise RuntimeTransitionError("OPERATOR_CALL_NOT_RUNNING", "Operator Call is not running.")
             success = isinstance(payload, OperatorCallCompleted)
+            if not success:
+                put((*SCHED, "operator_calls", call.id, "retry_at_us"), payload.retry_at_us)
             for name, value in (
                 ("status", "completed" if success else "failed"),
                 ("output", payload.output if success else None),
@@ -247,7 +254,7 @@ class TransitionPlanner:
             terminal = replace(occ, status="completed" if success else "failed",
                 output=payload.output if success else None, error=None if success else payload.error,
                 completed_at_us=occurred_at_us, metrics=payload.metrics if success else occ.metrics,
-                execution=NodeExecutionState())
+                execution=NodeExecutionState(), raw_input=None if success else occ.raw_input)
             occurrence_put(terminal)
             if success:
                 patch = occ.execution.pending_context_patch
@@ -269,6 +276,7 @@ class TransitionPlanner:
             for key in released_outputs(sched, planned, scheduler_delta, oid,
                                         _output_node_ids, retention_index):
                 put((*SCHED, "occurrences", key, "output"), None)
+                put((*SCHED, "occurrences", key, "raw_input"), None)
             if _execution_index is not None:
                 # The index describes pre-transition State. Match the original
                 # exclusion of this occurrence; ready/revived work prevents waiting.

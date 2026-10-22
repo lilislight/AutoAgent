@@ -294,10 +294,10 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
             first = await completed(host, session_id='race')
             entered, release = asyncio.Event(), asyncio.Event()
             original = host._persistence.save_checkpoint
-            async def delayed(checkpoint):
+            async def delayed(checkpoint, **options):
                 entered.set()
                 await release.wait()
-                return await original(checkpoint)
+                return await original(checkpoint, **options)
             host._persistence.save_checkpoint = delayed
             item = host._runtime.residency.entries['race']
             info = await host._runtime.app.aresidency_info(first.ref)
@@ -317,7 +317,7 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
             item = host._runtime.residency.entries[result.session_id]
             info = await host._runtime.app.aresidency_info(result.ref)
             original = host._persistence.save_checkpoint
-            async def fail(checkpoint):
+            async def fail(checkpoint, **options):
                 raise OSError('database unavailable')
             with self.assertLogs('autoagent.host.residency', level='ERROR'):
                 host._persistence.save_checkpoint = fail

@@ -9,9 +9,10 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 
-from autoagent import Node, Workflow
+from autoagent import Edge, InputMappingContext, Node, Stream, ValueContract, Workflow
 from autoagent.agent import (
-    EmbeddingRequest, LLMCallContext, LLMCallRecord, LLMRequest, LLMResponse,
+    EMBEDDING, LLM_CALL, embedding_operator, llm_call_operator, LLMStreamReducer,
+    EmbeddingRequest, LLMCallContext, LLMCallRecord, LLMRequest,
     OpenAIEmbeddingProvider, OpenAIResponsesProvider, llm_recording_context,
 )
 from autoagent.host import AutoAgentHost, HostSettings
@@ -28,6 +29,15 @@ class MemoryRecorder:
         self.records[record.llm_call_id] = record
 
 
+def embedding_input(context: InputMappingContext) -> EmbeddingRequest:
+    return EmbeddingRequest(model="demo-embedding", input="record this call too")
+
+
+def generation_input(context: InputMappingContext) -> LLMRequest:
+    # The preceding Node supplies vectors. Restore the Invocation's original request.
+    return ValueContract.create(LLMRequest, location="input").restore(context.invocation_input)
+
+
 async def main():
     # Without a recorder or Host database, calls work normally and store no rows.
     async with offline_provider() as (provider, _):
@@ -42,32 +52,36 @@ async def main():
     assert record.workflow_id == "manual-context"
     show("explicit recorder", record)
 
-    active = {}
-
     @asynccontextmanager
     async def resources(setup):
         async with OpenAIResponsesProvider(connection()) as provider, OpenAIEmbeddingProvider(connection()) as embeddings:
-            active.update(llm=provider, embeddings=embeddings)
+            # Host already binds the contracts; lifespan only supplies implementations.
+            setup.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
+            setup.register_operator(embedding_operator(embeddings), capability_id=EMBEDDING.id, default=True)
             yield
 
-    async def generate(value: LLMRequest) -> LLMResponse:
-        await active["embeddings"].ainvoke(EmbeddingRequest(model="demo-embedding", input="record this call too"))
-        return await active["llm"].ainvoke(value)
-
-    workflow = Workflow("agent-recording-guide", version="1", nodes=[Node("generate", generate)])
+    workflow = Workflow("agent-recording-guide", version="1", nodes=[
+        Node("embed", EMBEDDING, input_mapping=embedding_input),
+        Node("generate", LLM_CALL, input_mapping=generation_input, stream=Stream(LLMStreamReducer())),
+    ], edges=[Edge("embed", "generate")])
     with TemporaryDirectory() as directory:
         database = Path(directory) / "runtime.sqlite"
         settings = HostSettings(database_url="sqlite+aiosqlite:///" + str(database))
         async with offline_http():
             async with AutoAgentHost(workflows=[workflow], settings=settings, lifespan=resources, root=directory) as host:
-                result = await host.join(await host.execute(workflow.id, request()))
+                # Entry Input Mapping accepts a durable JSON Invocation input;
+                # generation_input restores the original typed request later.
+                result = await host.join(await host.execute(workflow.id, request().model_dump(mode="json")))
                 assert result.status == "completed", result.error
         # Example diagnostic SQL, not a newly introduced product query API.
         with sqlite3.connect(database) as db:
             db.row_factory = sqlite3.Row
             rows = [dict(row) for row in db.execute(
                 "SELECT * FROM llm_calls WHERE invocation_id=? ORDER BY kind", (result.invocation_id,))]
+        assert len(rows) == 2
         assert {row["kind"] for row in rows} == {"generation", "embedding"}
+        assert {row["node_id"] for row in rows} == {"generate", "embed"}
+        assert len({row["operator_call_id"] for row in rows}) == 2
         assert all(row["workflow_revision_id"] == result.ref.workflow_revision_id for row in rows)
         assert all(row["operator_call_id"] and row["status"] == "succeeded" for row in rows)
         show("Host metadata rows", [{key: row[key] for key in (

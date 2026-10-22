@@ -342,7 +342,7 @@ class StageRecoveryTests(unittest.TestCase):
             source.close()
         def unavailable_resolver(*args):
             raise AssertionError("Resolver must not run during continuation")
-        restored = AutoAgentApp(capability_resolver=unavailable_resolver)
+        restored = AutoAgentApp(capability_resolvers={"choice": unavailable_resolver})
         try:
             restored.register_operator(operator, capability_id="choice")
             restored.register_workflow(workflow)

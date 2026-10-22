@@ -107,16 +107,21 @@ from .workflow import (
     OutputBindingContext,
     Recovery,
     TimeoutPolicy,
+    RetryPolicy,
+    BackoffPolicy,
+    ResourcePolicy,
     Stream,
     StreamContext,
     SubWorkflow,
-    UserEventMapping,
+    UserEventContext,
+    UserEventSpec,
     Workflow,
     WorkflowIR,
     workflow_hook,
 )
 
 __all__ = [
+    "RetryPolicy", "BackoffPolicy", "ResourcePolicy",
     "TimeoutPolicy", "NodeTimeoutError", "run_sync",
     "OperatorCallContext", "operator_call_context",
     "GraphPauseRequested",
@@ -208,7 +213,8 @@ __all__ = [
     "WaitResumed",
     "WaitState",
     "UserEvent",
-    "UserEventMapping",
+    "UserEventContext",
+    "UserEventSpec",
     "Workflow",
     "WorkflowCompileError",
     "WorkflowCompiler",
@@ -242,3 +248,6 @@ __all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "Se
 
 from .runtime.recovery import RecoverySource
 __all__ += ["RecoverySource"]
+
+from .runtime.fork import ForkPlan
+__all__ += ['ForkPlan']

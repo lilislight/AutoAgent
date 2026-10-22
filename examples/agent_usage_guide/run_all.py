@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--litellm", action="store_true")
     parser.add_argument("--http", action="store_true")
-    parser.add_argument("--recording", action="store_true", help="Include Host/SQLite example; requires autoagent[host]")
+    parser.add_argument("--recording", action="store_true", help="Include Host/SQLite recording and Capability examples; requires autoagent[host]")
     options = parser.parse_args()
     commands = [(name, []) for name in ("llm", "media", "embeddings", "tools", "skills", "mcp", "nodes")]
     commands.extend(("providers", ["--backend", backend, "--protocol", protocol])
@@ -25,7 +25,7 @@ def main():
     if options.http:
         commands.extend((("mcp_http", []), ("mcp_auth", [])))
     if options.recording:
-        commands.append(("recording", []))
+        commands.extend((("recording", []), ("capabilities", [])))
     for name, arguments in commands:
         module = "examples.agent_usage_guide." + name
         print(f"\n>>> {module} {' '.join(arguments)}", flush=True)

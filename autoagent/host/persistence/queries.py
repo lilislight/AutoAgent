@@ -616,42 +616,6 @@ class Queries:
                 else None,
             }
 
-    async def checkpoints(self, root_sid, limit, cursor):
-        limit_value(limit)
-        async with self.view() as (conn, _, _, frontier):
-            table = meta.tables["checkpoints"]
-            where = [table.c.root_session_id == root_sid]
-            if cursor is not None:
-                if len(cursor) != 2:
-                    raise ValueError("Invalid cursor.")
-                where.append(
-                    tuple_(table.c.captured_at_us, table.c.checkpoint_id)
-                    > tuple(cursor)
-                )
-            rows = [
-                dict(r)
-                for r in (
-                    await conn.execute(
-                        select(
-                            table.c.checkpoint_id,
-                            table.c.root_session_id,
-                            table.c.captured_at_us,
-                            table.c.digest,
-                        )
-                        .where(*where)
-                        .order_by(table.c.captured_at_us, table.c.checkpoint_id)
-                        .limit(limit + 1)
-                    )
-                ).mappings()
-            ]
-            return Page(
-                tuple(rows[:limit]),
-                (rows[limit - 1]["captured_at_us"], rows[limit - 1]["checkpoint_id"])
-                if len(rows) > limit
-                else None,
-                frontier,
-            )
-
     async def execution_snapshot(self, iid, mode):
         """Resolve a Root result and its graph waits in one consistent view."""
         async with self.view(mode) as (conn, overlay, pending, _):
@@ -709,6 +673,7 @@ class Queries:
 
     async def recovery_bundle(self, root_invocation_id, *, full_history=False):
         """Read one durable Root graph and its histories from one MVCC snapshot."""
+        from .checkpoints import progress_order
         async with self.view() as (conn, _, _, frontier):
             invocations = meta.tables["invocations"]
             root = await self.storage.row(
@@ -737,10 +702,7 @@ class Queries:
             checkpoint_id = await conn.scalar(
                 select(checkpoints.c.checkpoint_id)
                 .where(checkpoints.c.root_session_id == root["session_id"])
-                .order_by(
-                    checkpoints.c.captured_at_us.desc(),
-                    checkpoints.c.checkpoint_id.desc(),
-                )
+                .order_by(*progress_order())
                 .limit(1)
             )
             checkpoint = (

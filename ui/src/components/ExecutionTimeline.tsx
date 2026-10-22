@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { getExecutionTimeline, getTimelineItems, getTimelinePosition } from '../api';
+import { getExecutionTimeline, getTimelineActivity, getTimelineItems, getTimelinePosition } from '../api';
 import type { ExecutionTrace, TimelineFocus, TimelineOverview, TimelineRow, TimelineIdle, WorkflowGraphData } from '../types';
-import { elapsedLabel, focusWindow, fullWindow, moveWindow, spanGeometry, timelineScale, timelineTimestamp, zoomWindow, type TimeWindow } from '../timeline';
+import { elapsedLabel, focusWindow, fullWindow, spanGeometry, timelineScale, timelineTimestamp, zoomWindow, type TimeWindow } from '../timeline';
+import { focusRange, initialRange, panRange, previousRange, rememberRange, resolveRange, sameWindow, selectRange, zoomRange } from '../timelineNavigation';
 import { duration } from './TraceDetails';
 import { pausedDuration, quiescentTrace, terminalStatus, type ObservationClock, type PauseInterval } from '../liveObservation';
 import { useObservationClock } from './useObservationClock';
@@ -13,13 +14,14 @@ import { TimelineRange } from './TimelineRange';
 import { TimelineNodeFilter } from './TimelineNodeFilter';
 import { TimelineReveal } from './TimelineReveal';
 import type { ExecutionReplay } from './ExecutionReplay';
+import type { OpenFork } from './ExecutionFork';
 
 interface Props {
   clock: ObservationClock; observing: boolean;
   ready: boolean; loadingStatus: string; loadError?: string; onRetry: () => void;
   trace: ExecutionTrace; workflow: WorkflowGraphData; active: boolean;
   selectedEvent: { id: string; time: number; sequence: number } | null; focus: TimelineFocus | null; selected: string | null; selectedNode: string | null; onPick: (row: TimelineRow) => void;
-  replay: ExecutionReplay; onReplay: (position: { sequence?: number; at_us?: number }) => void;
+  replay: ExecutionReplay; onReplay: (position: { sequence?: number; at_us?: number }) => void; onFork:OpenFork;
 }
 function usePage(iid: string, kind: string, window: TimeWindow, occurrence: string | null, active: boolean, frontier: number, nodeId: string | null = null, seekId: string | null = null) {
   const snapshot = useExecutionSnapshot();
@@ -148,8 +150,12 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
   const end=terminal?base.end:idleState?.at_us ?? Math.max(base.end,observed);
   const full=useMemo(()=>({start:base.start,end:Math.max(base.start+1,end)}),[base.start,end]);
   const overview={...saved,observed_at_us:observed};
-  const [navigation, setNavigation] = useState(() => ({ window: full, whole: true, history: [] as TimeWindow[] }));
-  const committedWindow = useMemo(()=>navigation.whole ? full : moveWindow(full, navigation.window.start, navigation.window.end - navigation.window.start),[full,navigation]);
+  const [navigation, setNavigation] = useState(initialRange);
+  const { domain, window: committedWindow } = useMemo(()=>resolveRange(full,navigation.frame),[full,navigation.frame]);
+  const snapshot = useExecutionSnapshot();
+  const activity = useQuery({ queryKey:['timeline-activity',props.trace.invocation.invocation_id,domain.start,domain.end,snapshot.epoch], meta:snapshot.meta,
+    queryFn:({signal})=>getTimelineActivity(props.trace.invocation.invocation_id,domain.start,domain.end+1,signal),
+    enabled:props.active,staleTime:Infinity,gcTime:5000,refetchOnWindowFocus:false });
   const [rangeRevision,setRangeRevision]=useState(0);
   const [preview, setPreview] = useState<TimeWindow | null>(null);
   const window = preview ?? committedWindow;
@@ -172,9 +178,9 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
   }, []);
   const rangeRequestAt = useRef(0);
   useEffect(() => {
-    // Reproject cached rows on every frame; fetch newly exposed rows at most
-    // five times a second during a drag, then settle on the final exact range.
-    const delay = preview ? Math.max(0, 200 - (performance.now() - rangeRequestAt.current)) : 140;
+    // Reproject geometry every frame; query cached Worker indexes at most five
+    // times a second during any gesture, including continuous wheel zoom/pan.
+    const delay = Math.max(0, 200 - (performance.now() - rangeRequestAt.current));
     const timer = setTimeout(() => { rangeRequestAt.current = performance.now(); setQueryWindow(window); }, delay);
     return () => clearTimeout(timer);
   }, [window.start, window.end, Boolean(preview)]);
@@ -186,17 +192,13 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
   const counts = useMemo(() => new Map(props.trace.nodes.map(n => [n.node_id, n.occurrences])), [props.trace.nodes]);
   const width = window.end - window.start;
   const total = full.end - full.start;
-  const change = (next: TimeWindow, preserveFocus = false) => { setRangeRevision(value=>value+1); if (!preserveFocus) setFocusEnabled(false); setNavigation(current => {
-    const bounded = moveWindow(full, next.start, next.end - next.start);
-    const previous = committedWindow;
-    if (previous.start === bounded.start && previous.end === bounded.end) return current;
-    return { window: bounded, whole: bounded.start === full.start && bounded.end === full.end, history: [...current.history, previous].slice(-20) };
-  }); };
-  const reset = () => { change(full); setNavigation(current => ({...current,whole:true})); };
-  const back = () => { setRangeRevision(value=>value+1); setFocusEnabled(false); setNavigation(current => {
-    const previous = current.history.at(-1);
-    return previous ? { window: previous, whole: previous.start === full.start && previous.end === full.end, history: current.history.slice(0, -1) } : current;
-  }); };
+  const rangeChanged = (preserveFocus = false) => { setRangeRevision(value=>value+1); if(!preserveFocus)setFocusEnabled(false); };
+  const change = (next: TimeWindow) => { rangeChanged(); setNavigation(current=>selectRange(current,full,next)); };
+  const navigate = (next: TimeWindow, preserveFocus = false) => { rangeChanged(preserveFocus);setNavigation(current=>focusRange(current,full,next)); };
+  const expandSelection = () => navigate(committedWindow);
+  const reset = () => { rangeChanged();setNavigation(current=>rememberRange(current,{domain:null,window:null},full)); };
+  const back = () => { rangeChanged();setNavigation(previousRange); };
+  const pan = (start: number, remember = true) => {rangeChanged();setNavigation(current=>panRange(current,full,start,remember));};
   useEffect(() => {
     const target = props.focus;
     if (!props.active || !target || appliedFocus === target.serial) return;
@@ -205,31 +207,41 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
     setFocusEnabled(true);
     if (target.kind === 'call' || target.kind === 'wait') setExpanded(current => new Set(current).add(target.occurrenceId));
   }, [props.active, props.focus, appliedFocus]);
-  const zoom = (factor: number) => change(zoomWindow(full, window, factor));
-  const interaction = useRef({ full, window, change });
-  interaction.current = { full, window, change };
+  const zoom = (factor: number) => {rangeChanged();setNavigation(current=>zoomRange(current,full,factor));};
+  const interaction = useRef({ full, navigation });
+  interaction.current = { full, navigation };
+  const body = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const element = scroll.current;
+    const element = body.current;
     if (!element) return;
+    let lastWheel = -Infinity;
     const wheel = (event: WheelEvent) => {
-      if (!(event.target as Element).closest('.timeline-track') || !props.active) return;
-      const bounds = axisTrack.current?.getBoundingClientRect();
-      if (!bounds) return;
-      const { full: all, window: current, change: commit } = interaction.current;
-      if (event.ctrlKey || event.metaKey) {
-        event.preventDefault();
-        commit(zoomWindow(all, current, Math.exp(Math.max(-1, Math.min(1, event.deltaY * .005))), (event.clientX - bounds.left) / bounds.width));
-      } else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-        event.preventDefault();
-        commit(moveWindow(all, current.start + (event.deltaX || event.deltaY) / bounds.width * (current.end - current.start), current.end - current.start));
+      const overviewTrack=(event.target as Element).closest('.timeline-overview-track');
+      if (!(overviewTrack || (event.target as Element).closest('.timeline-track')) || !props.active) return;
+      const bounds = (overviewTrack ?? axisTrack.current)?.getBoundingClientRect();
+      if (!bounds || !bounds.width) return;
+      const overviewZoom=Boolean(overviewTrack) && !event.ctrlKey && !event.metaKey && !event.shiftKey && Math.abs(event.deltaY)>Math.abs(event.deltaX);
+      if (!(overviewZoom || event.ctrlKey || event.metaKey || event.shiftKey || Math.abs(event.deltaX)>Math.abs(event.deltaY)))return;
+      event.preventDefault();
+      const {full:all,navigation:current}=interaction.current, now=performance.now(), remember=now-lastWheel>250;
+      const frame=resolveRange(all,current.frame), source=overviewTrack?frame.domain:frame.window;
+      const delta=(event.deltaX || event.deltaY)/bounds.width*(source.end-source.start);
+      const next=overviewZoom
+        ? zoomRange(current,all,Math.exp(Math.max(-1,Math.min(1,event.deltaY*.005))),.5,remember)
+        : event.ctrlKey || event.metaKey
+        ? focusRange(current,all,zoomWindow(all,source,Math.exp(Math.max(-1,Math.min(1,event.deltaY*.005))),(event.clientX-bounds.left)/bounds.width),remember)
+        : panRange(current,all,frame.domain.start+delta,remember);
+      if(next!==current){
+        lastWheel=now;interaction.current.navigation=next;setNavigation(next);
+        setRangeRevision(value=>value+1);setFocusEnabled(false);
       }
     };
     element.addEventListener('wheel', wheel, { passive: false });
     return () => element.removeEventListener('wheel', wheel);
   }, [props.active]);
-  const focus = (row: TimelineRow) => change(focusWindow(full, row, overview.observed_at_us));
+  const focus = (row: TimelineRow) => navigate(focusWindow(full, row, overview.observed_at_us));
   const scale = timelineScale(window);
-  const zoomed = width < total;
+  const zoomed = !sameWindow(domain, full) || !sameWindow(committedWindow, full);
   const updating = page.query.isFetching || window.start !== queryWindow.start || window.end !== queryWindow.end;
   const visibleRows = page.query.data?.items.filter(row => spanGeometry(row, { start: window.start, end: window.end + 1 }, overview.observed_at_us).visible);
   const hoverVisible = hoverTime != null && hoverTime >= window.start && hoverTime <= window.end;
@@ -240,9 +252,10 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
     const bounds = axisTrack.current?.getBoundingClientRect();
     return bounds ? Math.round(window.start + Math.max(0, Math.min(1, (x - bounds.left) / bounds.width)) * width) : window.start;
   };
-  return <div className={`timeline-body ${preview ? 'is-range-dragging' : ''}`} style={{ '--timeline-scrollbar-width': `${scrollbarWidth}px` } as CSSProperties}>
-    <header className="timeline-toolbar"><div><strong>Timeline</strong><span className="muted">{overview.counts.node} node runs · {terminal?'':'~ '}{elapsedLabel(total)}</span>{idleState ? <TimelineIdleTimer idle={idleState} clock={props.clock} active={props.active && props.observing && !props.replay.enabled} /> : null}</div><div className="timeline-range-controls"><button aria-label="Previous time range" disabled={!navigation.history.length} onClick={back}>← Back</button><button className="timeline-reset-range" disabled={!zoomed} onClick={reset}>Full range</button></div></header>
-    <TimelineRange full={full} window={committedWindow} bins={saved.node_start_bins} activityEnd={saved.end_at_us ?? undefined} onChange={change} onPreview={setPreview} onReset={reset} replayTime={props.replay.enabled ? props.replay.cursorTime : null} />
+  return <div ref={body} className={`timeline-body ${preview ? 'is-range-dragging' : ''}`} style={{ '--timeline-scrollbar-width': `${scrollbarWidth}px` } as CSSProperties}>
+    <header className="timeline-toolbar"><div><strong>Timeline</strong><span className="muted">{overview.counts.node} node runs · {terminal?'':'~ '}{elapsedLabel(total)}</span>{idleState ? <TimelineIdleTimer idle={idleState} clock={props.clock} active={props.active && props.observing && !props.replay.enabled} /> : null}</div><div className="timeline-range-controls"><button className="timeline-zoom-button" aria-label="Zoom in time range" title="Zoom in" disabled={width<=1} onClick={()=>zoom(.5)}>+</button><button className="timeline-zoom-button" aria-label="Zoom out time range" title="Zoom out" disabled={!zoomed} onClick={()=>zoom(2)}>−</button><button aria-label="Previous time range" disabled={!navigation.history.length} onClick={back}>← Back</button><button className="timeline-reset-range" disabled={!zoomed} onClick={reset}>Full range</button></div></header>
+    <TimelineRange full={full} domain={domain} window={committedWindow} bins={activity.data ?? []} onChange={change} onPreview={setPreview} onFocus={expandSelection} onPan={pan} replayTime={props.replay.enabled ? props.replay.cursorTime : null} />
+    {activity.error ? <div className="timeline-message sidebar-error">{activity.error.message}<button onClick={()=>void activity.refetch()}>Retry</button></div> : null}
     <div className="timeline-list-toolbar">
       <div className="timeline-row-options"><TimelineNodeFilter nodes={props.workflow.definition.nodes.map(node => node.id)} value={nodeFilter} onChange={value => { setNodeFilter(value); setFocusEnabled(false); }} /><button aria-pressed={props.replay.enabled} disabled={!props.trace.last_event} onClick={() => { if (props.replay.enabled) props.replay.stop(); else { props.onReplay(props.replay.resumePosition() ?? { at_us: window.start }); } }}>{props.replay.enabled ? "End replay" : "Replay"}</button><button className="timeline-collapse-all" disabled={!expanded.size} onClick={() => setExpanded(new Set())}>Collapse all</button></div>
       <div className={`timeline-toolbar-track ${props.replay.enabled ? 'timeline-replay-controls' : ''}`}>
@@ -250,13 +263,13 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
         <span className={`timeline-update-status ${props.replay.enabled ? 'sr-only' : ''}`} role="status">{`${elapsedLabel(width)} visible`}</span>
       </div>
     </div>
-    {focusEnabled && props.focus && (page.location.error || !canReveal) ? <div className="timeline-location-notice" role="status"><span>Selected record is outside the current range or filter.</span><button onClick={() => { change(focusWindow(full, props.focus!.interval, overview.observed_at_us), true); }}>Focus selected interval</button>{nodeFilter ? <button onClick={() => setNodeFilter(null)}>Show all nodes</button> : null}<button aria-label="Dismiss location notice" onClick={() => setFocusEnabled(false)}>×</button></div> : null}
+    {focusEnabled && props.focus && (page.location.error || !canReveal) ? <div className="timeline-location-notice" role="status"><span>Selected record is outside the current range or filter.</span><button onClick={() => { navigate(focusWindow(full, props.focus!.interval, overview.observed_at_us), true); }}>Focus selected interval</button>{nodeFilter ? <button onClick={() => setNodeFilter(null)}>Show all nodes</button> : null}<button aria-label="Dismiss location notice" onClick={() => setFocusEnabled(false)}>×</button></div> : null}
     <div className={`timeline-pinned ${eventVisible || replayVisible ? 'has-selected-event' : ''} ${replayVisible ? 'has-replay-position' : ''}`} style={trackStyle}>
-      <TimelineEvents rangeRevision={rangeRevision} replaying={props.replay.enabled} onReplay={props.onReplay} iid={props.trace.invocation.invocation_id} window={window} full={full} previewing={Boolean(preview)} queryWindow={requestWindow} frontier={overview.frontier} active={props.active} trackWidth={trackWidth} through={props.trace.last_event?.sequence ?? 0} />
+      <TimelineEvents rangeRevision={rangeRevision} onReplay={props.onReplay} onFork={props.onFork} iid={props.trace.invocation.invocation_id} window={window} full={full} queryWindow={requestWindow} onZoom={navigate} frontier={overview.frontier} active={props.active} trackWidth={trackWidth} through={props.trace.last_event?.sequence ?? 0} />
       <div className="timeline-axis timeline-row"><div className="timeline-row-label">Execution</div><div className="timeline-duration">Elapsed</div><div className="timeline-track" ref={axisTrack}><PauseSegments pauses={overview.pause_intervals} window={window} observed={overview.observed_at_us} />{idleState && idleState.since_at_us>=window.start && idleState.since_at_us<=window.end ? <span className="timeline-idle-boundary" style={{left:`${(idleState.since_at_us-window.start)/width*100}%`}} title={`${idleState.state==='paused'?'Paused':'Waiting'} since ${timelineTimestamp(idleState.since_at_us)}`} aria-label={`${idleState.state} boundary`} /> : null}{eventVisible ? <span className="timeline-selected-boundary" style={{ left: `clamp(22px, ${(props.selectedEvent!.time - window.start) / width * 100}%, calc(100% - 22px))` }} title={`Selected Edge evaluation · Event #${props.selectedEvent!.sequence}`} role="img" aria-label={`Selected Edge evaluation, Event ${props.selectedEvent!.sequence}`}>#{props.selectedEvent!.sequence}</span> : null}<span className="timeline-axis-unit">Time since start ({scale.unit})</span>{[0,.25,.5,.75,1].map(ratio => <span key={ratio} className={`timeline-tick ${ratio === 0 ? 'first' : ratio === 1 ? 'last' : 'middle'}`} style={{ left: `${ratio * 100}%` }}><span>{Number(((window.start - full.start + width * ratio) / scale.divisor).toFixed(3))}</span><i /></span>)}</div></div>
     </div>
     <div ref={scroll} className={`timeline-scroll ${hoverVisible ? 'has-time-hover' : ''} ${eventVisible || replayVisible ? 'has-selected-event' : ''} ${replayVisible ? 'has-replay-position' : ''}`} style={trackStyle} aria-busy={updating} tabIndex={0} aria-label="Timeline intervals. Control or Command and scroll to zoom. Escape returns to the full range."
-      onKeyDown={event => { if (event.target !== event.currentTarget) return; if (['+', '=', '-', 'ArrowLeft', 'ArrowRight', 'Escape'].includes(event.key)) event.preventDefault(); if (event.key === '+' || event.key === '=') zoom(.5); if (event.key === '-') zoom(2); if (event.key === 'Escape') reset(); if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') change(moveWindow(full, window.start + width / 4 * (event.key === 'ArrowLeft' ? -1 : 1), width)); }}
+      onKeyDown={event => { if (event.target !== event.currentTarget) return; if (['+', '=', '-', 'ArrowLeft', 'ArrowRight', 'Escape'].includes(event.key)) event.preventDefault(); if (event.key === '+' || event.key === '=') zoom(.5); if (event.key === '-') zoom(2); if (event.key === 'Escape') reset(); if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') pan(domain.start + width / 4 * (event.key === 'ArrowLeft' ? -1 : 1)); }}
       onPointerMove={event => setHoverTime((event.target as Element).closest('.timeline-track') ? pointerTime(event.clientX) : null)} onPointerLeave={() => setHoverTime(null)}>
       <QueryMessage page={page} label="Node runs" />
       {visibleRows?.map(row => <div key={row.id}><SpanRow reveal={canReveal ? focused?.serial : undefined} row={{ ...row, ui_ordinal: row.ordinal }} label={`${row.node_id}${(counts.get(row.node_id!) ?? 0) > 1 ? ` (${row.ordinal} of ${counts.get(row.node_id!)})` : ''}`} window={window} origin={full.start} trackWidth={trackWidth} observed={overview.observed_at_us} pauses={overview.pause_intervals} paused={overview.control_state === 'paused'} selected={props.selected} selectedNode={props.selectedNode} onPick={props.onPick} onZoom={focus} expanded={expanded.has(row.id)} onExpand={(row.call_count ?? 0) > 0 ? () => setExpanded(value => { const next = new Set(value); if (next.has(row.id)) next.delete(row.id); else next.add(row.id); return next; }) : undefined} /><TimelineReveal open={expanded.has(row.id)}><ExpandedOccurrence node={row} window={window} queryWindow={requestWindow} overview={overview} active={props.active && expanded.has(row.id)} focus={canReveal ? focused : null} selected={props.selected} onPick={props.onPick} onZoom={focus} trackWidth={trackWidth} /></TimelineReveal></div>)}

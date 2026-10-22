@@ -86,8 +86,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
         self,
         *,
         max_operator_concurrency: int = 32,
-        max_node_executions_per_invocation: int = 1_000,
-        capability_resolver: CapabilityResolver | None = None,
+        capability_resolvers: Mapping[str, CapabilityResolver] | None = None,
         runtime_repository: RuntimeRepository | None = None,
         runtime_event_sink: RuntimeEventSink | None = None,
         user_event_sink: UserEventSink | None = None,
@@ -99,10 +98,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
         runtime_lifespan: Callable[[], AbstractAsyncContextManager] | None = None,
     ) -> None:
         _positive_integer(max_operator_concurrency, "max_operator_concurrency")
-        _positive_integer(
-            max_node_executions_per_invocation,
-            "max_node_executions_per_invocation",
-        )
         self._compiler = WorkflowCompiler()
         self._workflows: dict[str, WorkflowIR] = {}
         self._workflow_definition_snapshots: dict[
@@ -131,6 +126,9 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
         )
         self._clock_us = clock_us or unix_time_us
         self._operator_registry = operator_registry or OperatorRegistry()
+        self._capability_resolvers = dict(capability_resolvers or {})
+        for capability_id, resolver in self._capability_resolvers.items():
+            self._validate_resolver(capability_id, resolver)
         self._task_runtime = TaskRuntime()
         self._init_wait_runtime()
         self._workflow_executor = WorkflowExecutor(
@@ -144,8 +142,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
             emit_user=self._emit_user,
             start_child=self._start_drive,
             ensure_child_durable=self._ensure_child_durable,
-            max_node_executions_per_invocation=max_node_executions_per_invocation,
-            capability_resolver=capability_resolver,
+            capability_resolvers=self._capability_resolvers,
             suspend_command=self._suspend_command,
             clock_us=self._clock_us,
             status_runtime=self._status_runtime,
@@ -253,6 +250,22 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
             self._ensure_open()
             self._operator_registry.bind_capabilities((capability,))
             return capability
+
+    @staticmethod
+    def _validate_resolver(capability_id, resolver):
+        if not isinstance(capability_id, str) or not capability_id.strip():
+            raise ValueError("Capability id cannot be empty.")
+        if not callable(resolver):
+            raise TypeError("Capability resolver must be callable.")
+
+    def register_capability_resolver(self, capability_id: str, resolver: CapabilityResolver) -> None:
+        """Register one Capability strategy before Runtime admission."""
+        with self._close_lock:
+            self._ensure_open()
+            self._validate_resolver(capability_id, resolver)
+            if capability_id in self._capability_resolvers:
+                raise ValueError(f"Resolver already registered for {capability_id!r}.")
+            self._capability_resolvers[capability_id] = resolver
 
     def register_operator(
         self,
@@ -495,6 +508,38 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
 
     # ------------------------------------------------------------------
     # Checkpoints and Child relationships
+
+    def prepare_fork(self, checkpoint, *, source=None, session_id=None):
+        """Validate and prepare a new Root graph without executing or installing it."""
+        return self._run(self._prepare_fork_checkpoint(checkpoint, source, session_id))
+
+    async def aprepare_fork(self, checkpoint, *, source=None, session_id=None):
+        return await self._await(self._submit(self._prepare_fork_checkpoint(checkpoint, source, session_id)))
+
+    async def _prepare_fork_checkpoint(self, checkpoint, source, session_id):
+        from ..runtime.fork import prepare_fork
+        return prepare_fork(checkpoint, self._workflows, source=source,
+            now=self._clock_us(), session_id=session_id)
+
+    def fork(self, checkpoint, *, source=None, session_id=None):
+        """Fork a historical Root graph and continue it under new execution identities."""
+        return self._run(self._fork_checkpoint(checkpoint, source, session_id))
+
+    async def afork(self, checkpoint, *, source=None, session_id=None):
+        return await self._await(self._submit(self._fork_checkpoint(checkpoint, source, session_id)))
+
+    async def _fork_checkpoint(self, checkpoint, source, session_id):
+        plan = await self._prepare_fork_checkpoint(checkpoint, source, session_id)
+        # Canonical initialization is acknowledged before installing or running
+        # the branch; a rejected Sink cannot start an external computation.
+        if any(self._repository.state(s.session_id).session is not None for s in plan.graph.sessions):
+            raise RuntimeTransitionError('FORK_SESSION_EXISTS', 'Fork requires fresh Session identities.')
+        for event in plan.events:
+            sink = self._repository.sink
+            if sink is not None:
+                await sink.append_runtime_event(event)
+        loaded = await self._load_checkpoint(plan.graph)
+        return await self._recover(loaded.invocations[0])
 
     def load_checkpoint(
         self, checkpoint: RuntimeGraphCheckpoint | AppCheckpoint
@@ -1527,13 +1572,15 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, PauseRuntime, TerminalRecoveryRun
             if occurrence.status not in {"running", "waiting"}:
                 continue
             node = workflow.node(occurrence.node_id)
+            latest_calls = {call.unit_index: call for call in invocation.scheduler.operator_calls.values()
+                if call.occurrence_id == occurrence.id}
             if occurrence.execution.fault is not None or any(
-                call.occurrence_id == occurrence.id and call.status == "failed"
+                call.status == "failed" and call.retry_at_us is None
                 and call.error is not None and call.error.type != "CancelledError"
-                for call in invocation.scheduler.operator_calls.values()
+                for call in latest_calls.values()
             ):
                 continue
-            unknown_calls = [call for call in invocation.scheduler.operator_calls.values()
+            unknown_calls = [call for call in latest_calls.values()
                 if call.occurrence_id == occurrence.id and not (isinstance(node.executable, (CommandIR, Wait)) and call.operator_id == node.executable.id) and (call.status in {"running", "lost"}
                     or (call.status == "failed" and call.error is not None and call.error.type == "CancelledError"))]
             stages = occurrence.execution.completed_stages

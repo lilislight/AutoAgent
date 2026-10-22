@@ -135,3 +135,22 @@ class TracePage(BaseModel):
     next_cursor: str | None
     frontier: int
     total_count: int | None = None
+
+
+class CreateCheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: str = Field(min_length=1, max_length=4096)
+    sequence: int | None = Field(None, ge=1, le=9007199254740991)
+    pinned: bool = False
+
+
+class PinCheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    pinned: bool
+
+
+class ForkRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    invocation_id: str = Field(min_length=1, max_length=4096)
+    sequence: int = Field(ge=1, le=9007199254740991)
+    session_id: str | None = Field(None, min_length=1, max_length=4096)

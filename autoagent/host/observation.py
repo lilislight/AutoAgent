@@ -3,7 +3,7 @@
 import asyncio
 import math
 
-from .models import HostNotFoundError
+from .models import HostError, HostNotFoundError
 
 
 class ExecutionObservation:
@@ -44,13 +44,22 @@ class ExecutionObservation:
             raise ValueError("timeout must be finite and nonnegative.")
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
-        while True:
-            state = await self.get_execution_state(invocation_id)
-            if until == "none" or state["settled"] or until == "boundary" and state["at_boundary"]:
-                return dict(state, observation="accepted" if until == "none" else "terminal" if state["settled"] else "boundary")
-            if state["needs_recovery"]:
-                return dict(state, observation="interrupted")
-            remaining = None if deadline is None else deadline - loop.time()
-            if remaining is not None and remaining <= 0:
-                return dict(state, observation="timeout")
-            await asyncio.sleep(min(0.1, remaining) if remaining is not None else 0.1)
+        self._check_loop()
+        if self._state != "ready":
+            raise HostError("Host is not open.")
+        # Register before the first snapshot so a commit during a query is
+        # remembered. Waiting holds neither a DB connection nor an operation slot.
+        async with self._persistence.execution_notifications(invocation_id) as (revision, changed):
+            while True:
+                state = await self.get_execution_state(invocation_id)
+                if until == "none" or state["settled"] or until == "boundary" and state["at_boundary"]:
+                    return dict(state, observation="accepted" if until == "none" else "terminal" if state["settled"] else "boundary")
+                if state["needs_recovery"]:
+                    return dict(state, observation="interrupted")
+                remaining = None if deadline is None else deadline - loop.time()
+                if remaining is not None and remaining <= 0:
+                    return dict(state, observation="timeout")
+                # Bounded fallback also observes Runtime-only recovery changes,
+                # buffered accepted state and commits made by another process.
+                revision = await changed(revision, min(0.1, remaining) if remaining is not None else 0.1,
+                                         state["invocation_id"])

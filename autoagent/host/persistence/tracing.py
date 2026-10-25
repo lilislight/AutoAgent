@@ -187,15 +187,17 @@ def trace_cursor(cursor):
         raise ValueError('Invalid trace cursor.')
 
 
-async def node_call_counts(conn, iid, sequence=None):
+async def node_call_counts(conn, iid, sequence=None, occurrence_ids=None):
     """Count Call starts using projection references, without reading Event values."""
     calls, nodes, events = (meta.tables[k] for k in ('operator_calls', 'node_executions', 'runtime_events'))
     source = calls.join(nodes, and_(nodes.c.invocation_id == calls.c.invocation_id, nodes.c.occurrence_id == calls.c.occurrence_id))
-    statement = select(nodes.c.node_id, func.count()).select_from(source).where(calls.c.invocation_id == iid)
+    statement = select(nodes.c.occurrence_id, func.count()).select_from(source).where(calls.c.invocation_id == iid)
+    if occurrence_ids is not None:
+        statement = statement.where(nodes.c.occurrence_id.in_(occurrence_ids))
     if sequence is not None:
         statement = statement.join(events, events.c.event_id == calls.c.input_ref['id'].as_string()).where(
             calls.c.input_ref['kind'].as_string() == 'runtime_event', events.c.invocation_id == iid, events.c.sequence <= sequence)
-    return dict((await conn.execute(statement.group_by(nodes.c.node_id))).all())
+    return dict((await conn.execute(statement.group_by(nodes.c.occurrence_id))).all())
 
 
 class TraceQueries:
@@ -244,6 +246,10 @@ class TraceQueries:
             definition[name] = light
         for name in ('entry_node_ids', 'exit_node_ids'):
             definition[name] = await reader.read(('definition', name))
+        try:
+            definition['groups'] = await reader.read(('definition', 'groups'))
+        except KeyError:
+            definition['groups'] = []
         revisions = meta.tables['workflow_revisions']
         registered = await conn.scalar(select(revisions.c.registered_at_us).where(revisions.c.revision_id == revision_id))
         return {k: record[k] for k in ('schema_version', 'workflow_id', 'workflow_version', 'workflow_revision_id', 'definition_hash')} | {'definition': definition, 'registered_at_us': registered}
@@ -253,14 +259,19 @@ class TraceQueries:
             return await self._graph(conn, revision_id)
 
     async def definition(self, revision_id, kind, identity):
-        if kind not in ('node', 'edge'):
-            raise ValueError('kind must be node or edge.')
+        if kind not in ('node', 'edge', 'group'):
+            raise ValueError('kind must be node, edge or group.')
         async with self.queries.view() as (conn, _, _, _):
             reader = await SourceReader.open(self.storage, conn, 'workflow_revision', revision_id)
             if reader is None:
                 return None
-            path = ('definition', 'nodes' if kind == 'node' else 'edges')
-            items = await reader.read(path, deep=False)
+            path = ('definition', {'node': 'nodes', 'edge': 'edges', 'group': 'groups'}[kind])
+            try:
+                items = await reader.read(path, deep=False)
+            except KeyError:
+                if kind == 'group':
+                    return None
+                raise
             for i in range(len(items)):
                 if await reader.read((*path, i, 'id')) == identity:
                     return await reader.read((*path, i))
@@ -474,6 +485,10 @@ class TraceQueries:
             page = rows[:limit]
             position = (page[-1]['_time'], page[-1]['_id']) if len(rows) > limit else None
             items = await self._node_summaries(conn, page) if kind == 'node' else tuple(summary(r) for r in page)
+            if kind == 'node':
+                counts = await node_call_counts(conn, iid, occurrence_ids=[r['occurrence_id'] for r in page])
+                for item in items:
+                    item['call_count'] = counts.get(item['occurrence_id'], 0)
             if kind == 'edge':
                 for item,row in zip(items,page):
                     item['inherited'] = row['invocation_id'] != iid
@@ -555,9 +570,9 @@ class TraceQueries:
             func.count().over(partition_by=nodes.c.node_id).label('occurrences'),
             func.row_number().over(partition_by=nodes.c.node_id, order_by=(case((nodes.c.status == 'running', 0), (nodes.c.status == 'waiting', 1), (nodes.c.status == 'ready', 2), else_=3), nodes.c.ordinal.desc(), nodes.c.occurrence_id.desc())).label('_rank')).where(nodes.c.invocation_id == iid).subquery()
         node_states = [dict(r) for r in (await conn.execute(select(*(c for c in ranked.c if c.name != '_rank')).where(ranked.c._rank == 1))).mappings()]
-        call_counts = await node_call_counts(conn, iid)
+        call_counts = await node_call_counts(conn, iid, occurrence_ids=select(ranked.c.occurrence_id).where(ranked.c._rank == 1))
         for row in node_states:
-            row['call_count'] = call_counts.get(row['node_id'], 0)
+            row['call_count'] = call_counts.get(row['occurrence_id'], 0)
         current_edges = await edge_states(self.storage,conn,iid)
         # Routing decisions include unconditional and source-status mismatches;
         # condition evaluations alone do not describe whether every Edge ran.

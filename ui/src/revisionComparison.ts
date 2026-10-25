@@ -17,8 +17,16 @@ export function comparisonGraph(base: WorkflowGraphData, target: WorkflowGraphDa
       edges.set(id, { ...edge, id }); marks.edges[id] = 'removed'; marks.aliases[id] = edge.id;
     }
   }
+  const groups = new Map((target.definition.groups??[]).map(g=>[g.id,{...g,node_ids:[...g.node_ids]}]));
+  const assigned=new Set([...groups.values()].flatMap(g=>g.node_ids));
+  for(const group of base.definition.groups??[]){
+    const members=group.node_ids.filter(id=>!assigned.has(id));
+    const current=groups.get(group.id);
+    if(current)current.node_ids.push(...members);else groups.set(group.id,{...group,node_ids:members});
+    for(const id of members)assigned.add(id);
+  }
   return { marks, workflow: { ...target, definition_hash: `compare:${base.definition_hash}:${target.definition_hash}`,
-    definition: { ...target.definition, nodes: [...nodes.values()], edges: [...edges.values()] } } };
+    definition: { ...target.definition, nodes: [...nodes.values()], edges: [...edges.values()],groups:[...groups.values()] } } };
 }
 
 /** Keep each Revision's real objects while routing both through the union layout. */

@@ -1,0 +1,14 @@
+[
+  {
+    "log": "corrected-focused.log",
+    "tests": 124,
+    "postgres_tests": 57,
+    "passed": true
+  },
+  {
+    "log": "corrected-integration.log",
+    "tests": 312,
+    "postgres_tests": 151,
+    "passed": true
+  }
+]

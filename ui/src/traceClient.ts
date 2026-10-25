@@ -1,5 +1,5 @@
 import { ApiError, config, request } from './http';
-import type { ExecutionTrace, TraceDataset, TraceDatasetManifest, TraceDatasetPage, TimelineRow, TimelineMarker, ReplayEvent, LocalReplayResult, TraceEdgeUpdate } from './types';
+import type { ExecutionTrace, TraceDataset, TraceDatasetManifest, TraceDatasetPage, TimelineRow, TimelineMarker, ReplayEvent, LocalReplayResult, TraceEdgeUpdate, FamilyLink } from './types';
 import { readTraceCache, writeTraceCache } from './traceStorage';
 import { setTraceProgress } from './traceProgress';
 
@@ -38,7 +38,7 @@ const current = new Map<string, Entry>();
 const readers = new Map<string, number>();
 const known = new Map<string, ExecutionTrace>();
 const loading = new Map<string, Promise<ExecutionTrace>>();
-const headerKey = (trace: ExecutionTrace) => `control-spans:2|${source()}|${trace.source_id ?? 'unknown'}|${trace.invocation.invocation_id}|${trace.last_event?.event_id ?? 'empty'}|${trace.invocation.status}`;
+const headerKey = (trace: ExecutionTrace) => `family-links:4|${source()}|${trace.source_id ?? 'unknown'}|${trace.invocation.invocation_id}|${trace.last_event?.event_id ?? 'empty'}|${trace.invocation.status}`;
 const entryKey = (manifest: TraceDatasetManifest) => `${source()}|${manifest.invocation_id}|${manifest.version}`;
 
 async function release(manifest: TraceDatasetManifest) {
@@ -65,11 +65,11 @@ async function download(manifest: TraceDatasetManifest, signal: AbortSignal, pro
   return parts;
 }
 function dataset(manifest: TraceDatasetManifest, parts: Record<string, TraceDatasetPage['items']>): TraceDataset {
-  return { manifest, node: (parts.node ?? []) as TimelineRow[], call: (parts.call ?? []) as TimelineRow[], wait: (parts.wait ?? []) as TimelineRow[], event: (parts.event ?? []) as TimelineMarker[], edge: (parts.edge ?? []) as TraceEdgeUpdate[] };
+  return { manifest, node: (parts.node ?? []) as TimelineRow[], call: (parts.call ?? []) as TimelineRow[], wait: (parts.wait ?? []) as TimelineRow[], event: (parts.event ?? []) as TimelineMarker[], edge: (parts.edge ?? []) as TraceEdgeUpdate[], link:(parts.link??[]) as FamilyLink[] };
 }
 async function datasetBytes(data: TraceDataset | { manifest: TraceDatasetManifest; events: ReplayEvent[] }) {
   let bytes = JSON.stringify(data.manifest).length * 2, chunks = 0;
-  const sections = 'events' in data ? [data.events] : [data.node, data.call, data.wait, data.event];
+  const sections = 'events' in data ? [data.events] : [data.node, data.call, data.wait, data.event, data.link??[]];
   for (const rows of sections) for (let offset = 0; offset < rows.length; offset += 200) {
     bytes += JSON.stringify(rows.slice(offset, offset + 200)).length * 2;
     if (++chunks % 32 === 0) await new Promise(resolve => setTimeout(resolve, 0));

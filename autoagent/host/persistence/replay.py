@@ -57,6 +57,10 @@ async def replay_window(timeline, iid, *, sequence=None, at_us=None, through_seq
             and_(n.c.invocation_id == iid, n.c.occurrence_id == ranked.c.occurrence_id)).where(ranked.c._rank == 1,
             or_(ranked.c.status.in_(('ready', 'running', 'waiting')), ranked.c.occurrence_id.in_(retained), ranked.c.occurrence_id.in_(latest_terminal)))
         occurrences = [dict(r) for r in (await conn.execute(initial)).mappings()]
+        from .tracing import node_call_counts
+        counts = await node_call_counts(conn, iid, base_seq, initial.with_only_columns(ranked.c.occurrence_id))
+        for row in occurrences:
+            row['call_count'] = counts.get(row['occurrence_id'], 0)
         batches = await replay_events(conn, iid, page, timeline.storage)
         children = {child for batch in batches.values() for child in batch['child_ids']}
         known = list((await conn.execute(select(g.c.entity_id).where(g.c.invocation_id == iid, g.c.sequence <= base_seq,
@@ -84,12 +88,12 @@ async def replay_events(conn, iid, page, storage):
             batches[event['event_id']]['initial_edges'] = await edge_states(storage,conn,iid,sequence=event['sequence'])
     calls = meta.tables['operator_calls']
     started_event = calls.c.input_ref['id'].as_string()
-    starts = select(started_event.label('event_id'), n.c.node_id, func.count().label('count')).select_from(
+    starts = select(started_event.label('event_id'), n.c.node_id, n.c.occurrence_id, func.count().label('count')).select_from(
         calls.join(n, and_(n.c.invocation_id == iid, n.c.occurrence_id == calls.c.occurrence_id))).where(
         calls.c.invocation_id == iid, calls.c.input_ref['kind'].as_string() == 'runtime_event',
-        started_event.in_(ids)).group_by(started_event, n.c.node_id)
+        started_event.in_(ids)).group_by(started_event, n.c.node_id, n.c.occurrence_id)
     for row in (await conn.execute(starts)).mappings():
-        batches[row['event_id']]['call_starts'].append(dict(node_id=row['node_id'], count=row['count']))
+        batches[row['event_id']]['call_starts'].append(dict(node_id=row['node_id'], occurrence_id=row['occurrence_id'], count=row['count']))
     raw_by_event = {key: [] for key in batches}
     for row in changes:
         value, kind, batch = row['change'], row['entity_type'], batches[row['event_id']]

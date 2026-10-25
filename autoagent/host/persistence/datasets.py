@@ -14,6 +14,7 @@ from .schema import meta
 from .timeline import TimelineQueries, timing_item
 from .tracing import TraceQueries, summary
 from .trace_cursor import encode_trace_cursor, decode_trace_cursor
+from .family_links import family_links
 
 PAGE_SIZE = 200
 
@@ -132,6 +133,14 @@ class TraceDatasets:
                         if previous is not None:
                             for rows in await self._edges(conn, iid, previous):
                                 await write('edge', rows)
+                        links = []
+                        async for link in family_links(conn, self.queries.storage, iid, previous):
+                            links.append(link)
+                            if len(links) == PAGE_SIZE:
+                                await write('link', links)
+                                links = []
+                        if links:
+                            await write('link', links)
                     headers = select(events.c.event_id, events.c.event_name, events.c.sequence, events.c.occurred_at_us).where(
                         events.c.invocation_id == iid, events.c.sequence <= upper).order_by(events.c.sequence)
                     if not replay:
@@ -154,13 +163,13 @@ class TraceDatasets:
                         if replay:
                             batch = list((await replay_events(conn, iid, batch, self.queries.storage)).values())
                         await write('event', batch)
-                    manifest = dict(schema_version=2, source_id=store_id, invocation_id=iid, snapshot_id=uuid4().hex,
-                        version=f"2:{(trace['last_event'] or {}).get('event_id', iid)}:{trace['frontier']}:{0 if trace['invocation']['status'] in ('completed','failed','cancelled') else trace['observed_at_us']}",
+                    manifest = dict(schema_version=4, source_id=store_id, invocation_id=iid, snapshot_id=uuid4().hex,
+                        version=f"4:{(trace['last_event'] or {}).get('event_id', iid)}:{trace['frontier']}:{0 if trace['invocation']['status'] in ('completed','failed','cancelled') else trace['observed_at_us']}",
                         frontier=trace['frontier'], through_sequence=upper, trace=trace, overview=overview,
                         cursor=encode_trace_cursor(store_id, iid, frontier), base_cursor=cursor or (old['manifest']['cursor'] if old else None), delta=previous is not None and not replay,
                         initial_trace=initial, history_complete=history_complete, replay=replay,
                         base_version=old['manifest']['version'] if old else None,
-                        sections={kind:dict(count=counts.get(kind,0), pages=len(offsets.get(kind,[]))) for kind in (('event',) if replay else ('node','call','wait','event', *(['edge'] if previous is not None else [])))})
+                        sections={kind:dict(count=counts.get(kind,0), pages=len(offsets.get(kind,[]))) for kind in (('event',) if replay else ('node','call','wait','event','link', *(['edge'] if previous is not None else [])))})
                 while self.entries and (self.bytes + size > self.config.trace_snapshot_bytes or len(self.entries) >= 32):
                     self._drop(next(iter(self.entries)))
                 self.entries[manifest['snapshot_id']] = dict(file=file, offsets=offsets, bytes=size, manifest=manifest, used=time.monotonic())

@@ -75,7 +75,7 @@ test('time indexes resolve unsorted timestamps, exact frontiers and same-time gr
   assert.equal(model.groups({start:1001,end:1002,buckets:1,through:5}).total_count,1);
 });
 test('local Replay checkpoints match full reduction across rewinds, atomic changes and sequence gaps',()=>{
-  const events:ReplayEvent[]=Array.from({length:700},(_,i)=>({event_id:String(i),sequence:i*3+2,occurred_at_us:i*10,event_name:'node_occurrence.started',changes:[{entity_type:'node',entity_id:'occ'+Math.floor(i/2),node_id:'n',change:{node_id:'n',status:i%2?'completed':'running'}}],evaluations:[],routes:[],child_ids:i===500?['child']:[],call_starts:[{node_id:'n',count:1}]}));
+  const events:ReplayEvent[]=Array.from({length:700},(_,i)=>({event_id:String(i),sequence:i*3+2,occurred_at_us:i*10,event_name:'node_occurrence.started',changes:[{entity_type:'node',entity_id:'occ'+Math.floor(i/2),node_id:'n',change:{node_id:'n',status:i%2?'completed':'running'}}],evaluations:[],routes:[],child_ids:i===500?['child']:[],call_starts:[{node_id:'n',occurrence_id:'occ'+Math.floor(i/2),count:1}]}));
   const baseline={trace:{...trace,invocation:{...trace.invocation,status:'planned'}},occurrences:[],child_ids:[]};
   const window={history_complete:true,baseline,events,boundary:null,previous:null,next:null,first:events[0],last:events.at(-1)!,frontier:99,time_from_us:0,time_until_us:null} as ReplayWindow;
   const local=new LocalReplay(new ReplayAccumulator(window),events);
@@ -97,7 +97,7 @@ test('compact checkpoints preserve concurrent priority, routing, atomic changes 
     events.push({event_id:String(i),sequence,occurred_at_us:i*10,event_name:'node_occurrence.changed',
       changes:[delta(id,'loop','ready'),delta(id,'loop',i%3?'completed':'running'),...(i>2?[delta('parallel'+(i-3),'loop','completed')]:[]),{entity_type:'invocation',entity_id:'i',node_id:null,change:{control_state:i%7?'active':'paused'}}],
       evaluations:[{edge_id:'next',condition_result:i%2===0}],routes:[{edge_id:'next',source_occurrence_id:'source',target_node_id:'loop',target_occurrence_id:id}],
-      child_ids:i%20===0?['child'+i]:[],call_starts:[{node_id:'loop',count:2}]});
+      child_ids:i%20===0?['child'+i]:[],call_starts:[{node_id:'loop',occurrence_id:id,count:2}]});
   }
   const window={history_complete:true,baseline:{trace,occurrences:[],child_ids:[]},events} as unknown as ReplayWindow;
   const replay=new LocalReplay(new ReplayAccumulator(window),events);

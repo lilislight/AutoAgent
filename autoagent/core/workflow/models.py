@@ -400,6 +400,18 @@ class LoopRegionIR:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowGroupIR:
+    """Inline authoring boundaries; members are exact, directly owned Node IDs."""
+
+    id: str
+    parent_group_id: str | None
+    label: str
+    workflow_id: str
+    workflow_version: str
+    node_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowIR:
     workflow_id: str
     workflow_revision_id: str
@@ -413,6 +425,7 @@ class WorkflowIR:
     loop_regions: tuple[LoopRegionIR, ...] = ()
     signal_endpoints: tuple[tuple[str, ValueContract], ...] = ()
     signal_limits: SignalLimits = field(default_factory=SignalLimits)
+    groups: tuple[WorkflowGroupIR, ...] = ()
     _nodes: Mapping[str, NodeIR] = field(init=False, repr=False, compare=False)
     _edges: Mapping[str, EdgeIR] = field(init=False, repr=False, compare=False)
     _incoming: Mapping[str, tuple[EdgeIR, ...]] = field(init=False, repr=False, compare=False)

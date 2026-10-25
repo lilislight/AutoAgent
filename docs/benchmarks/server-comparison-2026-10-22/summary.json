@@ -1,0 +1,3516 @@
+{
+  "business_parity_verified": true,
+  "expected_outputs": {
+    "concurrent-sessions": {
+      "step": 10,
+      "count": 1,
+      "bytes": 65536,
+      "digest": "e38aeb0de96c53b9362352f49c14664faedfffd30dc96b29dcc5d636cebb14cc"
+    },
+    "map-100": {
+      "bytes": 102400,
+      "count": 100,
+      "digest": "38cdf78075335902d47e337bf4f22894be3af7cc47a82bf355263eb2d443c099",
+      "step": 5050
+    },
+    "loop-10": {
+      "step": 10,
+      "count": 1,
+      "bytes": 1024,
+      "digest": "294702db41ce14fef81ae08b54cef2591afc05356af9a8e12ed2fe44947f9f71"
+    },
+    "many-definitions": {
+      "step": 10,
+      "count": 1,
+      "bytes": 0,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "rows": {
+      "bytes": 0,
+      "count": 1,
+      "digest": "360a02185d373f4f6934402242cd600c9e0d7c9765c00d8e1e8c2d38cc04d131",
+      "step": 4
+    },
+    "loop-100": {
+      "bytes": 1024,
+      "count": 1,
+      "digest": "6b25943148a89e840a0b2ae8739d01721c43bbe984ac1e2238dda737ffba7c93",
+      "step": 100
+    },
+    "context-append": {
+      "bytes": 65536,
+      "count": 1,
+      "digest": "c0335dbff5c1801cc06f381bfdd71d633203ff1afc1a96ca1bb7a6c0e43ac50c",
+      "step": 20
+    },
+    "chain-1": {
+      "bytes": 0,
+      "count": 1,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 1
+    },
+    "chain-100": {
+      "step": 100,
+      "count": 1,
+      "bytes": 0,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "map-1000": {
+      "step": 500500,
+      "count": 1000,
+      "bytes": 1024000,
+      "digest": "96a923fb72b9826d40f7c3dd1f4a4fd255b8ea3dc97e5ff2606c6fc90b32518b"
+    },
+    "text-overwrite": {
+      "step": 20,
+      "count": 1,
+      "bytes": 1048576,
+      "digest": "b23e4f491a5863ef199bdab12dbc45e6b4a49c73a0c67426fd62ce181d77e141"
+    },
+    "chain-10": {
+      "step": 10,
+      "count": 1,
+      "bytes": 0,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "chain": {
+      "bytes": 0,
+      "count": 1,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 3
+    },
+    "context": {
+      "bytes": 1024,
+      "count": 1,
+      "digest": "287135730def8426e50da8e1669fa5c24fbe482b093e431f050eb01b6ec33c67",
+      "step": 3
+    },
+    "loop": {
+      "bytes": 0,
+      "count": 1,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 3
+    },
+    "map": {
+      "bytes": 0,
+      "count": 4,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 10
+    },
+    "crash-at-wait": {
+      "bytes": 16384,
+      "count": 1,
+      "digest": "1536c422c31cc98834759d7085cda394a3510a03d78188248986a6b1a7207d03",
+      "step": 1
+    },
+    "wide-256": {
+      "bytes": 262144,
+      "count": 256,
+      "digest": "f1d97e15751992a6d5540442a2842b1ee82c63733216deda468e261174762a93",
+      "step": 256
+    },
+    "session-reuse": {
+      "step": 4,
+      "count": 1,
+      "bytes": 16384,
+      "digest": "08675e72dcd6846153bcda90019e3b21c59952904e51d1d4b323af4b244fd5a4"
+    },
+    "slow-storage": {
+      "step": 10,
+      "count": 1,
+      "bytes": 65536,
+      "digest": "e38aeb0de96c53b9362352f49c14664faedfffd30dc96b29dcc5d636cebb14cc"
+    },
+    "wait-resume": {
+      "bytes": 16384,
+      "count": 1,
+      "digest": "1536c422c31cc98834759d7085cda394a3510a03d78188248986a6b1a7207d03",
+      "step": 1
+    },
+    "sql-chain-10": {
+      "step": 10,
+      "count": 1,
+      "bytes": 0,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wide-32": {
+      "step": 32,
+      "count": 32,
+      "bytes": 524288,
+      "digest": "3fa4ca70117ae978d065c79f1b211e84b231886629b1ee05bfd38b51304d22f0"
+    },
+    "unique-history": {
+      "bytes": 16384,
+      "count": 1,
+      "digest": "08675e72dcd6846153bcda90019e3b21c59952904e51d1d4b323af4b244fd5a4",
+      "step": 4
+    },
+    "cpu-diagnostic": {
+      "step": 10,
+      "count": 1,
+      "bytes": 16384,
+      "digest": "7ed99b739480064d62939609be5f958cda2cc8d162bea5f348adc62ee40c08e7"
+    },
+    "idle-release": {
+      "bytes": 1048576,
+      "count": 1,
+      "digest": "b7950e6f7dea48941b322fc3acfd2c2ab0a0395625e575cd29b9a9b9a81cd0dc",
+      "step": 4
+    },
+    "large-text-32m": {
+      "bytes": 33554432,
+      "count": 1,
+      "digest": "ae1cd27a3c44750a2273bdfd31c742b1dfc606eb7b269ffc9432893b85782b6c",
+      "step": 30
+    },
+    "map-10000": {
+      "step": 50005000,
+      "count": 10000,
+      "bytes": 40960000,
+      "digest": "d7c6c3245c49a956257bc98c4a9b598c2c4bea8dc90c2596d3c94d9a91c466d0"
+    },
+    "large-text-8m": {
+      "bytes": 8388608,
+      "count": 1,
+      "digest": "9b0d52ddda81f55b6ac72f94eb62d5d188777d79ac19c929291319155dcd43b1",
+      "step": 30
+    },
+    "chain-long-deadline": {
+      "bytes": 0,
+      "count": 1,
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 1000
+    },
+    "trace-reader": {
+      "step": 10,
+      "count": 1,
+      "bytes": 16384,
+      "digest": "7ed99b739480064d62939609be5f958cda2cc8d162bea5f348adc62ee40c08e7"
+    },
+    "soak": {
+      "step": 4,
+      "count": 1,
+      "bytes": 16384,
+      "digest": "08675e72dcd6846153bcda90019e3b21c59952904e51d1d4b323af4b244fd5a4"
+    }
+  },
+  "summaries": [
+    {
+      "suite": "artifact-threshold",
+      "backend": "sqlite",
+      "case": "unique-history",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 39.339044498774456,
+      "p95_ms": 44.76649280040874,
+      "p99_ms": 72.24920996010049,
+      "peak_rss_mib": 117.6015625,
+      "closed_storage_mib": 22.23998260498047,
+      "startup_seconds": 0.5233611959993141,
+      "cpu_seconds": 4.61
+    },
+    {
+      "suite": "artifact-threshold",
+      "backend": "sqlite",
+      "case": "unique-history",
+      "profile": "v2-artifacts-8k",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 493.3313184992585,
+      "p95_ms": 595.690310349346,
+      "p99_ms": 614.672457909619,
+      "peak_rss_mib": 95.2734375,
+      "closed_storage_mib": 35.52020263671875,
+      "startup_seconds": 0.906533526002022,
+      "cpu_seconds": 56.12
+    },
+    {
+      "suite": "artifact-threshold",
+      "backend": "sqlite",
+      "case": "unique-history",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 492.5246295006218,
+      "p95_ms": 561.0108923516232,
+      "p99_ms": 613.4792247887526,
+      "peak_rss_mib": 94.52734375,
+      "closed_storage_mib": 105.9735336303711,
+      "startup_seconds": 0.7458577069992316,
+      "cpu_seconds": 54.33
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 33.012058999702276,
+      "p95_ms": 43.477541849642876,
+      "p99_ms": 53.57980617898649,
+      "peak_rss_mib": 76.4765625,
+      "closed_storage_mib": 1.8465194702148438,
+      "startup_seconds": 0.5767614819997107,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 23.9823769989016,
+      "p95_ms": 26.175519350454124,
+      "p99_ms": 26.68857361044502,
+      "peak_rss_mib": 74.4765625,
+      "closed_storage_mib": 0.789581298828125,
+      "startup_seconds": 0.581623916999888,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 46.057071502218605,
+      "p95_ms": 58.89895540003634,
+      "p99_ms": 61.270437997845875,
+      "peak_rss_mib": 76.01171875,
+      "closed_storage_mib": 1.6186294555664062,
+      "startup_seconds": 0.8679854410002008,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 522.955667000133,
+      "p95_ms": 1072.6818770008313,
+      "p99_ms": 1355.3300863501865,
+      "peak_rss_mib": 88.01171875,
+      "closed_storage_mib": 4.80462646484375,
+      "startup_seconds": 0.9151579630015476,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 73.24258750122681,
+      "p95_ms": 90.62371965119378,
+      "p99_ms": 101.32861739242799,
+      "peak_rss_mib": 82.58984375,
+      "closed_storage_mib": 3.4692535400390625,
+      "startup_seconds": 0.809345834000851,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 36.9811694999953,
+      "p95_ms": 58.03577124988804,
+      "p99_ms": 61.11894832087273,
+      "peak_rss_mib": 75.4453125,
+      "closed_storage_mib": 0.8052978515625,
+      "startup_seconds": 0.9049809009993623,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 55.371154499880504,
+      "p95_ms": 85.53570085023236,
+      "p99_ms": 113.7797104085985,
+      "peak_rss_mib": 78.09375,
+      "closed_storage_mib": 2.8563079833984375,
+      "startup_seconds": 0.858055668999441,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 2034.8427964981965,
+      "p95_ms": 4097.049178949601,
+      "p99_ms": 4576.382407409438,
+      "peak_rss_mib": 90.1484375,
+      "closed_storage_mib": 6.4611968994140625,
+      "startup_seconds": 1.0445787200005725,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-100",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 532.6750749991334,
+      "p95_ms": 864.8185890015155,
+      "p99_ms": 973.7351586016302,
+      "peak_rss_mib": 99.36328125,
+      "closed_storage_mib": 9.608909606933594,
+      "startup_seconds": 1.032832139000675,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-100",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 70.38932899922656,
+      "p95_ms": 184.56718479974364,
+      "p99_ms": 229.7209121594642,
+      "peak_rss_mib": 78.41015625,
+      "closed_storage_mib": 0.695281982421875,
+      "startup_seconds": 0.957549034999829,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-100",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 256.8528919982782,
+      "p95_ms": 307.1931406004296,
+      "p99_ms": 314.70031852062675,
+      "peak_rss_mib": 87.46875,
+      "closed_storage_mib": 6.5316925048828125,
+      "startup_seconds": 0.9410917629993492,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-100",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 9467.858601001353,
+      "p95_ms": 15979.580754999915,
+      "p99_ms": 16257.71935820012,
+      "peak_rss_mib": 101.70703125,
+      "closed_storage_mib": 10.73095703125,
+      "startup_seconds": 2.4370424900007492,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1000",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 0,
+      "statuses": {
+        "error": 3
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 107.84375,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1000",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 0,
+      "statuses": {
+        "error": 3
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 108.03515625,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1000",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 0,
+      "statuses": {
+        "error": 3
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 107.671875,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "chain-1000",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 0,
+      "statuses": {
+        "error": 3
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 360.265625,
+      "closed_storage_mib": null,
+      "startup_seconds": 16.69008776299961,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "concurrent-sessions",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 192,
+      "latency_samples": 192,
+      "p50_ms": 662.3239430009562,
+      "p95_ms": 937.8354104001119,
+      "p99_ms": 962.3319685696697,
+      "peak_rss_mib": 166.96484375,
+      "closed_storage_mib": 57.721031188964844,
+      "startup_seconds": 0.8319951379999111,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "concurrent-sessions",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 192,
+      "latency_samples": 192,
+      "p50_ms": 171.8142870004158,
+      "p95_ms": 209.67553169975872,
+      "p99_ms": 237.99915710143978,
+      "peak_rss_mib": 120.953125,
+      "closed_storage_mib": 1.1432037353515625,
+      "startup_seconds": 0.6273628169983567,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "concurrent-sessions",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 192,
+      "latency_samples": 192,
+      "p50_ms": 412.76911400018435,
+      "p95_ms": 837.668045900682,
+      "p99_ms": 846.9082681504733,
+      "peak_rss_mib": 153.96875,
+      "closed_storage_mib": 52.554969787597656,
+      "startup_seconds": 0.6325560959994618,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "concurrent-sessions",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 192,
+      "latency_samples": 192,
+      "p50_ms": 27688.53732250045,
+      "p95_ms": 37765.95756549941,
+      "p99_ms": 38240.39549660269,
+      "peak_rss_mib": 103.74609375,
+      "closed_storage_mib": 466.3341293334961,
+      "startup_seconds": 1.062893043999793,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 218.19988399875,
+      "p95_ms": 295.18822980098776,
+      "p99_ms": 295.2078691612405,
+      "peak_rss_mib": 90.97265625,
+      "closed_storage_mib": 16.673851013183594,
+      "startup_seconds": 0.7925349770011962,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 59.22509900119621,
+      "p95_ms": 79.91725079991738,
+      "p99_ms": 80.05920056064497,
+      "peak_rss_mib": 80.14453125,
+      "closed_storage_mib": 0.48703765869140625,
+      "startup_seconds": 0.88533020199975,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 157.013089999964,
+      "p95_ms": 217.07718760007992,
+      "p99_ms": 224.72439592005685,
+      "peak_rss_mib": 93.37109375,
+      "closed_storage_mib": 16.737533569335938,
+      "startup_seconds": 0.655355946999407,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 3327.3491429990827,
+      "p95_ms": 4693.9623923997715,
+      "p99_ms": 4755.279000079245,
+      "peak_rss_mib": 116.140625,
+      "closed_storage_mib": 198.3015365600586,
+      "startup_seconds": 0.886683205000736,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-10",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 89.59247799975856,
+      "p95_ms": 127.2214267984964,
+      "p99_ms": 132.37434135866351,
+      "peak_rss_mib": 78.16796875,
+      "closed_storage_mib": 1.7247161865234375,
+      "startup_seconds": 0.8323404490001849,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-10",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 27.176875999430194,
+      "p95_ms": 38.73720660121762,
+      "p99_ms": 38.900810121704126,
+      "peak_rss_mib": 74.9140625,
+      "closed_storage_mib": 0.48703765869140625,
+      "startup_seconds": 0.5846796049991099,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-10",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 59.44471600014367,
+      "p95_ms": 87.72872720001033,
+      "p99_ms": 88.05733903980581,
+      "peak_rss_mib": 76.1640625,
+      "closed_storage_mib": 1.166778564453125,
+      "startup_seconds": 0.7332022749997122,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-10",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 1793.0933640000148,
+      "p95_ms": 2124.8222362002707,
+      "p99_ms": 2131.434064040368,
+      "peak_rss_mib": 88.75,
+      "closed_storage_mib": 5.7854156494140625,
+      "startup_seconds": 0.8820831519988133,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 625.7506530000683,
+      "p95_ms": 735.8168762009882,
+      "p99_ms": 760.9848496418272,
+      "peak_rss_mib": 104.890625,
+      "closed_storage_mib": 15.604164123535156,
+      "startup_seconds": 0.5755672340001183,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 87.3758279994945,
+      "p95_ms": 113.6620799999946,
+      "p99_ms": 114.89570240031753,
+      "peak_rss_mib": 76.62890625,
+      "closed_storage_mib": 0.5184707641601562,
+      "startup_seconds": 0.6049791280001955,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 338.0166940005438,
+      "p95_ms": 392.21946299985575,
+      "p99_ms": 396.5718581996771,
+      "peak_rss_mib": 90.1171875,
+      "closed_storage_mib": 6.312507629394531,
+      "startup_seconds": 0.6317115439996996,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 17369.37527400005,
+      "p95_ms": 20414.1769560003,
+      "p99_ms": 20442.400744800252,
+      "peak_rss_mib": 92.64453125,
+      "closed_storage_mib": 18.246810913085938,
+      "startup_seconds": 0.8849054769998475,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "many-definitions",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 62.485364000167465,
+      "p95_ms": 88.58701819990529,
+      "p99_ms": 91.77387963951332,
+      "peak_rss_mib": 88.8359375,
+      "closed_storage_mib": 2.6991424560546875,
+      "startup_seconds": 1.6368066040013218,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "many-definitions",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 25.795527999434853,
+      "p95_ms": 69.69215939971035,
+      "p99_ms": 80.55226147858775,
+      "peak_rss_mib": 87.57421875,
+      "closed_storage_mib": 1.7050704956054688,
+      "startup_seconds": 1.8296285270007502,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "many-definitions",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 62.45229499836569,
+      "p95_ms": 78.80593679874437,
+      "p99_ms": 83.72902735864045,
+      "peak_rss_mib": 88.07421875,
+      "closed_storage_mib": 2.3730239868164062,
+      "startup_seconds": 1.872414197998296,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "many-definitions",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 1075.7985539985384,
+      "p95_ms": 1196.313916200961,
+      "p99_ms": 1206.4253248414752,
+      "peak_rss_mib": 119.79296875,
+      "closed_storage_mib": 7.2581634521484375,
+      "startup_seconds": 9.881975754999075,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 128.35114300105488,
+      "p95_ms": 165.20550240020384,
+      "p99_ms": 171.73197407930274,
+      "peak_rss_mib": 82.14453125,
+      "closed_storage_mib": 2.8563079833984375,
+      "startup_seconds": 0.8597731099980592,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 46.622568001112086,
+      "p95_ms": 49.128204199587344,
+      "p99_ms": 50.10623683941958,
+      "peak_rss_mib": 75.07421875,
+      "closed_storage_mib": 0.48703765869140625,
+      "startup_seconds": 0.7318637260013929,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 99.32820800167974,
+      "p95_ms": 195.9523937992344,
+      "p99_ms": 229.1103499593737,
+      "peak_rss_mib": 78.03125,
+      "closed_storage_mib": 1.4732513427734375,
+      "startup_seconds": 0.9852164809999522,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 3398.202828000649,
+      "p95_ms": 5440.754664198903,
+      "p99_ms": 5456.009471238067,
+      "peak_rss_mib": 90.30078125,
+      "closed_storage_mib": 8.679832458496094,
+      "startup_seconds": 0.8531363839992991,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-1000",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 1437.0000799972331,
+      "p95_ms": 1598.9475509999465,
+      "p99_ms": 1629.5029813992005,
+      "peak_rss_mib": 126.5,
+      "closed_storage_mib": 21.21179962158203,
+      "startup_seconds": 0.6039414429997123,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-1000",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 119.77565000051982,
+      "p95_ms": 145.24297160023707,
+      "p99_ms": 146.96412392062484,
+      "peak_rss_mib": 81.5234375,
+      "closed_storage_mib": 0.5184707641601562,
+      "startup_seconds": 0.5764200820012775,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-1000",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 526.3173169987567,
+      "p95_ms": 571.8909162002092,
+      "p99_ms": 575.039206440415,
+      "peak_rss_mib": 98.32421875,
+      "closed_storage_mib": 8.837913513183594,
+      "startup_seconds": 0.8073971830017399,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "map-1000",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 63454.57529199848,
+      "p95_ms": 80745.21833999825,
+      "p99_ms": 82069.07438319686,
+      "peak_rss_mib": 110.0,
+      "closed_storage_mib": 162.35909271240234,
+      "startup_seconds": 0.783079049000662,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 3
+      },
+      "calls": 3,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 768.84765625,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.5730863549997594,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 929.9242640008742,
+      "p95_ms": 966.0019844013732,
+      "p99_ms": 970.5812320811674,
+      "peak_rss_mib": 341.2421875,
+      "closed_storage_mib": 0.52239990234375,
+      "startup_seconds": 0.7825395859999844,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 2265.9313770018343,
+      "p95_ms": 2473.540839200723,
+      "p99_ms": 2553.1613486411516,
+      "peak_rss_mib": 522.80859375,
+      "closed_storage_mib": 22.46385955810547,
+      "startup_seconds": 1.1365607469997485,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 23960.361598001327,
+      "p95_ms": 24529.468559000088,
+      "p99_ms": 24580.47732380117,
+      "peak_rss_mib": 374.0078125,
+      "closed_storage_mib": 162.1515121459961,
+      "startup_seconds": 0.9118874470004812,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "text-overwrite",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 1628.1754019983055,
+      "p95_ms": 1907.1817984004156,
+      "p99_ms": 2010.13605568005,
+      "peak_rss_mib": 210.81640625,
+      "closed_storage_mib": 168.29199981689453,
+      "startup_seconds": 0.573356626999157,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "text-overwrite",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 170.543476999228,
+      "p95_ms": 199.84303919991362,
+      "p99_ms": 211.34181903951685,
+      "peak_rss_mib": 158.15234375,
+      "closed_storage_mib": 0.5027542114257812,
+      "startup_seconds": 0.7554345759999705,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "text-overwrite",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 747.7431840015925,
+      "p95_ms": 1473.7003228015965,
+      "p99_ms": 1476.439534961828,
+      "peak_rss_mib": 315.375,
+      "closed_storage_mib": 128.4772720336914,
+      "startup_seconds": 0.9119389100014814,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline",
+      "backend": "sqlite",
+      "case": "text-overwrite",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 5992.219413001294,
+      "p95_ms": 7342.910559000302,
+      "p99_ms": 7395.806962201459,
+      "peak_rss_mib": 114.375,
+      "closed_storage_mib": 107.92255401611328,
+      "startup_seconds": 0.9080030530021759,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 353.6343055002362,
+      "p95_ms": 542.2144414493232,
+      "p99_ms": 655.9650604702257,
+      "peak_rss_mib": 81.62890625,
+      "closed_storage_mib": 3.5831985473632812,
+      "startup_seconds": 4.59577130300022,
+      "cpu_seconds": 1.34
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 38.58601600040856,
+      "p95_ms": 49.81139629890094,
+      "p99_ms": 51.120831870648544,
+      "peak_rss_mib": 76.015625,
+      "closed_storage_mib": 0.7935104370117188,
+      "startup_seconds": 0.8849988259971724,
+      "cpu_seconds": 0.76
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 69.91787550032313,
+      "p95_ms": 496.65691649988713,
+      "p99_ms": 529.1678904111541,
+      "peak_rss_mib": 78.2109375,
+      "closed_storage_mib": 2.6912841796875,
+      "startup_seconds": 0.975762272002612,
+      "cpu_seconds": 1.02
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "chain-10",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 30,
+      "latency_samples": 30,
+      "p50_ms": 1808.7681630022416,
+      "p95_ms": 3530.8697187996577,
+      "p99_ms": 3876.597569720543,
+      "peak_rss_mib": 90.859375,
+      "closed_storage_mib": 6.340126037597656,
+      "startup_seconds": 1.0120373959980498,
+      "cpu_seconds": 10.66
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 259.25646100222366,
+      "p95_ms": 307.61453439918114,
+      "p99_ms": 316.86216127796797,
+      "peak_rss_mib": 92.73828125,
+      "closed_storage_mib": 14.329338073730469,
+      "startup_seconds": 0.7829272039998614,
+      "cpu_seconds": 1.38
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 63.723162002133904,
+      "p95_ms": 71.91302400096902,
+      "p99_ms": 72.53326240126626,
+      "peak_rss_mib": 80.9296875,
+      "closed_storage_mib": 0.48703765869140625,
+      "startup_seconds": 0.7826356189980288,
+      "cpu_seconds": 0.75
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 185.580776000279,
+      "p95_ms": 242.4897556003998,
+      "p99_ms": 251.85698791960021,
+      "peak_rss_mib": 93.97265625,
+      "closed_storage_mib": 16.72978973388672,
+      "startup_seconds": 0.792550972000754,
+      "cpu_seconds": 1.13
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "context-append",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 5217.705565999495,
+      "p95_ms": 6523.491840998759,
+      "p99_ms": 6831.704002598417,
+      "peak_rss_mib": 115.6484375,
+      "closed_storage_mib": 198.28575134277344,
+      "startup_seconds": 0.9339094030001434,
+      "cpu_seconds": 11.05
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 686.3021030003438,
+      "p95_ms": 1769.349192801019,
+      "p99_ms": 1838.8984737613646,
+      "peak_rss_mib": 106.2109375,
+      "closed_storage_mib": 15.281173706054688,
+      "startup_seconds": 0.8635508580009628,
+      "cpu_seconds": 3.17
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 85.33337599874358,
+      "p95_ms": 121.10153360044933,
+      "p99_ms": 123.33666352191358,
+      "peak_rss_mib": 77.3671875,
+      "closed_storage_mib": 0.5027542114257812,
+      "startup_seconds": 0.8074448549996305,
+      "cpu_seconds": 0.87
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 301.3037809978414,
+      "p95_ms": 348.45954380070907,
+      "p99_ms": 349.9837015599769,
+      "peak_rss_mib": 90.0703125,
+      "closed_storage_mib": 6.900848388671875,
+      "startup_seconds": 0.8848050179985876,
+      "cpu_seconds": 1.69
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "loop-100",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 18430.443175999244,
+      "p95_ms": 104690.42208479949,
+      "p99_ms": 114328.24942655978,
+      "peak_rss_mib": 93.67578125,
+      "closed_storage_mib": 17.89904022216797,
+      "startup_seconds": 2.765570381001453,
+      "cpu_seconds": 39.96
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 123.27520600229036,
+      "p95_ms": 154.04222160213976,
+      "p99_ms": 159.14185872170492,
+      "peak_rss_mib": 82.58984375,
+      "closed_storage_mib": 2.91131591796875,
+      "startup_seconds": 0.8297213850019034,
+      "cpu_seconds": 1.03
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 48.61988799893879,
+      "p95_ms": 60.051562399894465,
+      "p99_ms": 63.11074287892552,
+      "peak_rss_mib": 75.578125,
+      "closed_storage_mib": 0.48703765869140625,
+      "startup_seconds": 0.7814713279985881,
+      "cpu_seconds": 0.68
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 115.75579499913147,
+      "p95_ms": 585.0312570000824,
+      "p99_ms": 607.4256505999074,
+      "peak_rss_mib": 78.17578125,
+      "closed_storage_mib": 1.5164718627929688,
+      "startup_seconds": 1.13831008499983,
+      "cpu_seconds": 0.86
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "map-100",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 5765.270780997525,
+      "p95_ms": 6022.795716401015,
+      "p99_ms": 6089.22883288149,
+      "peak_rss_mib": 90.71484375,
+      "closed_storage_mib": 8.617332458496094,
+      "startup_seconds": 0.8551969139989524,
+      "cpu_seconds": 12.04
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v1-full",
+      "runs": 3,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 3
+      },
+      "calls": 3,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 769.171875,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.8307078720026766,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v1-minimal",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 909.801008998329,
+      "p95_ms": 1093.7312990005012,
+      "p99_ms": 1094.7035566004342,
+      "peak_rss_mib": 341.76171875,
+      "closed_storage_mib": 0.5145416259765625,
+      "startup_seconds": 1.6420601409990923,
+      "cpu_seconds": 4.13
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v1-standard",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 2345.739585998672,
+      "p95_ms": 3139.440105197718,
+      "p99_ms": 3489.336646636948,
+      "peak_rss_mib": 530.9296875,
+      "closed_storage_mib": 22.4547119140625,
+      "startup_seconds": 4.952838843000791,
+      "cpu_seconds": 8.17
+    },
+    {
+      "suite": "baseline-pinned",
+      "backend": "sqlite",
+      "case": "rows",
+      "profile": "v2-default",
+      "runs": 3,
+      "successful_runs": 3,
+      "statuses": {
+        "completed": 3
+      },
+      "calls": 9,
+      "latency_samples": 9,
+      "p50_ms": 23763.08695100306,
+      "p95_ms": 26765.366894598992,
+      "p99_ms": 26855.591854918457,
+      "peak_rss_mib": 373.59765625,
+      "closed_storage_mib": 162.1515121459961,
+      "startup_seconds": 0.9102833220022148,
+      "cpu_seconds": 90.79
+    },
+    {
+      "suite": "cpu-corrected",
+      "backend": "sqlite",
+      "case": "cpu-diagnostic",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 395.34318699952564,
+      "p95_ms": 415.000408299602,
+      "p99_ms": 416.7477168596088,
+      "peak_rss_mib": 82.078125,
+      "closed_storage_mib": 2.5419769287109375,
+      "startup_seconds": 0.5505110260019137,
+      "cpu_seconds": 1.84
+    },
+    {
+      "suite": "cpu-corrected",
+      "backend": "sqlite",
+      "case": "cpu-diagnostic",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 2763.502868001524,
+      "p95_ms": 2823.148766901795,
+      "p99_ms": 2828.4506245818193,
+      "peak_rss_mib": 93.58984375,
+      "closed_storage_mib": 11.699432373046875,
+      "startup_seconds": 0.9320986849998008,
+      "cpu_seconds": 9.94
+    },
+    {
+      "suite": "eviction",
+      "backend": "sqlite",
+      "case": "idle-release",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 8,
+      "latency_samples": 8,
+      "p50_ms": 607.6631989999441,
+      "p95_ms": 618.6521615985839,
+      "p99_ms": 619.9972379185783,
+      "peak_rss_mib": 109.83984375,
+      "closed_storage_mib": 46.505958557128906,
+      "startup_seconds": 0.7536486650024017,
+      "cpu_seconds": 5.44
+    },
+    {
+      "suite": "eviction",
+      "backend": "sqlite",
+      "case": "idle-release",
+      "profile": "v2-evict",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 8,
+      "latency_samples": 8,
+      "p50_ms": 608.8582625015988,
+      "p95_ms": 619.3436870504229,
+      "p99_ms": 619.610307810508,
+      "peak_rss_mib": 105.94921875,
+      "closed_storage_mib": 46.490333557128906,
+      "startup_seconds": 0.768806123000104,
+      "cpu_seconds": 5.77
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "crash-at-wait",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 562.4249510001391,
+      "p95_ms": 567.904123099288,
+      "p99_ms": 568.3911606192123,
+      "peak_rss_mib": 75.4375,
+      "closed_storage_mib": 1.418243408203125,
+      "startup_seconds": 0.5215227990011044,
+      "cpu_seconds": 0.57
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "crash-at-wait",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 567.1920909990149,
+      "p95_ms": 568.6249162008608,
+      "p99_ms": 568.7522784410248,
+      "peak_rss_mib": 76.05859375,
+      "closed_storage_mib": 1.4221725463867188,
+      "startup_seconds": 0.5229738679990987,
+      "cpu_seconds": 0.57
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "crash-at-wait",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 1011.842236002849,
+      "p95_ms": 1013.524471900746,
+      "p99_ms": 1013.6740039805591,
+      "peak_rss_mib": 86.51953125,
+      "closed_storage_mib": 2.7345046997070312,
+      "startup_seconds": 0.7290846559990314,
+      "cpu_seconds": 0.88
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "crash-at-wait",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 1002.4413899991487,
+      "p95_ms": 1005.4653162012983,
+      "p99_ms": 1005.7341096414893,
+      "peak_rss_mib": 86.49609375,
+      "closed_storage_mib": 5.121055603027344,
+      "startup_seconds": 0.692729500002315,
+      "cpu_seconds": 0.93
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "failed-storage",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "storage_fault_observed": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 77.6640625,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.5223569519985176,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "failed-storage",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "storage_fault_observed": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 77.71484375,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.5507105849974323,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "failed-storage",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "storage_fault_observed": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 90.02734375,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.8249742150001111,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "failed-storage",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "storage_fault_observed": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 87.57421875,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.8258900550026738,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "session-reuse",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 39.91037950072496,
+      "p95_ms": 46.04831944761827,
+      "p99_ms": 70.4875196486683,
+      "peak_rss_mib": 117.51171875,
+      "closed_storage_mib": 22.310089111328125,
+      "startup_seconds": 0.5229401510005118,
+      "cpu_seconds": 4.52
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "session-reuse",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 39.962875000128406,
+      "p95_ms": 47.25590235011623,
+      "p99_ms": 69.04082552926417,
+      "peak_rss_mib": 118.75390625,
+      "closed_storage_mib": 22.14593505859375,
+      "startup_seconds": 0.5225075669986836,
+      "cpu_seconds": 4.53
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "session-reuse",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 202.32892649983114,
+      "p95_ms": 210.6125422000332,
+      "p99_ms": 222.18200579947734,
+      "peak_rss_mib": 95.95703125,
+      "closed_storage_mib": 104.54618835449219,
+      "startup_seconds": 0.7789079659996787,
+      "cpu_seconds": 21.73
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "session-reuse",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 128,
+      "latency_samples": 128,
+      "p50_ms": 477.88507799850777,
+      "p95_ms": 493.9427198482008,
+      "p99_ms": 506.59104082966223,
+      "peak_rss_mib": 92.48828125,
+      "closed_storage_mib": 104.4735336303711,
+      "startup_seconds": 0.7517103110003518,
+      "cpu_seconds": 49.55
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "slow-storage",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 89.08799100026954,
+      "p95_ms": 103.14459219953278,
+      "p99_ms": 104.81731923966436,
+      "peak_rss_mib": 85.4453125,
+      "closed_storage_mib": 7.426063537597656,
+      "startup_seconds": 0.5242056770002819,
+      "cpu_seconds": 0.9
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "slow-storage",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 90.2499900003022,
+      "p95_ms": 106.42391900109942,
+      "p99_ms": 108.345815801149,
+      "peak_rss_mib": 85.703125,
+      "closed_storage_mib": 7.406486511230469,
+      "startup_seconds": 0.5501250189990969,
+      "cpu_seconds": 0.93
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "slow-storage",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 392.1070049982518,
+      "p95_ms": 413.0209547991399,
+      "p99_ms": 417.0182725583436,
+      "peak_rss_mib": 98.1015625,
+      "closed_storage_mib": 47.28662109375,
+      "startup_seconds": 1.1604999189985392,
+      "cpu_seconds": 3.15
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "slow-storage",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 2371.7597419999947,
+      "p95_ms": 2386.0066114008077,
+      "p99_ms": 2387.512822280696,
+      "peak_rss_mib": 94.4296875,
+      "closed_storage_mib": 45.25487518310547,
+      "startup_seconds": 0.9095047970004089,
+      "cpu_seconds": 6.5
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "sql-chain-10",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 55.49884499851032,
+      "p95_ms": 70.68333759962115,
+      "p99_ms": 73.61809711961541,
+      "peak_rss_mib": 79.453125,
+      "closed_storage_mib": 1.90545654296875,
+      "startup_seconds": 0.5223616290022619,
+      "cpu_seconds": 0.87
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "sql-chain-10",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 57.59767599738552,
+      "p95_ms": 75.27172499831067,
+      "p99_ms": 78.76792179857148,
+      "peak_rss_mib": 79.3984375,
+      "closed_storage_mib": 1.8936691284179688,
+      "startup_seconds": 0.5487290630007919,
+      "cpu_seconds": 0.9
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "sql-chain-10",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 353.6495369990007,
+      "p95_ms": 414.36439719982445,
+      "p99_ms": 424.24437223991845,
+      "peak_rss_mib": 90.1015625,
+      "closed_storage_mib": 5.51220703125,
+      "startup_seconds": 0.8286592149997887,
+      "cpu_seconds": 3.05
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "sql-chain-10",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 929.0106730004482,
+      "p95_ms": 947.3944140008825,
+      "p99_ms": 949.1798340015521,
+      "peak_rss_mib": 89.91796875,
+      "closed_storage_mib": 5.4338531494140625,
+      "startup_seconds": 0.8521879899999476,
+      "cpu_seconds": 5.53
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wait-resume",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 61.15371100167977,
+      "p95_ms": 64.39427799850819,
+      "p99_ms": 64.6430291987781,
+      "peak_rss_mib": 76.62890625,
+      "closed_storage_mib": 2.21978759765625,
+      "startup_seconds": 0.5211258989984344,
+      "cpu_seconds": 0.77
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wait-resume",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 59.81811099991319,
+      "p95_ms": 62.45881179856951,
+      "p99_ms": 62.75931355878129,
+      "peak_rss_mib": 76.96484375,
+      "closed_storage_mib": 2.1922836303710938,
+      "startup_seconds": 0.5223818679987744,
+      "cpu_seconds": 0.75
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wait-resume",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 304.8556770008872,
+      "p95_ms": 312.98149319991353,
+      "p99_ms": 313.12998983994476,
+      "peak_rss_mib": 88.7890625,
+      "closed_storage_mib": 5.812049865722656,
+      "startup_seconds": 1.1396244190000289,
+      "cpu_seconds": 1.8
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wait-resume",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 288.7549910010421,
+      "p95_ms": 308.40324760210933,
+      "p99_ms": 311.7588495221571,
+      "peak_rss_mib": 88.359375,
+      "closed_storage_mib": 5.613288879394531,
+      "startup_seconds": 0.7053631099988706,
+      "cpu_seconds": 2.28
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-256",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 1621.8090440015658,
+      "p95_ms": 1662.319030402432,
+      "p99_ms": 1665.919918082509,
+      "peak_rss_mib": 141.9765625,
+      "closed_storage_mib": 26.840255737304688,
+      "startup_seconds": 0.930789908998122,
+      "cpu_seconds": 7.47
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-256",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 1572.7978930008248,
+      "p95_ms": 1590.2286646014545,
+      "p99_ms": 1591.7780665215105,
+      "peak_rss_mib": 145.21484375,
+      "closed_storage_mib": 27.11504364013672,
+      "startup_seconds": 0.9034350600013568,
+      "cpu_seconds": 7.36
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-256",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 12902.843351999763,
+      "p95_ms": 12904.527679500097,
+      "p99_ms": 12904.677397500127,
+      "peak_rss_mib": 156.95703125,
+      "closed_storage_mib": 44.572471618652344,
+      "startup_seconds": 4.30411192000247,
+      "cpu_seconds": 57.21
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-256",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3,
+      "latency_samples": 3,
+      "p50_ms": 21081.851513998117,
+      "p95_ms": 22371.18943139976,
+      "p99_ms": 22485.797246279908,
+      "peak_rss_mib": 130.35546875,
+      "closed_storage_mib": 42.384490966796875,
+      "startup_seconds": 4.298892414000875,
+      "cpu_seconds": 75.98
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-32",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 150.65527600017958,
+      "p95_ms": 180.68323099796544,
+      "p99_ms": 185.1684629979718,
+      "peak_rss_mib": 94.57421875,
+      "closed_storage_mib": 10.868522644042969,
+      "startup_seconds": 0.5721866690000752,
+      "cpu_seconds": 1.5
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-32",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 152.30113999859896,
+      "p95_ms": 163.9703731998452,
+      "p99_ms": 165.7633010399877,
+      "peak_rss_mib": 94.30859375,
+      "closed_storage_mib": 10.907630920410156,
+      "startup_seconds": 0.5739186130012968,
+      "cpu_seconds": 1.47
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-32",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 1106.842940000206,
+      "p95_ms": 1131.2357115995837,
+      "p99_ms": 1134.2112375196302,
+      "peak_rss_mib": 115.72265625,
+      "closed_storage_mib": 43.14800262451172,
+      "startup_seconds": 1.1569939499968314,
+      "cpu_seconds": 8.05
+    },
+    {
+      "suite": "extended",
+      "backend": "sqlite",
+      "case": "wide-32",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 5,
+      "latency_samples": 5,
+      "p50_ms": 2551.2801080003555,
+      "p95_ms": 2625.3134328027954,
+      "p99_ms": 2639.9934937630314,
+      "peak_rss_mib": 108.046875,
+      "closed_storage_mib": 42.673973083496094,
+      "startup_seconds": 1.1597301430010702,
+      "cpu_seconds": 14.01
+    },
+    {
+      "suite": "long-chain",
+      "backend": "sqlite",
+      "case": "chain-long-deadline",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 650.52734375,
+      "closed_storage_mib": null,
+      "startup_seconds": 15.194223425001837,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "long-chain",
+      "backend": "sqlite",
+      "case": "chain-long-deadline",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 1,
+      "latency_samples": 1,
+      "p50_ms": 154122.91067299884,
+      "p95_ms": 154122.91067299884,
+      "p99_ms": 154122.91067299884,
+      "peak_rss_mib": 377.25,
+      "closed_storage_mib": 22.63727569580078,
+      "startup_seconds": 15.35381786599828,
+      "cpu_seconds": 158.73
+    },
+    {
+      "suite": "long-chain",
+      "backend": "sqlite",
+      "case": "chain-long-deadline",
+      "profile": "v2-join",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 1,
+      "latency_samples": 1,
+      "p50_ms": 147576.08025800073,
+      "p95_ms": 147576.08025800073,
+      "p99_ms": 147576.08025800073,
+      "peak_rss_mib": 354.0859375,
+      "closed_storage_mib": 22.641159057617188,
+      "startup_seconds": 15.0876666189979,
+      "cpu_seconds": 150.05
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "chain",
+      "profile": "v2-buffered",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 188.474053000391,
+      "p95_ms": 195.09099169918045,
+      "p99_ms": 197.16811753889488,
+      "peak_rss_mib": 87.67578125,
+      "closed_storage_mib": 1.2060699462890625,
+      "startup_seconds": 0.7792372379990411,
+      "cpu_seconds": 1.31
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "chain",
+      "profile": "v2-default",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 371.269173501787,
+      "p95_ms": 615.2792871493148,
+      "p99_ms": 627.0538838300854,
+      "peak_rss_mib": 88.1015625,
+      "closed_storage_mib": 4.5704803466796875,
+      "startup_seconds": 0.778562060000695,
+      "cpu_seconds": 1.83
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "chain",
+      "profile": "v2-join",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 355.03055399931327,
+      "p95_ms": 542.1266290506537,
+      "p99_ms": 556.006123410807,
+      "peak_rss_mib": 87.8046875,
+      "closed_storage_mib": 4.550834655761719,
+      "startup_seconds": 0.7786543820002407,
+      "cpu_seconds": 1.79
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "chain",
+      "profile": "v2-monitored",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 472.8110795003886,
+      "p95_ms": 627.3220628505442,
+      "p99_ms": 628.142447769751,
+      "peak_rss_mib": 87.70703125,
+      "closed_storage_mib": 4.5704803466796875,
+      "startup_seconds": 0.753056107001612,
+      "cpu_seconds": 1.83
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "context",
+      "profile": "v2-buffered",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 197.64035300067917,
+      "p95_ms": 201.18780404973222,
+      "p99_ms": 201.84650720901118,
+      "peak_rss_mib": 88.5703125,
+      "closed_storage_mib": 1.606842041015625,
+      "startup_seconds": 0.7768957469997986,
+      "cpu_seconds": 1.36
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "context",
+      "profile": "v2-default",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 498.86651250017167,
+      "p95_ms": 884.616459449171,
+      "p99_ms": 910.7991582900286,
+      "peak_rss_mib": 88.0859375,
+      "closed_storage_mib": 4.8907928466796875,
+      "startup_seconds": 0.754000631000963,
+      "cpu_seconds": 2.0
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "context",
+      "profile": "v2-join",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 430.92225499822234,
+      "p95_ms": 678.7694230499254,
+      "p99_ms": 713.5350302105871,
+      "peak_rss_mib": 87.78125,
+      "closed_storage_mib": 4.8907928466796875,
+      "startup_seconds": 0.7750331649986038,
+      "cpu_seconds": 1.91
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "context",
+      "profile": "v2-monitored",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 493.4741835004388,
+      "p95_ms": 867.5619523002752,
+      "p99_ms": 881.2448200599101,
+      "peak_rss_mib": 88.25390625,
+      "closed_storage_mib": 4.8907928466796875,
+      "startup_seconds": 0.8085520699969493,
+      "cpu_seconds": 2.13
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "loop",
+      "profile": "v2-buffered",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 191.42083850056224,
+      "p95_ms": 193.51065015071072,
+      "p99_ms": 193.63938363152556,
+      "peak_rss_mib": 87.90234375,
+      "closed_storage_mib": 1.3082275390625,
+      "startup_seconds": 0.729315136999503,
+      "cpu_seconds": 1.28
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "loop",
+      "profile": "v2-default",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 482.62693299875536,
+      "p95_ms": 628.586004349927,
+      "p99_ms": 629.9461048693047,
+      "peak_rss_mib": 87.8125,
+      "closed_storage_mib": 4.53900146484375,
+      "startup_seconds": 0.7527412319977884,
+      "cpu_seconds": 1.92
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "loop",
+      "profile": "v2-join",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 378.70483199912996,
+      "p95_ms": 395.03969769994,
+      "p99_ms": 395.8285275406888,
+      "peak_rss_mib": 87.671875,
+      "closed_storage_mib": 4.5468597412109375,
+      "startup_seconds": 0.7268764049986203,
+      "cpu_seconds": 1.77
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "loop",
+      "profile": "v2-monitored",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 487.2337350007001,
+      "p95_ms": 621.5448569002547,
+      "p99_ms": 624.8412681805712,
+      "peak_rss_mib": 87.875,
+      "closed_storage_mib": 4.53900146484375,
+      "startup_seconds": 0.7277599670014752,
+      "cpu_seconds": 1.89
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "map",
+      "profile": "v2-buffered",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 172.23015399940778,
+      "p95_ms": 177.1643411995683,
+      "p99_ms": 178.38407303937856,
+      "peak_rss_mib": 87.77734375,
+      "closed_storage_mib": 1.1392745971679688,
+      "startup_seconds": 0.7322123760022805,
+      "cpu_seconds": 1.2
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "map",
+      "profile": "v2-default",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 367.9569204996369,
+      "p95_ms": 376.01601685018977,
+      "p99_ms": 378.0092529699323,
+      "peak_rss_mib": 87.5859375,
+      "closed_storage_mib": 4.492103576660156,
+      "startup_seconds": 0.7267645100000664,
+      "cpu_seconds": 1.62
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "map",
+      "profile": "v2-join",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 301.0571125014394,
+      "p95_ms": 582.8640106003148,
+      "p99_ms": 634.2649229211383,
+      "peak_rss_mib": 87.41015625,
+      "closed_storage_mib": 4.49603271484375,
+      "startup_seconds": 0.829344672998559,
+      "cpu_seconds": 1.57
+    },
+    {
+      "suite": "monitor-final-ab",
+      "backend": "sqlite",
+      "case": "map",
+      "profile": "v2-monitored",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 10,
+      "latency_samples": 10,
+      "p50_ms": 370.1243539999268,
+      "p95_ms": 469.75693210206356,
+      "p99_ms": 524.6522600214303,
+      "peak_rss_mib": 87.81640625,
+      "closed_storage_mib": 4.492103576660156,
+      "startup_seconds": 0.7261966270016273,
+      "cpu_seconds": 1.62
+    },
+    {
+      "suite": "monitor-join-ab",
+      "backend": "sqlite",
+      "case": "chain",
+      "profile": "v2-join",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 150,
+      "latency_samples": 150,
+      "p50_ms": 352.823934998014,
+      "p95_ms": 374.797751449114,
+      "p99_ms": 381.97957103078807,
+      "peak_rss_mib": 89.73046875,
+      "closed_storage_mib": 6.78173828125,
+      "startup_seconds": 0.7289410049997969,
+      "cpu_seconds": 10.17
+    },
+    {
+      "suite": "monitor-join-ab",
+      "backend": "sqlite",
+      "case": "chain",
+      "profile": "v2-monitored-join",
+      "runs": 5,
+      "successful_runs": 5,
+      "statuses": {
+        "completed": 5
+      },
+      "calls": 150,
+      "latency_samples": 150,
+      "p50_ms": 350.166383501346,
+      "p95_ms": 378.62669524911325,
+      "p99_ms": 390.7774514102492,
+      "peak_rss_mib": 89.8828125,
+      "closed_storage_mib": 6.769927978515625,
+      "startup_seconds": 0.752672063998034,
+      "cpu_seconds": 10.27
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "chain-10",
+      "profile": "v1-full",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 20,
+      "latency_samples": 20,
+      "p50_ms": 58.91212399910728,
+      "p95_ms": 110.27700865197404,
+      "p99_ms": 120.4909017326281,
+      "peak_rss_mib": 84.7421875,
+      "closed_storage_mib": 10.237635612487793,
+      "startup_seconds": 0.6132842889983294,
+      "cpu_seconds": 1.18
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "chain-10",
+      "profile": "v2-buffered",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 20,
+      "latency_samples": 20,
+      "p50_ms": 232.72462600107247,
+      "p95_ms": 259.97938830296334,
+      "p99_ms": 261.59647526023036,
+      "peak_rss_mib": 91.685546875,
+      "closed_storage_mib": 12.190760612487793,
+      "startup_seconds": 1.048998689499058,
+      "cpu_seconds": 3.33
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "chain-10",
+      "profile": "v2-default",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 20,
+      "latency_samples": 20,
+      "p50_ms": 699.2439780005952,
+      "p95_ms": 822.4905108503663,
+      "p99_ms": 872.8947421680276,
+      "peak_rss_mib": 93.232421875,
+      "closed_storage_mib": 12.057948112487793,
+      "startup_seconds": 1.0969947985013278,
+      "cpu_seconds": 7.05
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "context-append",
+      "profile": "v1-full",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 210.32991999891237,
+      "p95_ms": 252.65468974885152,
+      "p99_ms": 260.7030915487485,
+      "peak_rss_mib": 92.00390625,
+      "closed_storage_mib": 10.460291862487793,
+      "startup_seconds": 0.7078847924985894,
+      "cpu_seconds": 1.395
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "context-append",
+      "profile": "v2-buffered",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 1158.4001834999071,
+      "p95_ms": 1317.9636270006085,
+      "p99_ms": 1336.3926942010949,
+      "peak_rss_mib": 119.28125,
+      "closed_storage_mib": 14.737635612487793,
+      "startup_seconds": 0.9449742359993252,
+      "cpu_seconds": 4.795
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "context-append",
+      "profile": "v2-default",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 2061.877785998149,
+      "p95_ms": 2089.614145750602,
+      "p99_ms": 2093.2984339513496,
+      "peak_rss_mib": 105.251953125,
+      "closed_storage_mib": 14.671229362487793,
+      "startup_seconds": 0.9173495119994186,
+      "cpu_seconds": 7.205
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "loop-10",
+      "profile": "v1-full",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 68.7480404994858,
+      "p95_ms": 74.98071924965188,
+      "p99_ms": 76.32209504990897,
+      "peak_rss_mib": 81.419921875,
+      "closed_storage_mib": 9.468104362487793,
+      "startup_seconds": 0.6006237250003323,
+      "cpu_seconds": 0.87
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "loop-10",
+      "profile": "v2-buffered",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 305.3537830001005,
+      "p95_ms": 405.32837675164046,
+      "p99_ms": 413.80511535280675,
+      "peak_rss_mib": 90.451171875,
+      "closed_storage_mib": 10.979823112487793,
+      "startup_seconds": 0.9587334254993038,
+      "cpu_seconds": 2.0
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "loop-10",
+      "profile": "v2-default",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 811.2963619987568,
+      "p95_ms": 834.8036785000659,
+      "p99_ms": 836.7338061007104,
+      "peak_rss_mib": 90.796875,
+      "closed_storage_mib": 10.843104362487793,
+      "startup_seconds": 0.921022187500057,
+      "cpu_seconds": 3.355
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "map-100",
+      "profile": "v1-full",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 104.26197749984567,
+      "p95_ms": 110.9398387498004,
+      "p99_ms": 111.12597814953915,
+      "peak_rss_mib": 84.2421875,
+      "closed_storage_mib": 9.854823112487793,
+      "startup_seconds": 0.678856487502344,
+      "cpu_seconds": 1.01
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "map-100",
+      "profile": "v2-buffered",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 880.8525410022412,
+      "p95_ms": 922.4698732496108,
+      "p99_ms": 929.3873362488739,
+      "peak_rss_mib": 95.345703125,
+      "closed_storage_mib": 12.272791862487793,
+      "startup_seconds": 1.163302183500491,
+      "cpu_seconds": 4.27
+    },
+    {
+      "suite": "postgres",
+      "backend": "postgres",
+      "case": "map-100",
+      "profile": "v2-default",
+      "runs": 2,
+      "successful_runs": 2,
+      "statuses": {
+        "completed": 2
+      },
+      "calls": 6,
+      "latency_samples": 6,
+      "p50_ms": 2144.0800025011413,
+      "p95_ms": 2689.484471498872,
+      "p99_ms": 2737.9246862983564,
+      "peak_rss_mib": 92.728515625,
+      "closed_storage_mib": 12.354823112487793,
+      "startup_seconds": 0.9449476879999565,
+      "cpu_seconds": 7.83
+    },
+    {
+      "suite": "soak-monitor-final",
+      "backend": "sqlite",
+      "case": "soak",
+      "profile": "v2-monitored",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3065,
+      "latency_samples": 3065,
+      "p50_ms": 985.6498330009344,
+      "p95_ms": 1625.9124569995024,
+      "p99_ms": 6161.690423679554,
+      "peak_rss_mib": 98.28125,
+      "closed_storage_mib": 2423.8329544067383,
+      "startup_seconds": 1.0538883970002644,
+      "cpu_seconds": 1660.77
+    },
+    {
+      "suite": "soak-v1-full",
+      "backend": "sqlite",
+      "case": "soak",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 1
+      },
+      "calls": 1989,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 640.04296875,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.5735854239992477,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "soak-v1-lru",
+      "backend": "sqlite",
+      "case": "soak",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3600,
+      "latency_samples": 3600,
+      "p50_ms": 76.14661350089591,
+      "p95_ms": 627.4160391973053,
+      "p99_ms": 949.6209064901257,
+      "peak_rss_mib": 119.63671875,
+      "closed_storage_mib": 516.3071441650391,
+      "startup_seconds": 0.7680498999998235,
+      "cpu_seconds": 161.35
+    },
+    {
+      "suite": "soak-v1-standard",
+      "backend": "sqlite",
+      "case": "soak",
+      "profile": "v1-standard",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3600,
+      "latency_samples": 3600,
+      "p50_ms": 58.761868998772115,
+      "p95_ms": 584.2642180998154,
+      "p99_ms": 849.704089178339,
+      "peak_rss_mib": 556.75,
+      "closed_storage_mib": 354.86498260498047,
+      "startup_seconds": 0.7942875680000725,
+      "cpu_seconds": 113.01
+    },
+    {
+      "suite": "soak-v2",
+      "backend": "sqlite",
+      "case": "soak",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 3357,
+      "latency_samples": 3357,
+      "p50_ms": 962.0699639999657,
+      "p95_ms": 1481.6382888013322,
+      "p99_ms": 2166.5714480397583,
+      "peak_rss_mib": 98.0,
+      "closed_storage_mib": 2659.1035079956055,
+      "startup_seconds": 0.827279663999434,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "large-text-32m",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 653.3046875,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.933224883996445,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "large-text-32m",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 2,
+      "latency_samples": 2,
+      "p50_ms": 83691.13709500016,
+      "p95_ms": 83731.15155940104,
+      "p99_ms": 83734.70840068112,
+      "peak_rss_mib": 527.55859375,
+      "closed_storage_mib": 3881.4911499023438,
+      "startup_seconds": 0.7697538680004072,
+      "cpu_seconds": 249.81
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "large-text-8m",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 646.4765625,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.5204544279986294,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "large-text-8m",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 2,
+      "latency_samples": 2,
+      "p50_ms": 11714.708486499148,
+      "p95_ms": 11724.584881748888,
+      "p99_ms": 11725.462783548865,
+      "peak_rss_mib": 309.765625,
+      "closed_storage_mib": 974.5853118896484,
+      "startup_seconds": 0.7517355739983032,
+      "cpu_seconds": 33.5
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "map-10000",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 1,
+      "latency_samples": 1,
+      "p50_ms": 64472.393011998065,
+      "p95_ms": 64472.393011998065,
+      "p99_ms": 64472.393011998065,
+      "peak_rss_mib": 390.828125,
+      "closed_storage_mib": 118.83751678466797,
+      "startup_seconds": 0.5239423439998063,
+      "cpu_seconds": 126.56
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "map-10000",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "timeout": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 168.50390625,
+      "closed_storage_mib": null,
+      "startup_seconds": 0.7261361620003299,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "register-chain-10000",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 661.75,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "register-chain-10000",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "rss_guard_stopped": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 648.69921875,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "register-chain-2000",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "error": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 211.46875,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "stress-final",
+      "backend": "sqlite",
+      "case": "register-chain-2000",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 0,
+      "statuses": {
+        "timeout": 1
+      },
+      "calls": 0,
+      "latency_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "p99_ms": null,
+      "peak_rss_mib": 469.8046875,
+      "closed_storage_mib": null,
+      "startup_seconds": null,
+      "cpu_seconds": null
+    },
+    {
+      "suite": "trace-reader",
+      "backend": "sqlite",
+      "case": "trace-reader",
+      "profile": "v1-full",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 8,
+      "latency_samples": 8,
+      "p50_ms": 61.9785500002763,
+      "p95_ms": 72.92115165182622,
+      "p99_ms": 75.66676473215921,
+      "peak_rss_mib": 83.578125,
+      "closed_storage_mib": 7.071876525878906,
+      "startup_seconds": 0.5513464200012095,
+      "cpu_seconds": 1.1
+    },
+    {
+      "suite": "trace-reader",
+      "backend": "sqlite",
+      "case": "trace-reader",
+      "profile": "v1-full-lru",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 8,
+      "latency_samples": 8,
+      "p50_ms": 63.26447199899121,
+      "p95_ms": 77.99152340176079,
+      "p99_ms": 80.3266942821574,
+      "peak_rss_mib": 83.703125,
+      "closed_storage_mib": 7.048393249511719,
+      "startup_seconds": 0.5514064939998207,
+      "cpu_seconds": 1.17
+    },
+    {
+      "suite": "trace-reader",
+      "backend": "sqlite",
+      "case": "trace-reader",
+      "profile": "v2-buffered",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 8,
+      "latency_samples": 8,
+      "p50_ms": 305.0160050006525,
+      "p95_ms": 344.78620365025563,
+      "p99_ms": 355.0288447313869,
+      "peak_rss_mib": 94.74609375,
+      "closed_storage_mib": 20.321609497070312,
+      "startup_seconds": 0.855838669998775,
+      "cpu_seconds": 3.67
+    },
+    {
+      "suite": "trace-reader",
+      "backend": "sqlite",
+      "case": "trace-reader",
+      "profile": "v2-default",
+      "runs": 1,
+      "successful_runs": 1,
+      "statuses": {
+        "completed": 1
+      },
+      "calls": 8,
+      "latency_samples": 8,
+      "p50_ms": 941.492179999841,
+      "p95_ms": 950.7274803998371,
+      "p99_ms": 951.6075864801314,
+      "peak_rss_mib": 93.1953125,
+      "closed_storage_mib": 19.50830078125,
+      "startup_seconds": 0.8203899310028646,
+      "cpu_seconds": 7.04
+    }
+  ],
+  "soak": [
+    {
+      "profile": "v1-full",
+      "status": "rss_guard_stopped",
+      "calls": 1989,
+      "elapsed_seconds": 1988.4251746069986,
+      "first_running_rss_mib": 77.26171875,
+      "last_running_rss_mib": 639.66796875,
+      "peak_rss_mib": 640.04296875,
+      "tail_slope_mib_per_minute": 12.798807442945655,
+      "storage_mib": 286.62745666503906
+    },
+    {
+      "profile": "v2-default",
+      "status": "completed",
+      "calls": 3357,
+      "elapsed_seconds": 3947.884098781,
+      "first_running_rss_mib": 88.40625,
+      "last_running_rss_mib": 91.546875,
+      "peak_rss_mib": 98.0,
+      "tail_slope_mib_per_minute": -0.005460701014975916,
+      "storage_mib": 2659.1035079956055
+    },
+    {
+      "profile": "v2-monitored",
+      "status": "completed",
+      "calls": 3065,
+      "elapsed_seconds": 3823.0764158049988,
+      "first_running_rss_mib": 87.6640625,
+      "last_running_rss_mib": 93.17578125,
+      "peak_rss_mib": 98.28125,
+      "tail_slope_mib_per_minute": -0.002873010187520091,
+      "storage_mib": 2423.8329544067383
+    },
+    {
+      "profile": "v1-standard",
+      "status": "completed",
+      "calls": 3600,
+      "elapsed_seconds": 3616.9903302469993,
+      "first_running_rss_mib": 76.80078125,
+      "last_running_rss_mib": 556.0078125,
+      "peak_rss_mib": 556.75,
+      "tail_slope_mib_per_minute": 11.985958529415717,
+      "storage_mib": 354.86498260498047
+    },
+    {
+      "profile": "v1-full-lru",
+      "status": "completed",
+      "calls": 3600,
+      "elapsed_seconds": 3612.1416573589995,
+      "first_running_rss_mib": 77.4609375,
+      "last_running_rss_mib": 112.7890625,
+      "peak_rss_mib": 119.63671875,
+      "tail_slope_mib_per_minute": 0.0210666099781963,
+      "storage_mib": 516.3071441650391
+    }
+  ]
+}

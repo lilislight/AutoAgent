@@ -1,0 +1,30 @@
+{
+  "packages": {
+    "sqlalchemy": "2.0.54",
+    "aiosqlite": "0.22.1",
+    "asyncpg": "0.31.0",
+    "pydantic": "2.13.5",
+    "uvicorn": "0.52.4",
+    "fastapi": "0.141.1",
+    "httpx": "0.28.1",
+    "greenlet": "3.5.6"
+  },
+  "platform": "Linux-5.15.0-198-generic-x86_64-with-glibc2.35",
+  "cpu_count": 4,
+  "controller_affinity": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "postgres": {
+    "server_version": "14.24 (Ubuntu 14.24-0ubuntu0.22.04.1)",
+    "fsync": "on",
+    "synchronous_commit": "on",
+    "full_page_writes": "on",
+    "disposable_databases": 37,
+    "leaked_disposable_databases": 0,
+    "other_clients": 0
+  },
+  "context": "Same execution context as the native Server benchmarks."
+}

@@ -9,6 +9,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from itertools import islice
 
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -36,6 +37,14 @@ class Entry:
     objects: dict
     done: asyncio.Future
     accepted_at: float
+    admitted: bool = True
+
+
+OBSERVABLE_EVENTS = frozenset({
+    "invocation.completed", "invocation.failed", "invocation.cancelled", "invocation.settling",
+    "node_occurrence.waiting", "graph.paused", "graph.pause_requested",
+    "invocation.cancellation_requested", "child_invocation.phase_changed",
+})
 
 
 class Writer:
@@ -44,7 +53,11 @@ class Writer:
     def __init__(self, url, config, *, read_only=False):
         self.config = config
         self.read_only = read_only
-        self.storage = Storage(url, read_only=read_only)
+        self.storage = Storage(
+            url, read_only=read_only,
+            graph_cache_bytes=config.workflow_graph_cache_bytes,
+            metadata_cache_bytes=config.writer_metadata_cache_bytes,
+        )
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
             target=self._thread_main, name="autoagent-persistence", daemon=True
@@ -71,9 +84,11 @@ class Writer:
             asyncio.Lock(),
         )
         self.pending, self.objects = deque(), {}
+        self.pending_by_identity, self.pending_tails = {}, {}
         self.pending_count, self.retained = 0, 0
         self.accepted_ticket = self.durable_ticket = self.store_order = 0
         self.commit_revision = 0
+        self.execution_watches = {}
         self.flush_ticket = 0
         self.state, self.fault = "open", None
         self.operator_bindings = {}
@@ -85,6 +100,7 @@ class Writer:
                 self.store_order = await conn.scalar(
                     select(meta.tables["persistence_meta"].c.last_store_order)
                 )
+                self.storage._store_order = self.store_order
             if not self.read_only:
                 self.task = asyncio.create_task(self._worker())
         except BaseException:
@@ -149,10 +165,7 @@ class Writer:
         # Serial admission preserves order even when measuring large shared values.
         async with self.admission:
             self.check_open()
-            existing = next(
-                (e for e in self.pending if e.kind == kind and e.identity == identity),
-                None,
-            )
+            existing = self.pending_by_identity.get((kind, identity))
             if existing:
                 previous_value = existing.value
                 if (
@@ -167,17 +180,28 @@ class Writer:
                     and existing.binding != binding
                 ):
                     raise ConflictError("Pending immutable identity conflicts.")
+                self.check_open()
                 completion = existing.done
             else:
+                stream_key = self._stream_key(kind, value)
+                tail = self.pending_tails.get(stream_key)
+                # Admission excludes new producers, but commits may remove the
+                # tail during SQL awaits. Keep its accepted sequence as a value.
+                pending_sequence = tail.value.sequence if tail else None
+                tail = None
+                checkpoint_frontiers = (
+                    self._checkpoint_frontiers(value, anchor)
+                    if kind == "checkpoint" else None
+                )
                 async with AsyncExitStack() as locks:
                     # WAL/MVCC reads continue during a commit. Only SQLite's
                     # single in-memory connection requires mutation serialization.
                     if self.storage.memory:
                         await locks.enter_async_context(self.mutation)
-                    await locks.enter_async_context(self.condition)
                     async with self.storage.engine.connect() as conn:
-                        stored = await self.storage.source(conn, kind, identity)
-                        if stored is not None:
+                        header = await self.storage.source_header(conn, kind, identity)
+                        if header is not None:
+                            stored = await self.storage.source(conn, kind, identity)
                             if not await self.cpu(
                                 lambda: (
                                     canonical(stored) == canonical(value.to_record())
@@ -187,16 +211,14 @@ class Writer:
                                     "Stored immutable identity conflicts."
                                 )
                             if kind == "runtime_event":
-                                row = await self.storage.row(
-                                    conn, "runtime_events", event_id=identity
-                                )
                                 if (
                                     strict_binding
-                                    and row["operator_definition_id"] != binding
+                                    and header["operator_definition_id"] != binding
                                 ):
                                     raise ConflictError(
                                         "Historical Operator binding conflicts."
                                     )
+                            self.check_open()
                             return
                         if kind in ("runtime_event", "user_event"):
                             field = (
@@ -205,29 +227,22 @@ class Writer:
                                 else "invocation_id"
                             )
                             stream = getattr(value, field)
-                            same = [
-                                e
-                                for e in self.pending
-                                if e.kind == kind and getattr(e.value, field) == stream
-                            ]
-                            if same:
-                                latest = same[-1].value.sequence
+                            if pending_sequence is not None:
+                                latest = pending_sequence
                             elif kind == "runtime_event":
-                                sess = await self.storage.row(
-                                    conn, "sessions", session_id=stream
+                                sess = await self.storage.writer_row(
+                                    conn, "sessions", columns=("durable_sequence",), session_id=stream
                                 )
                                 latest = (sess or {}).get("durable_sequence", 0)
                             else:
-                                table = meta.tables["user_events"]
-                                latest = (
-                                    await conn.scalar(
-                                        select(table.c.sequence)
+                                key = ('user_event_tail', (stream,))
+                                latest = self.storage.metadata_cache.get(key)
+                                if latest is None:
+                                    table = meta.tables["user_events"]
+                                    latest = (await conn.scalar(select(table.c.sequence)
                                         .where(table.c.invocation_id == stream)
-                                        .order_by(table.c.sequence.desc())
-                                        .limit(1)
-                                    )
-                                    or 0
-                                )
+                                        .order_by(table.c.sequence.desc()).limit(1))) or 0
+                                    self.storage.metadata_cache.put(key, latest)
                             if value.sequence != latest + 1:
                                 raise ConflictError(
                                     f"Expected {field} sequence {latest + 1}, got {value.sequence}."
@@ -237,15 +252,15 @@ class Writer:
                                 if kind == "runtime_event"
                                 else None
                             )
-                            if revision and not await self.storage.row(
-                                conn, "workflow_revisions", revision_id=revision
+                            if revision and not await self.storage.definition_header(
+                                conn, "workflow_revision", revision
                             ):
                                 raise ConflictError(
                                     "Workflow revision must be durably registered first."
                                 )
                             if binding:
-                                definition = await self.storage.row(
-                                    conn, "operator_definitions", definition_id=binding
+                                definition = await self.storage.definition_header(
+                                    conn, "operator_definition", binding
                                 )
                                 if (
                                     not definition
@@ -256,7 +271,9 @@ class Writer:
                                         "Operator binding must match a durably registered implementation."
                                     )
                         elif kind == "checkpoint":
-                            await self._validate_checkpoint(conn, value, anchor)
+                            await self._validate_checkpoint(
+                                conn, value, anchor, *checkpoint_frontiers
+                            )
                 objects = await self.cpu(retained_objects, value)
                 if sum(size for _, size in objects.values()) > self.config.queue_bytes:
                     raise CapacityError(
@@ -293,6 +310,9 @@ class Writer:
                         time.monotonic(),
                     )
                     self.pending.append(entry)
+                    self.pending_by_identity[(kind, identity)] = entry
+                    if stream_key is not None:
+                        self.pending_tails[stream_key] = entry
                     self.pending_count += 1
                     if durable:
                         self.flush_ticket = entry.ticket
@@ -311,21 +331,39 @@ class Writer:
         if durable or self.config.mode == "durable":
             await asyncio.shield(completion)
 
-    async def _validate_checkpoint(self, conn, checkpoint, anchor):
+    @staticmethod
+    def _stream_key(kind, value):
+        if kind == "runtime_event":
+            return kind, value.session_id
+        if kind == "user_event":
+            return kind, value.invocation_id
+        return None
+
+    def _checkpoint_frontiers(self, checkpoint, anchor):
+        # Snapshot accepted frontiers before SQL yields to the commit worker.
+        # Admission prevents new entries; commits can only make these durable.
+        sequences = {
+            member.session_id: entry.value.sequence
+            for member in checkpoint.sessions
+            if (entry := self.pending_tails.get(("runtime_event", member.session_id)))
+            is not None
+        }
+        anchors = {
+            member.session_id
+            for entry in self.pending
+            if entry.kind == "checkpoint" and entry.anchor
+            for member in entry.value.sessions
+        } if anchor else set()
+        return sequences, anchors
+
+    async def _validate_checkpoint(self, conn, checkpoint, anchor, sequences, anchors):
         revisions = set()
         for member in checkpoint.sessions:
             session = await self.storage.row(
-                conn, "sessions", session_id=member.session_id
+                conn, "sessions", columns=("durable_sequence",), session_id=member.session_id
             )
-            events = [
-                e
-                for e in self.pending
-                if e.kind == "runtime_event" and e.value.session_id == member.session_id
-            ]
-            latest = (
-                events[-1].value.sequence
-                if events
-                else (session or {}).get("durable_sequence", 0)
+            latest = sequences.get(
+                member.session_id, (session or {}).get("durable_sequence", 0)
             )
             if anchor and latest:
                 raise ConflictError(
@@ -333,12 +371,7 @@ class Writer:
                 )
             if not anchor and member.sequence > latest:
                 raise ConflictError("Checkpoint frontier is ahead of accepted Events.")
-            if anchor and any(
-                e.kind == "checkpoint"
-                and e.anchor
-                and any(s.session_id == member.session_id for s in e.value.sessions)
-                for e in self.pending
-            ):
+            if anchor and member.session_id in anchors:
                 raise ConflictError("Session already has a pending imported anchor.")
             invocation = member.state.invocation
             if invocation:
@@ -347,7 +380,7 @@ class Writer:
                     p.workflow_revision_id for p in invocation.child_plans.values()
                 )
         for revision in revisions:
-            if not await self.storage.row(
+            if not await self.storage.has_row(
                 conn, "workflow_revisions", revision_id=revision
             ):
                 raise ConflictError(
@@ -374,6 +407,10 @@ class Writer:
             try:
                 return await self.storage.write(prepared)
             except DBAPIError as exc:
+                # Even a wrapper/driver may fail after COMMIT succeeded. Retry
+                # against SQL position and sources rather than advancing twice.
+                self.storage._store_order = None
+                self.storage.metadata_cache.clear()
                 code = getattr(exc.orig, "sqlstate", None)
                 temporary = (
                     (
@@ -399,6 +436,37 @@ class Writer:
             except TimeoutError:
                 pass
             return self.commit_revision
+
+    async def subscribe_execution(self, invocation_id):
+        token = object()
+        self.execution_watches[token] = ({invocation_id}, 0)
+        return token, 0
+
+    async def unsubscribe_execution(self, token):
+        self.execution_watches.pop(token, None)
+
+    async def wait_execution_change(self, token, after, timeout, root_id):
+        """Filter commit wakeups without retaining completed execution history."""
+        identities, revision = self.execution_watches[token]
+        if root_id not in identities:
+            identities.add(root_id)
+            self.execution_watches[token] = identities, revision + 1
+        async with self.condition:
+            try:
+                await asyncio.wait_for(self.condition.wait_for(
+                    lambda: self.execution_watches[token][1] != after or self.state != "open"), timeout)
+            except TimeoutError:
+                pass
+            if self.fault:
+                raise PersistenceError("Persistence writer faulted.") from self.fault
+            if self.state != "open":
+                raise ClosedError("Persistence is closing or closed.")
+            return self.execution_watches[token][1]
+
+    def notify_executions(self, identities):
+        for token, (selected, revision) in self.execution_watches.items():
+            if not selected.isdisjoint(identities):
+                self.execution_watches[token] = selected, revision + 1
 
     async def _worker(self):
         while True:
@@ -427,7 +495,7 @@ class Writer:
                     except TimeoutError:
                         pass
                     continue
-                entries = list(self.pending)[: self.config.batch_count]
+                entries = list(islice(self.pending, self.config.batch_count))
             prepared = None
             try:
                 prepared = await self.cpu(prepare, entries, self.config)
@@ -437,9 +505,15 @@ class Writer:
                     async with self.condition:
                         self.store_order = order
                         self.commit_revision += 1
+                        if any(entry.kind == "runtime_event" and entry.value.event_name in OBSERVABLE_EVENTS for entry in entries):
+                            self.notify_executions(self.storage.committed_invocations)
                         for entry in entries:
                             assert self.pending[0] is entry
                             self.pending.popleft()
+                            del self.pending_by_identity[(entry.kind, entry.identity)]
+                            stream_key = self._stream_key(entry.kind, entry.value)
+                            if self.pending_tails.get(stream_key) is entry:
+                                del self.pending_tails[stream_key]
                             self.pending_count -= 1
                             self.durable_ticket = entry.ticket
                             for key in entry.objects:
@@ -501,7 +575,10 @@ class Writer:
         await self.storage.close()
         self.executor.shutdown(wait=True)
         self.pending.clear()
+        self.pending_by_identity.clear()
+        self.pending_tails.clear()
         self.objects.clear()
+        self.execution_watches.clear()
         self.pending_count = self.retained = 0
         self.state = "closed"
         if failure:

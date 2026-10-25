@@ -1,15 +1,16 @@
 """Durable model-call metadata, optional storage and actual Core/Host correlation."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 import tempfile
 import unittest
 
-from autoagent import AutoAgentApp, Node, Workflow
+from autoagent import AutoAgentApp, InputMappingContext, Node, Workflow
 from autoagent.agent import (
-    LLMCallRecord, LLMCallContext, LLMRequest, LLMResponse,
-    OpenAIResponsesProvider, llm_recording_context, runtime_llm_recorder,
+    LLM_CALL, LLMCallRecord, LLMCallContext, LLMRequest, LLMResponse, LLMSelection,
+    OpenAIResponsesProvider, llm_call_operator, llm_recording_context, runtime_llm_recorder,
 )
 from autoagent.core import OperatorCallContext
 try:
@@ -151,6 +152,53 @@ class PostgreSQLLLMCallStorageTests(LLMCallStorageContracts, unittest.IsolatedAs
 class RuntimeRecordingIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def database_url(self, path):
         return "sqlite+aiosqlite:///" + str(path)
+
+    async def test_llm_capability_records_resolved_models_and_per_call_streaming(self):
+        """Host stores actual selections while routing hints stay out of intercepted HTTP requests."""
+        import httpx
+        from openai import AsyncOpenAI
+
+        captured = []
+        async def handle(req):
+            body = json.loads(req.content)
+            captured.append(body)
+            response = providers.response_body(model=body["model"])
+            if body.get("stream"):
+                return httpx.Response(200, content=providers.sse([
+                    {"type": "response.completed", "response": response},
+                ]), headers={"content-type": "text/event-stream"})
+            return httpx.Response(200, json=response)
+        @asynccontextmanager
+        async def resources(setup):
+            sdk = AsyncOpenAI(api_key="test", max_retries=0,
+                              http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+            sdk._platform = "Linux"
+            try:
+                async with OpenAIResponsesProvider(client=sdk) as provider:
+                    setup.register_operator(llm_call_operator(resolver=lambda value: LLMSelection(
+                        provider, value.model or value.routing["selected_model"])), capability_id=LLM_CALL.id)
+                    yield
+            finally:
+                await sdk.close()
+        def model_input(ctx: InputMappingContext) -> LLMRequest:
+            return providers.request(**dict(ctx.invocation_input))
+        workflow = Workflow("selected", nodes=[Node("llm", LLM_CALL, input_mapping=model_input)])
+        with tempfile.TemporaryDirectory() as directory:
+            url = await self.database_url(Path(directory) / "selected.sqlite")
+            async with AutoAgentHost(workflows=[workflow], settings=HostSettings(database_url=url),
+                                     lifespan=resources, root=directory, environment={}) as host:
+                for payload in ({"model": "fixed", "streaming": False, "max_output_tokens": 128},
+                                {"model": None, "streaming": True, "max_output_tokens": 512,
+                                 "routing": {"selected_model": "automatic"}}):
+                    result = await host.join(await host.execute(workflow.id, payload))
+                    self.assertEqual(result.status, "completed", result.error)
+                rows = await read_rows(url, sqlalchemy.select(llm_calls).order_by(llm_calls.c.started_at_us))
+                self.assertEqual([(row["requested_model"], row["streaming"], row["status"]) for row in rows],
+                                 [("fixed", False, "succeeded"), ("automatic", True, "succeeded")])
+                self.assertEqual({row["node_id"] for row in rows}, {"llm"})
+                self.assertTrue(all(row["operator_call_id"] and row["operator_definition_id"] for row in rows))
+        self.assertEqual([body["max_output_tokens"] for body in captured], [128, 512])
+        self.assertTrue(all("routing" not in body and "streaming" not in body for body in captured))
 
     async def test_core_workflow_and_revision_are_automatic_and_override_manual_labels(self):
         """A real Core invocation records its actual Workflow revision and Operator Call identity."""

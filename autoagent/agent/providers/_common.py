@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+import hashlib
+import json
 from typing import Annotated
 
 from pydantic import JsonValue, TypeAdapter, WithJsonSchema
@@ -24,11 +26,14 @@ def raw_object(value: object) -> dict:
     return dump(mode="json")
 
 
-def native_fields(value: dict, known: set[str], provider_id: str, protocol: str):
-    return LLMNativeData(
-        provider_id=provider_id, protocol=protocol,
-        payload={key: field for key, field in value.items() if key not in known},
-    )
+def native_fields(value: dict, known: set[str], provider_id: str, protocol: str) -> LLMNativeData | None:
+    payload = {key: deepcopy(field) for key, field in value.items() if key not in known and field is not None}
+    return LLMNativeData(provider_id=provider_id, protocol=protocol, payload=payload) if payload else None
+
+
+def replay_digest(value: object) -> str:
+    """Detect changes to normalized replay content without retaining a second copy."""
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def check_native(native: LLMNativeData | None, provider_id: str, protocol: str) -> dict:
@@ -86,6 +91,7 @@ def text_format(value) -> dict:
 
 
 def common_parameters(request: LLMRequest, protocol: str, provider_id: str) -> dict:
+    require_model(request, provider_id, protocol)
     result = {"model": request.model}
     for key in ("temperature", "top_p"):
         value = getattr(request, key)
@@ -103,17 +109,33 @@ def common_parameters(request: LLMRequest, protocol: str, provider_id: str) -> d
     return result
 
 
+def require_model(request: LLMRequest, provider_id: str, protocol: str) -> None:
+    if request.model is None:
+        unsupported("Resolve a model before calling a Provider.", provider_id, protocol)
+
+
 def usage(value, *, chat: bool) -> LLMUsage | None:
     if value is None:
         return None
     input_details = value.get("prompt_tokens_details" if chat else "input_tokens_details") or {}
     output_details = value.get("completion_tokens_details" if chat else "output_tokens_details") or {}
+    native = deepcopy(value)
+    for key in (("prompt_tokens", "completion_tokens", "total_tokens") if chat else
+                ("input_tokens", "output_tokens", "total_tokens")):
+        native.pop(key, None)
+    for key, mapped in (("prompt_tokens_details" if chat else "input_tokens_details", "cached_tokens"),
+                        ("completion_tokens_details" if chat else "output_tokens_details", "reasoning_tokens")):
+        if isinstance(native.get(key), dict):
+            native[key] = {name: count for name, count in native[key].items() if name != mapped and count is not None}
+            if not native[key]:
+                native.pop(key)
+    native = {key: field for key, field in native.items() if field is not None}
     return LLMUsage(
         input_tokens=value.get("prompt_tokens" if chat else "input_tokens"),
         output_tokens=value.get("completion_tokens" if chat else "output_tokens"),
         total_tokens=value.get("total_tokens"),
         reasoning_tokens=output_details.get("reasoning_tokens"),
-        cache_read_tokens=input_details.get("cached_tokens"), native=value,
+        cache_read_tokens=input_details.get("cached_tokens"), native=native,
     )
 
 

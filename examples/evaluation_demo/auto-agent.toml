@@ -1,0 +1,16 @@
+schema_version = 1
+
+[project]
+name = "evaluation-demo"
+
+[[workflows]]
+entrypoint = "project:normalize_workflow"
+
+[[workflows]]
+entrypoint = "project:approval_workflow"
+
+[[evaluations]]
+entrypoint = "evals:normalization"
+
+[[evaluations]]
+entrypoint = "evals:approval"

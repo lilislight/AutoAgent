@@ -1,0 +1,290 @@
+[
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": 0.5543641303911384,
+    "cpu_reduction_pct": 12.499999999999979,
+    "rss_delta_mib": -0.43359375
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "latency_reduction_pct": 8.109053058580296,
+    "cpu_reduction_pct": 14.428312159709622,
+    "rss_delta_mib": -1.3046875
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "conditional-history",
+    "latency_reduction_pct": 11.33375263801124,
+    "cpu_reduction_pct": 15.079916608756106,
+    "rss_delta_mib": 1.828125
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": 8.266041873702468,
+    "cpu_reduction_pct": 13.769751693002263,
+    "rss_delta_mib": 0.30859375
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "diagnostics-on",
+    "latency_reduction_pct": 15.21146926172321,
+    "cpu_reduction_pct": 15.702479338842979,
+    "rss_delta_mib": 0.359375
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 15.836420383354966,
+    "cpu_reduction_pct": 16.575922565033263,
+    "rss_delta_mib": 1.83984375
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 4.12766375930217,
+    "cpu_reduction_pct": 5.041031652989448,
+    "rss_delta_mib": -0.1171875
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 7.388404978476837,
+    "cpu_reduction_pct": 10.720268006700174,
+    "rss_delta_mib": -0.31640625
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 0.5837176056998405,
+    "cpu_reduction_pct": 11.30030959752325,
+    "rss_delta_mib": 0.14453125
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": 10.360881775138298,
+    "cpu_reduction_pct": 9.243697478991619,
+    "rss_delta_mib": -0.0078125
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "latency_reduction_pct": 7.697318961221111,
+    "cpu_reduction_pct": 9.374999999999979,
+    "rss_delta_mib": 0.32421875
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "conditional-history",
+    "latency_reduction_pct": 11.717543372857431,
+    "cpu_reduction_pct": 10.3494623655914,
+    "rss_delta_mib": 0.140625
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": 4.004638435861885,
+    "cpu_reduction_pct": 4.608294930875568,
+    "rss_delta_mib": -1.5703125
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "diagnostics-on",
+    "latency_reduction_pct": 10.698668125252508,
+    "cpu_reduction_pct": 9.615384615384636,
+    "rss_delta_mib": 0.171875
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 10.304235806365881,
+    "cpu_reduction_pct": 8.618654073199504,
+    "rss_delta_mib": -1.83984375
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 2.3028810902382513,
+    "cpu_reduction_pct": 1.7777777777777781,
+    "rss_delta_mib": -0.50390625
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 12.885420382218138,
+    "cpu_reduction_pct": 11.436950146627556,
+    "rss_delta_mib": -5.10546875
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 7.486575018967279,
+    "cpu_reduction_pct": 8.075511274252756,
+    "rss_delta_mib": -0.640625
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": 13.115919265123177,
+    "cpu_reduction_pct": 13.367609254498714,
+    "rss_delta_mib": -0.13671875
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "latency_reduction_pct": 12.553092622937056,
+    "cpu_reduction_pct": 13.85503527902503,
+    "rss_delta_mib": 0.08203125
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "conditional-history",
+    "latency_reduction_pct": 15.794685988774804,
+    "cpu_reduction_pct": 14.22064777327935,
+    "rss_delta_mib": 1.2578125
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": 10.408693032716254,
+    "cpu_reduction_pct": 13.311688311688318,
+    "rss_delta_mib": -0.13671875
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "diagnostics-on",
+    "latency_reduction_pct": 7.1450330417921375,
+    "cpu_reduction_pct": 12.919254658385082,
+    "rss_delta_mib": 0.5703125
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 14.397697968756596,
+    "cpu_reduction_pct": 15.52821383114128,
+    "rss_delta_mib": -0.1796875
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 1.2941796888369494,
+    "cpu_reduction_pct": 3.277310924369725,
+    "rss_delta_mib": -0.24609375
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 11.274001188311422,
+    "cpu_reduction_pct": 11.794871794871787,
+    "rss_delta_mib": 1.49609375
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 0.9477227238503638,
+    "cpu_reduction_pct": 11.254374654632526,
+    "rss_delta_mib": 0.0859375
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": 16.781009034820784,
+    "cpu_reduction_pct": 17.74193548387094,
+    "rss_delta_mib": -0.203125
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "latency_reduction_pct": 11.352398747609039,
+    "cpu_reduction_pct": 11.707988980716266,
+    "rss_delta_mib": -0.39453125
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "conditional-history",
+    "latency_reduction_pct": 13.628875362353332,
+    "cpu_reduction_pct": 11.824953445065189,
+    "rss_delta_mib": -0.078125
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": 17.811632241563235,
+    "cpu_reduction_pct": 14.28571428571428,
+    "rss_delta_mib": -0.8359375
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "diagnostics-on",
+    "latency_reduction_pct": 8.72284021919022,
+    "cpu_reduction_pct": 8.847184986595158,
+    "rss_delta_mib": -0.55859375
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 6.487452696915918,
+    "cpu_reduction_pct": 5.7753164556962,
+    "rss_delta_mib": -0.25390625
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 1.6587549305508542,
+    "cpu_reduction_pct": 1.4876033057851012,
+    "rss_delta_mib": 0.62890625
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 11.413414693400792,
+    "cpu_reduction_pct": 11.27982646420823,
+    "rss_delta_mib": 1.18359375
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 9.189624040980714,
+    "cpu_reduction_pct": 9.22038980509744,
+    "rss_delta_mib": -0.45703125
+  }
+]

@@ -1,0 +1,218 @@
+[
+  {
+    "before": "04-False-0-sqlite-v2-artifacts-8k-text-overwrite-before",
+    "after": "04-False-0-sqlite-v2-artifacts-8k-text-overwrite-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        1277,
+        1276
+      ]
+    }
+  },
+  {
+    "before": "05-False-0-postgres-v2-buffered-artifacts-8k-context-append-before",
+    "after": "05-False-0-postgres-v2-buffered-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        4393,
+        4373
+      ]
+    }
+  },
+  {
+    "before": "05-False-0-sqlite-v2-artifacts-8k-context-append-before",
+    "after": "05-False-0-sqlite-v2-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        3,
+        4
+      ],
+      "checkpoint_sessions": [
+        3,
+        4
+      ],
+      "artifact_refs": [
+        4373,
+        4393
+      ]
+    }
+  },
+  {
+    "before": "05-False-0-sqlite-v2-artifacts-8k-text-overwrite-before",
+    "after": "05-False-0-sqlite-v2-artifacts-8k-text-overwrite-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        1277,
+        1276
+      ]
+    }
+  },
+  {
+    "before": "05-False-0-sqlite-v2-buffered-artifacts-8k-context-append-before",
+    "after": "05-False-0-sqlite-v2-buffered-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        4393,
+        4373
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-0-postgres-v2-artifacts-8k-text-overwrite-before",
+    "after": "cumulative-False-0-postgres-v2-artifacts-8k-text-overwrite-after",
+    "counts": {
+      "checkpoints": [
+        3,
+        4
+      ],
+      "checkpoint_sessions": [
+        3,
+        4
+      ],
+      "artifact_refs": [
+        1276,
+        1277
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-2-postgres-v2-artifacts-8k-text-overwrite-before",
+    "after": "cumulative-False-2-postgres-v2-artifacts-8k-text-overwrite-after",
+    "counts": {
+      "checkpoints": [
+        3,
+        4
+      ],
+      "checkpoint_sessions": [
+        3,
+        4
+      ],
+      "artifact_refs": [
+        1276,
+        1277
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-0-sqlite-v2-artifacts-8k-context-append-before",
+    "after": "cumulative-False-0-sqlite-v2-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        3,
+        4
+      ],
+      "checkpoint_sessions": [
+        3,
+        4
+      ],
+      "artifact_refs": [
+        4373,
+        4393
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-1-sqlite-v2-artifacts-8k-context-append-before",
+    "after": "cumulative-False-1-sqlite-v2-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        3,
+        4
+      ],
+      "checkpoint_sessions": [
+        3,
+        4
+      ],
+      "artifact_refs": [
+        4373,
+        4393
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-0-sqlite-v2-buffered-artifacts-8k-context-append-before",
+    "after": "cumulative-False-0-sqlite-v2-buffered-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        4393,
+        4373
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-1-sqlite-v2-buffered-artifacts-8k-context-append-before",
+    "after": "cumulative-False-1-sqlite-v2-buffered-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        4393,
+        4373
+      ]
+    }
+  },
+  {
+    "before": "cumulative-False-2-sqlite-v2-buffered-artifacts-8k-context-append-before",
+    "after": "cumulative-False-2-sqlite-v2-buffered-artifacts-8k-context-append-after",
+    "counts": {
+      "checkpoints": [
+        4,
+        3
+      ],
+      "checkpoint_sessions": [
+        4,
+        3
+      ],
+      "artifact_refs": [
+        4393,
+        4373
+      ]
+    }
+  }
+]

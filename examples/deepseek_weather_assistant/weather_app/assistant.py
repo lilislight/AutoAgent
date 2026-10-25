@@ -49,7 +49,7 @@ def prepare(value: Question) -> LLMRequest:
         input=(LLMMessage(role="system", content=(TextContent(text=SYSTEM_PROMPT),)),
                LLMMessage(role="user", content=(TextContent(text=value.question),))),
         tools=weather_tools().definitions,
-        options={"thinking": {"type": "disabled"}},
+        # options={"thinking": {"type": "disabled"}},
     )
 
 

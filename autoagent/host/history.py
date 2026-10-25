@@ -5,6 +5,23 @@ from .persistence.models import InspectionError
 
 
 class HistoryQueries:
+    async def capture_execution_evidence(self, invocation_id, *, limit=1000):
+        """Pin one durable Root-family cut; values remain lazy and Session-scoped."""
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError('limit must be between 1 and 10000.')
+        async def query():
+            result = await self._persistence.capture_execution_evidence(invocation_id, limit=limit)
+            if result is None:
+                raise HostNotFoundError('Unknown persisted Invocation.')
+            return result
+        return await self._perform(query)
+
+    async def read_execution_value_at(self, invocation_id, *, sequence, field, pointer=None):
+        """Read immutable historical output/error without hydrating a Runtime."""
+        if field not in ('output', 'error'):
+            raise ValueError('field must be output or error.')
+        return await self._inspect_state(invocation_id, sequence=sequence, field=field, pointer=pointer)
+
     async def inspect_execution_state(self, invocation_id, *, sequence):
         """Read the persisted state immediately after an exact Invocation Event."""
         return await self._inspect_state(invocation_id, sequence=sequence)

@@ -1,0 +1,504 @@
+[
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "admission-chain-10-16k",
+    "latency_reduction_pct": -0.13229853675158498,
+    "cpu_reduction_pct": -1.003344481605395,
+    "rss_delta_mib": 0.3984375,
+    "paired_p50_reduction_pct": [
+      -0.13229853675158498
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "admission-context-append",
+    "latency_reduction_pct": -1.3278162730382181,
+    "cpu_reduction_pct": -2.0725388601036565,
+    "rss_delta_mib": -0.13671875,
+    "paired_p50_reduction_pct": [
+      -1.3278162730382181
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": -15.462325870857008,
+    "cpu_reduction_pct": -1.2195121951219523,
+    "rss_delta_mib": 1.171875,
+    "paired_p50_reduction_pct": [
+      -19.33650593399221,
+      -15.014267469728626,
+      -22.43082253676867
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "latency_reduction_pct": 0.9190351966546273,
+    "cpu_reduction_pct": 0.10471204188481353,
+    "rss_delta_mib": 0.18359375,
+    "paired_p50_reduction_pct": [
+      -0.4657665752810569,
+      14.538794757139451,
+      -0.3832253510776429,
+      14.905190729790185,
+      -1.1547574876874966
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": -6.0680670912943935,
+    "cpu_reduction_pct": -0.7874015748031704,
+    "rss_delta_mib": 0.66015625,
+    "paired_p50_reduction_pct": [
+      -6.0680670912943935,
+      1.2721002202249698,
+      -29.462902273896695
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append-formal",
+    "latency_reduction_pct": -5.478745108077576,
+    "cpu_reduction_pct": -0.35142522452169533,
+    "rss_delta_mib": -0.5,
+    "paired_p50_reduction_pct": [
+      -6.387529975366091,
+      -5.991136734004043,
+      2.8618449607649477,
+      -0.28266498744971,
+      0.35988002531449625
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 0.28139849843359377,
+    "cpu_reduction_pct": 0.0,
+    "rss_delta_mib": 0.3203125,
+    "paired_p50_reduction_pct": [
+      -1.2210658863560209,
+      0.28139849843359377,
+      1.9621178701687558
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 0.24179825008344702,
+    "cpu_reduction_pct": -2.088452088452075,
+    "rss_delta_mib": -0.0078125,
+    "paired_p50_reduction_pct": [
+      -1.954697227708646,
+      4.521208842436142,
+      -10.14459154132017
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 0.1674755811256312,
+    "cpu_reduction_pct": -0.37037037037037646,
+    "rss_delta_mib": -0.8359375,
+    "paired_p50_reduction_pct": [
+      1.0287689998600524,
+      -0.9909918059688216,
+      -9.336133047673467
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 0.17604445325377638,
+    "cpu_reduction_pct": 1.3191855463148827,
+    "rss_delta_mib": 0.07421875,
+    "paired_p50_reduction_pct": [
+      0.31420619837845276,
+      0.24797530432328907,
+      -1.067387732988112
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": 3.1279093440852,
+    "cpu_reduction_pct": -5.6074766355140415,
+    "rss_delta_mib": 0.4140625,
+    "paired_p50_reduction_pct": [
+      4.341021352157403,
+      24.188899729694356,
+      -3.614861484763421
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "latency_reduction_pct": 0.6896623634941146,
+    "cpu_reduction_pct": 0.9049773755656076,
+    "rss_delta_mib": -0.671875,
+    "paired_p50_reduction_pct": [
+      0.29891660885434934,
+      -0.07924068192435296,
+      -0.4233155196671001,
+      -0.46686685311136955,
+      5.556535776664761
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": 0.48104392048000655,
+    "cpu_reduction_pct": -0.4761904761904745,
+    "rss_delta_mib": -1.33984375,
+    "paired_p50_reduction_pct": [
+      -0.48910284450243147,
+      0.837799975226039,
+      -17.04274829028467
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 3.8890685931399327,
+    "cpu_reduction_pct": 1.822916666666674,
+    "rss_delta_mib": 0.62109375,
+    "paired_p50_reduction_pct": [
+      1.906628982809011,
+      6.072702110535522,
+      -3.8293014937300196
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 3.5406239699015574,
+    "cpu_reduction_pct": 1.1111111111111072,
+    "rss_delta_mib": 0.0703125,
+    "paired_p50_reduction_pct": [
+      5.537072906425033,
+      0.5567437460923252,
+      2.371101648905749
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "queue-loop-100-16k",
+    "latency_reduction_pct": -0.9694357655218866,
+    "cpu_reduction_pct": -0.8547008547008739,
+    "rss_delta_mib": 0.19140625,
+    "paired_p50_reduction_pct": [
+      -1.5862586521480093,
+      -0.9694357655218866,
+      1.1173273591670307
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "queue-map-100-16k",
+    "latency_reduction_pct": 2.474091273195822,
+    "cpu_reduction_pct": 1.2195121951219745,
+    "rss_delta_mib": -0.5546875,
+    "paired_p50_reduction_pct": [
+      4.144203292223647,
+      -0.39963500252626627,
+      3.7393493357912866
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "queue-slow-storage",
+    "latency_reduction_pct": 1.9431581909822748,
+    "cpu_reduction_pct": 1.5748031496063186,
+    "rss_delta_mib": -0.0234375,
+    "paired_p50_reduction_pct": [
+      10.605543899941129,
+      7.273735534851333,
+      -12.001048691103078
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "slow-storage-formal",
+    "latency_reduction_pct": 0.6015153717366051,
+    "cpu_reduction_pct": 1.1406844106463865,
+    "rss_delta_mib": -0.734375,
+    "paired_p50_reduction_pct": [
+      -0.33996330399070906,
+      -0.591620948580851,
+      -1.1189634901001222,
+      1.1425694314687207,
+      5.648348089927325
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 1.5252608016581237,
+    "cpu_reduction_pct": 1.2903225806451868,
+    "rss_delta_mib": -0.90234375,
+    "paired_p50_reduction_pct": [
+      1.5252608016581237,
+      0.8280796575640292,
+      0.012673273823859965
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 0.3684999226821861,
+    "cpu_reduction_pct": -0.11344299489506326,
+    "rss_delta_mib": -0.2265625,
+    "paired_p50_reduction_pct": [
+      0.7013771121867185,
+      0.1651507145811082,
+      -4.989511275428216
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-join-artifacts-8k",
+    "case": "join-context-append",
+    "latency_reduction_pct": 0.8444956898414846,
+    "cpu_reduction_pct": 1.6853932584269704,
+    "rss_delta_mib": -0.22265625,
+    "paired_p50_reduction_pct": [
+      -0.8465677745803868,
+      1.9641424593668133,
+      4.15091801199905,
+      1.324327534205827,
+      0.7396459435750291
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": -1.2920226197008722,
+    "cpu_reduction_pct": 0.29761904761907987,
+    "rss_delta_mib": -0.10546875,
+    "paired_p50_reduction_pct": [
+      0.7969143943415302,
+      -1.3947931190520846,
+      -1.3520011271914267
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": -4.0943404687361795,
+    "cpu_reduction_pct": -2.8462998102466885,
+    "rss_delta_mib": -1.16015625,
+    "paired_p50_reduction_pct": [
+      0.48786089528327636,
+      -4.282992553964227,
+      -4.0943404687361795
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": -2.514100976312017,
+    "cpu_reduction_pct": -1.1563599798893875,
+    "rss_delta_mib": -1.359375,
+    "paired_p50_reduction_pct": [
+      -2.514100976312017,
+      -6.40971102588983,
+      2.446556979653536
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": -1.6748101037072693,
+    "cpu_reduction_pct": -1.0554089709762238,
+    "rss_delta_mib": 0.40625,
+    "paired_p50_reduction_pct": [
+      1.4965910774410118,
+      -1.6748101037072693,
+      -7.0074355274470035
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": 1.9457660148504696,
+    "cpu_reduction_pct": 2.1582733812949395,
+    "rss_delta_mib": 1.34765625,
+    "paired_p50_reduction_pct": [
+      3.5816443348036686,
+      -2.0935877238295264,
+      1.2919219006517602
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": 0.21034963582123867,
+    "cpu_reduction_pct": 0.6386485372888329,
+    "rss_delta_mib": -0.24609375,
+    "paired_p50_reduction_pct": [
+      -0.7561527847321559,
+      -0.115181831934974,
+      0.22299845808168017
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "latency_reduction_pct": 0.10796655131691812,
+    "cpu_reduction_pct": 0.0,
+    "rss_delta_mib": -0.19140625,
+    "paired_p50_reduction_pct": [
+      -0.12581279547283497,
+      0.35223664617787254,
+      7.070532626065562
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "latency_reduction_pct": 1.2989255557103396,
+    "cpu_reduction_pct": 1.0452961672473893,
+    "rss_delta_mib": -1.87890625,
+    "paired_p50_reduction_pct": [
+      -2.3079201392206095,
+      5.776816325857215,
+      -1.7176573596521916
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "latency_reduction_pct": 1.3313189122441726,
+    "cpu_reduction_pct": 0.6677796327212104,
+    "rss_delta_mib": -0.12890625,
+    "paired_p50_reduction_pct": [
+      1.5501097833998223,
+      1.3313189122441726,
+      -2.5573351530104205
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "latency_reduction_pct": 0.6090471074828963,
+    "cpu_reduction_pct": 0.8403361344538007,
+    "rss_delta_mib": -0.2734375,
+    "paired_p50_reduction_pct": [
+      0.2793016988522301,
+      0.8576151059340509,
+      -0.11537029869976845
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "queue-loop-100-16k",
+    "latency_reduction_pct": 0.517269089771788,
+    "cpu_reduction_pct": 1.6203703703703498,
+    "rss_delta_mib": 0.015625,
+    "paired_p50_reduction_pct": [
+      -1.0551276281294708,
+      1.439107623655711,
+      5.51103247148178
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "queue-map-100-16k",
+    "latency_reduction_pct": 1.0571034859403694,
+    "cpu_reduction_pct": 1.4727540500736325,
+    "rss_delta_mib": 0.2734375,
+    "paired_p50_reduction_pct": [
+      1.0829176656244277,
+      -0.32420309812326575,
+      10.68180398728108
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "queue-slow-storage",
+    "latency_reduction_pct": 0.16201895928874555,
+    "cpu_reduction_pct": -3.932584269662942,
+    "rss_delta_mib": -0.8515625,
+    "paired_p50_reduction_pct": [
+      0.16201895928874555,
+      -4.7118273388842,
+      8.050865271819196
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "slow-storage-formal",
+    "latency_reduction_pct": -0.3643444140472685,
+    "cpu_reduction_pct": 0.3865979381443285,
+    "rss_delta_mib": -0.8671875,
+    "paired_p50_reduction_pct": [
+      4.467841288436791,
+      1.1008776179383228,
+      -5.620757294712364,
+      -0.27118287710075073,
+      -1.2267698365812763
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "latency_reduction_pct": -0.48176507460824247,
+    "cpu_reduction_pct": 0.24038461538462563,
+    "rss_delta_mib": -0.828125,
+    "paired_p50_reduction_pct": [
+      -0.9190271271018347,
+      1.5661951008929975,
+      -0.4399069638350239
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "latency_reduction_pct": -0.2243570276098783,
+    "cpu_reduction_pct": -0.6578947368421018,
+    "rss_delta_mib": -0.3984375,
+    "paired_p50_reduction_pct": [
+      -0.2243570276098783,
+      -0.7049096078137085,
+      0.23308344436046013
+    ]
+  }
+]

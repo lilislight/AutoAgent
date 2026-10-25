@@ -1,0 +1,4498 @@
+[
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 680.4507420019945,
+    "p95_ms": 691.4295083930483,
+    "process_p50": [
+      680.4507420019945,
+      683.1801390071632,
+      583.8594000088051
+    ],
+    "cpu_ms_call": 476.0,
+    "rss_mib": 93.69921875,
+    "storage_mib": 11.182948112487793,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 684.2439449974336,
+    "p95_ms": 689.0649352048058,
+    "process_p50": [
+      683.9216170046711,
+      684.2439449974336,
+      684.3969970068429
+    ],
+    "cpu_ms_call": 543.9999999999999,
+    "rss_mib": 94.1328125,
+    "storage_mib": 11.401698112487793,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "after",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 629.665386499255,
+    "p95_ms": 693.4880212567805,
+    "process_p50": [
+      629.665386499255,
+      629.8007980003604,
+      675.0203859992325,
+      576.9826760006254,
+      591.4343044933048
+    ],
+    "cpu_ms_call": 471.5,
+    "rss_mib": 95.16796875,
+    "storage_mib": 15.034510612487793,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "before",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 685.23114349955,
+    "p95_ms": 788.1347730544803,
+    "process_p50": [
+      683.2933764962945,
+      685.23114349955,
+      684.0649334990303,
+      686.2604394991649,
+      689.9017530013225
+    ],
+    "cpu_ms_call": 551.0,
+    "rss_mib": 96.47265625,
+    "storage_mib": 14.776698112487793,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "conditional-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 1002.1058040001662,
+    "p95_ms": 1220.9140965060215,
+    "process_p50": [
+      913.6220780055737,
+      1017.7604309938033,
+      1002.1058040001662
+    ],
+    "cpu_ms_call": 763.7499999999999,
+    "rss_mib": 102.94921875,
+    "storage_mib": 17.456385612487793,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1440,
+        "node_execute_calls": 1200,
+        "sql_calls": 27108,
+        "selects": 17396,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 11.817934782608695,
+        "by_phase": {
+          "background": 202,
+          "admission_and_ack": 3248,
+          "write_transaction": 9952,
+          "projection_write": 6208,
+          "projection_compute": 6080,
+          "observation_sql": 1418
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1440,
+        "node_execute_calls": 1200,
+        "sql_calls": 27286,
+        "selects": 17570,
+        "events": 1472,
+        "events_per_batch": 0.9993211133740665,
+        "select_per_event": 11.936141304347826,
+        "by_phase": {
+          "background": 209,
+          "admission_and_ack": 3251,
+          "write_transaction": 9958,
+          "projection_write": 6208,
+          "projection_compute": 6080,
+          "observation_sql": 1580
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1440,
+        "node_execute_calls": 1200,
+        "sql_calls": 27238,
+        "selects": 17522,
+        "events": 1472,
+        "events_per_batch": 0.9993211133740665,
+        "select_per_event": 11.903532608695652,
+        "by_phase": {
+          "background": 209,
+          "admission_and_ack": 3251,
+          "write_transaction": 9958,
+          "projection_write": 6208,
+          "projection_compute": 6080,
+          "observation_sql": 1532
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "conditional-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 1130.1998605049448,
+    "p95_ms": 1159.0040362498257,
+    "process_p50": [
+      1128.3298095077043,
+      1130.1998605049448,
+      1131.5151134986081
+    ],
+    "cpu_ms_call": 899.3750000000001,
+    "rss_mib": 101.12109375,
+    "storage_mib": 17.401698112487793,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 2880,
+        "node_execute_calls": 2400,
+        "sql_calls": 32111,
+        "selects": 21199,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 14.40149456521739,
+        "by_phase": {
+          "background": 224,
+          "admission_and_ack": 3248,
+          "write_transaction": 9952,
+          "projection_write": 7408,
+          "projection_compute": 9616,
+          "observation_sql": 1663
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 2880,
+        "node_execute_calls": 2400,
+        "sql_calls": 32121,
+        "selects": 21209,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 14.408288043478262,
+        "by_phase": {
+          "background": 224,
+          "admission_and_ack": 3248,
+          "write_transaction": 9952,
+          "projection_write": 7408,
+          "projection_compute": 9616,
+          "observation_sql": 1673
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 2880,
+        "node_execute_calls": 2400,
+        "sql_calls": 32115,
+        "selects": 21203,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 14.404211956521738,
+        "by_phase": {
+          "background": 224,
+          "admission_and_ack": 3248,
+          "write_transaction": 9952,
+          "projection_write": 7408,
+          "projection_compute": 9616,
+          "observation_sql": 1667
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1669.1906699998071,
+    "p95_ms": 1678.3171856950503,
+    "process_p50": [
+      1568.589217000408,
+      1669.1906699998071,
+      1680.4210410045926
+    ],
+    "cpu_ms_call": 1273.3333333333333,
+    "rss_mib": 100.54296875,
+    "storage_mib": 13.542323112487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1819.5995290006977,
+    "p95_ms": 1821.6976288007572,
+    "process_p50": [
+      1816.2687639996875,
+      1923.4926550125238,
+      1819.5995290006977
+    ],
+    "cpu_ms_call": 1476.6666666666667,
+    "rss_mib": 100.234375,
+    "storage_mib": 13.565760612487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 688.1027074996382,
+    "p95_ms": 702.9458167991834,
+    "process_p50": [
+      685.7804935061722,
+      695.7997839999734,
+      688.1027074996382
+    ],
+    "cpu_ms_call": 510.0,
+    "rss_mib": 95.80078125,
+    "storage_mib": 12.472010612487793,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 590,
+        "node_execute_calls": 590,
+        "sql_calls": 11761,
+        "selects": 7351,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 11.856451612903227,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 1370,
+          "write_transaction": 4720,
+          "projection_write": 2670,
+          "projection_compute": 2280,
+          "observation_sql": 661
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 590,
+        "node_execute_calls": 590,
+        "sql_calls": 11744,
+        "selects": 7334,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 11.829032258064515,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 1370,
+          "write_transaction": 4720,
+          "projection_write": 2670,
+          "projection_compute": 2280,
+          "observation_sql": 644
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 590,
+        "node_execute_calls": 590,
+        "sql_calls": 11790,
+        "selects": 7380,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 11.903225806451612,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 1370,
+          "write_transaction": 4720,
+          "projection_write": 2670,
+          "projection_compute": 2280,
+          "observation_sql": 690
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 811.5516350007965,
+    "p95_ms": 829.0073731048324,
+    "process_p50": [
+      811.5516350007965,
+      751.4627230048063,
+      811.952960502822
+    ],
+    "cpu_ms_call": 605.0,
+    "rss_mib": 95.44140625,
+    "storage_mib": 12.472010612487793,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1180,
+        "node_execute_calls": 1180,
+        "sql_calls": 13342,
+        "selects": 8342,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 13.45483870967742,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 1370,
+          "write_transaction": 4720,
+          "projection_write": 3260,
+          "projection_compute": 3230,
+          "observation_sql": 702
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1180,
+        "node_execute_calls": 1180,
+        "sql_calls": 13325,
+        "selects": 8325,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 13.42741935483871,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 1370,
+          "write_transaction": 4720,
+          "projection_write": 3260,
+          "projection_compute": 3230,
+          "observation_sql": 685
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1180,
+        "node_execute_calls": 1180,
+        "sql_calls": 13348,
+        "selects": 8348,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 13.464516129032258,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 1370,
+          "write_transaction": 4720,
+          "projection_write": 3260,
+          "projection_compute": 3230,
+          "observation_sql": 708
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 5699.055267003132,
+    "p95_ms": 5859.111143604969,
+    "process_p50": [
+      5755.856488991412,
+      5594.594727008371,
+      5699.055267003132
+    ],
+    "cpu_ms_call": 4596.666666666667,
+    "rss_mib": 98.890625,
+    "storage_mib": 20.87549114227295,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 6771.403132996056,
+    "p95_ms": 6863.079982406634,
+    "process_p50": [
+      6771.403132996056,
+      6758.508606013493,
+      6861.0909579874715
+    ],
+    "cpu_ms_call": 5510.0,
+    "rss_mib": 97.05078125,
+    "storage_mib": 20.807948112487793,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 2026.725814997917,
+    "p95_ms": 2099.931047402788,
+    "process_p50": [
+      2026.725814997917,
+      2001.699215004919,
+      2092.7573360095266
+    ],
+    "cpu_ms_call": 1620.0,
+    "rss_mib": 94.21484375,
+    "storage_mib": 13.831385612487793,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 2113.9839649986243,
+    "p95_ms": 2125.820253798156,
+    "process_p50": [
+      2109.292239008937,
+      2132.8822820069036,
+      2113.9839649986243
+    ],
+    "cpu_ms_call": 1706.0,
+    "rss_mib": 94.33203125,
+    "storage_mib": 13.901698112487793,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2189.1674749931553,
+    "p95_ms": 2192.860191206273,
+    "process_p50": [
+      2199.892460994306,
+      2173.9372570009436,
+      2189.1674749931553
+    ],
+    "cpu_ms_call": 1776.6666666666667,
+    "rss_mib": 107.62109375,
+    "storage_mib": 14.003260612487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2363.8157559907995,
+    "p95_ms": 2434.032189990103,
+    "process_p50": [
+      2363.8157559907995,
+      2313.7982390035177,
+      2448.561034994782
+    ],
+    "cpu_ms_call": 1990.0000000000002,
+    "rss_mib": 107.9375,
+    "storage_mib": 13.761073112487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 358.1600705074379,
+    "p95_ms": 368.8527274010994,
+    "process_p50": [
+      358.9993084970047,
+      358.1600705074379,
+      356.7712015064899
+    ],
+    "cpu_ms_call": 268.59374999999994,
+    "rss_mib": 96.43359375,
+    "storage_mib": 25.628260612487793,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 360.2629890010576,
+    "p95_ms": 479.0675579533854,
+    "process_p50": [
+      360.0192104931921,
+      360.2629890010576,
+      360.8924700092757
+    ],
+    "cpu_ms_call": 302.81250000000006,
+    "rss_mib": 96.2890625,
+    "storage_mib": 25.823573112487793,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 246.42449400562327,
+    "p95_ms": 262.47172879520804,
+    "process_p50": [
+      246.42449400562327,
+      242.90596699574962,
+      249.58402299671434
+    ],
+    "cpu_ms_call": 215.99999999999994,
+    "rss_mib": 96.1640625,
+    "storage_mib": 11.159510612487793,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 274.9073160084663,
+    "p95_ms": 289.88058020186145,
+    "process_p50": [
+      280.6376100052148,
+      270.9469610126689,
+      274.9073160084663
+    ],
+    "cpu_ms_call": 238.0,
+    "rss_mib": 96.171875,
+    "storage_mib": 11.222010612487793,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "after",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 240.2202084995224,
+    "p95_ms": 327.82913569390075,
+    "process_p50": [
+      240.2202084995224,
+      246.8521695045638,
+      242.9318724971381,
+      232.8849400000763,
+      237.05572899780236
+    ],
+    "cpu_ms_call": 217.50000000000006,
+    "rss_mib": 97.53515625,
+    "storage_mib": 14.776698112487793,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "before",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 260.25268800003687,
+    "p95_ms": 352.3440810007742,
+    "process_p50": [
+      264.602212497266,
+      265.0100350001594,
+      258.8958895066753,
+      257.6760975061916,
+      260.25268800003687
+    ],
+    "cpu_ms_call": 240.0,
+    "rss_mib": 97.2109375,
+    "storage_mib": 14.917323112487793,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "conditional-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 449.8809984943364,
+    "p95_ms": 489.94754549494246,
+    "process_p50": [
+      449.8809984943364,
+      453.9405044997693,
+      448.51785349601414
+    ],
+    "cpu_ms_call": 416.875,
+    "rss_mib": 103.80078125,
+    "storage_mib": 17.112635612487793,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 392,
+        "node_execute_calls": 80,
+        "sql_calls": 13827,
+        "selects": 11507,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 7.817255434782608,
+        "by_phase": {
+          "background": 192,
+          "admission_and_ack": 1792,
+          "write_transaction": 5632,
+          "observation_sql": 2904,
+          "projection_compute": 3051,
+          "projection_write": 256
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 391,
+        "node_execute_calls": 80,
+        "sql_calls": 14105,
+        "selects": 11785,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 8.006114130434783,
+        "by_phase": {
+          "background": 192,
+          "admission_and_ack": 1792,
+          "write_transaction": 5632,
+          "observation_sql": 3185,
+          "projection_compute": 3048,
+          "projection_write": 256
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 397,
+        "node_execute_calls": 80,
+        "sql_calls": 13605,
+        "selects": 11285,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 7.666440217391305,
+        "by_phase": {
+          "background": 192,
+          "admission_and_ack": 1792,
+          "write_transaction": 5632,
+          "observation_sql": 2671,
+          "projection_compute": 3062,
+          "projection_write": 256
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "conditional-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 509.5927500005928,
+    "p95_ms": 529.1582432437281,
+    "process_p50": [
+      502.1110024972586,
+      520.5426250031451,
+      509.5927500005928
+    ],
+    "cpu_ms_call": 465.0,
+    "rss_mib": 103.66015625,
+    "storage_mib": 17.190760612487793,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 778,
+        "node_execute_calls": 160,
+        "sql_calls": 17100,
+        "selects": 14700,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 9.986413043478262,
+        "by_phase": {
+          "background": 192,
+          "admission_and_ack": 1792,
+          "write_transaction": 5632,
+          "observation_sql": 2563,
+          "projection_compute": 6585,
+          "projection_write": 336
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 796,
+        "node_execute_calls": 160,
+        "sql_calls": 17243,
+        "selects": 14843,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 10.083559782608695,
+        "by_phase": {
+          "background": 192,
+          "admission_and_ack": 1792,
+          "write_transaction": 5632,
+          "observation_sql": 2694,
+          "projection_compute": 6597,
+          "projection_write": 336
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 780,
+        "node_execute_calls": 160,
+        "sql_calls": 17116,
+        "selects": 14716,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 9.997282608695652,
+        "by_phase": {
+          "background": 192,
+          "admission_and_ack": 1792,
+          "write_transaction": 5632,
+          "observation_sql": 2577,
+          "projection_compute": 6587,
+          "projection_write": 336
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 746.6901860025246,
+    "p95_ms": 772.1172650024528,
+    "process_p50": [
+      755.7509809994372,
+      746.6901860025246,
+      744.2566910031019
+    ],
+    "cpu_ms_call": 690.0000000000001,
+    "rss_mib": 105.92578125,
+    "storage_mib": 13.542323112487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 777.8398600057699,
+    "p95_ms": 805.4505195963429,
+    "process_p50": [
+      767.3969339957694,
+      794.1288850124693,
+      777.8398600057699
+    ],
+    "cpu_ms_call": 723.3333333333334,
+    "rss_mib": 107.49609375,
+    "storage_mib": 13.581385612487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 250.76341850217432,
+    "p95_ms": 320.1998616998025,
+    "process_p50": [
+      250.76341850217432,
+      248.61480649997247,
+      258.43289800104685
+    ],
+    "cpu_ms_call": 235.0,
+    "rss_mib": 96.9453125,
+    "storage_mib": 12.417323112487793,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 121,
+        "node_execute_calls": 22,
+        "sql_calls": 5194,
+        "selects": 3997,
+        "events": 620,
+        "events_per_batch": 56.36363636363637,
+        "select_per_event": 6.446774193548387,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 760,
+          "write_transaction": 2893,
+          "observation_sql": 443,
+          "projection_compute": 972,
+          "projection_write": 66
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 121,
+        "node_execute_calls": 22,
+        "sql_calls": 5234,
+        "selects": 4027,
+        "events": 620,
+        "events_per_batch": 47.69230769230769,
+        "select_per_event": 6.495161290322581,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 760,
+          "write_transaction": 2899,
+          "observation_sql": 466,
+          "projection_compute": 975,
+          "projection_write": 74
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 122,
+        "node_execute_calls": 24,
+        "sql_calls": 5232,
+        "selects": 4023,
+        "events": 620,
+        "events_per_batch": 47.69230769230769,
+        "select_per_event": 6.4887096774193544,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 760,
+          "write_transaction": 2899,
+          "observation_sql": 460,
+          "projection_compute": 977,
+          "projection_write": 76
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 280.80591099569574,
+    "p95_ms": 347.43850284721697,
+    "process_p50": [
+      289.9445645016385,
+      280.0109340023482,
+      280.80591099569574
+    ],
+    "cpu_ms_call": 260.00000000000006,
+    "rss_mib": 96.7734375,
+    "storage_mib": 12.526698112487793,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 244,
+        "node_execute_calls": 48,
+        "sql_calls": 6214,
+        "selects": 4978,
+        "events": 620,
+        "events_per_batch": 44.285714285714285,
+        "select_per_event": 8.029032258064516,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 760,
+          "write_transaction": 2902,
+          "observation_sql": 462,
+          "projection_compute": 1928,
+          "projection_write": 102
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 242,
+        "node_execute_calls": 44,
+        "sql_calls": 6179,
+        "selects": 4956,
+        "events": 620,
+        "events_per_batch": 51.666666666666664,
+        "select_per_event": 7.993548387096774,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 760,
+          "write_transaction": 2896,
+          "observation_sql": 449,
+          "projection_compute": 1923,
+          "projection_write": 91
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 246,
+        "node_execute_calls": 52,
+        "sql_calls": 6070,
+        "selects": 4826,
+        "events": 620,
+        "events_per_batch": 44.285714285714285,
+        "select_per_event": 7.783870967741936,
+        "by_phase": {
+          "background": 60,
+          "admission_and_ack": 760,
+          "write_transaction": 2902,
+          "observation_sql": 308,
+          "projection_compute": 1930,
+          "projection_write": 110
+        }
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2651.039871998364,
+    "p95_ms": 2715.5973784974776,
+    "process_p50": [
+      2651.039871998364,
+      2557.1469249989605,
+      2686.8579799920553
+    ],
+    "cpu_ms_call": 2580.0,
+    "rss_mib": 102.5546875,
+    "storage_mib": 20.518885612487793,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2955.590931000188,
+    "p95_ms": 3078.1453704999876,
+    "process_p50": [
+      2992.2669799998403,
+      2850.186751005822,
+      2955.590931000188
+    ],
+    "cpu_ms_call": 2823.3333333333326,
+    "rss_mib": 104.39453125,
+    "storage_mib": 21.003260612487793,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 895.9663849964272,
+    "p95_ms": 940.6624089926481,
+    "process_p50": [
+      926.0932560137007,
+      895.9663849964272,
+      888.571215007687
+    ],
+    "cpu_ms_call": 884.0,
+    "rss_mib": 98.8359375,
+    "storage_mib": 13.729823112487793,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 917.0857800054364,
+    "p95_ms": 942.7105108072283,
+    "process_p50": [
+      917.0857800054364,
+      932.434040994849,
+      887.077687002602
+    ],
+    "cpu_ms_call": 900.0,
+    "rss_mib": 99.33984375,
+    "storage_mib": 13.737635612487793,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1113.7473080016207,
+    "p95_ms": 1133.8174142001662,
+    "process_p50": [
+      1113.7473080016207,
+      1127.9691740055569,
+      1111.1031049949815
+    ],
+    "cpu_ms_call": 1006.6666666666669,
+    "rss_mib": 143.1640625,
+    "storage_mib": 13.722010612487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1278.4855450008763,
+    "p95_ms": 1294.431607304432,
+    "process_p50": [
+      1345.7531989988638,
+      1278.4855450008763,
+      1253.1067060044734
+    ],
+    "cpu_ms_call": 1136.6666666666667,
+    "rss_mib": 148.26953125,
+    "storage_mib": 13.714198112487793,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 173.4012234956026,
+    "p95_ms": 201.90823344019006,
+    "process_p50": [
+      173.4012234956026,
+      174.8103110003285,
+      173.00722049549222
+    ],
+    "cpu_ms_call": 136.953125,
+    "rss_mib": 95.078125,
+    "storage_mib": 25.182948112487793,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 187.43357899802504,
+    "p95_ms": 214.7577297022508,
+    "process_p50": [
+      185.2363924990641,
+      187.5302839980577,
+      187.43357899802504
+    ],
+    "cpu_ms_call": 148.984375,
+    "rss_mib": 95.71875,
+    "storage_mib": 25.581385612487793,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 819.1668359941104,
+    "p95_ms": 842.8493043931667,
+    "process_p50": [
+      809.5826379867503,
+      821.0253229917726,
+      819.1668359941104
+    ],
+    "cpu_ms_call": 674.0,
+    "rss_mib": 92.1875,
+    "storage_mib": 6.7385406494140625,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 942.8273039957276,
+    "p95_ms": 1032.3002967983484,
+    "process_p50": [
+      942.8273039957276,
+      938.4624660015106,
+      947.9133800050477
+    ],
+    "cpu_ms_call": 778.0,
+    "rss_mib": 92.32421875,
+    "storage_mib": 6.777854919433594,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "after",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 825.5308474981575,
+    "p95_ms": 872.6416937592148,
+    "process_p50": [
+      825.5308474981575,
+      827.4569349960075,
+      820.6752344922279,
+      827.4649814993609,
+      824.0110744955018
+    ],
+    "cpu_ms_call": 671.5,
+    "rss_mib": 94.5625,
+    "storage_mib": 12.285781860351562,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "before",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 944.0366415001336,
+    "p95_ms": 964.6794833977766,
+    "process_p50": [
+      944.0366415001336,
+      944.6979839995038,
+      942.6932194983237,
+      943.4724969978561,
+      952.7889259989024
+    ],
+    "cpu_ms_call": 779.5000000000001,
+    "rss_mib": 94.48046875,
+    "storage_mib": 12.250625610351562,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "conditional-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 1272.9963700039661,
+    "p95_ms": 1344.9143504949461,
+    "process_p50": [
+      1274.8674234971986,
+      1272.1097655012272,
+      1272.9963700039661
+    ],
+    "cpu_ms_call": 1059.375,
+    "rss_mib": 100.40625,
+    "storage_mib": 15.349151611328125,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1440,
+        "node_execute_calls": 1200,
+        "sql_calls": 30747,
+        "selects": 17803,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 12.094429347826088,
+        "by_phase": {
+          "background": 1792,
+          "admission_and_ack": 4720,
+          "write_transaction": 9952,
+          "projection_write": 6208,
+          "projection_compute": 6080,
+          "observation_sql": 1995
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1440,
+        "node_execute_calls": 1200,
+        "sql_calls": 30854,
+        "selects": 17892,
+        "events": 1472,
+        "events_per_batch": 0.9993211133740665,
+        "select_per_event": 12.154891304347826,
+        "by_phase": {
+          "background": 1803,
+          "admission_and_ack": 4724,
+          "write_transaction": 9958,
+          "projection_write": 6208,
+          "projection_compute": 6080,
+          "observation_sql": 2081
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1440,
+        "node_execute_calls": 1200,
+        "sql_calls": 30729,
+        "selects": 17784,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 12.081521739130435,
+        "by_phase": {
+          "background": 1792,
+          "admission_and_ack": 4720,
+          "write_transaction": 9952,
+          "projection_write": 6208,
+          "projection_compute": 6080,
+          "observation_sql": 1977
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "conditional-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 1511.7767624906264,
+    "p95_ms": 1540.7761362548626,
+    "process_p50": [
+      1470.2894760048366,
+      1511.7767624906264,
+      1520.3362754982663
+    ],
+    "cpu_ms_call": 1235.0,
+    "rss_mib": 99.1484375,
+    "storage_mib": 15.207611083984375,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 2880,
+        "node_execute_calls": 2400,
+        "sql_calls": 35673,
+        "selects": 21505,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 14.609375,
+        "by_phase": {
+          "background": 1792,
+          "admission_and_ack": 4720,
+          "write_transaction": 9952,
+          "projection_write": 7408,
+          "projection_compute": 9616,
+          "observation_sql": 2185
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 2880,
+        "node_execute_calls": 2400,
+        "sql_calls": 35751,
+        "selects": 21580,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 14.660326086956522,
+        "by_phase": {
+          "background": 1792,
+          "admission_and_ack": 4720,
+          "write_transaction": 9952,
+          "projection_write": 7408,
+          "projection_compute": 9616,
+          "observation_sql": 2263
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 2880,
+        "node_execute_calls": 2400,
+        "sql_calls": 35821,
+        "selects": 21642,
+        "events": 1472,
+        "events_per_batch": 1.0,
+        "select_per_event": 14.702445652173912,
+        "by_phase": {
+          "background": 1792,
+          "admission_and_ack": 4720,
+          "write_transaction": 9952,
+          "projection_write": 7408,
+          "projection_compute": 9616,
+          "observation_sql": 2333
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2196.682159003103,
+    "p95_ms": 2197.52886009519,
+    "process_p50": [
+      2072.977841991815,
+      2196.682159003103,
+      2198.930045007728
+    ],
+    "cpu_ms_call": 1780.0,
+    "rss_mib": 99.90234375,
+    "storage_mib": 14.207977294921875,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2451.8920789996628,
+    "p95_ms": 2456.9684201065684,
+    "process_p50": [
+      2520.263761995011,
+      2451.8920789996628,
+      2376.149763003923
+    ],
+    "cpu_ms_call": 2053.3333333333335,
+    "rss_mib": 100.0390625,
+    "storage_mib": 14.352828979492188,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 889.2150719984784,
+    "p95_ms": 948.9863575923664,
+    "process_p50": [
+      823.555512499297,
+      924.7086270042928,
+      889.2150719984784
+    ],
+    "cpu_ms_call": 701.0,
+    "rss_mib": 94.26171875,
+    "storage_mib": 8.777900695800781,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 590,
+        "node_execute_calls": 590,
+        "sql_calls": 13176,
+        "selects": 7425,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 11.975806451612904,
+        "by_phase": {
+          "background": 700,
+          "admission_and_ack": 1990,
+          "write_transaction": 4720,
+          "projection_write": 2670,
+          "projection_compute": 2280,
+          "observation_sql": 816
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 590,
+        "node_execute_calls": 590,
+        "sql_calls": 13236,
+        "selects": 7480,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 12.064516129032258,
+        "by_phase": {
+          "background": 700,
+          "admission_and_ack": 1990,
+          "write_transaction": 4720,
+          "projection_write": 2670,
+          "projection_compute": 2280,
+          "observation_sql": 876
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 590,
+        "node_execute_calls": 590,
+        "sql_calls": 13229,
+        "selects": 7474,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 12.05483870967742,
+        "by_phase": {
+          "background": 700,
+          "admission_and_ack": 1990,
+          "write_transaction": 4720,
+          "projection_write": 2670,
+          "projection_compute": 2280,
+          "observation_sql": 869
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 957.638671497989,
+    "p95_ms": 1063.7374763493426,
+    "process_p50": [
+      957.638671497989,
+      1000.7776929924148,
+      953.5970264987554
+    ],
+    "cpu_ms_call": 804.9999999999999,
+    "rss_mib": 93.69140625,
+    "storage_mib": 8.535621643066406,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1180,
+        "node_execute_calls": 1180,
+        "sql_calls": 14849,
+        "selects": 8497,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 13.70483870967742,
+        "by_phase": {
+          "background": 703,
+          "admission_and_ack": 1990,
+          "write_transaction": 4720,
+          "projection_write": 3260,
+          "projection_compute": 3230,
+          "observation_sql": 946
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1180,
+        "node_execute_calls": 1180,
+        "sql_calls": 14874,
+        "selects": 8513,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 13.730645161290322,
+        "by_phase": {
+          "background": 718,
+          "admission_and_ack": 1990,
+          "write_transaction": 4720,
+          "projection_write": 3260,
+          "projection_compute": 3230,
+          "observation_sql": 956
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 1180,
+        "node_execute_calls": 1180,
+        "sql_calls": 14864,
+        "selects": 8506,
+        "events": 620,
+        "events_per_batch": 1.0,
+        "select_per_event": 13.719354838709677,
+        "by_phase": {
+          "background": 712,
+          "admission_and_ack": 1990,
+          "write_transaction": 4720,
+          "projection_write": 3260,
+          "projection_compute": 3230,
+          "observation_sql": 952
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 7985.406029998558,
+    "p95_ms": 8138.053480195231,
+    "process_p50": [
+      7977.180695001152,
+      8112.473490997218,
+      7985.406029998558
+    ],
+    "cpu_ms_call": 6636.666666666667,
+    "rss_mib": 93.5390625,
+    "storage_mib": 22.805450439453125,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 9328.49449198693,
+    "p95_ms": 9422.00298718817,
+    "process_p50": [
+      9429.2670940049,
+      9161.565999995219,
+      9328.49449198693
+    ],
+    "cpu_ms_call": 7856.666666666667,
+    "rss_mib": 93.71875,
+    "storage_mib": 22.37950897216797,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 2757.2298949962715,
+    "p95_ms": 2831.075658806367,
+    "process_p50": [
+      2785.046485005296,
+      2732.478314996115,
+      2757.2298949962715
+    ],
+    "cpu_ms_call": 2302.0000000000005,
+    "rss_mib": 92.73046875,
+    "storage_mib": 11.172683715820312,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 2793.381267998484,
+    "p95_ms": 2844.3552660028217,
+    "process_p50": [
+      2793.381267998484,
+      2975.9480100037763,
+      2755.7529829937266
+    ],
+    "cpu_ms_call": 2380.0,
+    "rss_mib": 92.9765625,
+    "storage_mib": 11.317329406738281,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 2689.1134979960043,
+    "p95_ms": 2786.421801307006,
+    "process_p50": [
+      2607.9409699887037,
+      2692.0858600060456,
+      2689.1134979960043
+    ],
+    "cpu_ms_call": 2293.3333333333335,
+    "rss_mib": 115.72265625,
+    "storage_mib": 107.88751220703125,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 3030.8066790021257,
+    "p95_ms": 3038.6383152072085,
+    "process_p50": [
+      3081.146302007255,
+      3030.8066790021257,
+      2912.804974010214
+    ],
+    "cpu_ms_call": 2600.0,
+    "rss_mib": 114.2265625,
+    "storage_mib": 107.90306854248047,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 492.3109890005435,
+    "p95_ms": 510.72981611068826,
+    "process_p50": [
+      491.3322050051647,
+      492.3109890005435,
+      493.2257760010543
+    ],
+    "cpu_ms_call": 376.40625,
+    "rss_mib": 94.6015625,
+    "storage_mib": 35.25841522216797,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "case": "unique-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 497.0213734995923,
+    "p95_ms": 614.5933897983923,
+    "process_p50": [
+      497.8528274950804,
+      497.0213734995923,
+      491.89173000195296
+    ],
+    "cpu_ms_call": 424.140625,
+    "rss_mib": 94.515625,
+    "storage_mib": 35.03187561035156,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 304.9987419944955,
+    "p95_ms": 331.04450539976824,
+    "process_p50": [
+      304.9987419944955,
+      297.3284650070127,
+      313.3461800025543
+    ],
+    "cpu_ms_call": 306.00000000000006,
+    "rss_mib": 95.12890625,
+    "storage_mib": 6.7564544677734375,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 366.5013700083364,
+    "p95_ms": 433.150158796343,
+    "process_p50": [
+      376.5673140005674,
+      341.60223399521783,
+      366.5013700083364
+    ],
+    "cpu_ms_call": 371.99999999999994,
+    "rss_mib": 95.33203125,
+    "storage_mib": 6.7525482177734375,
+    "rows": {
+      "runtime_events": [
+        372,
+        372,
+        372
+      ],
+      "node_executions": [
+        72,
+        72,
+        72
+      ],
+      "operator_calls": [
+        72,
+        72,
+        72
+      ],
+      "graph_changes": [
+        570,
+        570,
+        570
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "after",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 316.09928899706574,
+    "p95_ms": 369.02465365637914,
+    "process_p50": [
+      314.06205149687594,
+      316.09928899706574,
+      314.6216005043243,
+      317.4702795004123,
+      319.87296050647274
+    ],
+    "cpu_ms_call": 320.5,
+    "rss_mib": 97.359375,
+    "storage_mib": 13.16485595703125,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "version": "before",
+    "runs": 5,
+    "statuses": {
+      "completed": 5
+    },
+    "calls": 100,
+    "p50_ms": 356.57963050471153,
+    "p95_ms": 437.86927635374013,
+    "process_p50": [
+      358.5764460003702,
+      353.97805600223364,
+      356.1689359994489,
+      356.57963050471153,
+      357.7345575031359
+    ],
+    "cpu_ms_call": 363.00000000000006,
+    "rss_mib": 97.75390625,
+    "storage_mib": 13.188179016113281,
+    "rows": {
+      "runtime_events": [
+        1302,
+        1302,
+        1302,
+        1302,
+        1302
+      ],
+      "node_executions": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "operator_calls": [
+        252,
+        252,
+        252,
+        252,
+        252
+      ],
+      "graph_changes": [
+        1995,
+        1995,
+        1995,
+        1995,
+        1995
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "conditional-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 583.431509003276,
+    "p95_ms": 632.0132789987838,
+    "process_p50": [
+      581.7739390040515,
+      583.431509003276,
+      599.5148375077406
+    ],
+    "cpu_ms_call": 591.8749999999999,
+    "rss_mib": 105.02734375,
+    "storage_mib": 15.582183837890625,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 438,
+        "node_execute_calls": 80,
+        "sql_calls": 15922,
+        "selects": 11986,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 8.142663043478262,
+        "by_phase": {
+          "background": 304,
+          "admission_and_ack": 3264,
+          "write_transaction": 5632,
+          "observation_sql": 3371,
+          "projection_compute": 3095,
+          "projection_write": 256
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 434,
+        "node_execute_calls": 80,
+        "sql_calls": 16106,
+        "selects": 12169,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 8.266983695652174,
+        "by_phase": {
+          "background": 304,
+          "admission_and_ack": 3264,
+          "write_transaction": 5632,
+          "observation_sql": 3558,
+          "projection_compute": 3092,
+          "projection_write": 256
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 443,
+        "node_execute_calls": 82,
+        "sql_calls": 16028,
+        "selects": 12082,
+        "events": 1472,
+        "events_per_batch": 44.60606060606061,
+        "select_per_event": 8.20788043478261,
+        "by_phase": {
+          "background": 305,
+          "admission_and_ack": 3264,
+          "write_transaction": 5635,
+          "observation_sql": 3458,
+          "projection_compute": 3103,
+          "projection_write": 263
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "conditional-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 48,
+    "p50_ms": 675.4937040022924,
+    "p95_ms": 694.3627654945885,
+    "process_p50": [
+      670.8559214966954,
+      675.8171890032827,
+      675.4937040022924
+    ],
+    "cpu_ms_call": 671.25,
+    "rss_mib": 105.10546875,
+    "storage_mib": 15.644912719726562,
+    "rows": {
+      "runtime_events": [
+        1565,
+        1565,
+        1565
+      ],
+      "node_executions": [
+        306,
+        306,
+        306
+      ],
+      "operator_calls": [
+        306,
+        306,
+        306
+      ],
+      "graph_changes": [
+        3485,
+        3485,
+        3485
+      ],
+      "edge_evaluations": [
+        272,
+        272,
+        272
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 868,
+        "node_execute_calls": 160,
+        "sql_calls": 19468,
+        "selects": 15452,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 10.497282608695652,
+        "by_phase": {
+          "background": 304,
+          "admission_and_ack": 3264,
+          "write_transaction": 5632,
+          "observation_sql": 3303,
+          "projection_compute": 6629,
+          "projection_write": 336
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 878,
+        "node_execute_calls": 160,
+        "sql_calls": 19551,
+        "selects": 15535,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 10.55366847826087,
+        "by_phase": {
+          "background": 304,
+          "admission_and_ack": 3264,
+          "write_transaction": 5632,
+          "observation_sql": 3379,
+          "projection_compute": 6636,
+          "projection_write": 336
+        }
+      },
+      {
+        "graph_reads": 3280,
+        "edge_fact_reads": 256,
+        "node_parameter_sets": 876,
+        "node_execute_calls": 160,
+        "sql_calls": 19529,
+        "selects": 15513,
+        "events": 1472,
+        "events_per_batch": 46.0,
+        "select_per_event": 10.538722826086957,
+        "by_phase": {
+          "background": 304,
+          "admission_and_ack": 3264,
+          "write_transaction": 5632,
+          "observation_sql": 3358,
+          "projection_compute": 6635,
+          "projection_write": 336
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 890.7885230000829,
+    "p95_ms": 946.7404718088801,
+    "process_p50": [
+      865.7706410012906,
+      947.4788530060323,
+      890.7885230000829
+    ],
+    "cpu_ms_call": 920.0,
+    "rss_mib": 110.203125,
+    "storage_mib": 14.387687683105469,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "context-append",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1083.8377100008074,
+    "p95_ms": 1103.254012101388,
+    "process_p50": [
+      1084.8210010008188,
+      1083.8377100008074,
+      998.5502889903728
+    ],
+    "cpu_ms_call": 1073.3333333333333,
+    "rss_mib": 111.0390625,
+    "storage_mib": 14.228431701660156,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 334.41271400806727,
+    "p95_ms": 410.4535376507555,
+    "process_p50": [
+      323.64809150021756,
+      340.85838050668826,
+      334.41271400806727
+    ],
+    "cpu_ms_call": 340.0,
+    "rss_mib": 96.26953125,
+    "storage_mib": 8.303512573242188,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 130,
+        "node_execute_calls": 40,
+        "sql_calls": 6229,
+        "selects": 4280,
+        "events": 620,
+        "events_per_batch": 31.0,
+        "select_per_event": 6.903225806451613,
+        "by_phase": {
+          "background": 100,
+          "admission_and_ack": 1380,
+          "write_transaction": 2920,
+          "observation_sql": 707,
+          "projection_compute": 994,
+          "projection_write": 128
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 130,
+        "node_execute_calls": 40,
+        "sql_calls": 6288,
+        "selects": 4344,
+        "events": 620,
+        "events_per_batch": 31.0,
+        "select_per_event": 7.006451612903226,
+        "by_phase": {
+          "background": 100,
+          "admission_and_ack": 1380,
+          "write_transaction": 2920,
+          "observation_sql": 773,
+          "projection_compute": 992,
+          "projection_write": 123
+        }
+      },
+      {
+        "graph_reads": 0,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 130,
+        "node_execute_calls": 40,
+        "sql_calls": 6264,
+        "selects": 4318,
+        "events": 620,
+        "events_per_batch": 31.0,
+        "select_per_event": 6.964516129032258,
+        "by_phase": {
+          "background": 100,
+          "admission_and_ack": 1380,
+          "write_transaction": 2920,
+          "observation_sql": 746,
+          "projection_compute": 993,
+          "projection_write": 125
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "diagnostics-on",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 30,
+    "p50_ms": 366.370639501838,
+    "p95_ms": 421.3059796515154,
+    "process_p50": [
+      366.370639501838,
+      363.9064050075831,
+      368.4480764932232
+    ],
+    "cpu_ms_call": 372.99999999999994,
+    "rss_mib": 96.828125,
+    "storage_mib": 8.307807922363281,
+    "rows": {
+      "runtime_events": [
+        682,
+        682,
+        682
+      ],
+      "node_executions": [
+        132,
+        132,
+        132
+      ],
+      "operator_calls": [
+        132,
+        132,
+        132
+      ],
+      "graph_changes": [
+        1045,
+        1045,
+        1045
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    },
+    "diagnostics": [
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 260,
+        "node_execute_calls": 80,
+        "sql_calls": 7128,
+        "selects": 5143,
+        "events": 620,
+        "events_per_batch": 31.0,
+        "select_per_event": 8.29516129032258,
+        "by_phase": {
+          "background": 100,
+          "admission_and_ack": 1380,
+          "write_transaction": 2920,
+          "observation_sql": 620,
+          "projection_compute": 1943,
+          "projection_write": 165
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 260,
+        "node_execute_calls": 80,
+        "sql_calls": 7108,
+        "selects": 5122,
+        "events": 620,
+        "events_per_batch": 31.0,
+        "select_per_event": 8.261290322580646,
+        "by_phase": {
+          "background": 100,
+          "admission_and_ack": 1380,
+          "write_transaction": 2920,
+          "observation_sql": 598,
+          "projection_compute": 1944,
+          "projection_write": 166
+        }
+      },
+      {
+        "graph_reads": 950,
+        "edge_fact_reads": 0,
+        "node_parameter_sets": 260,
+        "node_execute_calls": 80,
+        "sql_calls": 7263,
+        "selects": 5281,
+        "events": 620,
+        "events_per_batch": 31.0,
+        "select_per_event": 8.51774193548387,
+        "by_phase": {
+          "background": 100,
+          "admission_and_ack": 1380,
+          "write_transaction": 2920,
+          "observation_sql": 761,
+          "projection_compute": 1941,
+          "projection_write": 161
+        }
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 3816.432690000511,
+    "p95_ms": 3868.050511495676,
+    "process_p50": [
+      3797.729583006003,
+      3816.432690000511,
+      3854.765119001968
+    ],
+    "cpu_ms_call": 3970.0,
+    "rss_mib": 109.14453125,
+    "storage_mib": 25.102142333984375,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "loop-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 4081.198512998526,
+    "p95_ms": 4135.956194203754,
+    "process_p50": [
+      4096.6297869890695,
+      4081.198512998526,
+      4023.351582000032
+    ],
+    "cpu_ms_call": 4213.333333333333,
+    "rss_mib": 109.3984375,
+    "storage_mib": 24.170509338378906,
+    "rows": {
+      "runtime_events": [
+        2448,
+        2448,
+        2448
+      ],
+      "node_executions": [
+        408,
+        408,
+        408
+      ],
+      "operator_calls": [
+        408,
+        408,
+        408
+      ],
+      "graph_changes": [
+        4460,
+        4460,
+        4460
+      ],
+      "edge_evaluations": [
+        800,
+        800,
+        800
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 1136.4071810094174,
+    "p95_ms": 1149.8366262036143,
+    "process_p50": [
+      1136.4071810094174,
+      1182.3785809974652,
+      1130.7625750050647
+    ],
+    "cpu_ms_call": 1192.0000000000002,
+    "rss_mib": 101.6171875,
+    "storage_mib": 11.769386291503906,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "map-100-16k",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 15,
+    "p50_ms": 1155.575344004319,
+    "p95_ms": 1173.4974527964368,
+    "process_p50": [
+      1133.1110049941344,
+      1170.6394339998951,
+      1155.575344004319
+    ],
+    "cpu_ms_call": 1210.0,
+    "rss_mib": 100.98828125,
+    "storage_mib": 11.702568054199219,
+    "rows": {
+      "runtime_events": [
+        1296,
+        1296,
+        1296
+      ],
+      "node_executions": [
+        18,
+        18,
+        18
+      ],
+      "operator_calls": [
+        612,
+        612,
+        612
+      ],
+      "graph_changes": [
+        150,
+        150,
+        150
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1392.4951069930103,
+    "p95_ms": 1411.75391900033,
+    "process_p50": [
+      1400.235952998628,
+      1392.4951069930103,
+      1387.9543180082692
+    ],
+    "cpu_ms_call": 1363.3333333333333,
+    "rss_mib": 154.82421875,
+    "storage_mib": 107.91510772705078,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "text-overwrite",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 9,
+    "p50_ms": 1571.9029040046735,
+    "p95_ms": 1584.9429157926352,
+    "process_p50": [
+      1555.277270002989,
+      1571.9029040046735,
+      1583.9427770115435
+    ],
+    "cpu_ms_call": 1536.6666666666663,
+    "rss_mib": 153.640625,
+    "storage_mib": 108.30974578857422,
+    "rows": {
+      "runtime_events": [
+        608,
+        608,
+        608
+      ],
+      "node_executions": [
+        88,
+        88,
+        88
+      ],
+      "operator_calls": [
+        88,
+        88,
+        88
+      ],
+      "graph_changes": [
+        1100,
+        1100,
+        1100
+      ],
+      "edge_evaluations": [
+        160,
+        160,
+        160
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "version": "after",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 196.15632700151764,
+    "p95_ms": 227.6097223533725,
+    "process_p50": [
+      196.15632700151764,
+      195.1868724936503,
+      197.2746664978331
+    ],
+    "cpu_ms_call": 189.21875000000003,
+    "rss_mib": 97.14453125,
+    "storage_mib": 36.094200134277344,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "unique-history",
+    "version": "before",
+    "runs": 3,
+    "statuses": {
+      "completed": 3
+    },
+    "calls": 384,
+    "p50_ms": 216.00651349581312,
+    "p95_ms": 247.46727214587733,
+    "process_p50": [
+      215.5676245020004,
+      216.1514285035082,
+      216.00651349581312
+    ],
+    "cpu_ms_call": 208.4375,
+    "rss_mib": 97.6015625,
+    "storage_mib": 35.86384582519531,
+    "rows": {
+      "runtime_events": [
+        4128,
+        4128,
+        4128
+      ],
+      "node_executions": [
+        774,
+        774,
+        774
+      ],
+      "operator_calls": [
+        774,
+        774,
+        774
+      ],
+      "graph_changes": [
+        6063,
+        6063,
+        6063
+      ],
+      "edge_evaluations": [
+        0,
+        0,
+        0
+      ]
+    }
+  }
+]

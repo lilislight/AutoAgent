@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 
 from .schema import meta
+from .graph_metadata import outgoing_edges
 
 PROJECTION_TABLES = (
     "sessions",
@@ -115,18 +116,26 @@ def light_record(item, *, availability=False):
 class ProjectionBatch:
     """Changed rows only; shared by writes, rebuilds and accepted query overlays."""
 
-    def __init__(self, connection, source_loader):
+    def __init__(self, connection, source_loader, *, graph_loader=None, metadata_cache=None):
         self.connection = connection
         self.source_loader = source_loader
+        self.graph_loader = graph_loader
+        self.metadata_cache = metadata_cache
         self.rows = {name: {} for name in PROJECTION_TABLES}
         self.dirty = {name: set() for name in PROJECTION_TABLES}
         self.order = 0
         self.ordinals = {}
+        self.changed_ordinals = set()
+        self.new_facts = {name: set() for name in ("edge_evaluations", "graph_changes")}
 
     async def get(self, name, **identity):
         table = meta.tables[name]
         key = tuple(identity[c.name] for c in table.primary_key)
         if key not in self.rows[name]:
+            cached = self.metadata_cache.get((name, key)) if self.metadata_cache else None
+            if cached is not None:
+                self.rows[name][key] = cached
+                return cached
             where = [table.c[k] == v for k, v in identity.items()]
             row = (
                 (await self.connection.execute(select(table).where(*where)))
@@ -135,6 +144,106 @@ class ProjectionBatch:
             )
             self.rows[name][key] = dict(row) if row else None
         return self.rows[name][key]
+
+    def publish(self):
+        """Called only after COMMIT; read snapshots never use this Writer cache."""
+        if self.metadata_cache is not None:
+            terminal = {row["invocation_id"] for row in self.rows["invocations"].values()
+                        if row and row.get("status") in ("completed", "failed", "cancelled")}
+            for name in ("sessions", "invocations", "node_executions", "operator_calls", "waits"):
+                for key, row in self.rows[name].items():
+                    if row and row.get("invocation_id") in terminal:
+                        self.metadata_cache.discard((name, key))
+                        continue
+                    if row is not None:
+                        # Newly inserted sparse rows read back nullable columns
+                        # as None; cache the same shape as a database SELECT.
+                        row = {column.name: row.get(column.name) for column in meta.tables[name].columns}
+                    self.metadata_cache.put((name, key), row)
+            for key in self.changed_ordinals:
+                if key[0] not in terminal:
+                    self.metadata_cache.put(("ordinals", key), self.ordinals[key])
+                else:
+                    # A terminal batch may advance a previously cached scope.
+                    # Recovery must read its committed MAX, not the older value.
+                    self.metadata_cache.discard(("ordinals", key))
+
+    async def prefetch(self, records):
+        """Load known projection identities in parameter-bounded groups."""
+        keys = {name: set() for name in ("sessions", "invocations", "node_executions", "operator_calls", "waits")}
+        scopes = set()
+
+        def scheduler(iid, value):
+            for oid, occurrence in value.get("occurrences", {}).items():
+                keys["node_executions"].add((iid, oid))
+                scopes.add((iid, occurrence["node_id"]))
+            for field, table in (("operator_calls", "operator_calls"), ("waits", "waits")):
+                keys[table].update((iid, key) for key in value.get(field, {}))
+
+        def plans(value):
+            for plan in value.values():
+                for unit in plan.get("units", ()):
+                    keys["sessions"].add((unit["session_id"],))
+                    keys["invocations"].add((unit["invocation_id"],))
+
+        for record in records:
+            if record.get("session_id"):
+                keys["sessions"].add((record["session_id"],))
+            iid = record.get("invocation_id")
+            if not iid:
+                continue
+            keys["invocations"].add((iid,))
+            payload = record.get("payload", {})
+            for field, table in (("occurrence_id", "node_executions"), ("call_id", "operator_calls"), ("wait_id", "waits")):
+                if payload.get(field):
+                    keys[table].add((iid, payload[field]))
+            for operation in (record.get("delta") or {}).get("operations", ()):
+                path, value = operation["path"], operation.get("value")
+                if path == ["invocation"] and isinstance(value, dict):
+                    scheduler(iid, value.get("scheduler", {}))
+                    plans(value.get("child_plans", {}))
+                elif path[:2] == ["invocation", "scheduler"] and len(path) >= 4:
+                    field, identity = path[2:4]
+                    table = {"occurrences": "node_executions", "operator_calls": "operator_calls", "waits": "waits"}.get(field)
+                    if table:
+                        keys[table].add((iid, identity))
+                    if field == "occurrences" and len(path) == 4 and isinstance(value, dict):
+                        scopes.add((iid, value["node_id"]))
+                elif path[:2] == ["invocation", "child_plans"] and len(path) == 3:
+                    plans({path[2]: value})
+        for name, identities in keys.items():
+            table = meta.tables[name]
+            missing = []
+            for key in identities:
+                if key in self.rows[name]:
+                    continue
+                cached = self.metadata_cache.get((name, key)) if self.metadata_cache else None
+                self.rows[name][key] = cached
+                if cached is None:
+                    missing.append(key)
+            columns = list(table.primary_key.columns)
+            for start in range(0, len(missing), 500):
+                result = (await self.connection.execute(select(table).where(
+                    tuple_(*columns).in_(missing[start:start + 500])))).mappings()
+                for row in result:
+                    self.rows[name][tuple(row[c.name] for c in columns)] = dict(row)
+        table = meta.tables["node_executions"]
+        missing = []
+        for scope in scopes:
+            cached = self.metadata_cache.get(("ordinals", scope)) if self.metadata_cache else None
+            if cached is not None:
+                self.ordinals[scope] = cached
+            elif self.rows["invocations"].get((scope[0],)) is None:
+                self.ordinals[scope] = 0
+            else:
+                missing.append(scope)
+                self.ordinals[scope] = 0
+        for start in range(0, len(missing), 500):
+            statement = select(table.c.invocation_id, table.c.node_id, func.max(table.c.ordinal)).where(
+                tuple_(table.c.invocation_id, table.c.node_id).in_(missing[start:start + 500])
+            ).group_by(table.c.invocation_id, table.c.node_id)
+            for iid, node, ordinal in await self.connection.execute(statement):
+                self.ordinals[(iid, node)] = ordinal
 
     async def put(self, name, identity, values):
         table = meta.tables[name]
@@ -149,6 +258,7 @@ class ProjectionBatch:
                 self.ordinals[scope] = await self.connection.scalar(select(func.max(table.c.ordinal)).where(
                     table.c.invocation_id == scope[0], table.c.node_id == scope[1])) or 0
             self.ordinals[scope] += 1
+            self.changed_ordinals.add(scope)
             row["ordinal"] = self.ordinals[scope]
         key = tuple(identity[c.name] for c in table.primary_key)
         self.rows[name][key] = row
@@ -163,7 +273,23 @@ class ProjectionBatch:
             if key in self.dirty[name] and row is not None
         ]
 
-    async def runtime(self, event, order, operator_definition_id=None):
+    async def put_fact(self, name, identity, values, *, new_event):
+        """Append facts only when the caller proved their source Event is new."""
+        if not new_event:
+            return await self.put(name, identity, values)
+        table = meta.tables[name]
+        key = tuple(identity[column.name] for column in table.primary_key)
+        if self.rows[name].get(key) is not None:
+            raise ValueError("A new Event produced a duplicate projection fact.")
+        row = dict(identity, **values)
+        self.rows[name][key] = row
+        self.dirty[name].add(key)
+        self.new_facts[name].add(key)
+        return row
+
+    async def runtime(
+        self, event, order, operator_definition_id=None, *, new_event=False
+    ):
         self.order = order
         sid, iid, seq = event["session_id"], event["invocation_id"], event["sequence"]
         payload, name, stamp = (
@@ -384,58 +510,63 @@ class ProjectionBatch:
             inv = await self.get("invocations", invocation_id=iid)
             if not inv:
                 return
-            snapshot = await self.source_loader(
-                self.connection, "workflow_revision", inv["workflow_revision_id"]
-            )
+            if self.graph_loader is not None:
+                graph = await self.graph_loader(self.connection, inv["workflow_revision_id"])
+            else:
+                # Query overlays and rebuilds retain their own connection's
+                # snapshot; they never consult the Writer's shared cache.
+                graph = outgoing_edges(await self.source_loader(
+                    self.connection, "workflow_revision", inv["workflow_revision_id"]))
+            definitions = graph.get(occurrence["node_id"], ())
             status = "complete" if occurrence["status"] == "completed" else "error"
+            needed = {edge.id for edge in definitions
+                      if not skipped and edge.on == status and edge.conditional}
+            pending_values = {
+                r["edge_id"]: r["condition_result"]
+                for r in self.rows["edge_evaluations"].values()
+                if r and r["invocation_id"] == iid
+                and r["source_occurrence_id"] == oid
+                and r["source_status"] == status and r["edge_id"] in needed
+            }
+            missing = needed - pending_values.keys()
             evaluations = meta.tables["edge_evaluations"]
             events = meta.tables["runtime_events"]
             stored = (
                 (
                     await self.connection.execute(
-                        select(evaluations, events.c.sequence)
+                        select(evaluations.c.edge_id, evaluations.c.condition_result)
                         .join(events, evaluations.c.event_id == events.c.event_id)
                         .where(
                             evaluations.c.invocation_id == iid,
                             evaluations.c.source_occurrence_id == oid,
                             evaluations.c.source_status == status,
+                            evaluations.c.edge_id.in_(missing),
                         )
                         .order_by(events.c.sequence, evaluations.c.result_index)
                     )
                 )
                 .mappings()
                 .all()
-            )
+            ) if missing else ()
             condition_values = {r["edge_id"]: r["condition_result"] for r in stored}
-            condition_values.update(
-                {
-                    r["edge_id"]: r["condition_result"]
-                    for r in self.rows["edge_evaluations"].values()
-                    if r
-                    and r["invocation_id"] == iid
-                    and r["source_occurrence_id"] == oid
-                    and r["source_status"] == status
-                }
-            )
-            for definition in snapshot["definition"]["edges"]:
-                if definition["source"] != occurrence["node_id"]:
-                    continue
+            condition_values.update(pending_values)
+            for definition in definitions:
                 selected = False
-                if not skipped and definition["on"] == status:
-                    if definition["condition"] is None:
+                if not skipped and definition.on == status:
+                    if not definition.conditional:
                         selected = True
-                    elif definition["id"] in condition_values:
-                        selected = condition_values[definition["id"]]
+                    elif definition.id in condition_values:
+                        selected = condition_values[definition.id]
                     else:
                         continue  # No condition result means no invented decision.
                 change(
                     "edge",
-                    definition["id"] + "@source:" + oid,
+                    definition.id + "@source:" + oid,
                     {
-                        "edge_id": definition["id"],
+                        "edge_id": definition.id,
                         "source_occurrence_id": oid,
                         "source_scope": occurrence["scope"],
-                        "target_node_id": definition["target"],
+                        "target_node_id": definition.target,
                         "selected": selected,
                     },
                 )
@@ -720,7 +851,7 @@ class ProjectionBatch:
             )
         elif name == "routing.resolved":
             for index, condition in enumerate(payload["conditions"]):
-                await self.put(
+                await self.put_fact(
                     "edge_evaluations",
                     {"event_id": event["id"], "result_index": index},
                     {
@@ -731,11 +862,12 @@ class ProjectionBatch:
                         "condition_result": condition["selected"],
                         "duration_ns": condition["duration_ns"],
                     },
+                    new_event=new_event,
                 )
         if "duration_ns" in payload and oid:
             change("node", oid, {"stage": name})
         for index, (typ, identity, values) in enumerate(changes):
-            await self.put(
+            await self.put_fact(
                 "graph_changes",
                 {"event_id": event["id"], "change_index": index},
                 {
@@ -753,6 +885,7 @@ class ProjectionBatch:
                     "error_type": values.get("error_type"),
                     "error_code": values.get("error_code"),
                 },
+                new_event=new_event,
             )
 
     async def checkpoint(self, record, checkpoint_id, *, anchor):

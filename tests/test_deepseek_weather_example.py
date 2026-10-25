@@ -17,7 +17,7 @@ import unittest
 
 from unittest.mock import patch
 
-from autoagent.agent import LLMMessage, LLMReasoning, LLMResponse, LLMToolCall, TextContent
+from autoagent.agent import LLMMessage, LLMReasoning, LLMResponse, LLMStreamChunk, LLMToolCall, TextContent
 from examples.deepseek_weather_assistant.weather_app.assistant import Question
 from examples.deepseek_weather_assistant.weather_app.project import weather_workflow
 from autoagent.agent import LLM_CALL, llm_call_operator
@@ -39,6 +39,9 @@ class ScriptedProvider:
     async def ainvoke(self, request):
         self.requests.append(request)
         return next(self.responses)
+
+    async def astream(self, request):
+        yield LLMStreamChunk(type="completed", response=await self.ainvoke(request))
 
 
 def completion(*items, reason="tool_calls"):

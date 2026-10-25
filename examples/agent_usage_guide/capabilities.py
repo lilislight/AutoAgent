@@ -35,13 +35,13 @@ async def main():
                     # Host already registers both Capability declarations.
                     # This binds implementations; no Resolver is needed.
                     async with OpenAIResponsesProvider(connection()) as llm, OpenAIEmbeddingProvider(connection()) as embeddings:
-                        setup.register_operator(llm_call_operator(llm, id="streamed" if streaming else "ordinary", streaming=streaming),
+                        setup.register_operator(llm_call_operator(llm),
                                                 capability_id=LLM_CALL.id, default=True)
                         setup.register_operator(embedding_operator(embeddings), capability_id=EMBEDDING.id, default=True)
                         yield
 
                 async with AutoAgentHost(workflows=workflows, settings=settings, lifespan=resources, environment={}) as host:
-                    generated = await host.join(await host.execute("generate", request()))
+                    generated = await host.join(await host.execute("generate", request(streaming=streaming)))
                     embedded = await host.join(await host.execute("embed", EmbeddingRequest(model="demo-embedding", input=("one", "two"))))
                     assert generated.status == "completed", generated.error
                     assert embedded.status == "completed", embedded.error

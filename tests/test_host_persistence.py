@@ -86,6 +86,174 @@ class Capture:
 
 
 class PersistenceContracts:
+    async def test_source_membership_reopens_and_preserves_cross_stream_conflicts(self):
+        """Startup loads persisted IDs, including collisions across different streams."""
+        sink=await self.sink()
+        event=RuntimeEvent('membership',1,SessionOpened({}))
+        await sink.append(event)
+        await sink.close()
+        reopened=await DatabaseSink.open(self.url,config=PersistenceConfig())
+        self.sinks.append(reopened)
+        identities=reopened._writer.storage.identities
+        self.assertTrue(identities.ready)
+        self.assertTrue(identities.may_contain('runtime_event',event.id))
+        await reopened.append(event)
+        with self.assertRaises(ConflictError):
+            await reopened.append(replace(event,session_id='other-stream'))
+        self.assertEqual(len(await self.rows(reopened,'runtime_events')),1)
+
+    async def test_saturated_source_filter_preserves_new_events_and_conflicts(self):
+        """A full filter falls back to SQL without false rejections or lost writes."""
+        sink=await self.sink(writer_metadata_cache_bytes=64)
+        writer=sink._writer
+        async def saturate():
+            writer.storage.identities.bits[:]=b'\xff'*len(writer.storage.identities.bits)
+        await writer.run(saturate)
+        event=RuntimeEvent('saturated',1,SessionOpened({}))
+        await sink.append(event)
+        await sink.append(event)
+        with self.assertRaises(ConflictError):
+            await sink.append(replace(event,payload=SessionOpened({'changed':True})))
+        self.assertEqual(len(await self.rows(sink,'runtime_events')),1)
+        self.assertLessEqual(writer.storage.metadata_cache.budget+len(writer.storage.identities.bits),64)
+
+    async def test_fresh_sources_and_commits_skip_redundant_position_queries(self):
+        """Known-new source IDs and the single Writer position need no preflight SQL."""
+        from sqlalchemy import event as sql_event
+        sink=await self.sink()
+        statements=[]
+        def sql(conn,cursor,statement,parameters,context,executemany):
+            statements.append(statement)
+        engine=sink._writer.storage.engine.sync_engine
+        sql_event.listen(engine,'before_cursor_execute',sql)
+        try:
+            for index in range(3):
+                await sink.append(RuntimeEvent(f'fresh-{index}',1,SessionOpened({})))
+        finally:
+            sql_event.remove(engine,'before_cursor_execute',sql)
+        self.assertFalse(any(q.startswith('SELECT runtime_events.')for q in statements))
+        self.assertFalse(any(q.startswith('SELECT persistence_meta.last_store_order')for q in statements))
+        self.assertEqual(sorted(r['store_order']for r in await self.rows(sink,'runtime_events')),[1,2,3])
+
+    async def test_user_tail_survives_lost_commit_ack_and_maintenance(self):
+        """Retry a committed User Event once and reload sequence state after maintenance."""
+        from sqlalchemy.exc import OperationalError
+        sink=await self.sink(retry_delay_ms=0)
+        storage=sink._writer.storage;original=storage.write;lost=False
+        async def lose_ack(entries):
+            nonlocal lost
+            result=await original(entries)
+            if not lost and any(e.kind=='user_event'for e in entries):
+                lost=True
+                raise OperationalError(None,None,OSError('lost acknowledgment'),connection_invalidated=True)
+            return result
+        storage.write=lose_ack
+        first=UserEvent('s','i',1,'progress',{})
+        await sink.append_user_event(first)
+        await sink.append_user_event(first)
+        await sink.rebuild_projections()
+        await sink.append_user_event(UserEvent('s','i',2,'progress',{}))
+        with self.assertRaises(ConflictError):
+            await sink.append_user_event(UserEvent('s','i',4,'progress',{}))
+        self.assertTrue(lost)
+        self.assertEqual([r['sequence']for r in await self.rows(sink,'user_events')],[1,2])
+
+    async def test_terminal_buffered_batch_cannot_leave_stale_ordinal_on_recovery(self):
+        """Recover after a failed batch advances an already cached Node ordinal."""
+        from autoagent import RecoverySource
+        calls = 0
+
+        def flaky(value: Value) -> Value:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ValueError('recover the second occurrence')
+            return {'blob': value['blob'][1:]}
+
+        capture = Capture()
+        workflow = Workflow('ordinal-recovery', nodes=[Node('entry', identity), Node('step', flaky), Node('finish', identity)],
+                            edges=[Edge('entry', 'step'), Edge('step', 'step', condition=again), Edge('step', 'finish', condition=finished)])
+        app = AutoAgentApp(runtime_event_sink=capture)
+        self.apps.append(app)
+        failed = await app.ainvoke(workflow, {'blob': 'xx'}, entry_node_id='entry')
+        self.assertEqual(failed.status, 'failed')
+        sink = await self.sink(mode='buffered', batch_delay_ms=60_000)
+        await sink.register_workflow(app.workflow_definition_snapshot(workflow.id))
+        first = True
+        for event in capture.events:
+            await sink.append(event)
+            if first and event.event_name == 'node_occurrence.started' and event.payload.occurrence_id.startswith('step'):
+                first = False
+                await sink.flush()
+                cached = sink._writer.storage.metadata_cache.get(('ordinals', (failed.ref.invocation_id, 'step')))
+                self.assertEqual(cached, 1)
+        await sink.flush()
+        boundary = len(capture.events)
+        recovered = await app.arecover(failed.ref, source=RecoverySource.from_events(tuple(capture.events)))
+        self.assertEqual(recovered.status, 'completed')
+        for event in capture.events[boundary:]:
+            await sink.append(event)
+        await sink.flush()
+        ordinals = [row['ordinal'] for row in await self.rows(sink, 'node_executions') if row['node_id'] == 'step']
+        self.assertEqual(sorted(ordinals), [1, 2, 3])
+
+    async def test_batch_source_writes_are_chunked_and_lossless(self):
+        """Bulk writes cross the parameter chunk boundary without losing ordered facts."""
+        from sqlalchemy import event as sql_event
+        sink = await self.sink(mode='buffered', batch_count=1024, batch_delay_ms=60_000)
+        statements = []
+
+        def sql(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith('INSERT INTO runtime_events'):
+                statements.append(statement)
+
+        engine = sink._writer.storage.engine.sync_engine
+        sql_event.listen(engine, 'before_cursor_execute', sql)
+        try:
+            for index in range(507):
+                await sink.append(RuntimeEvent(str(index), 1, SessionOpened({'shared': 'x' * 1024})))
+            await sink.flush()
+        finally:
+            sql_event.remove(engine, 'before_cursor_execute', sql)
+        rows = await self.rows(sink, 'runtime_events')
+        self.assertEqual(len(rows), 507)
+        self.assertEqual(sorted(row['store_order'] for row in rows), list(range(1, 508)))
+        self.assertEqual(len(statements), 2)
+        self.assertEqual(len(await self.rows(sink, 'sessions')), 507)
+
+    async def test_committed_metadata_is_not_published_before_commit(self):
+        """Rollback clears Writer metadata without exposing an uncommitted frontier."""
+        sink = await self.sink()
+        writer = sink._writer
+        event = RuntimeEvent('metadata-session', 1, SessionOpened({}))
+        original = writer.storage.projections
+
+        async def broken(conn, batch):
+            await original(conn, batch)
+            self.assertIsNone(writer.storage.metadata_cache.get(('sessions', ('metadata-session',))))
+            raise RuntimeError('rollback metadata')
+
+        writer.storage.projections = broken
+        with self.assertRaises(PersistenceError):
+            await sink.append(event)
+        self.assertFalse(writer.storage.metadata_cache.entries)
+        self.assertIsNone(await sink.get_session('metadata-session'))
+
+    async def test_metadata_eviction_preserves_frontiers_and_rebuild(self):
+        """Eviction and maintenance preserve committed rows and historical state."""
+        sink = await self.sink(writer_metadata_cache_bytes=4096)
+        app, workflow, _ = await self.registered(sink)
+        result = await app.ainvoke(workflow, {'blob': 'cache'})
+        await sink.flush()
+        cache = sink._writer.storage.metadata_cache
+        self.assertLessEqual(cache.bytes, 4096)
+        self.assertGreater(cache.evictions, 0)
+        before = await self.rows(sink, 'node_executions')
+        await sink.rebuild_projections()
+        self.assertFalse(cache.entries)
+        self.assertEqual(await self.rows(sink, 'node_executions'), before)
+        self.assertEqual(result.status, 'completed')
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.sinks, self.apps = [], []
@@ -184,6 +352,250 @@ class PersistenceContracts:
         self.assertEqual(
             sum(row["count"] for row in await sink.statistics("operator")), 2
         )
+
+    async def test_new_event_facts_append_without_reading_and_survive_lost_ack(self):
+        """New facts skip existence reads and remain unique after committed retries."""
+        from sqlalchemy import event
+        from sqlalchemy.exc import OperationalError
+
+        sink = await self.sink(retry_delay_ms=0)
+        workflow = Workflow('append-facts', nodes=[Node('a', identity), Node('b', identity)],
+                            edges=[Edge('a', 'b', condition=again)])
+        app = AutoAgentApp(runtime_event_sink=sink)
+        self.apps.append(app)
+        app.register_workflow(workflow)
+        await sink.register_workflow(app.workflow_definition_snapshot(workflow.id))
+        storage = sink._writer.storage
+        original = storage.write
+        lost = False
+        statements = []
+
+        async def lose_ack(entries):
+            nonlocal lost
+            order = await original(entries)
+            if not lost and any(e.light.get('event_name') == 'routing.resolved' for e in entries):
+                lost = True
+                raise OperationalError(None, None, OSError('lost commit acknowledgment'),
+                                       connection_invalidated=True)
+            return order
+
+        def inspect_sql(conn, cursor, statement, parameters, context, executemany):
+            if any(name in statement for name in ('graph_changes', 'edge_evaluations')):
+                statements.append(statement)
+
+        storage.write = lose_ack
+        engine = storage.engine.sync_engine
+        event.listen(engine, 'before_cursor_execute', inspect_sql)
+        try:
+            result = await app.ainvoke(workflow, {'blob': 'facts'})
+            await sink.flush()
+        finally:
+            event.remove(engine, 'before_cursor_execute', inspect_sql)
+            storage.write = original
+        self.assertEqual(result.status, 'completed')
+        self.assertTrue(lost)
+        self.assertFalse(any(q.startswith('SELECT graph_changes.') for q in statements))
+        self.assertFalse(any(q.startswith('SELECT edge_evaluations.') and 'JOIN' not in q for q in statements))
+        inserts = [q for q in statements if q.startswith(('INSERT INTO graph_changes', 'INSERT INTO edge_evaluations'))]
+        self.assertTrue(inserts)
+        self.assertTrue(all('ON CONFLICT' not in q for q in inserts))
+        before = {name: sorted(await self.rows(sink, name), key=lambda r: (r['event_id'], r.get('change_index', r.get('result_index'))))
+                  for name in ('graph_changes', 'edge_evaluations')}
+        routing = next(r for r in await self.rows(sink, 'runtime_events') if r['event_name'] == 'routing.resolved')
+        await sink.append(await sink.get_runtime_event(routing['event_id']))
+        await sink.rebuild_projections()
+        for name, expected in before.items():
+            actual = sorted(await self.rows(sink, name), key=lambda r: (r['event_id'], r.get('change_index', r.get('result_index'))))
+            self.assertEqual(actual, expected)
+
+    async def test_parent_child_projection_writes_each_node_once_per_batch(self):
+        """Parent-before-Child foreign keys hold without duplicate Node upserts."""
+        sink = await self.sink(mode='buffered', batch_delay_ms=1000)
+        child = Workflow('append-child', nodes=[Node('work', identity)])
+        root = Workflow('append-root', nodes=[Node('spawn', Spawn(child, 'work')), Node('await', Await())],
+                        edges=[Edge('spawn', 'await')])
+        app = AutoAgentApp(runtime_event_sink=sink)
+        self.apps.append(app)
+        app.register_workflow(root)
+        for workflow in (child, root):
+            await sink.register_workflow(app.workflow_definition_snapshot(workflow.id))
+        storage = sink._writer.storage
+        original_project, original_upsert = storage.projections, storage.upsert
+        seen = set()
+        writes = 0
+
+        async def project(conn, batch):
+            seen.clear()
+            return await original_project(conn, batch)
+
+        async def upsert(conn, name, rows):
+            nonlocal writes
+            if name == 'node_executions':
+                for row in rows:
+                    key = (row['invocation_id'], row['occurrence_id'])
+                    self.assertNotIn(key, seen)
+                    seen.add(key)
+                    writes += 1
+            return await original_upsert(conn, name, rows)
+
+        storage.projections, storage.upsert = project, upsert
+        try:
+            result = await app.ainvoke(root, {'blob': 'child'})
+            await sink.flush()
+        finally:
+            storage.projections, storage.upsert = original_project, original_upsert
+        self.assertEqual(result.status, 'completed')
+        self.assertGreater(writes, 0)
+        rows = await self.rows(sink, 'invocations')
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(any(row['parent_invocation_id'] for row in rows))
+
+    async def test_writer_graph_cache_skips_unconditional_reads_and_survives_eviction(self):
+        """Cache bounded revision metadata while keeping graph history exact after rebuild."""
+        from sqlalchemy import event
+        sink = await self.sink(workflow_graph_cache_bytes=1500)
+        storage = sink._writer.storage
+        queries = []
+
+        def sql(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith('SELECT'):
+                queries.append(statement)
+
+        event.listen(storage.engine.sync_engine, 'before_cursor_execute', sql)
+        results = []
+        try:
+            app = AutoAgentApp(runtime_event_sink=sink)
+            self.apps.append(app)
+            for i in range(3):
+                workflow = Workflow(f'cached-{i}', nodes=[Node('a', identity), Node('b', identity)],
+                                    edges=[Edge('a', 'b')])
+                app.register_workflow(workflow)
+                await sink.register_workflow(app.workflow_definition_snapshot(workflow.id))
+                for _ in range(2):
+                    result = await app.ainvoke(workflow, {'blob': 'metadata'})
+                    self.assertEqual(result.output, {'blob': 'metadata'})
+                    results.append(result)
+        finally:
+            event.remove(storage.engine.sync_engine, 'before_cursor_execute', sql)
+        self.assertFalse(any('FROM edge_evaluations' in q for q in queries))
+        # One full definition read per revision; admission uses only its PK.
+        self.assertEqual(sum('workflow_revisions.snapshot_text' in q for q in queries), 3)
+        self.assertGreater(storage.graph_cache.hits, 0)
+        self.assertGreaterEqual(storage.graph_cache.evictions, 2)
+        self.assertLessEqual(storage.graph_cache.bytes, 1500)
+        before = (await sink.graph_changes(results[-1].ref.invocation_id)).items
+        await sink.rebuild_projections()
+        self.assertEqual(storage.graph_cache.entries, {})
+        self.assertEqual((await sink.graph_changes(results[-1].ref.invocation_id)).items, before)
+        await sink.close()
+        self.assertEqual(storage.graph_cache.bytes, 0)
+
+    async def test_graph_cache_clears_after_rollback_and_definition_maintenance(self):
+        """Do not retain graph metadata across rollback, deletion or re-registration."""
+        sink = await self.sink()
+        app, workflow, _ = self.workflow()
+        snapshot = app.workflow_definition_snapshot(workflow.id)
+        await sink.register_workflow(snapshot)
+        revision = snapshot.workflow_revision_id
+        storage = sink._writer.storage
+        original = storage.write_transaction
+
+        async def broken(conn, entries):
+            await storage.workflow_graph(conn, revision)
+            self.assertTrue(storage.graph_cache.entries)
+            raise RuntimeError('rollback graph load')
+
+        async def rollback():
+            storage.write_transaction = broken
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'rollback graph load'):
+                    await storage.write([])
+            finally:
+                storage.write_transaction = original
+            self.assertFalse(storage.graph_cache.entries)
+            async with storage.engine.connect() as conn:
+                await storage.workflow_graph(conn, revision)
+
+        await sink._writer.run(rollback)
+        await sink.delete_workflow(revision)
+        self.assertEqual(storage.graph_cache.bytes, 0)
+        await sink.register_workflow(snapshot)
+        self.assertIsNotNone(await sink.get_workflow(revision))
+
+    async def test_projection_preserves_missing_conditions_other_status_and_skipped_edges(self):
+        """Never invent conditional decisions or omit unselected and skipped routes."""
+        from autoagent.host.persistence.projections import ProjectionBatch
+        sink = await self.sink()
+        snapshot = {'definition': {'edges': [
+            dict(id=f'{status}-{kind}', source='source', target='target', on=status,
+                 condition={} if kind == 'conditional' else None)
+            for status in ('complete', 'error') for kind in ('plain', 'conditional')
+        ] + [dict(id='unrelated', source='other', target='target', on='complete', condition=None)]}}
+
+        async def check():
+            async with sink._writer.storage.engine.connect() as conn:
+                async def load(*args):
+                    return snapshot
+                for status, decision in [('completed', None), ('completed', False),
+                                         ('completed', True), ('failed', True), ('skipped', None)]:
+                    batch = ProjectionBatch(conn, load)
+                    batch.rows['sessions'][('s',)] = {'session_id': 's'}
+                    batch.rows['invocations'][('i',)] = {'invocation_id': 'i', 'workflow_revision_id': 'r'}
+                    payload = dict(occurrence_id='source@root', output=None, metrics=None,
+                                   error={'type': 'Failure', 'code': 'TEST'})
+                    record = dict(id=uuid4().hex, session_id='s', invocation_id='i', sequence=1,
+                                  occurred_at_us=1, event_name='node_occurrence.failed' if status == 'failed'
+                                  else 'node_occurrence.completed', payload=payload)
+                    node = dict(node_id='source', scope='root', status=status)
+                    if status == 'skipped':
+                        record['event_name'] = 'scheduler.updated'
+                        record['delta'] = {'operations': [dict(op='set',
+                            path=['invocation','scheduler','occurrences','source@root'], value=node)]}
+                    else:
+                        batch.rows['node_executions'][('i', 'source@root')] = node
+                    source_status = 'error' if status == 'failed' else 'complete'
+                    if decision is not None:
+                        batch.rows['edge_evaluations'][('evaluation', 0)] = dict(
+                            invocation_id='i', source_occurrence_id='source@root',
+                            source_status=source_status, edge_id=source_status+'-conditional',
+                            condition_result=decision)
+                    await batch.runtime(record, 1, new_event=True)
+                    actual = {r['change']['edge_id']: r['change']['selected']
+                              for r in batch.changed('graph_changes') if r['entity_type'] == 'edge'}
+                    expected = {edge['id']: False for edge in snapshot['definition']['edges']
+                                if edge['source'] == 'source'}
+                    if status != 'skipped':
+                        expected[source_status+'-plain'] = True
+                        if decision is None:
+                            del expected[source_status+'-conditional']
+                        else:
+                            expected[source_status+'-conditional'] = decision
+                    self.assertEqual(actual, expected, (status, decision))
+        await sink._writer.run(check)
+
+    async def test_writer_installs_edge_lookup_index_without_reader_ddl(self):
+        """Refresh the current non-unique index on writer open without modifying readers."""
+        from sqlalchemy import inspect, text
+        sink = await self.sink()
+
+        async def drop():
+            async with sink._writer.storage.engine.begin() as conn:
+                await conn.execute(text('DROP INDEX edge_source_lookup'))
+        await sink._writer.run(drop)
+        await sink.close()
+
+        async def names(target):
+            async def read():
+                async with target._writer.storage.engine.connect() as conn:
+                    return await conn.run_sync(lambda c: {i['name'] for i in inspect(c).get_indexes('edge_evaluations')})
+            return await target._writer.run(read)
+
+        reader = await DatabaseSink.open(self.url, read_only=True)
+        self.sinks.append(reader)
+        self.assertNotIn('edge_source_lookup', await names(reader))
+        await reader.close()
+        reopened = await self.sink()
+        self.assertIn('edge_source_lookup', await names(reopened))
 
     async def test_artifacts_deduplicate_event_delta_and_checkpoint(self):
         """Store a shared MiB value once across original facts and checkpoints."""
@@ -340,6 +752,124 @@ class PersistenceContracts:
         await task
         self.assertEqual(len((await sink.runtime_events("s")).items), 1)
 
+    async def test_inflight_indexes_preserve_duplicates_tail_and_cancellation(self):
+        """Keep in-flight identities and newer stream tails until their own ACKs."""
+        sink = await self.sink(queue_count=2, batch_count=1)
+        writer = sink._writer
+        original = writer.storage.write
+
+        async def scenario():
+            gate, entered = asyncio.Event(), asyncio.Event()
+            next_gate, next_entered = asyncio.Event(), asyncio.Event()
+
+            async def delayed(entries):
+                entered.set()
+                await gate.wait()
+                if entries[0].identity == second.id:
+                    next_entered.set()
+                    await next_gate.wait()
+                return await original(entries)
+
+            writer.storage.write = delayed
+            first = UserEvent("s", "i", 1, "progress", {"value": 1})
+            second = UserEvent("s", "i", 2, "progress", {"value": 2})
+            a = asyncio.create_task(writer.accept("user_event", first.id, first))
+            await asyncio.wait_for(entered.wait(), 2)
+            b = asyncio.create_task(writer.accept("user_event", second.id, second))
+            while writer.pending_count != 2:
+                await asyncio.sleep(0)
+            duplicate = asyncio.create_task(
+                writer.accept("user_event", first.id, replace(first))
+            )
+            third = UserEvent("s", "i", 3, "progress", {})
+            blocked = asyncio.create_task(writer.accept("user_event", third.id, third))
+            try:
+                # Wait until the producer has finished SQL/codec validation and
+                # is actually blocked at the queue budget.
+                async def at_capacity():
+                    while not writer.condition._waiters:
+                        await asyncio.sleep(0)
+
+                await asyncio.wait_for(at_capacity(), 2)
+                duplicate.cancel()
+                blocked.cancel()
+                await asyncio.gather(duplicate, blocked, return_exceptions=True)
+                self.assertFalse(a.done())
+                self.assertEqual(len(writer.pending_by_identity), 2)
+                self.assertIs(writer.pending_tails[("user_event", "i")].value, second)
+                self.assertNotIn(("user_event", third.id), writer.pending_by_identity)
+                gate.set()
+                await asyncio.wait_for(next_entered.wait(), 2)
+                self.assertEqual(len(writer.pending_by_identity), 1)
+                self.assertIs(writer.pending_tails[("user_event", "i")].value, second)
+            finally:
+                gate.set()
+                next_gate.set()
+                await asyncio.gather(a, b)
+                await writer.flush()
+            self.assertEqual(writer.pending_by_identity, {})
+            self.assertEqual(writer.pending_tails, {})
+            self.assertEqual(writer.objects, {})
+
+        await asyncio.wait_for(writer.run(scenario), 10)
+        self.assertEqual([e["sequence"] for e in (await sink.user_events("i")).items], [1, 2])
+        # Independent producers still share the same serialized admission order.
+        await asyncio.gather(*(
+            sink.append(RuntimeEvent(f"producer-{i}", 1, SessionOpened({})))
+            for i in range(6)
+        ))
+        await sink.flush()
+
+    async def test_admission_sql_does_not_block_commit_ack(self):
+        """Allow the worker to ACK and release capacity during a slow admission read."""
+        sink = await self.sink(mode="buffered", queue_count=1, batch_delay_ms=0)
+        writer = sink._writer
+        original_write, original_source = writer.storage.write, writer.storage.source_header
+
+        async def scenario():
+            write_gate, writing = asyncio.Event(), asyncio.Event()
+            read_gate, reading = asyncio.Event(), asyncio.Event()
+            first = UserEvent("s", "i", 1, "progress", {})
+            second = UserEvent("s", "i", 2, "progress", {})
+
+            async def delayed_write(entries):
+                writing.set()
+                await write_gate.wait()
+                return await original_write(entries)
+
+            async def delayed_read(conn, kind, identity):
+                result = await original_source(conn, kind, identity)
+                if identity == second.id:
+                    reading.set()
+                    await read_gate.wait()
+                return result
+
+            writer.storage.write = delayed_write
+            writer.storage.source_header = delayed_read
+            await writer.accept("user_event", first.id, first)
+            await asyncio.wait_for(writing.wait(), 2)
+            second_call = asyncio.create_task(
+                writer.accept("user_event", second.id, second)
+            )
+            try:
+                await asyncio.wait_for(reading.wait(), 2)
+                completion = writer.pending_by_identity[("user_event", first.id)].done
+                write_gate.set()
+                await asyncio.wait_for(asyncio.shield(completion), 2)
+                self.assertFalse(second_call.done())
+                self.assertEqual(writer.pending_count, 0)
+                self.assertEqual(writer.pending_tails, {})
+            finally:
+                read_gate.set()
+                write_gate.set()
+                await second_call
+            await writer.flush()
+            self.assertEqual(writer.pending_by_identity, {})
+            self.assertEqual(writer.pending_tails, {})
+
+        await asyncio.wait_for(writer.run(scenario), 10)
+        self.assertEqual([e["sequence"] for e in (await sink.user_events("i")).items], [1, 2])
+
     async def test_cancelled_durable_waiter_cannot_cancel_the_write(self):
         """Cancellation after acceptance leaves the real writer running."""
         sink = await self.sink(durable_batch_delay_ms=200)
@@ -405,10 +935,16 @@ class PersistenceContracts:
         with self.assertRaises(PersistenceError):
             await sink.append(RuntimeEvent("b", 1, SessionOpened({})))
         self.assertEqual((await sink.health()).state, "faulted")
+        async def retained_indexes():
+            self.assertEqual(len(sink._writer.pending_by_identity), 1)
+            self.assertEqual(len(sink._writer.pending_tails), 1)
+        await sink._writer.run(retained_indexes)
         self.assertEqual((await sink.runtime_events("a")).items, ())
         with self.assertRaises(PersistenceError):
             await sink.close()
         self.assertFalse(sink._writer.thread.is_alive())
+        self.assertEqual(sink._writer.pending_by_identity, {})
+        self.assertEqual(sink._writer.pending_tails, {})
 
     async def test_checkpoint_cannot_advance_beyond_event_frontier(self):
         """Reject a normal checkpoint whose Event prefix was never persisted."""
@@ -880,7 +1416,57 @@ class PersistenceContracts:
 
 
 class SQLitePersistenceTests(PersistenceContracts, unittest.IsolatedAsyncioTestCase):
-    pass
+    async def test_memory_connection_serializes_admission_and_mutation(self):
+        """Keep admission SQL off the single SQLite connection while a write owns it."""
+        sink = await DatabaseSink.open(
+            "sqlite+aiosqlite:///:memory:",
+            config=PersistenceConfig(mode="buffered", batch_delay_ms=0),
+        )
+        self.sinks.append(sink)
+        writer = sink._writer
+        original_write, original_source = writer.storage.write, writer.storage.source_header
+
+        async def scenario():
+            gate, entered = asyncio.Event(), asyncio.Event()
+            reads, writing = 0, False
+
+            async def delayed_write(entries):
+                nonlocal writing
+                writing = True
+                entered.set()
+                await gate.wait()
+                try:
+                    return await original_write(entries)
+                finally:
+                    writing = False
+
+            async def checked_read(*args):
+                nonlocal reads
+                self.assertFalse(writing)
+                self.assertTrue(writer.mutation.locked())
+                reads += 1
+                return await original_source(*args)
+
+            writer.storage.write, writer.storage.source_header = delayed_write, checked_read
+            first = UserEvent("memory", "first", 1, "progress", {})
+            await writer.accept("user_event", first.id, first)
+            await asyncio.wait_for(entered.wait(), 2)
+            others = [UserEvent("memory", f"i-{i}", 1, "progress", {}) for i in range(6)]
+            tasks = [asyncio.create_task(writer.accept("user_event", e.id, e)) for e in others]
+            try:
+                await asyncio.sleep(.02)
+                self.assertEqual(reads, 1)
+                self.assertTrue(all(not task.done() for task in tasks))
+            finally:
+                gate.set()
+                await asyncio.gather(*tasks)
+            await writer.flush()
+            self.assertEqual(writer.pending_by_identity, {})
+            self.assertEqual(writer.pending_tails, {})
+            self.assertEqual(writer.objects, {})
+
+        await asyncio.wait_for(writer.run(scenario), 10)
+        self.assertEqual(len(await self.rows(sink, "user_events")), 7)
 
 
 @unittest.skipUnless(

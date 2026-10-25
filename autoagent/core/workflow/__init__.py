@@ -32,6 +32,7 @@ from .models import (
     UserEventSpec,
     Workflow,
     WorkflowIR,
+    WorkflowGroupIR,
 )
 from .hooks import HookVersion, workflow_hook, workflow_hook_version
 
@@ -67,6 +68,7 @@ __all__ = [
     "UserEventSpec",
     "Workflow",
     "WorkflowIR",
+    "WorkflowGroupIR",
     "HookVersion",
     "workflow_hook",
     "workflow_hook_version",

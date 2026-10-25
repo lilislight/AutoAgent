@@ -11,7 +11,7 @@ from ..models import (
     ProviderSource, URLSource,
 )
 from ..models.streaming import LLMStreamChunk
-from ._common import check_native, raw_object, unsupported
+from ._common import check_native, raw_object, require_model, unsupported
 from .base import LLMProvider, LLMProviderError
 from ._openai_client import OpenAIClientOwner
 from .chat_completions import ChatCompletionsAdapter
@@ -95,6 +95,12 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
     async def _create(self, params):
         return await self._endpoint(self._get_client()).create(**params)
 
+    async def _close_stream(self, source):
+        close = getattr(source, "aclose", None) or source.close
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
     async def ainvoke(self, request: LLMRequest) -> LLMResponse:
         self._bind_loop()
         self._active += 1
@@ -102,6 +108,7 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
         request_id = None
         try:
             request = LLMRequest.model_validate(request)
+            require_model(request, self.provider_id, self.protocol)
             recording = await start_llm_call(self, request)
             request = await self._prepare_request(request)
             params = self.adapter.encode_request(request, provider_id=self.provider_id)
@@ -148,6 +155,7 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
         request_id = None
         try:
             request = LLMRequest.model_validate(request)
+            require_model(request, self.provider_id, self.protocol)
             recording = await start_llm_call(self, request, streaming=True)
             request = await self._prepare_request(request)
             params = self.adapter.encode_request(request, provider_id=self.provider_id)
@@ -186,10 +194,7 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
                         await decoder.aclose()
                 finally:
                     if source is not None:
-                        close = getattr(source, "aclose", None) or source.close
-                        result = close()
-                        if inspect.isawaitable(result):
-                            await result
+                        await self._close_stream(source)
             except BaseException as error:
                 if not failed:
                     failure = error

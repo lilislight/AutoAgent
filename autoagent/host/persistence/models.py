@@ -55,6 +55,8 @@ class PersistenceConfig:
     queue_count: int = 10_000
     queue_bytes: int = 128 * MIB
     encoding_cache_bytes: int = 16 * MIB
+    workflow_graph_cache_bytes: int = 4 * MIB
+    writer_metadata_cache_bytes: int = 4 * MIB
     trace_snapshot_bytes: int = 128 * MIB
     trace_snapshot_ttl_seconds: float = 300
     inspection_scan_events: int = 100_000
@@ -73,6 +75,8 @@ class PersistenceConfig:
             "queue_count",
             "queue_bytes",
             "encoding_cache_bytes",
+            "workflow_graph_cache_bytes",
+            "writer_metadata_cache_bytes",
             "trace_snapshot_bytes",
             "inspection_scan_events",
             "inspection_read_bytes",

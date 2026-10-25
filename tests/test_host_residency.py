@@ -519,7 +519,11 @@ class ResidencyConfigurationTests(unittest.TestCase):
         example = Path(__file__).resolve().parents[1] / '.env.example'
         env = dict(line.split('=', 1) for line in example.read_text().splitlines() if line.startswith('AUTOAGENT_'))
         self.assertEqual(HostSettings.from_environment(env), HostSettings())
-        settings = HostSettings.from_environment(dict(env, AUTOAGENT_HOST_COLD_AFTER_SECONDS='17', AUTOAGENT_HOST_CHECKPOINT_TAIL_EVENTS='99', AUTOAGENT_BATCH_DELAY_MS='500'))
+        settings = HostSettings.from_environment(dict(env, AUTOAGENT_HOST_COLD_AFTER_SECONDS='17', AUTOAGENT_HOST_CHECKPOINT_TAIL_EVENTS='99', AUTOAGENT_BATCH_DELAY_MS='500', AUTOAGENT_WORKFLOW_GRAPH_CACHE_BYTES='12345'))
         self.assertEqual(settings.cold_after_seconds, 17)
         self.assertEqual(settings.checkpoint_tail_events, 99)
         self.assertEqual(settings.persistence.batch_delay_ms, 500)
+        self.assertEqual(settings.persistence.workflow_graph_cache_bytes, 12345)
+        for invalid in ('0', '-1', 'nan'):
+            with self.subTest(graph_cache_bytes=invalid), self.assertRaises(ValueError):
+                HostSettings.from_environment(dict(env, AUTOAGENT_WORKFLOW_GRAPH_CACHE_BYTES=invalid))

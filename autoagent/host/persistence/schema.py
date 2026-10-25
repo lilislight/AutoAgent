@@ -382,7 +382,8 @@ indexes = {
               ("wait_updates", ["invocation_id", "updated_store_order"]),
               ("wait_deadline", ["status", "deadline_at_us", "invocation_id"])],
     "edge_evaluations": [
-        ("edge_statistics", ["edge_id", "source_status", "invocation_id"])
+        ("edge_statistics", ["edge_id", "source_status", "invocation_id"]),
+        ("edge_source_lookup", ["invocation_id", "source_occurrence_id", "source_status"]),
     ],
     "graph_changes": [
         ("graph_updates", ["invocation_id", "store_order", "change_index"]),

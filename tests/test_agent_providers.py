@@ -162,6 +162,50 @@ class ProviderSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.text, "{}")
         self.assertEqual(result.provider_metadata["_request_id"], "request_1")
 
+    async def test_call_settings_do_not_leak_routing_or_unresolved_models_to_http(self):
+        """Adapters encode only wire fields and reject a pending model before any HTTP request."""
+        for protocol in ("chat", "responses"):
+            with self.subTest(protocol=protocol):
+                provider, _, captured = self.provider(protocol)
+                for method in ("ainvoke", "astream"):
+                    with self.assertRaisesRegex(LLMUnsupportedRequest, "Resolve a model"):
+                        if method == "ainvoke":
+                            await provider.ainvoke(request(model=None))
+                        else:
+                            _ = [chunk async for chunk in provider.astream(request(model=None))]
+                self.assertEqual(captured, [])
+                await provider.ainvoke(request(streaming=True, routing={"task": "local-only"}))
+                body = captured[0][1]
+                self.assertNotIn("routing", body)
+                self.assertNotIn("streaming", body)
+                self.assertFalse(body.get("stream", False))
+
+    async def test_selected_provider_rejects_incompatible_history_before_http(self):
+        """Selecting another Provider never silently strips protocol-specific options or native history."""
+        from contextlib import aclosing
+        from autoagent.agent import LLM_CALL, LLMSelection, llm_call_operator
+        provider, _, captured = self.provider()
+        @asynccontextmanager
+        async def resources():
+            async with provider:
+                yield
+        values = (
+            request(model=None, provider_options=LLMProviderOptions(
+                provider_id="other", protocol="openai.responses", values={})),
+            request(model=None, provider_options=LLMProviderOptions(protocol="openai.chat_completions")),
+            request(TextContent(text="Hello", native=LLMNativeData(
+                provider_id="other", protocol="openai.responses", payload={"signature": "opaque"})), model=None),
+        )
+        async with aclosing(AutoAgentApp(runtime_lifespan=resources)) as app:
+            app.register_operator(llm_call_operator(resolver=lambda value: LLMSelection(provider, "model")),
+                                  capability_id=LLM_CALL.id)
+            await app.aprepare()
+            for value in values:
+                result = await app.ainvoke(Workflow("mismatch", nodes=[Node("call", LLM_CALL)]), value)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("another", result.error.message)
+        self.assertEqual(captured, [])
+
     async def test_chat_sdk_encodes_audio_pdf_and_function_envelopes(self):
         """Chat Completions uses its own media and function parameter envelopes."""
         provider, _, captured = self.provider("chat")

@@ -388,9 +388,9 @@ class TimelineQueries:
                     (occurrences.c.status == 'ready', 2), else_=3), occurrences.c._created.desc(), occurrences.c.occurrence_id.desc())).label('_rank')
         ).subquery()
         node_states = [dict(row) for row in (await conn.execute(select(*(c for c in grouped.c if c.name != '_rank')).where(grouped.c._rank == 1))).mappings()]
-        call_counts = await node_call_counts(conn, iid, seq)
+        call_counts = await node_call_counts(conn, iid, seq, select(grouped.c.occurrence_id).where(grouped.c._rank == 1))
         for row in node_states:
-            row['call_count'] = call_counts.get(row['node_id'], 0)
+            row['call_count'] = call_counts.get(row['occurrence_id'], 0)
         invocation = dict(record, status='running', control_state='active', completed_at_us=None, last_sequence=seq, values=[])
         for field in ('status', 'control_state'):
             value = g.c.change[field].as_string()

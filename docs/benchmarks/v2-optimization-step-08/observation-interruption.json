@@ -1,0 +1,16 @@
+{
+  "reason": "Stop observation-path screening to isolate high-concurrency polling amplification from group commit; retain partial raw data.",
+  "signal": "SIGINT",
+  "controller_pid": 278416,
+  "unix_time": 1792826662.7042313,
+  "worker_signal": "SIGKILL",
+  "reason_for_force": "SIGINT interrupted the controller but ThreadPoolExecutor cleanup waited for in-flight HTTP calls; terminate owned disposable Server to release those waits.",
+  "stored_invocation_statuses_including_warmup": {
+    "completed": 1,
+    "running": 32
+  },
+  "stored_session_event_count_range": [
+    39,
+    62
+  ]
+}

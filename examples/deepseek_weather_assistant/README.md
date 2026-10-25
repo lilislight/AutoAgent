@@ -114,7 +114,9 @@ Node 的 `ResourcePolicy` 也限制启动次数。超时、重试、Map 并发�
 AUTOAGENT_LLM_STREAMING=true
 ```
 
-重启后，Provider 使用流式 API。`LLM_CALL` 的默认 Reducer 保留权威的终态响应，
+重启后，`llm_request()` 将环境默认值写入请求，`LLM_CALL` 根据该请求使用流式 API。
+单次调用可显式传 `streaming=False` 覆盖默认值，也可以独立指定 `model` 和 `max_output_tokens`。
+`LLM_CALL` 的默认 Reducer 保留权威的终态响应，
 Node 最终仍返回完整 `LLMResponse`，包括 Tools、Usage 和协议扩展字段；
 无需在 Node 上配置 `LLMStreamReducer`，也不会自动产生 User Event。
 

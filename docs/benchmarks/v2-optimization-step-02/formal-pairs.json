@@ -1,0 +1,80 @@
+[
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "median_paired_reduction_pct": -0.3832253510776429,
+    "ratio_of_process_medians_reduction_pct": 0.9190351966546273,
+    "paired_bootstrap_95_pct": [
+      -1.1547574876874966,
+      14.905190729790185
+    ],
+    "baseline_process_spread_pct": 1.5452677967770168,
+    "note": "Exact paired bootstrap over 5 independent process pairs (3125 resamples); exploratory, not a production SLO."
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "case": "context-append-formal",
+    "median_paired_reduction_pct": -0.28266498744971,
+    "ratio_of_process_medians_reduction_pct": -5.478745108077576,
+    "paired_bootstrap_95_pct": [
+      -6.387529975366091,
+      2.8618449607649477
+    ],
+    "baseline_process_spread_pct": 5.291479640305119,
+    "note": "Exact paired bootstrap over 5 independent process pairs (3125 resamples); exploratory, not a production SLO."
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "chain-10-16k-formal",
+    "median_paired_reduction_pct": -0.07924068192435296,
+    "ratio_of_process_medians_reduction_pct": 0.6896623634941146,
+    "paired_bootstrap_95_pct": [
+      -0.46686685311136955,
+      5.556535776664761
+    ],
+    "baseline_process_spread_pct": 5.198993120954976,
+    "note": "Exact paired bootstrap over 5 independent process pairs (3125 resamples); exploratory, not a production SLO."
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "slow-storage-formal",
+    "median_paired_reduction_pct": -0.33996330399070906,
+    "ratio_of_process_medians_reduction_pct": 0.6015153717366051,
+    "paired_bootstrap_95_pct": [
+      -1.1189634901001222,
+      5.648348089927325
+    ],
+    "baseline_process_spread_pct": 1.3633306265538936,
+    "note": "Exact paired bootstrap over 5 independent process pairs (3125 resamples); exploratory, not a production SLO."
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-join-artifacts-8k",
+    "case": "join-context-append",
+    "median_paired_reduction_pct": 1.324327534205827,
+    "ratio_of_process_medians_reduction_pct": 0.8444956898414846,
+    "paired_bootstrap_95_pct": [
+      -0.8465677745803868,
+      4.15091801199905
+    ],
+    "baseline_process_spread_pct": 2.752213673182924,
+    "note": "Exact paired bootstrap over 5 independent process pairs (3125 resamples); exploratory, not a production SLO."
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "case": "slow-storage-formal",
+    "median_paired_reduction_pct": -0.27118287710075073,
+    "ratio_of_process_medians_reduction_pct": -0.3643444140472685,
+    "paired_bootstrap_95_pct": [
+      -5.620757294712364,
+      4.467841288436791
+    ],
+    "baseline_process_spread_pct": 10.090285535406807,
+    "note": "Exact paired bootstrap over 5 independent process pairs (3125 resamples); exploratory, not a production SLO."
+  }
+]

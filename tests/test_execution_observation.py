@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ import httpx
 
 from autoagent import ChildCase, Edge, InputMappingContext, Map, Node, RuntimeHandle, Select, SignalCase, SignalEndpoint, Spawn, Timer, Wait, Workflow
 from autoagent.host import AutoAgentHost, HostSettings
-from autoagent.host.persistence import PersistenceConfig
+from autoagent.host.persistence import ClosedError, PersistenceConfig, PersistenceError
 from autoagent.host.persistence.reading import SourceReader
 from autoagent.server import create_app
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
@@ -31,6 +32,139 @@ def child_handle(context: InputMappingContext) -> RuntimeHandle:
 
 
 class ExecutionObservationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notification_wait_wakes_on_writer_fault_and_close(self):
+        """A failed or closing Writer wakes observers instead of leaving them blocked."""
+        wf = Workflow('notification-fault', nodes=[Node('work', identity)])
+        async with self.host([wf]) as host:
+            sink, writer = host._persistence, host._persistence._writer
+            async with sink.execution_notifications('selected') as (revision, changed):
+                async def transition(state):
+                    async with writer.condition:
+                        writer.state = state
+                        writer.fault = RuntimeError('test failure') if state == 'faulted' else None
+                        writer.condition.notify_all()
+
+                for state, error in [('faulted', PersistenceError), ('closing', ClosedError)]:
+                    try:
+                        await writer.run(transition, state)
+                        with self.assertRaises(error):
+                            await changed(revision, 1, 'selected')
+                    finally:
+                        await writer.run(transition, 'open')
+
+    async def test_commit_during_snapshot_cannot_lose_terminal_notification(self):
+        """A terminal commit after a stale snapshot wakes observation without waiting for fallback."""
+        entered, release = threading.Event(), threading.Event()
+
+        async def gated(value: Value) -> Value:
+            entered.set()
+            while not release.is_set():
+                await asyncio.sleep(0.005)
+            return value
+
+        wf = Workflow('notification-race', nodes=[Node('work', gated)])
+        async with self.host([wf]) as host:
+            ref = await host.execute(wf.id, {'text': 'race'}, entry_node_id='work')
+            if not await asyncio.to_thread(entered.wait, 2):
+                release.set()
+                self.fail('Operator did not start')
+            original = host.get_execution_state
+            first = True
+
+            async def stale_snapshot(iid):
+                nonlocal first
+                state = await original(iid)
+                if first:
+                    first = False
+                    self.assertFalse(state['settled'])
+                    release.set()
+                    await host.join(ref, timeout=2)
+                    await host._persistence.flush()
+                return state
+
+            writer = host._persistence._writer
+            wait = writer.wait_execution_change
+            notifications = []
+
+            async def checked(token, after, timeout, root_id):
+                notifications.append(writer.execution_watches[token][1] != after)
+                return await wait(token, after, timeout, root_id)
+
+            with patch.object(host, 'get_execution_state', stale_snapshot), patch.object(writer, 'wait_execution_change', checked):
+                result = await host.wait_execution(ref.invocation_id, until='terminal', timeout=2)
+            self.assertEqual(result['observation'], 'terminal')
+            self.assertEqual(notifications, [True])
+            self.assertFalse(writer.execution_watches)
+
+    async def test_unrelated_notifications_are_filtered_and_subscriptions_released(self):
+        """Scope wakeups to selected executions and retain no observer history after exit."""
+        wf = Workflow('notification-filter', nodes=[Node('work', identity)])
+        async with self.host([wf]) as host:
+            sink, writer = host._persistence, host._persistence._writer
+            async with sink.execution_notifications('selected') as (revision, changed):
+                async def notify(identities):
+                    async with writer.condition:
+                        writer.notify_executions(identities)
+                        writer.condition.notify_all()
+
+                await writer.run(notify, {'unrelated'})
+                self.assertEqual(await changed(revision, 0.01, 'selected'), revision)
+                await writer.run(notify, {'selected'})
+                updated = await changed(revision, 1, 'selected')
+                self.assertGreater(updated, revision)
+                # Adding a Root must force a fresh snapshot even if its commit
+                # happened before we learned the Child's Root identity.
+                self.assertGreater(await changed(updated, 1, 'root'), updated)
+            self.assertFalse(writer.execution_watches)
+
+    async def test_cancelled_observer_releases_notification_subscription(self):
+        """Cancellation removes the watch while leaving execution under Host control."""
+        wf = Workflow('notification-cancel', nodes=[Node('work', delayed)])
+        async with self.host([wf]) as host:
+            ref = await host.execute(wf.id, {'text': 'cancel observer'}, entry_node_id='work')
+            observer = asyncio.create_task(host.wait_execution(ref.invocation_id, until='terminal'))
+            for _ in range(100):
+                if host._persistence._writer.execution_watches:
+                    break
+                await asyncio.sleep(0.001)
+            self.assertTrue(host._persistence._writer.execution_watches)
+            observer.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await observer
+            self.assertFalse(host._persistence._writer.execution_watches)
+            await host.join(ref)
+
+    async def test_cancelled_registration_releases_undelivered_subscription(self):
+        """Cancellation before registration returns cannot leak a Writer-side watch."""
+        wf = Workflow('notification-registration-cancel', nodes=[Node('work', identity)])
+        async with self.host([wf]) as host:
+            sink, writer = host._persistence, host._persistence._writer
+            registered, release = asyncio.Event(), asyncio.Event()
+            original_run = writer.run
+
+            async def delayed_registration_result(function, *args, **kwargs):
+                result = await original_run(function, *args, **kwargs)
+                if function == writer.subscribe_execution:
+                    registered.set()
+                    await release.wait()
+                return result
+
+            async def observe():
+                async with sink.execution_notifications('selected'):
+                    self.fail('A cancelled registration must not enter the observer body.')
+
+            with patch.object(writer, 'run', delayed_registration_result):
+                observer = asyncio.create_task(observe())
+                try:
+                    await asyncio.wait_for(registered.wait(), 2)
+                    self.assertTrue(writer.execution_watches)
+                    observer.cancel()
+                finally:
+                    release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await observer
+            self.assertFalse(writer.execution_watches)
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.url = "sqlite+aiosqlite:///" + str(Path(self.temp.name) / "observation.db")

@@ -186,26 +186,37 @@ function routeSingleEdge(
   return simplifyOrthogonalPoints(points);
 }
 
+/** Route between explicit handles, including handles on folded Workflow groups. */
+export function routePortPair(source: GraphPoint, target: GraphPoint, obstacles: GraphRect[], bounds?: GraphRect): GraphPoint[] {
+  const start = {x:source.x + GRAPH_ROUTE_CLEARANCE,y:source.y};
+  const end = {x:target.x - GRAPH_ROUTE_CLEARANCE,y:target.y};
+  return simplifyOrthogonalPoints([source,...routeBetween(start,end,obstacles,bounds),target]);
+}
+
 function routeBetween(
   start: GraphPoint,
   end: GraphPoint,
   obstacles: GraphRect[],
+  bounds?: GraphRect,
 ): GraphPoint[] {
   const xValues = uniqueSorted([
     start.x,
     end.x,
     ...obstacles.flatMap((rect) => [rect.left, rect.right]),
+    ...(bounds ? [bounds.left,bounds.right] : []),
   ]);
   const yValues = uniqueSorted([
     start.y,
     end.y,
     ...obstacles.flatMap((rect) => [rect.top, rect.bottom]),
+    ...(bounds ? [bounds.top,bounds.bottom] : []),
   ]);
   const points: GraphPoint[] = [];
   const pointIndex = new Map<string, number>();
   for (const x of xValues) {
     for (const y of yValues) {
       const point = { x, y };
+      if(bounds && (x<bounds.left||x>bounds.right||y<bounds.top||y>bounds.bottom))continue;
       if (pointInsideAnyObstacle(point, obstacles)) continue;
       pointIndex.set(pointKey(point), points.length);
       points.push(point);
@@ -214,7 +225,7 @@ function routeBetween(
   const startIndex = pointIndex.get(pointKey(start));
   const endIndex = pointIndex.get(pointKey(end));
   if (startIndex === undefined || endIndex === undefined) {
-    return fallbackOuterRoute(start, end, obstacles);
+    return boundedFallback(start,end,obstacles,bounds);
   }
   const neighbors = buildVisibilityNeighbors(points, obstacles);
   const path = searchOrthogonalPath(
@@ -223,7 +234,12 @@ function routeBetween(
     startIndex,
     endIndex,
   );
-  return path ?? fallbackOuterRoute(start, end, obstacles);
+  return path ?? boundedFallback(start,end,obstacles,bounds);
+}
+
+function boundedFallback(start:GraphPoint,end:GraphPoint,obstacles:GraphRect[],bounds?:GraphRect):GraphPoint[]{
+  const points=fallbackOuterRoute(start,end,obstacles);
+  return bounds?points.map(p=>({x:Math.max(bounds.left,Math.min(bounds.right,p.x)),y:Math.max(bounds.top,Math.min(bounds.bottom,p.y))})):points;
 }
 
 function buildVisibilityNeighbors(

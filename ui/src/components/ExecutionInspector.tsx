@@ -5,7 +5,7 @@ import type { ExecutionTrace, Selection, TraceRow, WorkflowGraphData } from '../
 import { systemCommandId, valueMessage } from '../inspectorModel';
 import { duration, formatTime, LazyValue, MissingValue, RowDetails, RowValues, StatusBadge } from './TraceDetails';
 import { CopyId, InspectorFrame, type InspectorTab } from './InspectorFrame';
-import { DefinitionDetails } from './DefinitionDetails';
+import { DefinitionDetails, GroupDefinitionInspector } from './DefinitionDetails';
 import { useExecutionSnapshot } from './ExecutionSnapshot';
 import { useExecutionNavigation } from './ExecutionNavigation';
 import { InvocationActions, NodeActions } from './ExecutionActionContent';
@@ -129,6 +129,7 @@ export function ExecutionInspector({ trace, workflow, selection, record, onClose
     if (redirectWait && record && selection.record && navigation.active) navigation.pickRecord?.(selection.record.kind, record, selection.record.section);
   }, [redirectWait, record, selection.record, navigation.active, navigation.pickRecord]);
   if (redirectWait) return null;
+  if(selection.kind==='group')return <GroupDefinitionInspector workflow={workflow} identity={selection.id} onClose={onClose}/>;
   if (record?.wait_id) {
     const executable = workflow.definition.nodes.find(node => node.id === record.node_id)?.executable;
     return <CallInspector row={{ invocation_id: iid, node_id: record.node_id, occurrence_id: record.occurrence_id, call_id: record.wait_id, operator_id: systemCommandId(executable?.id), values: [] }} workflow={workflow} frontier={trace.frontier} initial={selection.record?.section ?? 'Execution'} onBack={onBack ?? onClose} onClose={onClose} />;

@@ -73,6 +73,10 @@ def build_parser():
     server.add_argument("--no-ui", action="store_true")
     server.add_argument("--access-log", action=argparse.BooleanOptionalAction, default=None,
                         help="Log HTTP requests; default: AUTOAGENT_SERVER_ACCESS_LOG or true.")
+    memory = groups.add_parser('memory', parents=[common], allow_abbrev=False,
+        help='Read bounded process memory telemetry from a running Server.')
+    memory.set_defaults(memory_query=True)
+    memory.add_argument('--history', type=int, default=0, help='Include up to the configured number of recent samples (0–3600).')
     invoke = groups.add_parser("invoke", parents=[common], allow_abbrev=False, help="Start a registered Workflow in a new or existing Session.")
     invoke.add_argument("workflow_id")
     invoke.add_argument("--revision-id")
@@ -98,14 +102,18 @@ def build_parser():
             control.add_argument("--reason")
     from .history import add_parsers
     add_parsers(groups, workflow_commands, controls, common)
+    from .evaluation import add_parsers as add_evaluation_parsers
+    add_evaluation_parsers(groups, common)
     _prepare_help(parser)
     return parser
 
 
 def _prepare_help(parser):
     """Keep global options usable before commands, but show only relevant leaf flags."""
-    local_only = parser.prog.endswith((" server", "project check", "workflow check", "workflow compile"))
+    local_only = parser.prog.endswith((" server", "project check", "workflow check", "workflow compile")) or ' eval' in parser.prog
     hidden = {"server_url", "request_timeout"} if local_only else set()
+    if parser.prog.endswith(' memory'):
+        hidden.update({'project', 'env_file', 'no_env_file'})
     if parser.prog.endswith(" server"):
         hidden.add("output")
     for action in list(parser._actions):
@@ -191,7 +199,13 @@ def main(argv=None):
                 from .server import launch
                 launch(options, stdout, stderr)
                 return 0
-            if getattr(options, 'management_query', False):
+            if getattr(options, 'evaluation_query', False):
+                from .evaluation import run as run_evaluation
+                root, document, status = asyncio.run(run_evaluation(options))
+            elif getattr(options, 'memory_query', False):
+                from .memory import run as run_memory
+                root, document, status = asyncio.run(run_memory(options))
+            elif getattr(options, 'management_query', False):
                 from .management import run as run_management
                 root, document, status = asyncio.run(run_management(options))
             elif getattr(options, "history_query", False):

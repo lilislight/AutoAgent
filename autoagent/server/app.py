@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from collections.abc import Awaitable
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import Field, ValidationError
 
 from autoagent import RuntimeTransitionError
@@ -129,6 +129,16 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
             await hub.close()
             hubs.discard(hub)
     router = APIRouter(prefix=settings.api_prefix, tags=["AutoAgent Workflows"], lifespan=watch_lifespan)
+
+    @router.get('/memory')
+    async def memory(history: int = Query(0, ge=0, le=3600)):
+        return await _query(host.memory_snapshot(history=history), settings)
+
+    @router.get('/memory/metrics', response_class=PlainTextResponse)
+    async def memory_metrics():
+        from autoagent.host.memory import prometheus
+        snapshot = await _query(host.memory_snapshot(), settings)
+        return PlainTextResponse(prometheus(snapshot), media_type='text/plain; version=0.0.4')
 
     @router.get("/workflow-comparison")
     async def workflow_comparison(base_revision_id: str = Query(min_length=1, max_length=4096),
@@ -324,7 +334,7 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         return await _query(host.get_workflow_graph(revision_id), settings)
 
     @router.get("/workflow-object")
-    async def workflow_object(revision_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(node|edge)$"), identity: str = Query(min_length=1, max_length=4096)):
+    async def workflow_object(revision_id: str = Query(min_length=1, max_length=4096), kind: str = Query(pattern="^(node|edge|group)$"), identity: str = Query(min_length=1, max_length=4096)):
         return await _query(host.get_workflow_object(revision_id, kind, identity), settings)
 
     def trace_page(page, scope):
@@ -468,7 +478,7 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
 
     @router.get('/trace-dataset-page')
     async def trace_dataset_page(snapshot_id: str = Query(pattern='^[a-f0-9]{32}$'),
-        section: str = Query(pattern='^(node|call|wait|event|edge)$'), page: int = Query(ge=0)):
+        section: str = Query(pattern='^(node|call|wait|event|edge|link)$'), page: int = Query(ge=0)):
         return await _query(host.get_trace_dataset_page(snapshot_id, section, page), settings)
 
     @router.get('/execution-timeline')

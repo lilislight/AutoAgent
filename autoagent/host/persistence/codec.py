@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -31,16 +32,27 @@ BUSINESS_FIELDS = frozenset(
         "cancel_reason",
     }
 )
+SURROGATES = re.compile(r"[\ud800-\udfff]")
 
 
-def canonical(value) -> bytes:
+def _json_text(value):
     return json.dumps(
         value,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
         allow_nan=False,
-    ).encode("utf-8", errors="backslashreplace")
+    )
+
+
+def canonical_text(value) -> str:
+    """Match canonical UTF-8 JSON, including escaped unpaired surrogates."""
+    result = _json_text(value)
+    return result.encode("utf-8", errors="backslashreplace").decode() if SURROGATES.search(result) else result
+
+
+def canonical(value) -> bytes:
+    return _json_text(value).encode("utf-8", errors="backslashreplace")
 
 
 def pointer(path) -> str:
@@ -88,6 +100,25 @@ class EncodingMemo:
     def __init__(self, budget: int):
         self.budget, self.used = budget, 0
         self.items = OrderedDict()
+        self.keys = OrderedDict()
+        self.key_bytes = 0
+        self.key_budget = min(budget // 16, 64 * 1024)
+
+    def key_size(self, key):
+        cached = self.keys.get(key)
+        if cached is not None:
+            self.keys.move_to_end(key)
+            return cached[0]
+        size = len(canonical(key))
+        # Only short metadata keys; bound both count and retained key length.
+        charge = sys.getsizeof(key) + sys.getsizeof(size) + 128
+        if len(key) <= 128 and charge <= self.key_budget:
+            while self.keys and (len(self.keys) >= 256 or self.key_bytes + charge > self.key_budget):
+                _, (_, old) = self.keys.popitem(last=False)
+                self.key_bytes -= old
+            self.keys[key] = size, charge
+            self.key_bytes += charge
+        return size
 
     def string(self, value):
         entry = self.items.get(id(value))
@@ -95,8 +126,9 @@ class EncodingMemo:
             self.items.move_to_end(id(value))
             return entry[1]
         data = canonical(value)
-        if len(value) >= 1024 and len(data) <= self.budget:
-            while self.items and self.used + len(data) > self.budget:
+        string_budget = self.budget - self.key_budget
+        if len(value) >= 1024 and len(data) <= string_budget:
+            while self.items and self.used + len(data) > string_budget:
                 _, old = self.items.popitem(last=False)
                 self.used -= len(old[1])
             self.items[id(value)] = (value, data, None)
@@ -107,7 +139,9 @@ class EncodingMemo:
         entry = self.items.get(id(value)) if isinstance(value, str) else None
         if entry is not None and entry[0] is value and entry[2] is not None:
             return entry[2]
-        digest = hashlib.sha256(DOMAIN + data).hexdigest()
+        hasher = hashlib.sha256(DOMAIN)
+        hasher.update(data)
+        digest = hasher.hexdigest()
         if entry is not None and entry[0] is value:
             self.items[id(value)] = (value, entry[1], digest)
         return digest
@@ -130,7 +164,7 @@ def encode(record: dict, kind: str, threshold: int, memo: EncodingMemo) -> Encod
                 value, child_refs, child_size = visit(child, (*path, key), eligible)
                 body[key] = value
                 refs.extend(((key, *p), h) for p, h in child_refs)
-                size += len(canonical(key)) + 1 + child_size
+                size += memo.key_size(key) + 1 + child_size
         elif isinstance(item, list):
             body, refs, size = [], [], 2 + max(0, len(item) - 1)
             for index, child in enumerate(item):
@@ -140,7 +174,8 @@ def encode(record: dict, kind: str, threshold: int, memo: EncodingMemo) -> Encod
                 size += child_size
         else:
             body, refs = item, []
-            size = len(memo.string(item) if isinstance(item, str) else canonical(item))
+            size = (4 if item is None else 4 if item is True else 5 if item is False
+                    else len(memo.string(item) if isinstance(item, str) else canonical(item)))
         if not business or size < threshold:
             return body, refs, size
         data = memo.string(item) if isinstance(item, str) else canonical(body)

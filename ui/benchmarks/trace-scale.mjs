@@ -40,7 +40,9 @@ if (isMainThread) {
     const result=measure(()=>replay.seek({sequence:events[index].sequence}));
     assert.equal(result.value.marker.sequence,index+2);
     assert.equal(result.value.frame.nodes.reduce((sum,n)=>sum+n.occurrences,0),Math.ceil((index+1)/5));
-    assert.equal(result.value.frame.nodes.reduce((sum,n)=>sum+n.call_count,0),Math.floor((index+3)/5));
+    // Each represented occurrence owns one Call; earlier Loop passes never accumulate.
+    const visible=Math.min(32,Math.ceil((index+1)/5));
+    assert.equal(result.value.frame.nodes.reduce((sum,n)=>sum+n.call_count,0),visible-(index%5<2?1:0));
     seeks.push({fraction,ms:+result.ms.toFixed(1)});
   }
   // A time seek and an Event seek must reconstruct the same exact graph.

@@ -122,6 +122,14 @@ class LiteLLMProvider(_LiteLLMTransport, OpenAIProvider):
     async def _create(self, params):
         return await self._call_sdk("aresponses" if self.protocol == "openai.responses" else "acompletion", params)
 
+    async def _close_stream(self, source):
+        # Responses iterators do not expose close methods. The Chat bridge
+        # owns a CustomStreamWrapper; native Responses owns an HTTP response.
+        if not callable(getattr(source, "aclose", None)) and not callable(getattr(source, "close", None)):
+            source = getattr(source, "litellm_custom_stream_wrapper", None) or getattr(source, "response", None)
+        if source is not None:
+            await super()._close_stream(source)
+
 
 class LiteLLMEmbeddingProvider(_LiteLLMTransport, OpenAIEmbeddingProvider):
     """Normalize LiteLLM vectors through the same portable embedding contract."""

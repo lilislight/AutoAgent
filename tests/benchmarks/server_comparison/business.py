@@ -60,3 +60,7 @@ def operations(case):
         return Batch(items=[Payload(step=i) for i in range(case.get('width', 1))])
 
     return entry, advance, finish, batch
+
+
+async def finish_many(value: Batch) -> Summary:
+    return summarize(value.items)

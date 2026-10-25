@@ -38,6 +38,7 @@ from ..workflow import (
     UserEventSpec,
     Workflow,
     WorkflowIR,
+    WorkflowGroupIR,
 )
 from ._hooks import resolve_hook_contract
 from .diagnostic import CompileResult, Diagnostic
@@ -355,7 +356,8 @@ class WorkflowCompiler:
                 "Workflow failure_mode must be 'fail_fast' or "
                 "'continue_active_branches'.",
             )
-        nodes, edges = self._flatten(workflow, validate_workflow=False)
+        groups: list[WorkflowGroupIR] = []
+        nodes, edges = self._flatten(workflow, validate_workflow=False, groups=groups)
         if not nodes:
             raise _error("WORKFLOW_EMPTY", "Workflow must contain at least one Node.")
         node_ids = tuple(node.id for node in nodes)
@@ -509,6 +511,7 @@ class WorkflowCompiler:
             signal_limits=workflow.signal_limits,
             entry_node_ids=entries,
             exit_node_ids=exits,
+            groups=tuple(groups),
         )
         digest = definition_digest(definition)
         return WorkflowIR(
@@ -524,6 +527,7 @@ class WorkflowCompiler:
             loop_regions=loops,
             signal_endpoints=endpoints,
             signal_limits=workflow.signal_limits,
+            groups=tuple(groups),
         )
 
     def _flatten(
@@ -533,6 +537,8 @@ class WorkflowCompiler:
         parent_workflows: tuple[int, ...] = (),
         *,
         validate_workflow: bool = True,
+        groups: list[WorkflowGroupIR] | None = None,
+        group_path: tuple[str, ...] = (),
     ) -> tuple[list[Node], list[Edge]]:
         if prefix and workflow.signal_endpoints:
             raise _error('INLINE_SIGNAL_ENDPOINT_UNSUPPORTED', 'Declare Signal Endpoints on the owning Workflow or use Spawn/Await.')
@@ -605,6 +611,7 @@ class WorkflowCompiler:
             )
             for edge in workflow.edges
         ]
+        child_ids: set[str] = set()
         for child in workflow.sub_workflows:
             if not isinstance(child.id, str) or not child.id.strip():
                 raise _error("SUBWORKFLOW_ID_EMPTY", "SubWorkflow id cannot be empty.")
@@ -616,10 +623,24 @@ class WorkflowCompiler:
                 forbid_default_edge_separator=True,
             )
             child_prefix = f"{prefix}{child.id}."
+            if child.id in child_ids:
+                raise _error('SUBWORKFLOW_ID_DUPLICATE', 'SubWorkflow instance IDs must be unique within their owner.')
+            child_ids.add(child.id)
+            path = (*group_path, child.id)
+            if groups is not None:
+                groups.append(WorkflowGroupIR(
+                    id=json.dumps(path, ensure_ascii=False, separators=(',', ':')),
+                    parent_group_id=json.dumps(group_path, ensure_ascii=False, separators=(',', ':')) if group_path else None,
+                    label=child.id, workflow_id=child.workflow.id,
+                    workflow_version=_validate_workflow_version(child.workflow.version),
+                    node_ids=tuple(f'{child_prefix}{node.id}' for node in child.workflow.nodes if isinstance(node, Node)),
+                ))
             child_nodes, child_edges = self._flatten(
                 child.workflow,
                 child_prefix,
                 workflow_stack,
+                groups=groups,
+                group_path=path,
             )
             nodes.extend(child_nodes)
             edges.extend(child_edges)

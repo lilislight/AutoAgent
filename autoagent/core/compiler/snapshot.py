@@ -78,6 +78,7 @@ class WorkflowDefinitionSnapshot:
             signal_limits=workflow.signal_limits,
             entry_node_ids=workflow.entry_node_ids,
             exit_node_ids=workflow.exit_node_ids,
+            groups=workflow.groups,
         )
         definition_hash = definition_digest(definition)
         if definition_hash != workflow.definition_hash:
@@ -149,10 +150,12 @@ def workflow_semantic_definition(
     exit_node_ids: tuple[str, ...],
     signal_endpoints: tuple = (),
     signal_limits: SignalLimits = SignalLimits(),
+    groups: tuple = (),
 ) -> dict[str, object]:
     """Build the single canonical definition used by revision and snapshot."""
 
     return {
+        **({'groups': [asdict(group) for group in groups]} if groups else {}),
         "workflow_id": workflow_id,
         "workflow_version": workflow_version,
         "failure_mode": failure_mode,

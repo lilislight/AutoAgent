@@ -157,10 +157,18 @@ class LLMProviderOptions(Model):
 
 
 class LLMRequest(Model):
-    """One candidate generation with an explicitly ordered input transcript."""
+    """One generation with ordered input and per-call execution settings.
 
-    model: NonEmpty
+    model=None delegates model selection to an application LLM resolver. Providers
+    require a resolved model. LLM_CALL uses streaming to choose the Provider
+    method; direct Provider calls use ainvoke/astream explicitly. routing contains
+    application hints only and is never encoded as model API parameters.
+    """
+
+    model: NonEmpty | None = None
     input: tuple[LLMItem, ...] = Field(min_length=1)
+    streaming: bool = False
+    routing: dict[str, JsonValue] = Field(default_factory=dict)
     tools: tuple[LLMToolDefinition, ...] = ()
     tool_choice: LLMToolChoice | None = None
     max_output_tokens: int | None = Field(default=None, gt=0)

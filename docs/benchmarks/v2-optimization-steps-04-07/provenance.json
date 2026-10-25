@@ -1,0 +1,980 @@
+{
+  "server_runs": 434,
+  "calls": 3260,
+  "suite": {
+    "modules": 102,
+    "tests": 1740,
+    "postgres_tests": 313,
+    "skipped": 0,
+    "failed_modules": [
+      "tests.test_deepseek_weather_example"
+    ]
+  },
+  "verification": [
+    {
+      "module": "tests.test_agent_capabilities",
+      "exit_code": 0,
+      "tests": 15,
+      "seconds": 7.078085604996886,
+      "skips": [],
+      "postgres_tests": 3
+    },
+    {
+      "module": "tests.test_agent_embeddings",
+      "exit_code": 0,
+      "tests": 15,
+      "seconds": 0.9747974600031739,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_llm_models",
+      "exit_code": 0,
+      "tests": 29,
+      "seconds": 0.43800744399777614,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_mcp",
+      "exit_code": 0,
+      "tests": 28,
+      "seconds": 1.552699150997796,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_mcp_content",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 0.7495684379973682,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_mcp_extensions",
+      "exit_code": 0,
+      "tests": 25,
+      "seconds": 1.1727073980000569,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_mcp_recovery",
+      "exit_code": 0,
+      "tests": 16,
+      "seconds": 1.8368475479946937,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_media",
+      "exit_code": 0,
+      "tests": 12,
+      "seconds": 0.9997597050096374,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_native_replay",
+      "exit_code": 0,
+      "tests": 14,
+      "seconds": 0.6296935599966673,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_operations",
+      "exit_code": 0,
+      "tests": 7,
+      "seconds": 0.9241658810060471,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_provider_backends",
+      "exit_code": 0,
+      "tests": 30,
+      "seconds": 15.229389115003869,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_providers",
+      "exit_code": 0,
+      "tests": 31,
+      "seconds": 1.669249275000766,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_recording",
+      "exit_code": 0,
+      "tests": 17,
+      "seconds": 1.1937200399988797,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_skill_extensions",
+      "exit_code": 0,
+      "tests": 46,
+      "seconds": 2.1759700890106615,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_skill_snapshots",
+      "exit_code": 0,
+      "tests": 13,
+      "seconds": 0.8125049239897635,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_skills",
+      "exit_code": 0,
+      "tests": 37,
+      "seconds": 2.64644115199917,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_structured_output",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 1.1647148670017486,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_tool_context",
+      "exit_code": 0,
+      "tests": 11,
+      "seconds": 0.3913340509898262,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_agent_tools",
+      "exit_code": 0,
+      "tests": 23,
+      "seconds": 1.457516640992253,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_checkpoint_management",
+      "exit_code": 0,
+      "tests": 28,
+      "seconds": 13.435777680002502,
+      "skips": [],
+      "postgres_tests": 14
+    },
+    {
+      "module": "tests.test_checkpoint_opt_in",
+      "exit_code": 0,
+      "tests": 7,
+      "seconds": 0.2576477990078274,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_child_checkpoint_validation",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 0.2321345589880366,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_child_compaction",
+      "exit_code": 0,
+      "tests": 9,
+      "seconds": 0.37440179599798284,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_child_recovery_integrity",
+      "exit_code": 0,
+      "tests": 9,
+      "seconds": 0.4687673940061359,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_child_sink_integrity",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 0.2444277689937735,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_cli",
+      "exit_code": 0,
+      "tests": 18,
+      "seconds": 1.9573615870031063,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_cli_alignment",
+      "exit_code": 0,
+      "tests": 17,
+      "seconds": 30.918209337993176,
+      "skips": [],
+      "postgres_tests": 5
+    },
+    {
+      "module": "tests.test_cli_evaluation",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 1.6854200149973622,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_cli_execution",
+      "exit_code": 0,
+      "tests": 28,
+      "seconds": 22.541050967003684,
+      "skips": [],
+      "postgres_tests": 7
+    },
+    {
+      "module": "tests.test_cli_forks",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 4.562661144998856,
+      "skips": [],
+      "postgres_tests": 3
+    },
+    {
+      "module": "tests.test_cli_history",
+      "exit_code": 0,
+      "tests": 14,
+      "seconds": 22.287835741997696,
+      "skips": [],
+      "postgres_tests": 2
+    },
+    {
+      "module": "tests.test_cli_management",
+      "exit_code": 0,
+      "tests": 27,
+      "seconds": 36.50067922699964,
+      "skips": [],
+      "postgres_tests": 8
+    },
+    {
+      "module": "tests.test_cli_state",
+      "exit_code": 0,
+      "tests": 3,
+      "seconds": 1.5985695409908658,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_cli_usability",
+      "exit_code": 0,
+      "tests": 6,
+      "seconds": 1.3383751060027862,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_control_commands",
+      "exit_code": 0,
+      "tests": 14,
+      "seconds": 0.8651280670019332,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_agent_harness_demo",
+      "exit_code": 0,
+      "tests": 6,
+      "seconds": 1.8453673820040422,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_checkpoints",
+      "exit_code": 0,
+      "tests": 7,
+      "seconds": 0.2123926339991158,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_context_child_indexes",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 0.7495942680106964,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_contract_fast_paths",
+      "exit_code": 0,
+      "tests": 6,
+      "seconds": 0.24119291998795234,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_execution_performance",
+      "exit_code": 0,
+      "tests": 5,
+      "seconds": 0.6340859049960272,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_graph_concurrency",
+      "exit_code": 0,
+      "tests": 11,
+      "seconds": 0.6301736080058618,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_memory_sharing",
+      "exit_code": 0,
+      "tests": 13,
+      "seconds": 0.2429244390077656,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_payload_retention",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 1.4296149190049618,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_performance_fixes",
+      "exit_code": 0,
+      "tests": 12,
+      "seconds": 4.8732612210005755,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_planner_topology",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 0.2668069449864561,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_transient_memory",
+      "exit_code": 0,
+      "tests": 9,
+      "seconds": 0.3033022710005753,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_core_user_event_sink",
+      "exit_code": 0,
+      "tests": 1,
+      "seconds": 0.2501254609960597,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_deepseek_weather_example",
+      "exit_code": 1,
+      "tests": 7,
+      "seconds": 17.307024830006412,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_durable_waits",
+      "exit_code": 0,
+      "tests": 27,
+      "seconds": 0.5502826829906553,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_evaluation",
+      "exit_code": 0,
+      "tests": 36,
+      "seconds": 35.075867549996474,
+      "skips": [],
+      "postgres_tests": 16
+    },
+    {
+      "module": "tests.test_execution_actions",
+      "exit_code": 0,
+      "tests": 28,
+      "seconds": 30.328307670002687,
+      "skips": [],
+      "postgres_tests": 14
+    },
+    {
+      "module": "tests.test_execution_observation",
+      "exit_code": 0,
+      "tests": 26,
+      "seconds": 47.37322630100243,
+      "skips": [],
+      "postgres_tests": 13
+    },
+    {
+      "module": "tests.test_executor_hardening",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 0.3882136750034988,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_exploration",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 6.904819907998899,
+      "skips": [],
+      "postgres_tests": 4
+    },
+    {
+      "module": "tests.test_forks",
+      "exit_code": 0,
+      "tests": 47,
+      "seconds": 30.3224727850029,
+      "skips": [],
+      "postgres_tests": 23
+    },
+    {
+      "module": "tests.test_graph_pause",
+      "exit_code": 0,
+      "tests": 31,
+      "seconds": 2.190065788992797,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_host",
+      "exit_code": 0,
+      "tests": 44,
+      "seconds": 18.939683200005675,
+      "skips": [],
+      "postgres_tests": 21
+    },
+    {
+      "module": "tests.test_host_agent",
+      "exit_code": 0,
+      "tests": 10,
+      "seconds": 5.522540917008882,
+      "skips": [],
+      "postgres_tests": 3
+    },
+    {
+      "module": "tests.test_host_memory",
+      "exit_code": 0,
+      "tests": 20,
+      "seconds": 7.828565470001195,
+      "skips": [],
+      "postgres_tests": 9
+    },
+    {
+      "module": "tests.test_host_persistence",
+      "exit_code": 0,
+      "tests": 90,
+      "seconds": 33.49191844300367,
+      "skips": [],
+      "postgres_tests": 43
+    },
+    {
+      "module": "tests.test_host_residency",
+      "exit_code": 0,
+      "tests": 50,
+      "seconds": 25.583720012989943,
+      "skips": [],
+      "postgres_tests": 23
+    },
+    {
+      "module": "tests.test_invocation_settling",
+      "exit_code": 0,
+      "tests": 10,
+      "seconds": 0.4818782530055614,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_live_trace",
+      "exit_code": 0,
+      "tests": 18,
+      "seconds": 16.92221540599712,
+      "skips": [],
+      "postgres_tests": 9
+    },
+    {
+      "module": "tests.test_llm_call_storage",
+      "exit_code": 0,
+      "tests": 16,
+      "seconds": 5.281080879998626,
+      "skips": [],
+      "postgres_tests": 8
+    },
+    {
+      "module": "tests.test_nested_workflow_example",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 0.9223145160067361,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_node_policies",
+      "exit_code": 0,
+      "tests": 22,
+      "seconds": 4.622279182003695,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_node_timeout",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 0.6101731359958649,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_operator_execution_bridge",
+      "exit_code": 0,
+      "tests": 5,
+      "seconds": 0.4733794299972942,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_persistence_encoding",
+      "exit_code": 0,
+      "tests": 3,
+      "seconds": 0.3693442049989244,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase10_boundaries",
+      "exit_code": 0,
+      "tests": 16,
+      "seconds": 0.29669453100359533,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase11_app_correctness",
+      "exit_code": 0,
+      "tests": 17,
+      "seconds": 0.4192164709966164,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase12_runtime_boundaries",
+      "exit_code": 0,
+      "tests": 14,
+      "seconds": 0.8659534210019046,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase13_lifecycle_recovery",
+      "exit_code": 0,
+      "tests": 23,
+      "seconds": 0.3726138290076051,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase14_contract_roundtrip",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 0.24723771499702707,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase14_runtime_state_validation",
+      "exit_code": 0,
+      "tests": 10,
+      "seconds": 0.20732080499874428,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase1_compiler",
+      "exit_code": 0,
+      "tests": 28,
+      "seconds": 0.3421372699958738,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase1_contracts",
+      "exit_code": 0,
+      "tests": 8,
+      "seconds": 0.20944763800071087,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase1_loops",
+      "exit_code": 0,
+      "tests": 13,
+      "seconds": 3.2261114650027594,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase2_runtime_state",
+      "exit_code": 0,
+      "tests": 22,
+      "seconds": 0.7912001080112532,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase3_scheduler",
+      "exit_code": 0,
+      "tests": 9,
+      "seconds": 0.27129939598671626,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase4_loop_scheduler",
+      "exit_code": 0,
+      "tests": 7,
+      "seconds": 0.3062411360006081,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase5_executor",
+      "exit_code": 0,
+      "tests": 9,
+      "seconds": 0.3164785999979358,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase6_context",
+      "exit_code": 0,
+      "tests": 3,
+      "seconds": 0.24041072899126448,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase7_wait_recovery",
+      "exit_code": 0,
+      "tests": 5,
+      "seconds": 0.21932795899920166,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase8_app",
+      "exit_code": 0,
+      "tests": 27,
+      "seconds": 0.7835723419993883,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_phase9_quality",
+      "exit_code": 0,
+      "tests": 24,
+      "seconds": 0.849726850996376,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_resume_command",
+      "exit_code": 0,
+      "tests": 16,
+      "seconds": 1.0414551559952088,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_runtime_graph",
+      "exit_code": 0,
+      "tests": 16,
+      "seconds": 0.45931378900422715,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_server",
+      "exit_code": 0,
+      "tests": 115,
+      "seconds": 124.57698210699891,
+      "skips": [],
+      "postgres_tests": 56
+    },
+    {
+      "module": "tests.test_server_comparison",
+      "exit_code": 0,
+      "tests": 9,
+      "seconds": 33.279927739989944,
+      "skips": [],
+      "postgres_tests": 4
+    },
+    {
+      "module": "tests.test_server_shutdown",
+      "exit_code": 0,
+      "tests": 5,
+      "seconds": 3.5308795910095796,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_server_ui_reload",
+      "exit_code": 0,
+      "tests": 1,
+      "seconds": 0.5961724660010077,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_signal_commands",
+      "exit_code": 0,
+      "tests": 24,
+      "seconds": 1.5068261039996287,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_spawn_map_concurrency",
+      "exit_code": 0,
+      "tests": 4,
+      "seconds": 0.37171578299603425,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_state_inspection",
+      "exit_code": 0,
+      "tests": 28,
+      "seconds": 16.944135725992965,
+      "skips": [],
+      "postgres_tests": 14
+    },
+    {
+      "module": "tests.test_status_command",
+      "exit_code": 0,
+      "tests": 11,
+      "seconds": 0.4840225820080377,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_system_commands",
+      "exit_code": 0,
+      "tests": 18,
+      "seconds": 0.45531320800364483,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_terminal_recovery",
+      "exit_code": 0,
+      "tests": 18,
+      "seconds": 0.6123497170046903,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_user_events",
+      "exit_code": 0,
+      "tests": 12,
+      "seconds": 0.6406759140081704,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_workflow_graph_cache",
+      "exit_code": 0,
+      "tests": 2,
+      "seconds": 0.42214093399525154,
+      "skips": [],
+      "postgres_tests": 0
+    },
+    {
+      "module": "tests.test_workflow_run",
+      "exit_code": 0,
+      "tests": 22,
+      "seconds": 11.151655904002837,
+      "skips": [],
+      "postgres_tests": 11
+    },
+    {
+      "module": "tests.test_writer_metadata",
+      "exit_code": 0,
+      "tests": 3,
+      "seconds": 0.40958092699293047,
+      "skips": [],
+      "postgres_tests": 0
+    }
+  ],
+  "snapshot_verification": [
+    {
+      "source": "step-05a-after",
+      "exit_code": 0,
+      "seconds": 33.01027662400156
+    },
+    {
+      "source": "step-05b-after",
+      "exit_code": 0,
+      "seconds": 37.200393690000055
+    },
+    {
+      "source": "step-05c-after",
+      "exit_code": 0,
+      "seconds": 88.28402974900382
+    },
+    {
+      "source": "step-06-after",
+      "exit_code": 0,
+      "seconds": 38.47331882099388
+    }
+  ],
+  "raw_directory": ".autoagent/performance/v2-optimization/steps-04-07",
+  "limitations": [
+    "Shared host without CPU/cgroup isolation",
+    "No one-hour soak in steps 4-7",
+    "V1 and B0 not remeasured in this batch",
+    "One pre-existing weather CLI test method has two failing subcases because __main__.py was already deleted at task start"
+  ],
+  "initial_harness_sha256": {
+    "worker.py": "abad86ec6a1a2bf157a829b46a896fc3388b899238b9e8f5137c282fcf2f8d2c",
+    "report.py": "aa623dfcac2981da9455c6ce77de899dfddf1d5c2d46e3421ee809528683da4b",
+    "business.py": "264ecd3799e855f61df6296b59aae6fa2772838b93afeb122a248051accb7557",
+    "diagnostics.py": "7c55a39b08124c368f145056137025f0e47b138c804bc41240909517faa77aff",
+    "__init__.py": "ac937be139aec51835a2c69307fa7ee7a7cebe4c189314552b691dd4c1709ad3",
+    "run.py": "cb690a7e9fff74ae80797a0c960ef00e844609c4d6a80c8fbc4f8bb40afc56bd",
+    "document.py": "e169b1fd73b4c256837091b1b34eda190df1e528bfd5fc2fbfdd928d88e0a914",
+    "observe.py": "27e447a27bd71d5ac3494b89e333ca9dcfe23826a3e3732d3f7ab450c172d00f"
+  },
+  "final_harness_sha256": {
+    "worker.py": "abad86ec6a1a2bf157a829b46a896fc3388b899238b9e8f5137c282fcf2f8d2c",
+    "report.py": "aa623dfcac2981da9455c6ce77de899dfddf1d5c2d46e3421ee809528683da4b",
+    "business.py": "264ecd3799e855f61df6296b59aae6fa2772838b93afeb122a248051accb7557",
+    "diagnostics.py": "70357e3c8b6fd4b4cf62e4a7f4e5211cb36ef86e12c73b91ed7d6e0204a31653",
+    "__init__.py": "ac937be139aec51835a2c69307fa7ee7a7cebe4c189314552b691dd4c1709ad3",
+    "run.py": "cb690a7e9fff74ae80797a0c960ef00e844609c4d6a80c8fbc4f8bb40afc56bd",
+    "document.py": "e169b1fd73b4c256837091b1b34eda190df1e528bfd5fc2fbfdd928d88e0a914",
+    "observe.py": "27e447a27bd71d5ac3494b89e333ca9dcfe23826a3e3732d3f7ab450c172d00f"
+  },
+  "preliminary_failures": [
+    "Local PostgreSQL socket creation initially blocked in sandbox; approved run started it",
+    "Draft test used nonexistent RuntimeEvent.create; corrected before final regression",
+    "Draft race test used an asyncio gate across Runtime loops; process terminated and corrected to threading.Event",
+    "Draft notification tests used an empty Host without Workflows; corrected",
+    "Unmeasured snapshot assembly indentation caught by compileall and corrected"
+  ],
+  "product_source_unchanged_during_full_verification": true,
+  "correction_verification": [
+    {
+      "log": "corrected-focused.log",
+      "tests": 124,
+      "postgres_tests": 57,
+      "passed": true
+    },
+    {
+      "log": "corrected-integration.log",
+      "tests": 312,
+      "postgres_tests": 151,
+      "passed": true
+    }
+  ],
+  "current_agent_verification": {
+    "tests": 172,
+    "postgres_tests": 17,
+    "passed": true
+  },
+  "source_alignment": {
+    "targets": [
+      "autoagent/host/models.py",
+      "autoagent/host/observation.py",
+      "autoagent/host/persistence/codec.py",
+      "autoagent/host/persistence/database.py",
+      "autoagent/host/persistence/maintenance.py",
+      "autoagent/host/persistence/metadata.py",
+      "autoagent/host/persistence/models.py",
+      "autoagent/host/persistence/ports.py",
+      "autoagent/host/persistence/projections.py",
+      "autoagent/host/persistence/storage.py",
+      "autoagent/host/persistence/writer.py"
+    ],
+    "aligned_unrelated_files": [
+      "autoagent/agent/providers/openai.py",
+      "autoagent/agent/providers/litellm.py"
+    ],
+    "reason": "Provider files changed between the initial baseline and step 4 freeze; align them in the final control to isolate persistence changes"
+  },
+  "late_source_changes": {
+    "autoagent/agent/__init__.py": {
+      "frozen": "7debe5f61f14bd4f709c02eb72f140b0f93a95bdbff30749dbd4881baa38db5c",
+      "current": "d6d44fec193aecdd40d9a9b6cdf36ccf806c1fce0007fb414aaee4cc950f578e"
+    },
+    "autoagent/host/agent.py": {
+      "frozen": "8f742a5c82fcc9fdcd5f17ce85dc442a64a25781c6117912c549fac49d757b5d",
+      "current": "93f7b2514211240d081af79ecf1bb06a35ce077217a23987b4b3fc2225ea8a94"
+    },
+    "autoagent/agent/providers/openai.py": {
+      "frozen": "3a989307787ba0018a6a45f91b92f3490fd3a741c4cc54a0ae2c85fca3ef65ca",
+      "current": "09ec8887966589d1f718e9ffc5cd7bc08ad7746ddb7155659504eb63692d2412"
+    },
+    "autoagent/agent/providers/_common.py": {
+      "frozen": "dd0f5cc496d1258329eb4ea0315559b4f04d4f18cc9d276dee8ce72638324a77",
+      "current": "8b76474a9cc259ce20bc8ebfef931542f36b647867013b926c953d66d3f00c4d"
+    },
+    "autoagent/agent/models/llm.py": {
+      "frozen": "e68bcff23e88f2e670dec5a74359fca30044e5041d25674c5c33603c58fa79d4",
+      "current": "10d51cb157a1c20bead9743f9dbbae74a622d961f8d5ec63360eb5e23a636a80"
+    },
+    "autoagent/agent/integration/__init__.py": {
+      "frozen": "cd5f84c704c9ff506f916e171c07ea7ee8c49f517c2ab612267ea26ea0fedf2d",
+      "current": "8381073051650d136c4db649596d0554ec122e6f9d8c63545ef6488ea9549dca"
+    },
+    "autoagent/agent/integration/capabilities.py": {
+      "frozen": "be21570a66ec20b5772a6d70853d2237a20f96ba47f5fa292cf28aa43b7c4e79",
+      "current": "55edae854dc6ea24a087aaba1e3cc52409f76ca0798c5d927116d6d97a1cd386"
+    }
+  },
+  "terminal_ordinal_fix": "Applied after full-suite run; affected regressions rerun on corrected package; initial per-step metrics preserved; cumulative restarted with corrected source",
+  "initial_cumulative_runs": 46,
+  "final_validation": {
+    "target_files": 11,
+    "target_hashes_match": true,
+    "compileall": true,
+    "diff_check": true,
+    "known_weather_entry_exists": false,
+    "current_agent_tests": {
+      "tests": 172,
+      "postgres_tests": 17,
+      "passed": true
+    },
+    "postgres": {
+      "version": "PostgreSQL 14.24 (Ubuntu 14.24-0ubuntu0.22.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0, 64-bit",
+      "settings": {
+        "fsync": "on",
+        "synchronous_commit": "on",
+        "full_page_writes": "on"
+      },
+      "other_clients": 0
+    }
+  }
+}

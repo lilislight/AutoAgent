@@ -2,10 +2,12 @@ import type { TraceDataset, TimelineRow, TimelineMarker, TimelinePage, TimelineE
 import { spanGeometry } from './timeline.js';
 import { ReplayAccumulator } from './replay.js';
 import { LiveGraph } from './liveGraph.js';
+import { FamilyLinkIndex } from './familyHandoff.js';
 import { appendPauseIntervals, pauseIntervals, TimelineActivity, type PauseInterval } from './liveObservation.js';
 const visible = (row:TimelineRow) => row.timeline_visible !== false;
 
 export class TraceModel {
+  readonly family=new FamilyLinkIndex();
   readonly nodes = new Map<string, TimelineRow>();
   readonly calls = new Map<string, TimelineRow[]>();
   readonly waits = new Map<string, TimelineRow>();
@@ -21,6 +23,7 @@ export class TraceModel {
   private activity = new TimelineActivity();
   bytesDelta = 0;
   constructor(readonly data: TraceDataset) {
+    this.family.add(data.link??[]);
     for (const row of data.node) this.nodes.set(row.id, row);
     for (const row of data.wait) this.waits.set(row.id, row);
     for (const row of data.call) {
@@ -112,7 +115,7 @@ export class TraceModel {
         }else this.data[kind].push(row);
         if(kind==='call'){
           const rows=this.calls.get(row.occurrence_id) ?? [];rows.push(row);callGroups.add(row.occurrence_id);this.calls.set(row.occurrence_id,rows);
-          this.graph.call(row,this.nodes.get(row.occurrence_id)?.node_id);
+          this.graph.call(row);
         }
       }
     }
@@ -127,6 +130,8 @@ export class TraceModel {
     }
     if(delta.event.some(event=>event.control_state || event.invocation_status))this.pauses=appendPauseIntervals(this.pauses,delta.event);
     this.activity.append(delta.event);
+    const links=this.family.add(delta.link??[]);
+    if(links.length){const saved=this.data.link??=[];for(const row of links)saved.push(row);this.bytesDelta+=JSON.stringify(links).length*2;}
     this.graph.updateEdges(delta.edge ?? []);
     this.data.manifest={...next,delta:false,base_cursor:null,trace:this.graph.frame(next.trace)};
     this.data.manifest.overview=this.overview();

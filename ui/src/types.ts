@@ -41,10 +41,16 @@ export interface GraphEdge {
 }
 
 export interface GraphDefinition {
+  groups?: WorkflowGroup[];
   nodes: GraphNode[];
   edges: GraphEdge[];
   entry_node_ids: string[];
   exit_node_ids: string[];
+}
+
+export interface WorkflowGroup {
+  id: string; parent_group_id: string | null; label: string;
+  workflow_id: string; workflow_version: string; node_ids: string[];
 }
 
 export interface WorkflowGraphData {
@@ -94,7 +100,7 @@ export interface ExecutionActionInput {
 export type InspectorTab = 'Summary' | 'Input / Output' | 'Execution' | 'Definition' | 'Actions' | 'Changes' | 'Details';
 export interface ExecutionRecordSelection { kind: 'node' | 'call' | 'wait' | 'edge'; id: string; section?: InspectorTab; waitId?: string }
 export type ExecutionView = 'graph' | 'timeline' | 'split';
-export type Selection = { kind: "node" | "edge" | "invocation" | "workflow"; id: string; section?: InspectorTab; record?: ExecutionRecordSelection } | null;
+export type Selection = { kind: "node" | "edge" | "group" | "invocation" | "workflow"; id: string; section?: InspectorTab; record?: ExecutionRecordSelection } | null;
 
 export interface LocationState {
   view: "workflows" | "executions";
@@ -238,13 +244,13 @@ export interface TimelineEventGroup {
 }
 export interface TimelineEventGroups { items: TimelineEventGroup[]; total_count: number; frontier: number }
 
-export interface ReplayOccurrence { occurrence_id: string; node_id: string; status: string; created_sequence: number }
+export interface ReplayOccurrence { occurrence_id: string; node_id: string; status: string; created_sequence: number; call_count?: number }
 export interface ReplayEvent extends TimelineMarker {
   changes: { entity_type: 'node' | 'edge' | 'invocation'; entity_id: string; node_id: string | null; change: { status?: string; control_state?: string; node_id?: string; edge_id?: string; selected?: boolean } }[];
   evaluations: { edge_id: string; condition_result: boolean }[];
   routes: Omit<ExecutionTrace['active_routes'][number], 'status'>[];
   child_ids: string[];
-  call_starts: { node_id: string; count: number }[];
+  call_starts: { node_id: string; occurrence_id: string; count: number }[];
   initial_edges?: ExecutionTrace['edges'];
 }
 export interface ReplayWindow {
@@ -270,9 +276,19 @@ export interface TraceDatasetManifest {
 }
 export interface TraceEdgeUpdate { edge_id: string; condition_result?: boolean; evaluations_delta: number }
 export interface TraceHead { invocation_id: string; root_invocation_id: string; invocation_version: number; family_version: number; status: string | null; active: boolean; store_id: string; cursor: string; frontier: number; server_now_us: number }
-export interface TraceDatasetPage { items: (TimelineRow | TimelineMarker | ReplayEvent | TraceEdgeUpdate)[]; snapshot_id: string; section: string; page: number; next_page: number | null }
-export interface TraceDataset { manifest: TraceDatasetManifest; node: TimelineRow[]; call: TimelineRow[]; wait: TimelineRow[]; event: TimelineMarker[]; edge?: TraceEdgeUpdate[] }
+export interface TraceDatasetPage { items: (TimelineRow | TimelineMarker | ReplayEvent | TraceEdgeUpdate | FamilyLink)[]; snapshot_id: string; section: string; page: number; next_page: number | null }
+export interface TraceDataset { manifest: TraceDatasetManifest; node: TimelineRow[]; call: TimelineRow[]; wait: TimelineRow[]; event: TimelineMarker[]; edge?: TraceEdgeUpdate[]; link?:FamilyLink[] }
 export interface LocalReplayResult { frame: ExecutionTrace; marker: TimelineMarker; previous: TimelineMarker | null; next: TimelineMarker | null; cursorTime: number }
+export interface FamilyLink {
+  id:string; kind:'spawn'|'await'; event_id:string; sequence:number; occurred_at_us:number;
+  animate?:boolean;
+  occurrence_id:string; node_id:string; wait_id:string|null;
+  target:TraceRow & {created_sequence:number};
+}
+export interface FamilyHandoff {
+  key:string; kind:FamilyLink['kind']; sequence:number; occurrenceId:string; nodeId:string;
+  waitId:string|null; target:FamilyLink['target'];
+}
 
 export type RevisionChangeStatus = 'added' | 'removed' | 'modified';
 export interface RevisionChange { kind: 'workflow' | 'node' | 'edge'; id: string; status: RevisionChangeStatus; fields: string[]; ordinal: number }

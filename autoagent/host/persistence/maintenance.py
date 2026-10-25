@@ -21,6 +21,11 @@ class Maintenance:
         async with self.writer.admission:
             self.writer.check_open()
             await self.writer.flush()
+            # Maintenance owns mutation; no cached metadata may outlive a
+            # definition deletion or be reused by a rebuild SQL snapshot.
+            self.storage.graph_cache.clear()
+            self.storage.metadata_cache.clear()
+            self.storage._store_order = None
             async with self.writer.mutation, self.storage.engine.begin() as conn:
                 result = await operation(conn, *args)
                 if operation.__name__ in ("rebuild", "purge"):

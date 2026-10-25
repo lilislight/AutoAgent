@@ -356,7 +356,7 @@ from autoagent.agent import (
 async def resources(setup):
     async with OpenAIResponsesProvider() as llm, OpenAIEmbeddingProvider() as embeddings:
         setup.register_operator(
-            llm_call_operator(llm, streaming=True),
+            llm_call_operator(llm),
             capability_id=LLM_CALL.id, default=True,
         )
         setup.register_operator(
@@ -368,15 +368,22 @@ async def resources(setup):
 
 将 `resources` 传给 `AutoAgentHost(lifespan=resources, ...)`。
 这个片段使用 OpenAI 配置；本地离线完整版本见 `capabilities.py`。
-`streaming=False`（默认）调用 Provider 的 `ainvoke`，`True` 调用 `astream`；
-两种实现共享输入及 chunk 契约，由 Capability 的默认 Reducer 得到完整 `LLMResponse`。
+每次请求的 `LLMRequest.streaming=False`（默认）调用 Provider 的 `ainvoke`，
+`True` 调用 `astream`；同一实现支持两种模式，由 Capability 的默认 Reducer 得到完整 `LLMResponse`。
+各 Node 分别在请求中指定 `model`、`max_output_tokens`、`temperature` 和 `streaming`。
 普通 `Node("call", LLM_CALL)` 即可使用，无需在 Node 上配置 `LLMStreamReducer`。
 Host 还可以通过 `AUTOAGENT_LLM_*`、`AUTOAGENT_EMBEDDING_*` 创建和绑定默认 Provider；
-没有配置 MODEL 或自定义实现时，调用会明确失败。项目注册的自定义实现优先。
+LLM 连接可以只配置 API_KEY，将模型留给每次调用；MODEL 和 API_KEY 均为空时不自动创建连接。
+`llm_request()` 为省略的参数补上环境默认值，显式参数优先。项目注册的自定义实现优先。
+
+可通过 `llm_call_operator(resolver=...)` 注入同步或异步的 `LLMResolver`，接收 `LLMRequest`，
+返回运行时对象 `LLMSelection(provider=..., model=...)`。未内置路由策略。
+`model=None` 允许回调选择模型；显式模型不能被回调替换。`routing` 是不会发送给模型 API 的 JSON 提示。
+Provider 的创建和关闭仍由应用负责，Provider 专用选项和历史必须与选中的目标兼容。
 
 单独使用 Core App 时，用 `app.register_capability(...)` 注册契约，
-再用 `app.register_operator(...)` 绑定实现。`nodes.py` 手动切换普通默认实现的启用状态，
-分别演示普通与流式调用，不需要 Resolver。
+再用 `app.register_operator(...)` 绑定实现。`nodes.py` 在同一个实现上使用不同请求的
+`streaming` 设置，分别演示普通与流式调用，不需要 Resolver。
 
 Provider 和 MCP client 使用 `AutoAgentApp(runtime_lifespan=...)` 创建和关闭，
 确保资源与 Core 的 Runtime loop 一致。不要先在调用方 event loop 连接好 client，再交给 Core。

@@ -1,0 +1,30 @@
+{
+  "autoagent/agent/__init__.py": {
+    "frozen": "7debe5f61f14bd4f709c02eb72f140b0f93a95bdbff30749dbd4881baa38db5c",
+    "current": "d6d44fec193aecdd40d9a9b6cdf36ccf806c1fce0007fb414aaee4cc950f578e"
+  },
+  "autoagent/host/agent.py": {
+    "frozen": "8f742a5c82fcc9fdcd5f17ce85dc442a64a25781c6117912c549fac49d757b5d",
+    "current": "93f7b2514211240d081af79ecf1bb06a35ce077217a23987b4b3fc2225ea8a94"
+  },
+  "autoagent/agent/providers/openai.py": {
+    "frozen": "3a989307787ba0018a6a45f91b92f3490fd3a741c4cc54a0ae2c85fca3ef65ca",
+    "current": "09ec8887966589d1f718e9ffc5cd7bc08ad7746ddb7155659504eb63692d2412"
+  },
+  "autoagent/agent/providers/_common.py": {
+    "frozen": "dd0f5cc496d1258329eb4ea0315559b4f04d4f18cc9d276dee8ce72638324a77",
+    "current": "8b76474a9cc259ce20bc8ebfef931542f36b647867013b926c953d66d3f00c4d"
+  },
+  "autoagent/agent/models/llm.py": {
+    "frozen": "e68bcff23e88f2e670dec5a74359fca30044e5041d25674c5c33603c58fa79d4",
+    "current": "10d51cb157a1c20bead9743f9dbbae74a622d961f8d5ec63360eb5e23a636a80"
+  },
+  "autoagent/agent/integration/__init__.py": {
+    "frozen": "cd5f84c704c9ff506f916e171c07ea7ee8c49f517c2ab612267ea26ea0fedf2d",
+    "current": "8381073051650d136c4db649596d0554ec122e6f9d8c63545ef6488ea9549dca"
+  },
+  "autoagent/agent/integration/capabilities.py": {
+    "frozen": "be21570a66ec20b5772a6d70853d2237a20f96ba47f5fa292cf28aa43b7c4e79",
+    "current": "55edae854dc6ea24a087aaba1e3cc52409f76ca0798c5d927116d6d97a1cd386"
+  }
+}

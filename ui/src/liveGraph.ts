@@ -11,11 +11,9 @@ export class LiveGraph {
   private edges = new Map<string,ExecutionTrace['edges'][number]>();
   constructor(data: TraceDataset) {
     for (const row of data.node) this.node(row);
-    const nodes = new Map(data.node.map(row => [row.id, row.node_id]));
-    for (const row of data.call) this.call(row, nodes.get(row.occurrence_id));
-    // Call Node IDs are available through TraceModel's index in production; a
-    // manifest also preserves counts from imported/incomplete historical views.
-    for (const row of data.manifest.trace.nodes) this.callCounts.set(row.node_id, row.call_count ?? this.callCounts.get(row.node_id) ?? 0);
+    for (const row of data.call) this.call(row);
+    // The manifest also preserves counts for imported/incomplete histories.
+    for (const row of data.manifest.trace.nodes) this.callCounts.set(row.occurrence_id, row.call_count ?? this.callCounts.get(row.occurrence_id) ?? 0);
     for (const row of data.manifest.trace.edges) this.edges.set(row.edge_id,{...row});
   }
   node(row: TimelineRow, previous?: TimelineRow) {
@@ -30,8 +28,8 @@ export class LiveGraph {
       if (!old || old.id === row.id || newer(row,old)) this.terminal.set(id,row);
     }
   }
-  call(row: TimelineRow, nodeId?: string) {
-    if (nodeId) this.callCounts.set(nodeId,(this.callCounts.get(nodeId) ?? 0)+1);
+  call(row: TimelineRow) {
+    this.callCounts.set(row.occurrence_id,(this.callCounts.get(row.occurrence_id) ?? 0)+1);
   }
   updateEdges(rows: TraceEdgeUpdate[]) {
     for(const row of rows) {
@@ -47,7 +45,7 @@ export class LiveGraph {
         if(!representative || rank(row)<rank(representative) || rank(row)===rank(representative) && newer(row,representative))representative=row;
         for(const route of row.activations ?? [])routes.push({...route,target_node_id:id,target_occurrence_id:row.id,status:row.status!});
       }
-      if(representative)nodes.push({node_id:id,status:representative.status!,occurrence_id:representative.id,occurrences:total,call_count:this.callCounts.get(id) ?? 0});
+      if(representative)nodes.push({node_id:id,status:representative.status!,occurrence_id:representative.id,occurrences:total,call_count:this.callCounts.get(representative.id) ?? 0});
     }
     return {...header,nodes,edges:[...this.edges.values()],active_routes:routes};
   }

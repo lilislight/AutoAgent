@@ -1,0 +1,310 @@
+{
+  "timing": [
+    {
+      "job": "sqlite-c1-d0-r0-timing",
+      "backend": "sqlite",
+      "delay_ms": 0,
+      "completed": 5,
+      "run_seconds": 4.504101209997316,
+      "latency_ms": {
+        "p50": 806.7664209957002,
+        "p95": 1198.025213595247,
+        "p99": 1271.0934563155752
+      },
+      "warm_memory": {
+        "rss_bytes": 94613504,
+        "peak_rss_bytes": 94617600,
+        "cpu_seconds": 1.86
+      },
+      "drained_memory": {
+        "rss_bytes": 97771520,
+        "peak_rss_bytes": 97771520,
+        "cpu_seconds": 5.56
+      }
+    },
+    {
+      "job": "sqlite-c1-d1-r0-timing",
+      "backend": "sqlite",
+      "delay_ms": 1,
+      "completed": 5,
+      "run_seconds": 4.528798643004848,
+      "latency_ms": {
+        "p50": 898.1993810011772,
+        "p95": 962.2040895977989,
+        "p99": 965.2053379174322
+      },
+      "warm_memory": {
+        "rss_bytes": 92430336,
+        "peak_rss_bytes": 92430336,
+        "cpu_seconds": 1.76
+      },
+      "drained_memory": {
+        "rss_bytes": 95514624,
+        "peak_rss_bytes": 95514624,
+        "cpu_seconds": 5.45
+      }
+    },
+    {
+      "job": "sqlite-c1-d5-r0-timing",
+      "backend": "sqlite",
+      "delay_ms": 5,
+      "completed": 5,
+      "run_seconds": 5.497345361000043,
+      "latency_ms": {
+        "p50": 1096.6586540016579,
+        "p95": 1125.4280839988496,
+        "p99": 1130.1413399993908
+      },
+      "warm_memory": {
+        "rss_bytes": 92106752,
+        "peak_rss_bytes": 92110848,
+        "cpu_seconds": 1.65
+      },
+      "drained_memory": {
+        "rss_bytes": 96194560,
+        "peak_rss_bytes": 96194560,
+        "cpu_seconds": 5.21
+      }
+    },
+    {
+      "job": "sqlite-c8-d0-r0-timing",
+      "backend": "sqlite",
+      "delay_ms": 0,
+      "completed": 16,
+      "run_seconds": 37.127086100997985,
+      "latency_ms": {
+        "p50": 18508.315061997564,
+        "p95": 18654.751127756754,
+        "p99": 18654.78803435035
+      },
+      "warm_memory": {
+        "rss_bytes": 92327936,
+        "peak_rss_bytes": 92332032,
+        "cpu_seconds": 1.57
+      },
+      "drained_memory": {
+        "rss_bytes": 105193472,
+        "peak_rss_bytes": 105193472,
+        "cpu_seconds": 37.97
+      }
+    },
+    {
+      "job": "sqlite-c8-d1-r0-timing",
+      "backend": "sqlite",
+      "delay_ms": 1,
+      "completed": 16,
+      "run_seconds": 35.672577696997905,
+      "latency_ms": {
+        "p50": 17833.012327995675,
+        "p95": 18127.505781001673,
+        "p99": 18135.422118599672
+      },
+      "warm_memory": {
+        "rss_bytes": 92581888,
+        "peak_rss_bytes": 92585984,
+        "cpu_seconds": 1.56
+      },
+      "drained_memory": {
+        "rss_bytes": 108298240,
+        "peak_rss_bytes": 108298240,
+        "cpu_seconds": 36.58
+      }
+    },
+    {
+      "job": "sqlite-c8-d5-r0-timing",
+      "backend": "sqlite",
+      "delay_ms": 5,
+      "completed": 16,
+      "run_seconds": 35.8444125889946,
+      "latency_ms": {
+        "p50": 17894.352148498,
+        "p95": 18054.974148253677,
+        "p99": 18055.277364858193
+      },
+      "warm_memory": {
+        "rss_bytes": 92745728,
+        "peak_rss_bytes": 92749824,
+        "cpu_seconds": 1.61
+      },
+      "drained_memory": {
+        "rss_bytes": 107184128,
+        "peak_rss_bytes": 107184128,
+        "cpu_seconds": 36.8
+      }
+    }
+  ],
+  "diagnostics": [
+    {
+      "backend": "sqlite",
+      "statements": 63123,
+      "phases": {
+        "admission_lock_wait": {
+          "calls": 992,
+          "elapsed_ms": 3963.5091480013216,
+          "errors": 0
+        },
+        "queue_residency": {
+          "calls": 992,
+          "elapsed_ms": 55.444849756895564,
+          "errors": 0
+        },
+        "admission_lock_hold": {
+          "calls": 992,
+          "elapsed_ms": 2666.216567129595,
+          "errors": 0
+        },
+        "source_texts": {
+          "calls": 992,
+          "elapsed_ms": 33.066117131966166,
+          "errors": 0
+        },
+        "encoding": {
+          "calls": 252,
+          "elapsed_ms": 460.2753290819237,
+          "errors": 0
+        },
+        "projection_write": {
+          "calls": 252,
+          "elapsed_ms": 1106.6257648781175,
+          "errors": 0
+        },
+        "write_transaction": {
+          "calls": 252,
+          "elapsed_ms": 2052.965617956943,
+          "errors": 0
+        },
+        "driver_commit": {
+          "calls": 1353,
+          "elapsed_ms": 871.5152448567096,
+          "errors": 0
+        },
+        "admission_and_ack": {
+          "calls": 992,
+          "elapsed_ms": 285030.5725462531,
+          "errors": 0
+        },
+        "host_residency": {
+          "calls": 1124,
+          "elapsed_ms": 84.28468894271646,
+          "errors": 0
+        },
+        "projection_compute": {
+          "calls": 8543,
+          "elapsed_ms": 23914.44475966273,
+          "errors": 0
+        },
+        "observation_sql": {
+          "calls": 1070,
+          "elapsed_ms": 180515.5890800088,
+          "errors": 0
+        },
+        "observation_wait": {
+          "calls": 16,
+          "elapsed_ms": 286657.26567202364,
+          "errors": 0
+        }
+      },
+      "batches": {
+        "count": 252,
+        "records": 992,
+        "runtime_events": 992
+      },
+      "latency_ms": {
+        "p50": 18099.62085499137,
+        "p95": 18761.31799425275,
+        "p99": 18772.542007648008
+      },
+      "completed": 16
+    },
+    {
+      "backend": "postgres",
+      "statements": 47852,
+      "phases": {
+        "admission_lock_wait": {
+          "calls": 992,
+          "elapsed_ms": 3260.2985817211447,
+          "errors": 0
+        },
+        "queue_residency": {
+          "calls": 992,
+          "elapsed_ms": 55.16740011807997,
+          "errors": 0
+        },
+        "admission_lock_hold": {
+          "calls": 992,
+          "elapsed_ms": 2108.0127200693823,
+          "errors": 0
+        },
+        "source_texts": {
+          "calls": 992,
+          "elapsed_ms": 33.55247022409458,
+          "errors": 0
+        },
+        "encoding": {
+          "calls": 254,
+          "elapsed_ms": 446.0831618489465,
+          "errors": 0
+        },
+        "projection_write": {
+          "calls": 254,
+          "elapsed_ms": 1228.3437789592426,
+          "errors": 0
+        },
+        "write_transaction": {
+          "calls": 254,
+          "elapsed_ms": 2191.228542054887,
+          "errors": 0
+        },
+        "driver_commit": {
+          "calls": 1125,
+          "elapsed_ms": 401.1544880049769,
+          "errors": 0
+        },
+        "admission_and_ack": {
+          "calls": 992,
+          "elapsed_ms": 168242.3744451662,
+          "errors": 0
+        },
+        "host_residency": {
+          "calls": 1112,
+          "elapsed_ms": 80.48424031585455,
+          "errors": 0
+        },
+        "projection_compute": {
+          "calls": 6720,
+          "elapsed_ms": 12797.75285962387,
+          "errors": 0
+        },
+        "observation_sql": {
+          "calls": 841,
+          "elapsed_ms": 86940.34414597263,
+          "errors": 0
+        },
+        "observation_wait": {
+          "calls": 16,
+          "elapsed_ms": 170412.33906600974,
+          "errors": 0
+        }
+      },
+      "batches": {
+        "count": 254,
+        "records": 992,
+        "runtime_events": 992
+      },
+      "latency_ms": {
+        "p50": 10808.206813497236,
+        "p95": 10958.204693750304,
+        "p99": 10959.37437875109
+      },
+      "completed": 16
+    }
+  ],
+  "partial": {
+    "status": "error",
+    "completed": 0,
+    "total_seconds": 236.41299835700192,
+    "exit_code": -9,
+    "cpu_seconds": 230.22,
+    "rss_bytes": 119070720
+  }
+}

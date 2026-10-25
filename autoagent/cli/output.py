@@ -53,6 +53,9 @@ def render(document, format):
         return "\n".join(lines) + "\n"
     source, data, command = document["source"], document["data"], document["command"]
     lines = [f"SERVER {source['url']}", ""] if source["kind"] == "server" else [f"PROJECT {source['name']}", f"ROOT {source['root']}", ""]
+    if command.startswith('eval.'):
+        from .evaluation import render as render_evaluation
+        return '\n'.join(lines + [render_evaluation(data, command)]) + '\n'
     if document.get("view") in ('durable', 'live'):
         from .history import render_query
         lines += ["VIEW " + document['view'], render_query(data)]
@@ -67,6 +70,28 @@ def render(document, format):
             lines.append(f"UI {data['ui_url']}")
         lines.append("Press Ctrl+C to stop and save Host state.")
         return "\n".join(lines) + "\n"
+    if command == 'memory':
+        lines.append('MONITOR ' + ('enabled' if data['enabled'] else 'disabled'))
+        sample = data.get('latest')
+        if sample is None:
+            lines.append('Set AUTOAGENT_MEMORY_MONITOR_ENABLED=true before starting the Server.' if not data['enabled'] else 'No sample available yet.')
+        else:
+            def mib(value):
+                return f'{value / 1024**2:.2f} MiB' if value is not None else 'unavailable'
+            lines.extend([f"PID {sample['pid']}", f"RSS {mib(sample['process']['rss_bytes'])}",
+                          f"PEAK RSS {mib(sample['process']['peak_rss_bytes'])}",
+                          f"BUDGET {mib(sample['budget_bytes'])}", f"PRESSURE {sample['pressure']}",
+                          f"SAMPLE AGE {data['sample_age_seconds']:.3f}s" + (' (stale)' if data['stale'] else '')])
+            host = sample.get('host') or {}
+            persistence = host.get('persistence', {})
+            lines.extend([f"RESIDENT GRAPHS {host.get('resident_graphs', 'unavailable')}",
+                          f"PERSISTENCE QUEUE {persistence.get('queued_count', 'unavailable')}",
+                          f"PERSISTENCE RETAINED {mib(persistence.get('retained_bytes'))}"])
+            estimates = host.get('residency', {})
+            lines.append(f"CACHED STATE ESTIMATE {mib(estimates.get('estimated_bytes'))} (not an RSS breakdown)")
+            if data.get('history'):
+                lines.append(f"HISTORY {len(data['history'])}/{data['history_capacity']} samples (use --format json for values)")
+        return '\n'.join(lines) + '\n'
     if command == "invoke" or command.startswith("invocation."):
         for key in ("workflow_id", "revision_id", "session_id", "invocation_id", "operation_id", "request_id", "status", "control_state", "observation", "host_state"):
             if data.get(key) is not None:

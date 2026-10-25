@@ -10,13 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class AgentSettings(BaseModel):
-    """One explicit vendor/transport/model route; credentials never enter requests."""
+    """Connection and request defaults; credentials never enter requests."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     provider: str = Field(default="openai", min_length=1, pattern=r"\S")
     backend: Literal["openai", "litellm"] = "openai"
-    model: str = Field(min_length=1, pattern=r"\S")
+    model: str | None = Field(default=None, min_length=1, pattern=r"\S")
     api_key: SecretStr | None = Field(default=None, repr=False)
     base_url: str | None = None
     protocol: Literal["openai.chat_completions", "openai.responses"] = "openai.chat_completions"
@@ -27,9 +27,10 @@ class AgentSettings(BaseModel):
     @classmethod
     def from_environment(cls, environment, *, embedding=False):
         prefix = "AUTOAGENT_EMBEDDING_" if embedding else "AUTOAGENT_LLM_"
-        # Empty examples and unrelated projects create no clients or SDK imports.
+        # Embeddings still require a default model. Generation may choose its
+        # model in each Node, independently of Host connection setup.
         model = environment.get(prefix + "MODEL", "").strip()
-        if not model:
+        if embedding and not model:
             return None
         fields = {"PROVIDER": "provider", "BACKEND": "backend", "MODEL": "model",
                   "API_KEY": "api_key", "BASE_URL": "base_url", "TIMEOUT_SECONDS": "timeout_seconds"}
@@ -37,7 +38,7 @@ class AgentSettings(BaseModel):
             fields.update(PROTOCOL="protocol", STREAMING="streaming", MAX_OUTPUT_TOKENS="max_output_tokens")
         values = {field: environment[prefix + name].strip() for name, field in fields.items()
                   if environment.get(prefix + name, "").strip()}
-        return cls(**values)
+        return cls(**values) if values else None
 
     def create_provider(self, *, embedding=False):
         """Construct lazily; Host enters and closes the resource on its Runtime loop."""
@@ -67,23 +68,30 @@ class AgentSettings(BaseModel):
         return provider(config)
 
 
-def llm_request(*, input, model=None, options=None, **kwargs):
+_UNSET = object()
+
+
+def llm_request(*, input, model=_UNSET, options=None, **kwargs):
     """Build a complete LLMRequest from Host's merged environment and explicit overrides.
 
     Call in Input Mapping or an Operator, while Host's environment scope is open.
     Passing model explicitly also works without environment configuration.
+    Explicit model=None requests resolver selection instead of the env default.
+    Explicit streaming=False and max_output_tokens=None override env defaults.
     """
     from autoagent.agent import LLMProviderOptions, LLMRequest
 
     settings = AgentSettings.from_environment(os.environ)
-    selected = model or (settings.model if settings else None)
-    if selected is None:
-        raise ValueError("Set AUTOAGENT_LLM_MODEL or pass model to llm_request().")
-    if settings and settings.max_output_tokens is not None:
-        kwargs.setdefault("max_output_tokens", settings.max_output_tokens)
+    selected = (settings.model if settings else None) if model is _UNSET else model
+    if selected is None and model is _UNSET:
+        raise ValueError("Set AUTOAGENT_LLM_MODEL, pass model, or pass model=None for resolver selection.")
+    if settings:
+        kwargs.setdefault("streaming", settings.streaming)
+        if settings.max_output_tokens is not None:
+            kwargs.setdefault("max_output_tokens", settings.max_output_tokens)
     if options is not None:
         if settings is None:
-            raise ValueError("Protocol options require AUTOAGENT_LLM_MODEL; otherwise pass provider_options explicitly.")
+            raise ValueError("Protocol options require Agent settings; otherwise pass provider_options explicitly.")
         if "provider_options" in kwargs:
             raise ValueError("Use options or provider_options, not both.")
         kwargs["provider_options"] = LLMProviderOptions(
@@ -113,11 +121,11 @@ async def agent_resources(setup):
             if any(item.capability_id == capability.id and item.enabled for item in setup.operators):
                 continue
             settings = AgentSettings.from_environment(setup.environment, embedding=embedding)
-            if settings is None:
+            if settings is None or (settings.model is None and settings.api_key is None):
                 continue
             provider = await stack.enter_async_context(settings.create_provider(embedding=embedding))
             identity = f"{capability.id}.{settings.provider}.{settings.backend}"
             operator = (embedding_operator(provider, id=identity) if embedding else
-                        llm_call_operator(provider, id=identity, streaming=settings.streaming))
+                        llm_call_operator(provider, id=identity))
             setup.register_operator(operator, capability_id=capability.id, default=True)
         yield

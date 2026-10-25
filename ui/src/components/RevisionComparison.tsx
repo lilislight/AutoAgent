@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { compareWorkflowRevisions, getRevisionComparisonObject, getWorkflowGraph, getWorkflowObject, getWorkflowRevision, listWorkflowRevisions } from '../api';
 import { comparisonGraph, definitionDifferences } from '../revisionComparison';
-import type { RevisionChange, RevisionChangeStatus, Selection } from '../types';
+import type { RevisionChange, RevisionChangeStatus, Selection, WorkflowGraphData } from '../types';
 import type { Theme } from '../theme';
 import { Sidebar } from './Sidebar';
 import { SelectMenu } from './SelectMenu';
@@ -21,6 +21,7 @@ export function RevisionComparison({ workflowId, base, target, active, theme, on
   onPair:(base:string,target:string)=>void; onExit:()=>void; changeView:(view:'workflows'|'executions')=>void;
 }) {
   const [selected,setSelected]=useState<RevisionChange|null>(null);
+  const [selectedGroup,setSelectedGroup]=useState<string|null>(null);
   const [visible,setVisible]=useState(50);
   const [mode,setMode]=useState<'overlay'|'split'>('overlay');
   const [focusRequest,setFocusRequest]=useState(0);
@@ -40,21 +41,23 @@ export function RevisionComparison({ workflowId, base, target, active, theme, on
   const counts=comparison.data?.pages[0].counts;
   const flowKey=`compare:${base}:${target}:${mode}`;
   const candidate=useMemo(()=>drawing&&left.data&&right.data&&!loading?{key:flowKey,mode,base:left.data,target:right.data,...drawing}:null,[drawing,left.data,right.data,loading,flowKey,mode]);
-  const changePair=(nextBase:string,nextTarget:string)=>{setSelected(null);setVisible(50);onPair(nextBase,nextTarget);};
-  const graphSelection:Selection=selected?.kind==='node'||selected?.kind==='edge'?{kind:selected.kind,id:selected.id}:null;
+  const changePair=(nextBase:string,nextTarget:string)=>{setSelected(null);setSelectedGroup(null);setVisible(50);onPair(nextBase,nextTarget);};
+  const graphSelection:Selection=selectedGroup?{kind:'group',id:selectedGroup}:selected?.kind==='node'||selected?.kind==='edge'?{kind:selected.kind,id:selected.id}:null;
   const choose=(selection:Selection)=>{
+    setSelectedGroup(selection?.kind==='group'?selection.id:null);
+    if(selection?.kind==='group'){setSelected(null);return;}
     if(!selection){setSelected(null);return;}
     const identity=selection.kind==='edge'?drawing?.marks.aliases[selection.id]??selection.id:selection.id;
     setSelected(changes.find(row=>row.kind===selection.kind&&row.id===identity)??{kind:selection.kind as RevisionChange['kind'],id:identity,status:'modified',fields:[],ordinal:0});
   };
-  useEffect(()=>{if(!active||!selected)return;const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!document.querySelector('[role="listbox"]'))setSelected(null);};window.addEventListener('keydown',escape);return()=>window.removeEventListener('keydown',escape);},[active,selected]);
+  useEffect(()=>{if(!active||!selected&&!selectedGroup)return;const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!document.querySelector('[role="listbox"]')){setSelected(null);setSelectedGroup(null);}};window.addEventListener('keydown',escape);return()=>window.removeEventListener('keydown',escape);},[active,selected,selectedGroup]);
   return <div className={`workspace workspace-tab ${active?'':'is-inactive'}`} data-workspace-view="comparison" aria-hidden={!active} inert={!active}>
     <Sidebar view="workflows" onChange={changeView}>
       <div className="directory-title">Changes <span className="comparison-total">{comparison.data?.pages[0].total_count??'—'}</span></div>
       <div className="comparison-change-list">
         {(['workflow','node','edge'] as const).map(kind=>{
           const group=changes.slice(0,visible).filter(row=>row.kind===kind);
-          return group.length?<section key={kind}><h3>{kind==='workflow'?'Workflow':kind==='node'?'Nodes':'Edges'} <span>{counts?.[kind]}</span></h3>{group.map(row=><button key={`${kind}:${row.id}`} type="button" className={`comparison-change-row ${selected?.kind===kind&&selected.id===row.id?'active':''}`} onClick={()=>{setSelected(row);if(kind!=='workflow')setFocusRequest(value=>value+1);}}>
+          return group.length?<section key={kind}><h3>{kind==='workflow'?'Workflow':kind==='node'?'Nodes':'Edges'} <span>{counts?.[kind]}</span></h3>{group.map(row=><button key={`${kind}:${row.id}`} type="button" className={`comparison-change-row ${selected?.kind===kind&&selected.id===row.id?'active':''}`} onClick={()=>{setSelectedGroup(null);setSelected(row);if(kind!=='workflow')setFocusRequest(value=>value+1);}}>
             <span className={`change-symbol change-${row.status}`} aria-label={row.status}>{symbols[row.status]}</span><span><strong>{row.id}</strong><small>{row.status[0].toUpperCase()+row.status.slice(1)}{row.fields.length?` · ${row.fields.length} ${row.fields.length===1?'field':'fields'}`:''}</small></span>
           </button>)}</section>:null;
         })}
@@ -74,10 +77,18 @@ export function RevisionComparison({ workflowId, base, target, active, theme, on
           render={snapshot=><FlowLoadingSurface><Suspense fallback={null}>{snapshot.mode==='split'?<RevisionSplitGraph base={snapshot.base} target={snapshot.target} drawing={snapshot} selection={graphSelection} onSelect={choose} theme={theme} focusRequest={focusRequest} />:<WorkflowGraph workflow={snapshot.workflow} comparison={snapshot.marks} selection={graphSelection} onSelect={choose} theme={theme} focusRequest={focusRequest} />}</Suspense></FlowLoadingSurface>}
           fallback={<FlowLoadingSurface>{error?<div className="empty-state" role="alert"><h2>Could not compare Revisions</h2><p>{error.message}</p><button className="toolbar-action" onClick={()=>{void left.refetch();void right.refetch();void comparison.refetch();}}>Retry</button></div>:null}</FlowLoadingSurface>}
         />
-        <InspectorPresence open={Boolean(selected)}>{selected?<ComparisonInspector base={base} target={target} selected={selected} onClose={()=>setSelected(null)} />:null}</InspectorPresence>
+        <InspectorPresence open={Boolean(selected)||Boolean(selectedGroup)}>{selectedGroup&&left.data&&right.data?<ComparisonGroupInspector key={`${base}:${target}:${selectedGroup}`} base={left.data} target={right.data} identity={selectedGroup} onClose={()=>setSelectedGroup(null)}/>:selected?<ComparisonInspector base={base} target={target} selected={selected} onClose={()=>setSelected(null)} />:null}</InspectorPresence>
       </div>
     </main>
   </div>;
+}
+
+function ComparisonGroupInspector({base,target,identity,onClose}:{base:WorkflowGraphData;target:WorkflowGraphData;identity:string;onClose:()=>void}){
+  const [side,setSide]=useState(target.definition.groups?.some(g=>g.id===identity)?'target':'base');
+  const graph=side==='base'?base:target,group=graph.definition.groups?.find(g=>g.id===identity);
+  return <InspectorFrame kind="inline Workflow" title={group?.label??identity} context={<span>Revision comparison</span>} tabs={['Definition']} onClose={onClose}>
+    {()=> <><SelectMenu label="Definition Revision" value={side} options={[{value:'base',label:'Base'},{value:'target',label:'Target'}]} onChange={setSide}/>{group?<ComparedDefinition revision={graph.workflow_revision_id} kind="group" identity={identity}/>:<p className="inspector-empty">Absent from {side}.</p>}</>}
+  </InspectorFrame>;
 }
 
 function ComparisonInspector({base,target,selected,onClose}:{base:string;target:string;selected:RevisionChange;onClose:()=>void}) {

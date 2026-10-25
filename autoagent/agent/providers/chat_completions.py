@@ -147,6 +147,40 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
                 params["audio"] = options.audio.model_dump(mode="json")
         return params
 
+    def _decode_output(self, message: dict, *, provider_id: str, request: LLMRequest | None = None):
+        """Decode content and calls; message-level extensions have one owner."""
+        parts = []
+        if isinstance(message.get("content"), str):
+            if message["content"]:
+                parts.append(TextContent(text=message["content"], annotations=tuple(message.get("annotations") or ())))
+        elif message.get("content") is not None:
+            raise ValueError("Unsupported Chat assistant content shape.")
+        if message.get("refusal"):
+            parts.append(RefusalContent(text=message["refusal"]))
+        if message.get("audio") is not None:
+            audio = message["audio"]
+            if request is None or request.output_options is None or request.output_options.audio is None:
+                raise ValueError("Audio response decoding requires the request audio format.")
+            format = request.output_options.audio.format
+            parts.append(AudioContent(source=DataSource(data=audio["data"], mime_type=_AUDIO_MIME[format]), transcript=audio.get("transcript"), native=native_fields(audio, {"data", "transcript"}, provider_id, self.protocol)))
+        output = []
+        message_data = native_fields(message, {"role", "content", "refusal", "audio", "tool_calls", "annotations"}, provider_id, self.protocol)
+        if parts:
+            output.append(LLMMessage(role=message["role"], content=tuple(parts), native=message_data))
+        for call in message.get("tool_calls") or ():
+            if call["type"] == "function":
+                data = native_fields(call, {"id", "type", "function"}, provider_id, self.protocol)
+                output.append(LLMToolCall(call_id=call["id"], name=call["function"]["name"], arguments=call["function"]["arguments"], native=data))
+            else:
+                output.append(LLMProviderItem(id=call.get("id"), provider_type=call["type"], native=LLMNativeData(provider_id=provider_id, protocol=self.protocol, payload=call)))
+        if output and not parts and message_data is not None:
+            first = output[0]
+            payload = dict(first.native.payload) if first.native else {}
+            payload["_message_fields"] = message_data.payload
+            output[0] = first.model_copy(update={"native": LLMNativeData(
+                provider_id=provider_id, protocol=self.protocol, payload=payload)})
+        return output
+
     def decode_response(self, raw: dict, *, provider_id: str, request: LLMRequest | None = None) -> LLMResponse:
         if raw.get("error"):
             remote_failure(raw, provider_id, self.protocol)
@@ -156,37 +190,13 @@ class ChatCompletionsAdapter(OpenAIProtocolAdapter):
         choice = choices[0]
         if choice.get("finish_reason") is None:
             raise ValueError("Chat response has no terminal finish reason.")
-        message = choice["message"]
+        output = self._decode_output(choice["message"], provider_id=provider_id, request=request)
         group = raw.get("id") or str(uuid4())
-        parts = []
-        if isinstance(message.get("content"), str):
-            parts.append(TextContent(text=message["content"], annotations=tuple(message.get("annotations") or ())))
-        elif message.get("content") is not None:
-            raise ValueError("Unsupported Chat assistant content shape.")
-        if message.get("refusal") is not None:
-            parts.append(RefusalContent(text=message["refusal"]))
-        if message.get("audio") is not None:
-            audio = message["audio"]
-            if request is None or request.output_options is None or request.output_options.audio is None:
-                raise ValueError("Audio response decoding requires the request audio format.")
-            format = request.output_options.audio.format
-            parts.append(AudioContent(source=DataSource(data=audio["data"], mime_type=_AUDIO_MIME[format]), transcript=audio.get("transcript"), native=native_fields(audio, {"data", "transcript"}, provider_id, self.protocol)))
-        output = []
-        if parts:
-            data = native_fields(message, {"role", "content", "refusal", "audio", "tool_calls", "annotations"}, provider_id, self.protocol)
-            data.payload["_group_id"] = group
-            output.append(LLMMessage(role=message["role"], content=tuple(parts), native=data))
-        for call in message.get("tool_calls") or ():
-            if call["type"] == "function":
-                data = native_fields(call, {"id", "type", "function"}, provider_id, self.protocol)
-                data.payload["_group_id"] = group
-                data.payload["_message_fields"] = {
-                    key: value for key, value in message.items()
-                    if key not in {"role", "content", "refusal", "audio", "tool_calls", "annotations"}
-                }
-                output.append(LLMToolCall(call_id=call["id"], name=call["function"]["name"], arguments=call["function"]["arguments"], native=data))
-            else:
-                output.append(LLMProviderItem(id=call.get("id"), provider_type=call["type"], native=LLMNativeData(provider_id=provider_id, protocol=self.protocol, payload={**call, "_group_id": group})))
+        for index, item in enumerate(output):
+            payload = dict(item.native.payload) if item.native else {}
+            payload["_group_id"] = group
+            output[index] = item.model_copy(update={"native": LLMNativeData(
+                provider_id=provider_id, protocol=self.protocol, payload=payload)})
         if not output and choice["finish_reason"] not in {"length", "content_filter"}:
             raise ValueError("Chat response has no usable output.")
         finish = choice["finish_reason"]

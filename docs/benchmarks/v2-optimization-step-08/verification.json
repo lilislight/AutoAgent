@@ -1,0 +1,40 @@
+{
+  "command": [
+    "/home/chengqian/projects/AutoAgent/.venv/bin/python",
+    "-m",
+    "unittest",
+    "tests.test_server_comparison",
+    "tests.test_host_persistence",
+    "tests.test_execution_observation",
+    "tests.test_writer_metadata",
+    "tests.test_persistence_encoding",
+    "-v"
+  ],
+  "tests": 137,
+  "postgres_tests": 63,
+  "skipped": 0,
+  "exit_code": 0,
+  "success": true,
+  "initial_regression": {
+    "tests": 135,
+    "failures": 1,
+    "test": "tests.test_execution_observation.ExecutionObservationTests.test_cancelled_observer_releases_notification_subscription",
+    "detail": "Writer subscription could be registered before the awaiting observer received its token; cancellation leaked that token."
+  },
+  "compileall_exit_code": 0,
+  "diff_check_exit_code": 0,
+  "diff_check_output": "",
+  "product_changes_since_freeze": [
+    "autoagent/host/persistence/database.py"
+  ],
+  "observation_join_product_hashes_equal": true,
+  "postgres": {
+    "server_version": "14.24 (Ubuntu 14.24-0ubuntu0.22.04.1)",
+    "fsync": "on",
+    "synchronous_commit": "on",
+    "full_page_writes": "on",
+    "disposable_databases": 37,
+    "leaked_disposable_databases": 0,
+    "other_clients": 0
+  }
+}

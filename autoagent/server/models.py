@@ -118,7 +118,17 @@ class GraphEdge(BaseModel):
     conditional: bool
 
 
+class WorkflowGroup(BaseModel):
+    id: str
+    parent_group_id: str | None
+    label: str
+    workflow_id: str
+    workflow_version: str
+    node_ids: list[str]
+
+
 class GraphDefinition(BaseModel):
+    groups: list[WorkflowGroup] = Field(default_factory=list)
     nodes: list[GraphNode]
     edges: list[GraphEdge]
     entry_node_ids: list[str]

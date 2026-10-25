@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useId, useMemo, useRef, useState, type CSSP
 import {
   ReactFlow, Background, Controls, ControlButton, MiniMap, Handle, Position, BaseEdge,
   MarkerType, useNodesState, getSmoothStepPath,
+  applyNodeChanges,
   type Node, type NodeProps, type EdgeProps, type ReactFlowInstance,
 } from "@xyflow/react";
 import { fallbackLayout, routeDefinition, NODE_HEIGHT, NODE_WIDTH, type Layout, type Point } from "../layout";
@@ -14,6 +15,9 @@ import type { ComparisonMarks } from "../revisionComparison";
 import type { StackAnchor } from "../stackMotion";
 import { executionGraphStates, executionStateLabel } from '../executionGraphState';
 import { cameraFromViewport, sameGraphCamera, viewportFromCamera, type GraphCamera } from '../graphCamera';
+import { groupNodeId, workflowGroups, localNodeLabel, constrainGroupMove, type GroupPort } from '../workflowGroups';
+import { rerouteGroups } from '../groupGeometry';
+import { foldKey, readGraphPreferences, writeGraphPreferences } from '../graphPreferences';
 
 export interface LinkedGraphView {
   layout: Layout; camera: GraphCamera; onCamera: (camera: GraphCamera) => void;
@@ -21,8 +25,31 @@ export interface LinkedGraphView {
 }
 
 type DefinitionNode = Node<{
-  inherited?: boolean; change?: string; label: string; kind: string; executable: string; entry: boolean; exit: boolean; mapped: boolean; callCount?: number; status?: string; occurrences?: number; recordBadge?: string; recordTitle?: string; related?: boolean;
+  inherited?: boolean; change?: string; label: string; fullId?: string; kind: string; executable: string; entry: boolean; exit: boolean; mapped: boolean; callCount?: number; status?: string; occurrences?: number; recordBadge?: string; recordTitle?: string; related?: boolean;
 }, "definition">;
+type GroupNode = Node<{ id: string; label: string; count: number; members:string[]; folded: boolean; ports: GroupPort[]; activity?: string; boundaryActive?: boolean; canFold: boolean; onToggle: () => void; onInspect: () => void }, 'workflowGroup'>;
+type CanvasNode = DefinitionNode | GroupNode;
+
+function WorkflowGroup({ data, selected }: NodeProps<GroupNode>) {
+  return <div data-family-node-ids={data.folded?JSON.stringify(data.members):undefined} className={`inline-workflow-group ${data.folded ? 'is-folded' : ''} ${selected ? 'selected' : ''} ${data.boundaryActive?'is-boundary-active':''}`}>
+    <header className="workflow-group-heading">
+      <button className="workflow-group-title nodrag" title={`Inspect inline Workflow ${data.label}`} onClick={event => { event.stopPropagation(); data.onInspect(); }}><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="1" y="2" width="5" height="5" rx="1"/><rect x="10" y="9" width="5" height="5" rx="1"/><path d="M3.5 7v4.5H10"/></svg>{data.label}</button>
+      <span className="workflow-group-count">{data.count} nodes</span>
+      <button className="workflow-group-toggle nodrag" disabled={!data.canFold} title={!data.canFold?'Linked comparison keeps both layouts expanded':undefined} aria-label={`${data.folded ? 'Expand' : 'Collapse'} ${data.label}`} aria-expanded={!data.folded} onClick={event => { event.stopPropagation(); data.onToggle(); }}><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d={data.folded ? 'm6 3 5 5-5 5' : 'm3 6 5 5 5-5'} /></svg></button>
+    </header>
+    {data.folded ? data.ports.map(port => <div key={port.id} className={`workflow-group-port port-${port.side}`} style={{ top: port.y }} title={port.nodeId}>
+      <Handle id={port.id} type={port.side === 'in' ? 'target' : 'source'} position={port.side === 'in' ? Position.Left : Position.Right} />
+      <span>{port.label}</span>
+    </div>) : null}
+    {data.folded && data.activity ? <div className="workflow-group-activity">{data.activity}</div> : null}
+  </div>;
+}
+
+function nodePositions(nodes: CanvasNode[]): Record<string, Point> {
+  const index = new Map(nodes.map(n => [n.id,n])), positions: Record<string, Point> = {};
+  function read(node: CanvasNode): Point { if (positions[node.id]) return positions[node.id]; const parent=node.parentId ? index.get(node.parentId) : undefined; const at=parent ? read(parent) : {x:0,y:0}; return positions[node.id]={x:at.x+node.position.x,y:at.y+node.position.y}; }
+  for (const node of nodes) read(node); return positions;
+}
 
 function NodeStateIcon({ state }: { state: string }) {
   const paths: Record<string, string> = { completed: 'M3 8l3 3 7-7', failed: 'M4 4l8 8M12 4l-8 8', paused: 'M5 3v10M11 3v10', cancelled: 'M4 4h8v8H4Z', skipped: 'M3 3l5 5-5 5V3m6 0 5 5-5 5V3', running: 'M2 8h3l2-4 3 8 2-4h2', waiting: 'M4 2h8M4 14h8M5 2v3l6 6v3M11 2v3l-6 6v3', ready: 'M8 4v4l3 2', 'not-run': 'M4 8h8', 'not-started': 'M8 3a5 5 0 1 0 0 10 5 5 0 0 0 0-10' };
@@ -30,7 +57,7 @@ function NodeStateIcon({ state }: { state: string }) {
 }
 
 function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
-  return <div className={`workflow-node ${data.kind} ${data.change ? `comparison-${data.change}` : ""} ${selected ? "selected" : ""} ${data.related ? "record-related" : ""} ${data.status ? `execution-${data.status}` : ""}`}>
+  return <div data-family-node={data.fullId??data.label} className={`workflow-node ${data.kind} ${data.change ? `comparison-${data.change}` : ""} ${selected ? "selected" : ""} ${data.related ? "record-related" : ""} ${data.status ? `execution-${data.status}` : ""}`}>
     {data.change ? <span className={`graph-change-badge change-${data.change}`} title={data.change}>{data.change === "added" ? "+" : data.change === "removed" ? "−" : "~"}</span> : null}
     {data.status ? <span className="node-state-overlay" aria-hidden="true" /> : null}
     {data.recordBadge ? <span className="graph-record-badge" title={data.recordTitle}>{data.recordBadge}</span> : null}
@@ -40,9 +67,9 @@ function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
         : data.kind === "capability" ? <path d="m8 1 7 7-7 7-7-7Z M8 5v6M5 8h6" />
         : <><rect x="2" y="2" width="12" height="12" rx="3" /><path d="m6 5 3 3-3 3m4 0h2" /></>}
     </svg>{data.kind === "operator" ? "Operator" : data.kind === "capability" ? "Capability" : "System Command"}
-      {data.mapped ? <span className="node-flag">Map{data.callCount !== undefined ? <small className="map-call-count" title="Operator Calls started across this Node’s occurrences">×{data.callCount}</small> : null}</span> : null}
+      {data.mapped ? <span className="node-flag">Map{data.callCount !== undefined ? <small className="map-call-count" title="Operator Calls started in the displayed Node occurrence">×{data.callCount}</small> : null}</span> : null}
       {data.status ? <span className={`node-state status-${data.status}`} title={`${data.occurrences ?? 0} occurrences`}><NodeStateIcon state={data.status} />{executionStateLabel(data.status)}{(data.occurrences ?? 0) > 1 ? <small className="node-occurrence-count">×{data.occurrences}</small> : null}</span> : null}</div>
-    <strong title={data.label}>{data.label}</strong>
+    <strong title={data.fullId??data.label}>{data.label}</strong>
     <div className="node-bottom"><span title={data.executable}>{data.executable}</span>
       {data.inherited ? <span className="inherited-tag" title="Completed work inherited from the source execution">Inherited</span> : null}{data.entry ? <span className="entry-tag">Entry</span> : null}
       {data.exit ? <span className="exit-tag">Exit</span> : null}</div>
@@ -88,7 +115,7 @@ function RoutedEdge(props: EdgeProps) {
 const MAX_ZOOM = 1;
 const FIT_VIEW_OPTIONS = { padding: 0.25, maxZoom: MAX_ZOOM };
 
-const nodeTypes = { definition: WorkflowNode };
+const nodeTypes = { definition: WorkflowNode, workflowGroup: WorkflowGroup };
 const edgeTypes = { routed: RoutedEdge };
 const edgeColors = {
   light: { complete: "#4f6f97", fail: "#b64445" },
@@ -146,12 +173,21 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
 }) {
   const markReady = useFlowReady();
   const flowId = useId();
-  const [nodes, setNodes, onNodesChange] = useNodesState<DefinitionNode>([]);
+  const [nodes, setNodes] = useNodesState<CanvasNode>([]);
+  const preferences = useMemo(() => readGraphPreferences(workflow.definition_hash), [workflow.definition_hash]);
+  const [groupChoice, setGroupChoice] = useState({revision:workflow.definition_hash,folded:preferences.folded});
+  const folded = useMemo(() => new Set((linkedView?[]:groupChoice.revision === workflow.definition_hash ? groupChoice.folded : preferences.folded).filter(id => workflow.definition.groups?.some(g=>g.id===id))), [groupChoice, preferences, workflow.definition_hash, workflow.definition.groups, Boolean(linkedView)]);
+  const foldSignature = foldKey(folded);
+  const presentation = useMemo(() => workflowGroups(workflow.definition,folded),[workflow.definition,folded]);
+  const [groupTransition,setGroupTransition] = useState(false);
+  const anchor = useRef<{id:string;point:Point}|null>(null);
+  const fitRequested = useRef(true);
+  const groupActions = useRef({toggle:(_id:string)=>{},inspect:(_id:string)=>{}});
   const [layout, setLayout] = useState<Layout | null>(null);
   const [layoutWarning, setLayoutWarning] = useState(false);
   const [moved, setMoved] = useState(false);
   const [layoutVersion, setLayoutVersion] = useState(0);
-  const instance = useRef<ReactFlowInstance<DefinitionNode> | null>(null);
+  const instance = useRef<ReactFlowInstance<CanvasNode> | null>(null);
   const initialFitComplete = useRef(false);
   const [ready, setReady] = useState(false);
   const lastFocus = useRef(0);
@@ -159,6 +195,23 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   const requestedFocus = useRef(focusRequest); requestedFocus.current = focusRequest;
   const container = useRef<HTMLDivElement>(null);
   const linked = useRef(linkedView); linked.current = linkedView;
+  const savePositions = () => {
+    const value=readGraphPreferences(workflow.definition_hash);
+    value.folded=[...folded];value.layouts[foldSignature]=nodePositions(instance.current?.getNodes() ?? nodes);
+    writeGraphPreferences(workflow.definition_hash,value);
+  };
+  groupActions.current={inspect:id=>onSelect({kind:'group',id}),toggle:id=>{
+    if(linked.current)return;
+    savePositions();
+    const node=nodes.find(n=>n.id===groupNodeId(id)),at=nodePositions(nodes)[groupNodeId(id)];
+    if(node&&at)anchor.current={id:node.id,point:{x:at.x+(node.width??NODE_WIDTH)/2,y:at.y+(node.height??NODE_HEIGHT)/2}};
+    const next=new Set(folded);if(next.has(id))next.delete(id);else next.add(id);
+    const value=readGraphPreferences(workflow.definition_hash);value.folded=[...next];writeGraphPreferences(workflow.definition_hash,value);
+    fitRequested.current=false;setGroupTransition(true);
+    setGroupChoice({revision:workflow.definition_hash,folded:[...next]});
+  }};
+  useEffect(()=>{fitRequested.current=true;initialFitComplete.current=false;},[workflow.definition_hash]);
+  useEffect(()=>{if(!groupTransition)return;const timer=setTimeout(()=>setGroupTransition(false),300);return()=>clearTimeout(timer);},[foldSignature,groupTransition]);
   const applyLinkedCamera = () => {
     if (!linked.current || !instance.current || !container.current) return;
     const { width, height } = container.current.getBoundingClientRect();
@@ -198,18 +251,18 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   useEffect(() => {
     if (linkedView) { setLayout(linkedView.layout); setLayoutWarning(Boolean(linkedView.layoutWarning)); setMoved(false); return; }
     const controller = new AbortController();
-    setLayout(null);
+    if(!initialFitComplete.current)setLayout(null);
     setLayoutWarning(false);
     setMoved(false);
-    layoutWorkflow(workflow.definition_hash, workflow.definition, controller.signal)
+    layoutWorkflow(workflow.definition_hash, workflow.definition, controller.signal, folded)
       .then(value => { if (!controller.signal.aborted) setLayout(value); })
       .catch(() => {
         if (controller.signal.aborted) return;
-        setLayout(fallbackLayout(workflow.definition));
+        setLayout(fallbackLayout(workflow.definition,folded));
         setLayoutWarning(true);
       });
     return () => controller.abort();
-  }, [workflow.definition_hash, workflow.definition, linkedView?.layout, linkedView?.layoutWarning]);
+  }, [workflow.definition_hash, workflow.definition, foldSignature, linkedView?.layout, linkedView?.layoutWarning]);
 
   useEffect(() => { if (ready) applyLinkedCamera(); }, [linkedView?.camera, ready]);
 
@@ -217,15 +270,36 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
     if (!layout) return;
     const entries = new Set(workflow.definition.entry_node_ids);
     const exits = new Set(workflow.definition.exit_node_ids);
-    setNodes(workflow.definition.nodes.map(node => ({
-      id: node.id, type: "definition", position: { ...layout.positions[node.id] },
+    const positions={...layout.positions};
+    const saved=readGraphPreferences(workflow.definition_hash).layouts[foldSignature];
+    if(!linked.current&&saved)for(const [id,point] of Object.entries(saved))if(positions[id])positions[id]={...point};
+    if(anchor.current&&positions[anchor.current.id]){
+      const {id,point}=anchor.current,size=layout.sizes?.[id]??{width:NODE_WIDTH,height:NODE_HEIGHT};
+      const dx=point.x-positions[id].x-size.width/2,dy=point.y-positions[id].y-size.height/2;
+      for(const key of Object.keys(positions))positions[key]={x:positions[key].x+dx,y:positions[key].y+dy};
+      anchor.current=null;
+    }
+    const groupIds=new Set(presentation.groups.map(g=>groupNodeId(g.id)));
+    const parentOf=(id:string)=>{const p=layout.parents?.[id];return p&&groupIds.has(p)?p:undefined;};
+    const relative=(id:string)=>{const parent=parentOf(id),at=parent?positions[parent]:{x:0,y:0};return {x:positions[id].x-at.x,y:positions[id].y-at.y};};
+    const groupNodes: GroupNode[]=presentation.groups.filter(g=>positions[groupNodeId(g.id)]).map(g=>{
+      const id=groupNodeId(g.id),size=layout.sizes?.[id]??{width:NODE_WIDTH,height:NODE_HEIGHT};
+      return {id,type:'workflowGroup',position:relative(id),parentId:parentOf(id),width:size.width,height:size.height,
+        style:{width:size.width,height:size.height},dragHandle:folded.has(g.id)?undefined:'.workflow-group-heading',zIndex:folded.has(g.id)?20:-10,
+        ariaLabel:`Inline Workflow: ${g.label}`,data:{id:g.id,label:g.label,count:presentation.allMembers.get(g.id)?.size??0,
+          members:[...(presentation.allMembers.get(g.id)??[])],folded:folded.has(g.id),canFold:!linked.current,ports:presentation.ports.get(g.id)??[],onToggle:()=>groupActions.current.toggle(g.id),onInspect:()=>groupActions.current.inspect(g.id)}};
+    });
+    const leaves:DefinitionNode[]=presentation.nodes.filter(n=>positions[n.id]).map(node => ({
+      id: node.id, type: "definition", position: relative(node.id),parentId:parentOf(node.id),zIndex:20,
       width: NODE_WIDTH, height: NODE_HEIGHT,
       ariaLabel: `${node.executable.kind} node: ${node.id}`,
-      data: { label: node.id, kind: node.executable.kind,
+      data: { label: localNodeLabel(workflow.definition,node.id),fullId:node.id, kind: node.executable.kind,
         executable: node.executable.id.startsWith(`${node.executable.kind}:`)
           ? node.executable.id : `${node.executable.kind}:${node.executable.id}`,
         entry: entries.has(node.id), exit: exits.has(node.id), mapped: node.mapped },
-    })));
+    }));
+    setNodes([...groupNodes,...leaves]);
+    if(saved || groupTransition)setMoved(true);
     // Wait for React Flow to receive restored positions before fitting the viewport.
     let cancelled = false;
     const finish = () => {
@@ -235,6 +309,8 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
     const fit = () => {
       if (!instance.current) { fitFrame = requestAnimationFrame(fit); return; }
       if (linked.current) { applyLinkedCamera(); finish(); return; }
+      if(initialFitComplete.current&&!fitRequested.current){finish();return;}
+      fitRequested.current=false;
       void instance.current.fitView({ ...FIT_VIEW_OPTIONS,
         duration: !initialFitComplete.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 250 }).then(finish, finish);
     };
@@ -247,13 +323,17 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   const restoreLayout = () => {
     if (linked.current) { linked.current.onReset(); return; }
     setMoved(false);
+    const value=readGraphPreferences(workflow.definition_hash);delete value.layouts[foldSignature];writeGraphPreferences(workflow.definition_hash,value);fitRequested.current=true;
     setLayoutVersion(current => current + 1);
   };
 
   const nodeStates = useMemo(() => new Map(trace?.nodes.map(item => [item.node_id, item])), [trace]);
   const edgeStates = useMemo(() => new Map(trace?.edges.map(item => [item.edge_id, item])), [trace]);
   const executionStates = useMemo(() => trace ? executionGraphStates(trace) : null, [trace]);
-  const displayNodes = useMemo<DefinitionNode[]>(() => nodes.map(node => ({ ...node,
+  const displayNodes = useMemo<CanvasNode[]>(() => {
+    const boundaries=new Set(nodes.filter(n=>n.dragging&&n.className==='group-constrained').map(n=>n.parentId));
+    return nodes.map(node => node.type === 'workflowGroup' ? {...node,selected:selection?.kind==='group'&&selection.id===node.data.id,
+    data:{...node.data,boundaryActive:boundaries.has(node.id),activity:['running','waiting','paused','ready'].map(status=>{let count=0;for(const id of presentation.allMembers.get(node.data.id)??[])if(executionStates?.nodes.get(id)===status)count++;return count?`${count} ${status}`:'';}).filter(Boolean).join(' · ')}} : ({ ...node,
     selected: selection?.kind === "node" && selection.id === node.id,
     data: { ...node.data, inherited: Boolean(trace?.fork && ['completed','skipped','failed','cancelled'].includes(trace.fork.inherited_occurrences[nodeStates.get(node.id)?.occurrence_id ?? ''] ?? '')), change: comparison?.nodes[node.id], status: executionStates ? executionStates.nodes.get(node.id) ?? executionStates.unrecordedNode : undefined, occurrences: nodeStates.get(node.id)?.occurrences, callCount: trace ? nodeStates.get(node.id)?.call_count ?? 0 : undefined,
       related: selection?.record?.kind === 'edge' && selectedRecord?.node_id === node.id,
@@ -261,29 +341,47 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
         : selection?.record?.kind === 'call' ? `Unit ${selectedRecord.unit_index ?? 0}`
         : selection?.record?.kind === 'wait' ? 'Wait' : `Occurrence #${selectedRecord.ordinal ?? selectedRecord.ui_ordinal ?? '—'}` : undefined,
       recordTitle: selectedRecord?.node_id === node.id ? `${selectedRecord.occurrence_id ?? selectedRecord.source_occurrence_id}` : undefined },
-  })), [nodes, selection, executionStates, nodeStates, selectedRecord, trace, comparison]);
+  }));}, [nodes, selection, executionStates, nodeStates, selectedRecord, trace, comparison, presentation]);
   const routes = useMemo(() => moved
-    ? routeDefinition(workflow.definition, Object.fromEntries(nodes.map(node => [node.id, node.position])))
-    : layout?.routes, [moved, nodes, workflow.definition, layout]);
-  const edges = useMemo(() => workflow.definition.edges.map(edge => {
+    ? workflow.definition.groups?.length ? rerouteGroups(workflow.definition,folded,{...layout!,positions:nodePositions(nodes)})
+      : routeDefinition(workflow.definition, nodePositions(nodes))
+    : layout?.routes, [moved, nodes, workflow.definition, layout, folded]);
+  const originalEdges = useMemo(()=>new Map(workflow.definition.edges.map(edge=>[edge.id,edge])),[workflow.definition.edges]);
+  const edges = useMemo(() => presentation.edges.map(edge => {
+    const original = originalEdges.get(edge.id)!;
     const state = executionStates ? executionStates.edges.get(edge.id) ?? 'not-evaluated' : undefined;
     const color = state ? executionEdgeColors[theme][state] : edgeColors[theme][edge.on === 'error' ? 'fail' : 'complete'];
     return {
-    id: edge.id, source: edge.source, target: edge.target, type: "routed",
+    id: edge.id, source: edge.source, target: edge.target,sourceHandle:edge.sourceHandle,targetHandle:edge.targetHandle,type: "routed",
     selected: selection?.kind === "edge" && selection.id === (comparison?.aliases[edge.id] ?? edge.id),
-    ariaLabel: `${edge.id}: ${edge.on === "error" ? "Fail" : "Complete"} edge${edge.conditional ? ", conditional" : ""}, ${edge.source} to ${edge.target}${state ? ', ' + executionStateLabel(state) : ''}`,
+    ariaLabel: `${edge.id}: ${edge.on === "error" ? "Fail" : "Complete"} edge${edge.conditional ? ", conditional" : ""}, ${original.source} to ${original.target}${state ? ', ' + executionStateLabel(state) : ''}`,
     className: state ? `execution-edge-${state}` : undefined,
     data: { comparison: comparison?.edges[edge.id], points: routes?.[edge.id], conditional: Boolean(edge.conditional), failure: edge.on === "error", evaluations: edgeStates.get(edge.id)?.evaluations, executionState: state, color },
     markerEnd: { type: MarkerType.ArrowClosed, color },
     style: { stroke: 'var(--edge-color)',
       strokeDasharray: edge.on === "error" ? "5 4" : undefined },
-  }; }), [workflow.definition.edges, routes, selection, theme, executionStates, edgeStates, comparison]);
+  }; }), [presentation.edges, routes, selection, theme, executionStates, edgeStates, comparison,originalEdges]);
+
+  const revealedFocus = useRef(0);
+  useEffect(()=>{
+    if(!focusRequest||revealedFocus.current===focusRequest||linked.current)return;
+    revealedFocus.current=focusRequest;
+    const nodeId=selection?.kind==='node'?selection.id:selectedRecord?.node_id??(selection?.kind==='edge'?workflow.definition.edges.find(e=>e.id===selection.id)?.source:undefined);
+    if(!nodeId)return;
+    const groups=workflow.definition.groups??[],next=new Set(folded);
+    let owner=groups.find(g=>g.node_ids.includes(nodeId));
+    while(owner){next.delete(owner.id);owner=groups.find(g=>g.id===owner!.parent_group_id);}
+    if(next.size===folded.size)return;
+    savePositions();const value=readGraphPreferences(workflow.definition_hash);value.folded=[...next];writeGraphPreferences(workflow.definition_hash,value);
+    fitRequested.current=false;setGroupTransition(true);setGroupChoice({revision:workflow.definition_hash,folded:[...next]});
+  },[focusRequest,selection,selectedRecord?.node_id,workflow.definition,foldSignature]);
 
   useEffect(() => {
     if (!ready || !focusRequest || lastFocus.current === focusRequest || !selection) return;
     const node = nodes.find(item => item.id === (selectedRecord?.node_id ?? (selection.kind === 'node' ? selection.id : '')));
     const points = selection.kind === 'edge' ? routes?.[selection.id] : null;
-    const point = points?.length ? routeMidpoint(points) : node ? { x: node.position.x + NODE_WIDTH / 2, y: node.position.y + NODE_HEIGHT / 2 } : null;
+    const at=node?nodePositions(nodes)[node.id]:null;
+    const point = points?.length ? routeMidpoint(points) : at ? { x: at.x + NODE_WIDTH / 2, y: at.y + NODE_HEIGHT / 2 } : null;
     if (!point || !instance.current) return;
     const bounds = container.current?.getBoundingClientRect();
     const presence = container.current?.closest('.flow-loading-surface')?.querySelector<HTMLElement>('.inspector-presence:not(.is-hidden)');
@@ -300,12 +398,25 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
     void instance.current.setViewport({ x: left! - bounds.left + visibleWidth / 2 - point.x * zoom, y: bounds.height / 2 - point.y * zoom, zoom }, { duration: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 220 });
   }, [ready, focusRequest, selection, selectedRecord, nodes, routes]);
 
-  return <div ref={container} className="graph-shell" aria-label="Workflow definition graph">
-    <ReactFlow<DefinitionNode> id={flowId} nodes={displayNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} colorMode={theme}
+  return <div ref={container} className={`graph-shell ${groupTransition?'is-group-transition':''}`} aria-label="Workflow definition graph">
+    <ReactFlow<CanvasNode> id={flowId} nodes={displayNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} colorMode={theme}
       onNodesChange={changes => {
         if (changes.some(change => change.type === "position" && change.position)) setMoved(true);
-        onNodesChange(changes);
+        setNodes(current=>{
+          const next=applyNodeChanges(changes,current),before=nodePositions(current),after=nodePositions(next);
+          const sizes=Object.fromEntries(next.map(n=>[n.id,{width:n.width??NODE_WIDTH,height:n.height??NODE_HEIGHT}]));
+          const parents=Object.fromEntries(next.filter(n=>n.parentId).map(n=>[n.id,n.parentId!]));
+          for(const change of changes)if(change.type==='position'&&change.position){
+            const node=next.find(n=>n.id===change.id)!;
+            const at=constrainGroupMove(node.id,after[node.id],{positions:{...after,[node.id]:before[node.id]},sizes,parents});
+            node.className=at.x!==after[node.id].x||at.y!==after[node.id].y?'group-constrained':undefined;
+            const parent=after[parents[node.id]]??{x:0,y:0};node.position={x:at.x-parent.x,y:at.y-parent.y};
+          }
+          return next;
+        });
       }}
+      onNodeDragStart={()=>setGroupTransition(false)}
+      onNodeDragStop={savePositions}
       onInit={flow => { instance.current = flow; if (layout && !linked.current) void flow.fitView(FIT_VIEW_OPTIONS); }}
       onMove={(_event, viewport) => {
         if (!linked.current || !container.current) return;
@@ -315,6 +426,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
         if (!sameGraphCamera(next, linked.current.camera)) linked.current.onCamera(next);
       }}
       onNodeClick={(event, node) => {
+        if(node.type==='workflowGroup'){if(node.data.folded)groupActions.current.inspect(node.data.id);return;}
         const rect = event.currentTarget.getBoundingClientRect();
         onSelect({ kind: "node", id: node.id }, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height });
       }}

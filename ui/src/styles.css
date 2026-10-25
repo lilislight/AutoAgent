@@ -1306,7 +1306,8 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .timeline-event-marker:hover .timeline-event-dot,.timeline-event-marker:focus-visible .timeline-event-dot { transform:scale(1.08); box-shadow:0 0 0 3px color-mix(in srgb,var(--event-color) 24%,transparent); }
 .timeline-event-marker:focus-visible { outline:2px solid var(--event-color); outline-offset:-1px; }
 .timeline-event-record i { display:inline-block; width:8px; height:8px; flex-shrink:0; border-radius:50%; background:var(--event-color); }
-.timeline-event-record span { display:flex; align-items:center; gap:6px; }
+.timeline-event-kind { display:flex; align-items:center; gap:6px; min-width:0; }
+.timeline-event-name { overflow:hidden; text-overflow:ellipsis; }
 .timeline-event-actions { display:flex; justify-content:flex-end; gap:4px; white-space:nowrap; }
 .timeline-event-actions button { min-height:24px; }
 .timeline-event-record button { color:var(--accent); padding:3px 5px; border-radius:4px; font-size:10px; }
@@ -1322,12 +1323,12 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .inspector-replay-note { padding:7px; background:var(--surface-muted); color:var(--muted); font-size:10px; border-radius:4px; }
 @media(prefers-reduced-motion:reduce) { .graph-replay-status { animation:none; } }
 @media(prefers-reduced-motion:reduce) { .timeline-event-marker,.timeline-event-dot { transition:none; } }
-.timeline-event-popover { position:fixed; box-sizing:border-box; width:min(620px,calc(100vw - 16px)); max-height:260px; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; background:var(--surface); color:var(--text); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow); z-index:100; padding:5px; transform-origin:top; animation:timeline-event-enter var(--popup-enter-duration) var(--popup-enter-easing); }
+.timeline-event-popover { position:fixed; box-sizing:border-box; width:min(520px,calc(100vw - 16px)); max-height:260px; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; background:var(--surface); color:var(--text); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow); z-index:100; padding:5px; transform-origin:top; animation:timeline-event-enter var(--popup-enter-duration) var(--popup-enter-easing); }
 .timeline-event-popover.opens-above { transform-origin:bottom; --event-enter-y:6px; }
 @keyframes timeline-event-enter { from { opacity:0; transform:translateY(var(--event-enter-y,-6px)); filter:blur(2px); } to { opacity:1; transform:translateY(0); filter:blur(0); } }
 .timeline-event-popover header { display:flex; justify-content:space-between; align-items:center; padding:4px 6px; font-size:11px; }
 .timeline-event-popover header button { height:23px; width:23px; font-size:18px; border-radius:4px; }
-.timeline-event-record { display:grid; grid-template-columns:max-content minmax(160px,1fr) max-content max-content; align-items:center; gap:8px; padding:4px 6px; border-top:1px solid var(--line); font-size:10px; white-space:nowrap; }
+.timeline-event-record { display:grid; grid-template-columns:max-content minmax(0,1fr) max-content max-content; align-items:center; gap:8px; padding:4px 6px; border-top:1px solid var(--line); font-size:10px; white-space:nowrap; }
 .timeline-event-record small { font-size:9px; color:var(--muted); }
 .timeline-event-record span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 @keyframes timeline-pop-in { from { opacity:0; transform:translateY(-5px); filter:blur(2px); } to { opacity:1; transform:translateY(0); filter:blur(0); } }
@@ -1411,11 +1412,23 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .type-command .record-kind-icon { color:var(--command); }
 
 /* Unframed, content-sized family navigation. Only the cards carry surfaces. */
+.execution-family-layer { position:absolute; inset:0; z-index:16; pointer-events:none; }
 .execution-family-bar { position:absolute; z-index:8; bottom:14px; left:50%; transform:translateX(-50%); width:calc(100% - 32px); max-width:calc(100% - 32px); font-size:11px; pointer-events:none; }
+.family-handoff-overlay { position:absolute; inset:0; width:100%; height:100%; z-index:9; overflow:hidden; pointer-events:none; color:var(--accent); }
+.family-handoff-overlay path { fill:none; stroke:currentColor; stroke-linecap:round; }
+.family-handoff-line { stroke-width:1.6; stroke-dasharray:1; stroke-dashoffset:1; }
+.family-handoff-glow { stroke-width:8; filter:blur(3px); opacity:.12; }
+.family-handoff-dot { fill:currentColor; filter:drop-shadow(0 0 4px currentColor); }
+.family-handoff-label { font:11px system-ui,sans-serif; fill:var(--text); paint-order:stroke; stroke:var(--canvas); stroke-width:4px; stroke-linejoin:round; }
+.family-card.is-handoff-target { border-color:var(--accent); animation:family-handoff-arrival 900ms ease-out both; }
+.workflow-node.is-handoff-source,.inline-workflow-group.is-handoff-source { outline:1px solid color-mix(in srgb,var(--accent) 65%,transparent); outline-offset:4px; }
+.timeline-block-hit.is-handoff-source { box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 55%,transparent); }
+@keyframes family-handoff-arrival { from { box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 40%,transparent); } to { box-shadow:0 0 0 7px transparent; } }
+@media(prefers-reduced-motion:reduce) { .family-card.is-handoff-target { animation:none; } }
 .family-panel-content { position:absolute; bottom:30px; left:50%; transform:translateX(-50%); width:max-content; max-width:100%; pointer-events:auto; transform-origin:50% 100%; visibility:visible; transition:opacity 240ms ease, transform 280ms cubic-bezier(.2,.8,.2,1), filter 240ms ease, visibility 0s; }
 .family-panel-content::after { content:''; position:absolute; left:0; right:0; top:100%; height:30px; }
 .execution-family-bar:not(.is-expanded) .family-panel-content { opacity:0; visibility:hidden; filter:blur(3px); transform:translateX(-50%); pointer-events:none; transition:opacity 240ms ease, transform 280ms cubic-bezier(.2,.8,.2,1), filter 240ms ease, visibility 0s 280ms; }
-.family-card-strip { display:flex; gap:8px; overflow-x:auto; overflow-y:hidden; padding:5px 3px 8px; max-width:100%; scrollbar-width:none; }
+.family-card-strip { position:relative; display:flex; gap:8px; overflow-x:auto; overflow-y:hidden; padding:5px 3px 8px; max-width:100%; scrollbar-width:none; }
 .family-card-strip::-webkit-scrollbar { display:none; }
 .family-trigger { pointer-events:auto; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; width:54px; height:26px; margin:auto; border-radius:8px; cursor:default; color:var(--muted); transition:color 180ms, background 180ms; }
 .family-trigger:hover,.family-trigger:focus-visible,.is-expanded .family-trigger { color:var(--accent); background:color-mix(in srgb,var(--surface) 80%,transparent); }
@@ -1538,11 +1551,9 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .live-trace-status { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .live-trace-status > span { display: inline-flex; gap: 5px; align-items: center; }
 .live-trace-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .6; }
-.live-trace-status.is-live i { background: var(--status-completed, #3b9b72); opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, #3b9b72 12%, transparent); animation: live-observation 2s ease-in-out infinite; }
+.live-trace-status.has-error { color:var(--edge-fail); }
 .live-trace-status button { border: 0; background: transparent; border-radius: 5px; color: inherit; padding: 4px 6px; cursor: pointer; transition: color 140ms, background 140ms; }
 .live-trace-status button:hover { color: var(--text); background: var(--surface-muted); }
-@keyframes live-observation { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, #3b9b72 4%, transparent); } }
-@media (prefers-reduced-motion: reduce) { .live-trace-status.is-live i { animation: none; } }
 
 .run-form { display:flex; flex-direction:column; min-height:0; flex:1; }
 .run-fields { overflow:auto; padding:18px; display:flex; flex-direction:column; gap:17px; min-height:0; flex:1; }
@@ -1920,3 +1931,30 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .inherited-tag { font-size:9px; color:var(--muted); margin-right:auto; }
 @keyframes fork-popup-in { from { opacity:0; transform:translateY(-5px); } to { opacity:1; transform:translateY(0); } }
 @media (prefers-reduced-motion:reduce) { .fork-dialog,.fork-source-events { animation:none; } }
+
+/* Inline Workflow boundaries share the canvas; execution colours stay on Nodes. */
+.react-flow__node-workflowGroup { pointer-events:none!important; }
+.inline-workflow-group { width:100%;height:100%;border:1px solid var(--line-strong);border-radius:14px;background:color-mix(in srgb,var(--surface) 46%,transparent);pointer-events:none; }
+.inline-workflow-group:has(.workflow-group-heading:hover) { border-color:var(--accent); }
+.inline-workflow-group.is-boundary-active { border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent); }
+.inline-workflow-group.selected { border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 17%,transparent); }
+.inline-workflow-group.is-folded { background:var(--surface);pointer-events:auto; }
+.workflow-group-heading { position:absolute;left:12px;right:10px;top:10px;height:28px;display:flex;gap:7px;align-items:center;pointer-events:auto;cursor:grab; }
+.workflow-group-heading:active { cursor:grabbing; }
+.workflow-group-title { display:flex;align-items:center;gap:7px;min-width:0;background:none;border:0;padding:3px 1px;font:600 12px/1.4 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.workflow-group-title svg { width:15px;height:15px;flex-shrink:0;color:var(--muted); }
+.workflow-group-title:hover { color:var(--accent); }
+.workflow-group-count { margin-left:auto;font-size:10px;white-space:nowrap;color:var(--muted); }
+.workflow-group-toggle { display:grid;place-items:center;flex-shrink:0;width:27px;height:27px;background:none;border:0;border-radius:5px;color:var(--muted); }
+.workflow-group-toggle svg { width:13px;height:13px; }
+.workflow-group-toggle:disabled { opacity:.4;cursor:default; }
+.workflow-group-toggle:hover { background:var(--surface-muted);color:var(--text); }
+.workflow-group-port { position:absolute;max-width:calc(50% - 10px);height:20px;transform:translateY(-50%);font:10px/20px ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted); }
+.workflow-group-port.port-in { left:0;padding-left:11px; }
+.workflow-group-port.port-out { right:0;padding-right:11px;text-align:right; }
+.workflow-group-port span { display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.workflow-group-port .react-flow__handle { top:50%;width:5px;height:5px; }
+.workflow-group-activity { position:absolute;bottom:4px;left:12px;right:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:9px;color:var(--muted); }
+.graph-shell.is-group-transition .react-flow__node { transition:transform 230ms ease,width 230ms ease,height 230ms ease; }
+.graph-shell.is-group-transition .react-flow__node.dragging { transition:none; }
+@media (prefers-reduced-motion:reduce) { .graph-shell.is-group-transition .react-flow__node { transition:none; } }

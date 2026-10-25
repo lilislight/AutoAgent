@@ -1,6 +1,6 @@
 # AutoAgent V2 后续事项
 
-更新日期：2026-10-23。
+更新日期：2026-10-24。
 
 本文记录当前确认的推进顺序、阶段边界和验收目标，不代表下面的 API 已经实现。
 当前源码和测试是具体行为的依据；V1 只用于参考，不保留旧 API 或数据模型兼容层。
@@ -14,6 +14,10 @@ SQLite/PostgreSQL 持久化、驻留策略、Checkpoint 管理和历史状态检
 
 `autoagent.agent` 已提供 LLM Provider、结构化输出、流式输出、Tool、MCP、Skill、
 Embedding、媒体处理和调用记录基础。后续重点是补齐组合能力，不是重新实现这些组件。
+
+`autoagent.evaluation` 已交付业务评测基础 SDK、Host 执行、固定历史证据、报告和 CLI。
+该阶段尚未完成验收：代码审查已复现评测依据、比较条件、JSON 调用、并行审批和报告导出
+问题，业务场景覆盖仍需补齐。已实现的基础能力与待修复项分别记录如下。
 
 ## 推进顺序
 
@@ -30,21 +34,76 @@ Embedding、媒体处理和调用记录基础。后续重点是补齐组合能�
 ## 1. Evaluation
 
 目标：自动验证业务正确性和改动效果，为 LLM 优化 Workflow 提供明确证据。
-新增 `autoagent.evaluation`，通过 Host 执行，不创建第二套 Runtime 或持久化体系。
+模块为 `autoagent.evaluation`，通过 Host 执行，不创建第二套 Runtime 或执行历史存储。
+当前范围是业务正确性及版本比较；耗时、内存衡量暂缓，后续评估复用已有测量设施。
+Agent 调用效率、Token 和费用不属于通用 Eval 的内置范围。
 
-- [ ] 设计 Suite、Case、执行步骤、Evaluator 和报告的最小公共契约。
-- [ ] 支持单次调用、多轮 Session、多个 Workflow、Wait 回复及必要的父子交互。
-- [ ] Runner 管理 Case 隔离、并发、超时、清理和失败归因。
-- [ ] 提供结果、状态、必要执行行为的确定性检查及自定义 Evaluator 扩展点。
-- [ ] 区分业务检查失败、Workflow 执行错误和评测器错误。
-- [ ] 支持可替换的 Model/Tool 测试夹具和明确选择的真实集成评测。
-- [ ] 记录 Revision、代码版本、模型配置和夹具等可获取的实验身份，说明不可复现因素。
-- [ ] 报告引用 Invocation/Event；默认读取摘要和投影，详细值按需获取，不复制整份历史。
-- [ ] 比较基线和候选版本的结果、必要路径、耗时及可获得的 Token 用量。
-- [ ] 提供简洁 CLI、结构化报告和明确退出码；UI 展示按需要后续补充。
-- [ ] 后续从历史执行提取 Case 草稿；可复用输入和交互记录，预期结果必须另行确认。
+### 已交付的基础能力
+
+- [x] Suite、Case、异步 Python Scenario、CheckResult 和可调用 Evaluator 公共契约。
+- [x] 单次调用、Session 别名复用、多个 Workflow、基本 Wait 回复和单层父子审批。
+- [x] Runner 管理独立 Session/数据库、Case 选择、并发、重复运行、超时及清理。
+- [x] 提供 StatusIs、OutputEquals、EventCount 和同步/异步自定义 Evaluator。
+- [x] 区分业务检查失败、执行异常、评估器错误、未评估和中断；预期的 Workflow 失败
+  可以满足业务检查，无有效判断或存在未评估检查时不自动通过。
+- [x] 通过 Host 固定持久化证据位置；各 Child 使用自己的 Session Event sequence，
+  大值按需读取，支持 Context JSON Pointer，报告不复制整份执行历史。
+- [x] 原子 JSON 报告、逐 Trial 保存、Invocation/Event 引用和基本代码/环境身份记录。
+- [x] 按 Case ID、输入/预期指纹及 Scenario/Evaluator 标识进行基础版本比较。
+  该比较功能已有，但条件识别和结论可靠性仍有下述缺口，不能视为本阶段验收通过。
+- [x] TOML Evaluation entrypoint 惰性发现，以及 `eval list/check/run/show/compare`、
+  结构化输出、输出文件和进程退出码；提供离线示例。
+
+本次核对依据为当前 SDK、CLI、示例及测试源码。最近一次审查重跑 40 项 Eval/CLI 测试，
+SQLite/PostgreSQL 均通过；额外临时复现确认以下问题，不能只凭现有测试通过就标记完成。
+
+### 必须修复的可靠性缺口
+
+- [ ] 固定每个 Trial 的输入、预期和评估参数，防止 Scenario/Evaluator 改写嵌套 JSON
+  后仍沿用原来的报告指纹；改变评测依据必须显式报错，不能产生通过结论。
+- [ ] 补齐评估规则身份：全局 JSON 参数、项目内辅助函数及显式依赖版本变化不能漏判；
+  不透明或动态依赖无法可靠确认时标记条件未知，不把自动指纹当作完整证明。
+- [ ] 区分被测代码版本与评测条件，记录可确认的 Model/Tool/fixture/dataset 配置身份；
+  业务标准变化判为不可比较，条件变化或缺失时不给出可接受的改进结论。
+- [ ] invoke/Signal 等 JSON 操作复用 Host 的合同解码边界，覆盖 Enum 等合法值合同，
+  保证同一输入在 Eval、Server 和 CLI 下的执行语义一致。
+- [ ] 回复审批只等待目标 Wait 可回复，不要求整个 Root 到达 boundary；
+  支持并行 Node/Child 仍运行时回复，并保持歧义报错、超时和 Root 所有权校验。
+- [ ] 统一内部报告与 CLI 导出文档的读取，支持导出文件直接 show/compare；
+  明确报告移动后执行历史的定位与不可用提示。
+
+### 证据和业务场景验收
+
+- [ ] 通过 Host 补齐 User Event 的有界只读证据；按各 Invocation 的 User Event sequence
+  固定上界，与 Runtime Event sequence 分开记录，不用时间戳猜测两者的精确对应关系。
+- [ ] 验证审批前不执行副作用、拒绝审批后不执行副作用、重复提交不重复执行；
+  使用业务夹具核对实际状态，不能只检查 Agent 的文字或最终输出。
+- [ ] 验证多轮 Session Context 继承、跨 Workflow 共享及跨 Session/Trial 隔离，
+  包含历史位置读取和大 Context 的指定路径读取。
+- [ ] 使用脚本化 Model 和真实 ToolSet 执行路径验证工具选择、参数、失败处理与公开消息；
+  支持显式选择的真实集成评测，但基础验收不依赖模型凭据或付费服务。
+- [ ] 验证 Map/循环、多 Child、父子 Signal、并行审批及取消/恢复后的业务结果，
+  不要求并行分支具有固定的全局完成顺序。
+- [ ] 验证多页 Event、大 Artifact、读取预算不足及缺失证据；不完整证据不能通过
+  “从未发生某动作”一类否定判断。
+
+### 实施顺序
+
+1. 固定评测依据，修复评估规则和比较条件；将审查复现用例转成回归测试。
+2. 对齐 JSON 调用与目标 Wait 交互，先验证并行执行中的业务操作。
+3. 补齐 User Event 证据，统一报告导出/读取，保证查询边界和来源可追溯。
+4. 扩展现有离线示例为完整业务 Suite，验证真实业务状态、Context、Tool 和父子交互。
+5. 验证 SDK/CLI、SQLite/PostgreSQL、报告比较及异常清理；通过后再进入开发 Skill 阶段。
+
+### 后续事项
+
+- [ ] 从历史执行提取 Case 草稿；可复用输入和交互记录，预期结果必须另行确认。
+- [ ] 按需要增加 Eval UI，不作为本轮修复的前置要求。
+- [ ] 后续设计耗时、内存的测量与比较；本轮不实现性能评分，超时仅用于执行保护。
 
 验收：同一组 Case 能对原版本和候选版本给出可解释的差异，并定位失败证据。
+放宽评估标准、替换测试夹具或丢失证据不能被误判为代码改进；JSON 调用与并行交互
+不得因经过 Eval 包装而改变原业务语义。
 参考 V1 多步 Case、Evaluator、惰性证据和报告，不照搬单 Workflow 绑定限制及旧 Host API。
 
 ## 2. AutoAgent 开发 Skill

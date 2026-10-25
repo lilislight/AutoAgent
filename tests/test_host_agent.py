@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from autoagent import Node, Workflow
-from autoagent.agent import EMBEDDING, LLM_CALL, llm_call_operator
+from autoagent import InputMappingContext, Node, Workflow
+from autoagent.agent import EMBEDDING, LLM_CALL, LLMRequest, llm_call_operator
 from autoagent.host import AgentSettings, AutoAgentHost, HostSettings, embedding_request, llm_request
 from tests.test_agent_capabilities import DemoEmbedding, DemoLLM, request
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
@@ -37,13 +37,32 @@ class AgentSettingsTests(unittest.TestCase):
             value = llm_request(input=request().input, options={"thinking": {"type": "disabled"}})
             self.assertEqual(value.model, "demo")
             self.assertEqual(value.max_output_tokens, 123)
+            self.assertTrue(value.streaming)
             self.assertEqual(value.provider_options.provider_id, "deepseek")
             self.assertNotIn("private-value", value.model_dump_json())
             self.assertEqual(llm_request(model="override", input=request().input, max_output_tokens=7).max_output_tokens, 7)
+            explicit = llm_request(model=None, input=request().input, streaming=False, max_output_tokens=None)
+            self.assertIsNone(explicit.model)
+            self.assertFalse(explicit.streaming)
+            self.assertIsNone(explicit.max_output_tokens)
         for field, value in (("BACKEND", "direct"), ("TIMEOUT_SECONDS", "nan"), ("STREAMING", "maybe"),
                              ("MAX_OUTPUT_TOKENS", "0"), ("PROTOCOL", "unknown")):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 AgentSettings.from_environment(dict(env, **{"AUTOAGENT_LLM_" + field: value}))
+
+    def test_request_defaults_work_without_a_default_model(self):
+        """Per-call models use environment defaults without requiring a Host default model or credentials."""
+        with patch.dict(os.environ, {"AUTOAGENT_LLM_STREAMING": "true", "AUTOAGENT_LLM_MAX_OUTPUT_TOKENS": "321"}, clear=True):
+            value = llm_request(model="per-node", input=request().input)
+            self.assertTrue(value.streaming)
+            self.assertEqual(value.max_output_tokens, 321)
+            direct = LLMRequest(model="direct", input=request().input)
+            self.assertFalse(direct.streaming)
+            self.assertIsNone(direct.max_output_tokens)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(llm_request(model=None, input=request().input).model)
+            with self.assertRaises(ValueError):
+                llm_request(model="", input=request().input)
 
     def test_provider_factories_choose_vendor_and_protocol_without_loading_sdks(self):
         """Factory selection keeps vendor adaptations, OpenAI-compatible connections and embeddings explicit."""
@@ -83,6 +102,41 @@ class HostAgentDefaultsTests(unittest.IsolatedAsyncioTestCase):
 
     def host(self, **kwargs):
         return AutoAgentHost(settings=HostSettings(database_url=self.url), **kwargs)
+
+    async def test_connection_without_default_model_uses_request_level_settings(self):
+        """A connection-only Host serves per-call models and honors streaming overrides on its Runtime loop."""
+        provider = DemoLLM()
+        @asynccontextmanager
+        async def resource():
+            try:
+                yield provider
+            finally:
+                await provider.aclose()
+        def factory(settings, *, embedding=False):
+            self.assertIsNone(settings.model)
+            return resource()
+        def model_input(ctx: InputMappingContext) -> LLMRequest:
+            return llm_request(input=request().input, **dict(ctx.invocation_input))
+        workflow = Workflow("per-call", nodes=[Node("call", LLM_CALL, input_mapping=model_input)])
+        env = {"AUTOAGENT_LLM_API_KEY": "test", "AUTOAGENT_LLM_STREAMING": "true",
+               "AUTOAGENT_LLM_MAX_OUTPUT_TOKENS": "512"}
+        with patch.object(AgentSettings, "create_provider", factory):
+            async with self.host(workflows=[workflow], environment=env) as host:
+                for payload in ({"model": "small", "streaming": False, "max_output_tokens": 128},
+                                {"model": "large"}):
+                    result = await host.join(await host.execute(workflow.id, payload))
+                    self.assertEqual(result.status, "completed", result.error)
+        self.assertEqual([(mode, value.model, value.max_output_tokens, value.streaming)
+                          for mode, value in provider.calls],
+                         [("invoke", "small", 128, False), ("stream", "large", 512, True)])
+        self.assertTrue(provider.closed)
+
+    async def test_request_defaults_alone_do_not_create_a_host_connection(self):
+        """Setting streaming defaults without a model or key does not import SDKs or demand credentials."""
+        with patch.object(AgentSettings, "create_provider", side_effect=AssertionError("Unexpected connection")):
+            async with self.host(workflows=[Workflow("unbound", nodes=[Node("call", LLM_CALL)])],
+                                 environment={"AUTOAGENT_LLM_STREAMING": "true"}) as host:
+                self.assertEqual(host._runtime.app.operator_registry.for_capability(LLM_CALL.id), ())
 
     async def test_environment_defaults_own_both_providers_on_the_runtime_loop(self):
         """Host enters, uses and closes generation and embedding clients on one owned Runtime loop."""

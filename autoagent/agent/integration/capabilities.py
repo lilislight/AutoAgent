@@ -8,6 +8,9 @@ creation and cleanup remain the application's lifespan responsibility.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+import inspect
+from typing import Awaitable, Protocol
 
 from autoagent.core.operators import Operator, OperatorContract, ValueContract
 from autoagent.core.workflow import Capability, Stream
@@ -32,7 +35,7 @@ LLM_CALL = Capability(
 
 The default Reducer retains the complete terminal response. Node.stream may
 override it; User Events require a separate, explicit Node.user_events Mapper.
-Ordinary implementations emit just the completed chunk; streaming ones forward
+Non-streaming calls emit just the completed chunk; streaming calls forward
 Provider observations. Core handles Retry, cancellation and User Events.
 """
 
@@ -46,27 +49,68 @@ EMBEDDING = Capability(
 """One EmbeddingRequest -> EmbeddingResponse contract, without streaming."""
 
 
+def _check_provider(provider):
+    for method in ("ainvoke", "astream"):
+        if not callable(getattr(provider, method, None)):
+            raise TypeError(f"LLM Provider must implement {method}.")
+
+
+@dataclass(frozen=True, slots=True)
+class LLMSelection:
+    """Runtime-only route result; the caller owns the selected Provider's lifespan."""
+
+    provider: LLMProvider
+    model: str
+
+    def __post_init__(self):
+        _check_provider(self.provider)
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("LLM selection requires a nonempty model.")
+
+
+class LLMResolver(Protocol):
+    """Application hook selecting a Provider/model, without a built-in routing policy."""
+
+    def __call__(self, request: LLMRequest) -> LLMSelection | Awaitable[LLMSelection]: ...
+
+
 def llm_call_operator(
-    provider: LLMProvider, *, id: str = "llm.call", streaming: bool = False,
+    provider: LLMProvider | None = None, *, id: str = "llm.call",
+    resolver: LLMResolver | None = None,
 ) -> Operator:
-    """Borrow a Provider and adapt either call style to the single LLM contract.
+    """Borrow a Provider or resolve one per call, using request-level streaming.
 
     This adapter never closes the Provider. It always closes a consumed stream,
-    including when Core cancels, times out or rejects a chunk. Select streaming
-    at registration time; it is not a model API option inside LLMRequest.
+    including when Core cancels, times out or rejects a chunk. A resolver must
+    preserve an explicitly requested model. Each Operator attempt resolves once;
+    routing hints stay in AutoAgent and are never model API parameters.
     """
-    if type(streaming) is not bool:
-        raise TypeError("streaming must be bool.")
-    method = "astream" if streaming else "ainvoke"
-    if not callable(getattr(provider, method, None)):
-        raise TypeError(f"LLM Provider must implement {method}.")
+    if (provider is None) == (resolver is None):
+        raise ValueError("Pass exactly one of provider or resolver.")
+    if provider is not None:
+        _check_provider(provider)
+    elif not callable(resolver):
+        raise TypeError("LLM resolver must be callable.")
 
     async def invoke(request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
-        if not streaming:
-            response = LLMResponse.model_validate(await provider.ainvoke(request))
+        selected_provider = provider
+        if resolver is not None:
+            selection = resolver(request)
+            if inspect.isawaitable(selection):
+                selection = await selection
+            if not isinstance(selection, LLMSelection):
+                raise TypeError("LLM resolver must return LLMSelection.")
+            if request.model is not None and request.model != selection.model:
+                raise ValueError("LLM resolver cannot replace an explicit model.")
+            selected_provider = selection.provider
+            request = LLMRequest.model_validate({**request.model_dump(mode="python"), "model": selection.model})
+        if request.model is None:
+            raise ValueError("Set a model on LLMRequest or supply an LLM resolver.")
+        if not request.streaming:
+            response = LLMResponse.model_validate(await selected_provider.ainvoke(request))
             yield LLMStreamChunk(type="completed", response=response)
             return
-        source = provider.astream(request)
+        source = selected_provider.astream(request)
         try:
             async for chunk in source:
                 yield chunk
@@ -91,4 +135,4 @@ def embedding_operator(
     return Operator(invoke, id=id)
 
 
-__all__ = ["LLM_CALL", "EMBEDDING", "llm_call_operator", "embedding_operator"]
+__all__ = ["LLM_CALL", "EMBEDDING", "LLMSelection", "LLMResolver", "llm_call_operator", "embedding_operator"]

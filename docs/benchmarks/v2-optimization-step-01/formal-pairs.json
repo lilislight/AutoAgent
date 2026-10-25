@@ -1,0 +1,166 @@
+[
+  {
+    "backend": "postgres",
+    "profile": "v2-artifacts-8k",
+    "pairs": [
+      {
+        "round": 0,
+        "before_p50_ms": 683.2933764962945,
+        "after_p50_ms": 629.665386499255,
+        "latency_reduction_pct": 7.848457462302116,
+        "cpu_reduction_pct": 15.42600896860985
+      },
+      {
+        "round": 1,
+        "before_p50_ms": 685.23114349955,
+        "after_p50_ms": 629.8007980003604,
+        "latency_reduction_pct": 8.089291624443796,
+        "cpu_reduction_pct": 13.702359346642467
+      },
+      {
+        "round": 2,
+        "before_p50_ms": 684.0649334990303,
+        "after_p50_ms": 675.0203859992325,
+        "latency_reduction_pct": 1.3221767491478298,
+        "cpu_reduction_pct": 11.254612546125442
+      },
+      {
+        "round": 3,
+        "before_p50_ms": 686.2604394991649,
+        "after_p50_ms": 576.9826760006254,
+        "latency_reduction_pct": 15.923657726546326,
+        "cpu_reduction_pct": 14.351005484460677
+      },
+      {
+        "round": 4,
+        "before_p50_ms": 689.9017530013225,
+        "after_p50_ms": 591.4343044933048,
+        "latency_reduction_pct": 14.272676954312502,
+        "cpu_reduction_pct": 15.571557155715576
+      }
+    ]
+  },
+  {
+    "backend": "postgres",
+    "profile": "v2-buffered-artifacts-8k",
+    "pairs": [
+      {
+        "round": 0,
+        "before_p50_ms": 264.602212497266,
+        "after_p50_ms": 240.2202084995224,
+        "latency_reduction_pct": 9.214588104774645,
+        "cpu_reduction_pct": 10.208333333333307
+      },
+      {
+        "round": 1,
+        "before_p50_ms": 265.0100350001594,
+        "after_p50_ms": 246.8521695045638,
+        "latency_reduction_pct": 6.851765253185482,
+        "cpu_reduction_pct": 11.042944785276054
+      },
+      {
+        "round": 2,
+        "before_p50_ms": 258.8958895066753,
+        "after_p50_ms": 242.9318724971381,
+        "latency_reduction_pct": 6.166191761466955,
+        "cpu_reduction_pct": 4.545454545454541
+      },
+      {
+        "round": 3,
+        "before_p50_ms": 257.6760975061916,
+        "after_p50_ms": 232.8849400000763,
+        "latency_reduction_pct": 9.621054395827134,
+        "cpu_reduction_pct": 7.74058577405855
+      },
+      {
+        "round": 4,
+        "before_p50_ms": 260.25268800003687,
+        "after_p50_ms": 237.05572899780236,
+        "latency_reduction_pct": 8.91324473168601,
+        "cpu_reduction_pct": 11.04166666666666
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-artifacts-8k",
+    "pairs": [
+      {
+        "round": 0,
+        "before_p50_ms": 944.0366415001336,
+        "after_p50_ms": 825.5308474981575,
+        "latency_reduction_pct": 12.553092622937056,
+        "cpu_reduction_pct": 13.410702772404903
+      },
+      {
+        "round": 1,
+        "before_p50_ms": 944.6979839995038,
+        "after_p50_ms": 827.4569349960075,
+        "latency_reduction_pct": 12.410426505531513,
+        "cpu_reduction_pct": 12.76459268762028
+      },
+      {
+        "round": 2,
+        "before_p50_ms": 942.6932194983237,
+        "after_p50_ms": 820.6752344922279,
+        "latency_reduction_pct": 12.943551781461904,
+        "cpu_reduction_pct": 14.203454894433776
+      },
+      {
+        "round": 3,
+        "before_p50_ms": 943.4724969978561,
+        "after_p50_ms": 827.4649814993609,
+        "latency_reduction_pct": 12.295802566331593,
+        "cpu_reduction_pct": 12.105602060528009
+      },
+      {
+        "round": 4,
+        "before_p50_ms": 952.7889259989024,
+        "after_p50_ms": 824.0110744955018,
+        "latency_reduction_pct": 13.515884577309723,
+        "cpu_reduction_pct": 15.07633587786258
+      }
+    ]
+  },
+  {
+    "backend": "sqlite",
+    "profile": "v2-buffered-artifacts-8k",
+    "pairs": [
+      {
+        "round": 0,
+        "before_p50_ms": 358.5764460003702,
+        "after_p50_ms": 314.06205149687594,
+        "latency_reduction_pct": 12.414199259325665,
+        "cpu_reduction_pct": 12.841530054644812
+      },
+      {
+        "round": 1,
+        "before_p50_ms": 353.97805600223364,
+        "after_p50_ms": 316.09928899706574,
+        "latency_reduction_pct": 10.700880001705215,
+        "cpu_reduction_pct": 10.33519553072626
+      },
+      {
+        "round": 2,
+        "before_p50_ms": 356.1689359994489,
+        "after_p50_ms": 314.6216005043243,
+        "latency_reduction_pct": 11.665064326437735,
+        "cpu_reduction_pct": 12.621359223300965
+      },
+      {
+        "round": 3,
+        "before_p50_ms": 356.57963050471153,
+        "after_p50_ms": 317.4702795004123,
+        "latency_reduction_pct": 10.967915062602685,
+        "cpu_reduction_pct": 11.707988980716266
+      },
+      {
+        "round": 4,
+        "before_p50_ms": 357.7345575031359,
+        "after_p50_ms": 319.87296050647274,
+        "latency_reduction_pct": 10.583712476905793,
+        "cpu_reduction_pct": 11.21751025991794
+      }
+    ]
+  }
+]

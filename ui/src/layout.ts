@@ -1,10 +1,12 @@
 import type { GraphDefinition } from "./types.js";
 import { routeEdgesAroundNodes } from "./graphRouting.js";
+import { computeGroupLayout } from './groupLayout.js';
+import { fallbackGroups } from './groupGeometry.js';
 
 export const NODE_WIDTH = 232;
 export const NODE_HEIGHT = 106;
 export interface Point { x: number; y: number }
-export interface Layout { positions: Record<string, Point>; routes: Record<string, Point[]> }
+export interface Layout { positions: Record<string, Point>; routes: Record<string, Point[]>; sizes?: Record<string, { width: number; height: number }>; parents?: Record<string, string> }
 interface ElkNode {
   id: string;
   x?: number;
@@ -19,7 +21,8 @@ export function routeDefinition(definition: GraphDefinition, positions: Layout["
   return Object.fromEntries(Object.entries(routes).map(([id, route]) => [id, route.points]));
 }
 
-export function fallbackLayout(definition: GraphDefinition): Layout {
+export function fallbackLayout(definition: GraphDefinition, folded: ReadonlySet<string> = new Set()): Layout {
+  if (definition.groups?.length) return fallbackGroups(definition,folded);
   const positions = Object.fromEntries(definition.nodes.map((node, index) => [node.id, {
       x: (index % 3) * (NODE_WIDTH + 80),
       y: Math.floor(index / 3) * (NODE_HEIGHT + 100),
@@ -27,7 +30,8 @@ export function fallbackLayout(definition: GraphDefinition): Layout {
   return { positions, routes: routeDefinition(definition, positions) };
 }
 
-export async function computeLayout(definition: GraphDefinition, engine: LayoutEngine): Promise<Layout> {
+export async function computeLayout(definition: GraphDefinition, engine: LayoutEngine, folded: ReadonlySet<string> = new Set()): Promise<Layout> {
+  if (definition.groups?.length) return computeGroupLayout(definition, engine, folded);
   const port = (id: string, side: string) => JSON.stringify([id, side]);
   const result = await engine.layout({
     id: "root",

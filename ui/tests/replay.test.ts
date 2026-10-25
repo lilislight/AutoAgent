@@ -41,8 +41,8 @@ test('routing decisions override evaluations, finished targets release routes an
   assert.equal(last.invocation.completed_at_us,150);
 });
 test('Map Call counts follow start boundaries across batches and rewind without future leakage', () => {
-  const first=event(4,[]);first.call_starts=[{node_id:'n',count:3}];
-  const second=event(8,[]);second.call_starts=[{node_id:'n',count:2}];
+  const first=event(4,[]);first.call_starts=[{node_id:'n',occurrence_id:'old',count:3}];
+  const second=event(8,[]);second.call_starts=[{node_id:'n',occurrence_id:'old',count:2}];
   const batch={...window,baseline:{...window.baseline!,trace:{...trace,nodes:trace.nodes.map(n=>({...n,call_count:7}))}},events:[first,second]};
   assert.equal(replayFrame(batch,3)!.nodes[0].call_count,7);
   assert.equal(replayFrame(batch,4)!.nodes[0].call_count,10);
@@ -59,4 +59,14 @@ test('Fork initialization seeds inherited Edge counts once and new evaluations r
   assert.equal(replayFrame(batch,2)!.edges[0].evaluations,18);
   assert.equal(replayFrame(batch,2)!.edges[0].condition_result,false);
   assert.equal(replayFrame(batch,1)!.edges[0].evaluations,17);
+});
+test('Map counts remain occurrence-scoped while representatives change and older occurrences resume',()=>{
+  const change=(id:string,status:string):ReplayEvent['changes'][number]=>({entity_type:'node',entity_id:id,node_id:'n',change:{node_id:'n',status}});
+  const created=event(12,[change('a','running')]);created.call_starts=[{node_id:'n',occurrence_id:'a',count:3}];
+  const next=event(15,[change('a','completed'),change('b','running')]);next.call_starts=[{node_id:'n',occurrence_id:'b',count:1}];
+  const resumed=event(18,[change('b','completed'),change('a','running')]);
+  const batch={...window,baseline:{trace:{...trace,nodes:[]},child_ids:[],occurrences:[]},events:[created,next,resumed]};
+  assert.equal(replayFrame(batch,12)!.nodes[0].call_count,3);
+  assert.equal(replayFrame(batch,15)!.nodes[0].call_count,1);
+  assert.equal(replayFrame(batch,18)!.nodes[0].call_count,3);
 });

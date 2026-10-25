@@ -163,6 +163,7 @@ class LLMRequestTests(unittest.TestCase):
         for values in (
             {"input": ()}, {"model": " "}, {"max_output_tokens": 0},
             {"max_output_tokens": True}, {"temperature": 2.1},
+            {"streaming": "true"}, {"streaming": 1},
             {"temperature": float("nan")}, {"top_p": -0.1}, {"top_p": 1.1},
         ):
             arguments = {"model": "model", "input": (user_message(),), **values}

@@ -173,7 +173,7 @@ export function OccurrenceStack({ invocationId, target, onPick, onClose }: {
             <div className="occurrence-card-top"><span>{target.kind === "node" ? "Occurrence" : "Evaluation"} #{ordinal}</span>{target.kind === "node" ? <StatusBadge row={row} /> : <span className={`status-badge status-${row.condition_result ? "completed" : "skipped"}`}>{row.condition_result ? "Selected" : "Skipped"}</span>}</div>
             <strong title={target.id}>{target.id}</strong>
             <code title={row.occurrence_id ?? row.source_occurrence_id}>{row.occurrence_id ?? row.source_occurrence_id}</code>
-            <div className="occurrence-card-meta"><span>{formatTime(target.kind === "node" ? row.started_at_us ?? row.ready_at_us : row.occurred_at_us as number)}</span><span>{duration(elapsed)}</span></div>
+            <div className="occurrence-card-meta"><span>{formatTime(target.kind === "node" ? row.started_at_us ?? row.ready_at_us : row.occurred_at_us as number)}</span>{target.kind==='node'&&row.call_count!=null?<span>{row.call_count} {row.call_count===1?'call':'calls'}</span>:null}<span>{duration(elapsed)}</span></div>
             {row.error_type ? <div className="occurrence-card-error">{row.error_type}{row.error_code ? ` · ${row.error_code}` : ""}</div> : null}
           </button>;
         })}

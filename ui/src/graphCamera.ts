@@ -18,9 +18,9 @@ export function fitGraphCamera(layout: Layout, size: GraphSize): GraphCamera {
   const positions = Object.values(layout.positions);
   if (!positions.length) return { x: 0, y: 0, zoom: 1 };
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-  for (const point of positions) {
+  for (const [id, point] of Object.entries(layout.positions)) {
     left = Math.min(left, point.x); top = Math.min(top, point.y);
-    right = Math.max(right, point.x + NODE_WIDTH); bottom = Math.max(bottom, point.y + NODE_HEIGHT);
+    right = Math.max(right, point.x + (layout.sizes?.[id]?.width ?? NODE_WIDTH)); bottom = Math.max(bottom, point.y + (layout.sizes?.[id]?.height ?? NODE_HEIGHT));
   }
   return { x: (left + right) / 2, y: (top + bottom) / 2,
     zoom: Math.max(.15, Math.min(1, Math.max(1, size.width - 80) / (right - left), Math.max(1, size.height - 100) / (bottom - top))) };

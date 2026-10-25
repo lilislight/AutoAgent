@@ -1,0 +1,25 @@
+{
+  "file": "autoagent/host/persistence/database.py",
+  "before_sha256": "a186961def4cb95ecc8be0efc0761c560627e567c6f66030ef31b81fb8cc4703",
+  "after_sha256": "0d07d932978a0fd8888a6cb989f40d4052c0dc47dfc9a2d3403fe5c24d004416",
+  "test_file": "tests/test_execution_observation.py",
+  "test_sha256": "cc99f99d0cbf7e641d9d1d83d1c8424f0a670e94fd22cff940649bada4620b83",
+  "initial_regression": {
+    "tests": 135,
+    "postgres_tests": 62,
+    "failures": 1,
+    "skipped": 0
+  },
+  "deterministic_before": {
+    "tests": 2,
+    "failures": 2,
+    "errors": 0,
+    "expected": true
+  },
+  "focused_after": {
+    "tests": 4,
+    "failures": 0,
+    "errors": 0
+  },
+  "performance_boundary": "All group-commit and observation-path timings precede the cancellation fix. Primary Host.join path does not call execution_notifications; no group-commit speedup is attributed to this fix."
+}

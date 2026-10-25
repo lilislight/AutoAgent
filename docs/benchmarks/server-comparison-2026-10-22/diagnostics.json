@@ -1,0 +1,2634 @@
+[
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.30999999999999994,
+    "cpu_seconds_per_call": 0.10333333333333332
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 8.61,
+    "cpu_seconds_per_call": 0.861
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 7.67,
+    "cpu_seconds_per_call": 2.5566666666666666
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.06999999999999995,
+    "cpu_seconds_per_call": 0.023333333333333317
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.13,
+    "cpu_seconds_per_call": 0.013000000000000001
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 67.24000000000001,
+    "cpu_seconds_per_call": 22.413333333333338
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.29000000000000004,
+    "cpu_seconds_per_call": 0.09666666666666668
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 6.399999999999999,
+    "cpu_seconds_per_call": 2.133333333333333
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 8.280000000000001,
+    "cpu_seconds_per_call": 2.7600000000000002
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.4,
+    "cpu_seconds_per_call": 0.13333333333333333
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.06999999999999995,
+    "cpu_seconds_per_call": 0.023333333333333317
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 7.590000000000001,
+    "cpu_seconds_per_call": 2.5300000000000002
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.79,
+    "cpu_seconds_per_call": 0.26333333333333336
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5800000000000001,
+    "cpu_seconds_per_call": 0.19333333333333336
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.4,
+    "cpu_seconds_per_call": 0.13333333333333333
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 8.65,
+    "cpu_seconds_per_call": 0.865
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.3400000000000001,
+    "cpu_seconds_per_call": 0.03400000000000001
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5700000000000001,
+    "cpu_seconds_per_call": 0.19000000000000003
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.22000000000000008,
+    "cpu_seconds_per_call": 0.07333333333333336
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.47999999999999987,
+    "cpu_seconds_per_call": 0.15999999999999995
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5800000000000001,
+    "cpu_seconds_per_call": 0.19333333333333336
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 8.459999999999999,
+    "cpu_seconds_per_call": 2.82
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5100000000000001,
+    "cpu_seconds_per_call": 0.05100000000000001
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.32999999999999996,
+    "cpu_seconds_per_call": 0.032999999999999995
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.22000000000000008,
+    "cpu_seconds_per_call": 0.07333333333333336
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.1499999999999999,
+    "cpu_seconds_per_call": 0.01499999999999999
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.19000000000000006,
+    "cpu_seconds_per_call": 0.06333333333333335
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.78,
+    "cpu_seconds_per_call": 0.26
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 2.6,
+    "cpu_seconds_per_call": 0.8666666666666667
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.30000000000000004,
+    "cpu_seconds_per_call": 0.10000000000000002
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.12,
+    "cpu_seconds_per_call": 0.04
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 8.44,
+    "cpu_seconds_per_call": 2.813333333333333
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 1.85,
+    "cpu_seconds_per_call": 0.6166666666666667
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.10999999999999999,
+    "cpu_seconds_per_call": 0.03666666666666666
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 2.6400000000000006,
+    "cpu_seconds_per_call": 0.8800000000000002
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 67.32,
+    "cpu_seconds_per_call": 22.439999999999998
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.62,
+    "cpu_seconds_per_call": 0.062
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 2.5700000000000003,
+    "cpu_seconds_per_call": 0.8566666666666668
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 5.529999999999999,
+    "cpu_seconds_per_call": 1.843333333333333
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 5.23,
+    "cpu_seconds_per_call": 1.7433333333333334
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 1.7999999999999998,
+    "cpu_seconds_per_call": 0.6
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.24,
+    "cpu_seconds_per_call": 0.08
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.67,
+    "cpu_seconds_per_call": 0.067
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 28.65,
+    "cpu_seconds_per_call": 9.549999999999999
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.20000000000000007,
+    "cpu_seconds_per_call": 0.0666666666666667
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.8200000000000001,
+    "cpu_seconds_per_call": 0.2733333333333334
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 7.64,
+    "cpu_seconds_per_call": 2.5466666666666664
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 8.7,
+    "cpu_seconds_per_call": 0.8699999999999999
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 1.79,
+    "cpu_seconds_per_call": 0.5966666666666667
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.05999999999999994,
+    "cpu_seconds_per_call": 0.01999999999999998
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "context-append",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.09999999999999998,
+    "cpu_seconds_per_call": 0.033333333333333326
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "rows",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 66.92999999999999,
+    "cpu_seconds_per_call": 22.31
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "map-100",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.19000000000000006,
+    "cpu_seconds_per_call": 0.06333333333333335
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 30.339999999999996,
+    "cpu_seconds_per_call": 10.113333333333332
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 0.5199999999999999,
+    "cpu_seconds_per_call": 0.05199999999999999
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "loop-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 22.939999999999998,
+    "cpu_seconds_per_call": 7.646666666666666
+  },
+  {
+    "suite": "baseline-pinned",
+    "case": "chain-10",
+    "profile": "v1-minimal",
+    "status": "completed",
+    "running_cpu_seconds": 0.13,
+    "cpu_seconds_per_call": 0.013000000000000001
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.69,
+    "cpu_seconds_per_call": 0.345
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.73,
+    "cpu_seconds_per_call": 0.365
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6299999999999999,
+    "cpu_seconds_per_call": 0.31499999999999995
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2799999999999999,
+    "cpu_seconds_per_call": 0.13999999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.31999999999999995,
+    "cpu_seconds_per_call": 0.15999999999999998
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6299999999999999,
+    "cpu_seconds_per_call": 0.31499999999999995
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.5800000000000001,
+    "cpu_seconds_per_call": 0.29000000000000004
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.31999999999999995,
+    "cpu_seconds_per_call": 0.15999999999999998
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.54,
+    "cpu_seconds_per_call": 0.27
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6299999999999999,
+    "cpu_seconds_per_call": 0.31499999999999995
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.7,
+    "cpu_seconds_per_call": 0.35
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.55,
+    "cpu_seconds_per_call": 0.275
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.47999999999999987,
+    "cpu_seconds_per_call": 0.23999999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2899999999999999,
+    "cpu_seconds_per_call": 0.14499999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2400000000000001,
+    "cpu_seconds_per_call": 0.12000000000000005
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.30999999999999994,
+    "cpu_seconds_per_call": 0.15499999999999997
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.53,
+    "cpu_seconds_per_call": 0.265
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.55,
+    "cpu_seconds_per_call": 0.275
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.7699999999999998,
+    "cpu_seconds_per_call": 0.3849999999999999
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.5999999999999999,
+    "cpu_seconds_per_call": 0.29999999999999993
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.30999999999999994,
+    "cpu_seconds_per_call": 0.15499999999999997
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.7,
+    "cpu_seconds_per_call": 0.35
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.32000000000000006,
+    "cpu_seconds_per_call": 0.16000000000000003
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.56,
+    "cpu_seconds_per_call": 0.28
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6199999999999999,
+    "cpu_seconds_per_call": 0.30999999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.7,
+    "cpu_seconds_per_call": 0.35
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.48,
+    "cpu_seconds_per_call": 0.24
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.7,
+    "cpu_seconds_per_call": 0.35
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.6099999999999999,
+    "cpu_seconds_per_call": 0.30499999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.78,
+    "cpu_seconds_per_call": 0.39
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.6199999999999999,
+    "cpu_seconds_per_call": 0.30999999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6399999999999999,
+    "cpu_seconds_per_call": 0.31999999999999995
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.6799999999999999,
+    "cpu_seconds_per_call": 0.33999999999999997
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2899999999999999,
+    "cpu_seconds_per_call": 0.14499999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.6099999999999999,
+    "cpu_seconds_per_call": 0.30499999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.72,
+    "cpu_seconds_per_call": 0.36
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.29999999999999993,
+    "cpu_seconds_per_call": 0.14999999999999997
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.53,
+    "cpu_seconds_per_call": 0.265
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.54,
+    "cpu_seconds_per_call": 0.27
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.72,
+    "cpu_seconds_per_call": 0.36
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.29999999999999993,
+    "cpu_seconds_per_call": 0.14999999999999997
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.75,
+    "cpu_seconds_per_call": 0.375
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.54,
+    "cpu_seconds_per_call": 0.27
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.55,
+    "cpu_seconds_per_call": 0.275
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.7,
+    "cpu_seconds_per_call": 0.35
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.71,
+    "cpu_seconds_per_call": 0.355
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.29000000000000015,
+    "cpu_seconds_per_call": 0.14500000000000007
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2400000000000001,
+    "cpu_seconds_per_call": 0.12000000000000005
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2300000000000001,
+    "cpu_seconds_per_call": 0.11500000000000005
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.6199999999999999,
+    "cpu_seconds_per_call": 0.30999999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.6699999999999999,
+    "cpu_seconds_per_call": 0.33499999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.8300000000000001,
+    "cpu_seconds_per_call": 0.41500000000000004
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.28,
+    "cpu_seconds_per_call": 0.14
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.8200000000000001,
+    "cpu_seconds_per_call": 0.41000000000000003
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6199999999999999,
+    "cpu_seconds_per_call": 0.30999999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.8399999999999999,
+    "cpu_seconds_per_call": 0.41999999999999993
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.2799999999999999,
+    "cpu_seconds_per_call": 0.13999999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.31000000000000005,
+    "cpu_seconds_per_call": 0.15500000000000003
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.9300000000000002,
+    "cpu_seconds_per_call": 0.4650000000000001
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.6399999999999999,
+    "cpu_seconds_per_call": 0.31999999999999995
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.94,
+    "cpu_seconds_per_call": 0.47
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.9500000000000002,
+    "cpu_seconds_per_call": 0.4750000000000001
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.8899999999999999,
+    "cpu_seconds_per_call": 0.44499999999999995
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.81,
+    "cpu_seconds_per_call": 0.405
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.73,
+    "cpu_seconds_per_call": 0.365
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.81,
+    "cpu_seconds_per_call": 0.405
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.51,
+    "cpu_seconds_per_call": 0.255
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6499999999999999,
+    "cpu_seconds_per_call": 0.32499999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.32999999999999996,
+    "cpu_seconds_per_call": 0.16499999999999998
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.71,
+    "cpu_seconds_per_call": 0.355
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.29999999999999993,
+    "cpu_seconds_per_call": 0.14999999999999997
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "map",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.49,
+    "cpu_seconds_per_call": 0.245
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "loop",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.72,
+    "cpu_seconds_per_call": 0.36
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.7799999999999998,
+    "cpu_seconds_per_call": 0.3899999999999999
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 0.6499999999999999,
+    "cpu_seconds_per_call": 0.32499999999999996
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.7799999999999998,
+    "cpu_seconds_per_call": 0.3899999999999999
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.71,
+    "cpu_seconds_per_call": 0.355
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.5900000000000001,
+    "cpu_seconds_per_call": 0.29500000000000004
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 0.6199999999999999,
+    "cpu_seconds_per_call": 0.30999999999999994
+  },
+  {
+    "suite": "monitor-final-ab",
+    "case": "context",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.31999999999999995,
+    "cpu_seconds_per_call": 0.15999999999999998
+  },
+  {
+    "suite": "postgres",
+    "case": "loop-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.18000000000000005,
+    "cpu_seconds_per_call": 0.06000000000000002
+  },
+  {
+    "suite": "postgres",
+    "case": "loop-10",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.8999999999999999,
+    "cpu_seconds_per_call": 0.3
+  },
+  {
+    "suite": "postgres",
+    "case": "context-append",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5700000000000001,
+    "cpu_seconds_per_call": 0.19000000000000003
+  },
+  {
+    "suite": "postgres",
+    "case": "map-100",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.56,
+    "cpu_seconds_per_call": 0.8533333333333334
+  },
+  {
+    "suite": "postgres",
+    "case": "chain-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 5.44,
+    "cpu_seconds_per_call": 0.544
+  },
+  {
+    "suite": "postgres",
+    "case": "map-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 5.32,
+    "cpu_seconds_per_call": 1.7733333333333334
+  },
+  {
+    "suite": "postgres",
+    "case": "loop-10",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.77,
+    "cpu_seconds_per_call": 0.25666666666666665
+  },
+  {
+    "suite": "postgres",
+    "case": "map-100",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.54,
+    "cpu_seconds_per_call": 0.8466666666666667
+  },
+  {
+    "suite": "postgres",
+    "case": "chain-10",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.01,
+    "cpu_seconds_per_call": 0.20099999999999998
+  },
+  {
+    "suite": "postgres",
+    "case": "loop-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 1.8300000000000003,
+    "cpu_seconds_per_call": 0.6100000000000001
+  },
+  {
+    "suite": "postgres",
+    "case": "chain-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 5.34,
+    "cpu_seconds_per_call": 0.534
+  },
+  {
+    "suite": "postgres",
+    "case": "chain-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5000000000000001,
+    "cpu_seconds_per_call": 0.05000000000000001
+  },
+  {
+    "suite": "postgres",
+    "case": "map-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.2799999999999999,
+    "cpu_seconds_per_call": 0.09333333333333331
+  },
+  {
+    "suite": "postgres",
+    "case": "context-append",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.5700000000000001,
+    "cpu_seconds_per_call": 0.19000000000000003
+  },
+  {
+    "suite": "postgres",
+    "case": "map-100",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.28,
+    "cpu_seconds_per_call": 0.09333333333333334
+  },
+  {
+    "suite": "postgres",
+    "case": "chain-10",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.02,
+    "cpu_seconds_per_call": 0.202
+  },
+  {
+    "suite": "postgres",
+    "case": "map-100",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 5.05,
+    "cpu_seconds_per_call": 1.6833333333333333
+  },
+  {
+    "suite": "postgres",
+    "case": "loop-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 1.84,
+    "cpu_seconds_per_call": 0.6133333333333334
+  },
+  {
+    "suite": "postgres",
+    "case": "context-append",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 4.67,
+    "cpu_seconds_per_call": 1.5566666666666666
+  },
+  {
+    "suite": "postgres",
+    "case": "context-append",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 4.67,
+    "cpu_seconds_per_call": 1.5566666666666666
+  },
+  {
+    "suite": "postgres",
+    "case": "context-append",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.9399999999999995,
+    "cpu_seconds_per_call": 0.9799999999999999
+  },
+  {
+    "suite": "postgres",
+    "case": "chain-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.4800000000000001,
+    "cpu_seconds_per_call": 0.04800000000000001
+  },
+  {
+    "suite": "postgres",
+    "case": "loop-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.16000000000000003,
+    "cpu_seconds_per_call": 0.053333333333333344
+  },
+  {
+    "suite": "postgres",
+    "case": "context-append",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.8,
+    "cpu_seconds_per_call": 0.9333333333333332
+  },
+  {
+    "suite": "extended",
+    "case": "crash-at-wait",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 0.020000000000000018,
+    "cpu_seconds_per_call": 0.006666666666666672
+  },
+  {
+    "suite": "extended",
+    "case": "wide-256",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 4.7299999999999995,
+    "cpu_seconds_per_call": 1.5766666666666664
+  },
+  {
+    "suite": "extended",
+    "case": "session-reuse",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 48.33,
+    "cpu_seconds_per_call": 0.377578125
+  },
+  {
+    "suite": "extended",
+    "case": "slow-storage",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 1.7600000000000002,
+    "cpu_seconds_per_call": 0.35200000000000004
+  },
+  {
+    "suite": "extended",
+    "case": "crash-at-wait",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 0.010000000000000009,
+    "cpu_seconds_per_call": 0.003333333333333336
+  },
+  {
+    "suite": "extended",
+    "case": "session-reuse",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 20.72,
+    "cpu_seconds_per_call": 0.161875
+  },
+  {
+    "suite": "extended",
+    "case": "wait-resume",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 1.21,
+    "cpu_seconds_per_call": 0.242
+  },
+  {
+    "suite": "extended",
+    "case": "wide-256",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 53.62,
+    "cpu_seconds_per_call": 17.87333333333333
+  },
+  {
+    "suite": "extended",
+    "case": "sql-chain-10",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "sql": {
+      "statements": 2996,
+      "cursor_ms": 1162.798605972057,
+      "commits": 30,
+      "verbs": {
+        "PRAGMA": 0,
+        "BEGIN": 340,
+        "SELECT": 2253,
+        "CREATE": 0,
+        "INSERT": 393,
+        "UPDATE": 10
+      }
+    },
+    "running_cpu_seconds": 1.72,
+    "cpu_seconds_per_call": 0.344
+  },
+  {
+    "suite": "extended",
+    "case": "slow-storage",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.29999999999999993,
+    "cpu_seconds_per_call": 0.059999999999999984
+  },
+  {
+    "suite": "extended",
+    "case": "sql-chain-10",
+    "profile": "v1-full",
+    "status": "completed",
+    "sql": {
+      "statements": 80,
+      "cursor_ms": 119.86578397045378,
+      "commits": 10,
+      "verbs": {
+        "PRAGMA": 0,
+        "CREATE": 0,
+        "SELECT": 45,
+        "INSERT": 20,
+        "UPDATE": 15
+      }
+    },
+    "running_cpu_seconds": 0.26,
+    "cpu_seconds_per_call": 0.052000000000000005
+  },
+  {
+    "suite": "extended",
+    "case": "session-reuse",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 3.86,
+    "cpu_seconds_per_call": 0.03015625
+  },
+  {
+    "suite": "extended",
+    "case": "slow-storage",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 4.58,
+    "cpu_seconds_per_call": 0.916
+  },
+  {
+    "suite": "extended",
+    "case": "crash-at-wait",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.0,
+    "cpu_seconds_per_call": 0.0
+  },
+  {
+    "suite": "extended",
+    "case": "wait-resume",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.16999999999999993,
+    "cpu_seconds_per_call": 0.03399999999999999
+  },
+  {
+    "suite": "extended",
+    "case": "wide-32",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 0.6999999999999998,
+    "cpu_seconds_per_call": 0.13999999999999996
+  },
+  {
+    "suite": "extended",
+    "case": "slow-storage",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 0.29999999999999993,
+    "cpu_seconds_per_call": 0.059999999999999984
+  },
+  {
+    "suite": "extended",
+    "case": "sql-chain-10",
+    "profile": "v2-default",
+    "status": "completed",
+    "sql": {
+      "statements": 6796,
+      "cursor_ms": 1761.1603680888948,
+      "commits": 365,
+      "verbs": {
+        "PRAGMA": 0,
+        "BEGIN": 675,
+        "SELECT": 3871,
+        "CREATE": 0,
+        "INSERT": 1940,
+        "UPDATE": 310
+      }
+    },
+    "running_cpu_seconds": 3.7799999999999994,
+    "cpu_seconds_per_call": 0.7559999999999999
+  },
+  {
+    "suite": "extended",
+    "case": "wide-32",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 10.57,
+    "cpu_seconds_per_call": 2.114
+  },
+  {
+    "suite": "extended",
+    "case": "sql-chain-10",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "sql": {
+      "statements": 80,
+      "cursor_ms": 128.36119500207133,
+      "commits": 10,
+      "verbs": {
+        "PRAGMA": 0,
+        "CREATE": 0,
+        "SELECT": 45,
+        "INSERT": 20,
+        "UPDATE": 15
+      }
+    },
+    "running_cpu_seconds": 0.26,
+    "cpu_seconds_per_call": 0.052000000000000005
+  },
+  {
+    "suite": "extended",
+    "case": "wait-resume",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 0.16000000000000003,
+    "cpu_seconds_per_call": 0.03200000000000001
+  },
+  {
+    "suite": "extended",
+    "case": "wide-32",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 5.61,
+    "cpu_seconds_per_call": 1.122
+  },
+  {
+    "suite": "extended",
+    "case": "wide-256",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 4.85,
+    "cpu_seconds_per_call": 1.6166666666666665
+  },
+  {
+    "suite": "extended",
+    "case": "crash-at-wait",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.010000000000000009,
+    "cpu_seconds_per_call": 0.003333333333333336
+  },
+  {
+    "suite": "extended",
+    "case": "session-reuse",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 3.8500000000000005,
+    "cpu_seconds_per_call": 0.030078125000000004
+  },
+  {
+    "suite": "extended",
+    "case": "wait-resume",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 0.7999999999999999,
+    "cpu_seconds_per_call": 0.15999999999999998
+  },
+  {
+    "suite": "extended",
+    "case": "wide-32",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.7199999999999999,
+    "cpu_seconds_per_call": 0.14399999999999996
+  },
+  {
+    "suite": "extended",
+    "case": "wide-256",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 39.58,
+    "cpu_seconds_per_call": 13.193333333333333
+  },
+  {
+    "suite": "artifact-threshold",
+    "case": "unique-history",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 52.0,
+    "cpu_seconds_per_call": 0.40625
+  },
+  {
+    "suite": "artifact-threshold",
+    "case": "unique-history",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 3.94,
+    "cpu_seconds_per_call": 0.03078125
+  },
+  {
+    "suite": "artifact-threshold",
+    "case": "unique-history",
+    "profile": "v2-artifacts-8k",
+    "status": "completed",
+    "running_cpu_seconds": 53.76,
+    "cpu_seconds_per_call": 0.42
+  },
+  {
+    "suite": "cpu-corrected",
+    "case": "cpu-diagnostic",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 7.85,
+    "cpu_seconds_per_call": 2.6166666666666667,
+    "cpu_profile": {
+      "total_seconds": 8.018862234999999,
+      "top_self": [
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/selectors.py",
+          "line": 451,
+          "function": "select",
+          "calls": 38895,
+          "self_cpu_seconds": 0.44793404600000003,
+          "cumulative_cpu_seconds": 2.026105501
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py",
+          "line": 1922,
+          "function": "_run_once",
+          "calls": 38891,
+          "self_cpu_seconds": 0.23336347500000001,
+          "cumulative_cpu_seconds": 14.534118813000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.isinstance>",
+          "calls": 582466,
+          "self_cpu_seconds": 0.22664609000000002,
+          "cumulative_cpu_seconds": 0.263283843
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'send' of '_socket.socket' objects>",
+          "calls": 18596,
+          "self_cpu_seconds": 0.225092911,
+          "cumulative_cpu_seconds": 0.219372591
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'get' of '_queue.SimpleQueue' objects>",
+          "calls": 17549,
+          "self_cpu_seconds": 0.20973021800000002,
+          "cumulative_cpu_seconds": 0.0001486
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'put_nowait' of '_queue.SimpleQueue' objects>",
+          "calls": 17160,
+          "self_cpu_seconds": 0.19868101400000002,
+          "cumulative_cpu_seconds": 0.19868101400000002
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'poll' of 'select.epoll' objects>",
+          "calls": 38893,
+          "self_cpu_seconds": 0.18900486500000002,
+          "cumulative_cpu_seconds": 0.000701401
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/sql/coercions.py",
+          "line": 314,
+          "function": "expect",
+          "calls": 51833,
+          "self_cpu_seconds": 0.169409008,
+          "cumulative_cpu_seconds": 0.582121318
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'switch' of 'greenlet.greenlet' objects>",
+          "calls": 39884,
+          "self_cpu_seconds": 0.15173346100000001,
+          "cumulative_cpu_seconds": 1.330488821
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/sql/schema.py",
+          "line": 1507,
+          "function": "__init__",
+          "calls": 16557,
+          "self_cpu_seconds": 0.133498374,
+          "cumulative_cpu_seconds": 0.434827367
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'recv' of '_socket.socket' objects>",
+          "calls": 35614,
+          "self_cpu_seconds": 0.12007410600000001,
+          "cumulative_cpu_seconds": 0.118308512
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'run' of '_contextvars.Context' objects>",
+          "calls": 60807,
+          "self_cpu_seconds": 0.115905436,
+          "cumulative_cpu_seconds": 11.288728090000001
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/events.py",
+          "line": 86,
+          "function": "_run",
+          "calls": 60774,
+          "self_cpu_seconds": 0.090422823,
+          "cumulative_cpu_seconds": 11.641576616
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.getattr>",
+          "calls": 213553,
+          "self_cpu_seconds": 0.088779205,
+          "cumulative_cpu_seconds": 0.096468489
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/codec.py",
+          "line": 119,
+          "function": "visit",
+          "calls": 19267,
+          "self_cpu_seconds": 0.088723126,
+          "cumulative_cpu_seconds": 0.333018001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.hasattr>",
+          "calls": 175459,
+          "self_cpu_seconds": 0.08763121800000001,
+          "cumulative_cpu_seconds": 0.192739668
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/sql/cache_key.py",
+          "line": 221,
+          "function": "_gen_cache_key",
+          "calls": 16690,
+          "self_cpu_seconds": 0.08694182,
+          "cumulative_cpu_seconds": 0.161521395
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py",
+          "line": 818,
+          "function": "_call_soon",
+          "calls": 42720,
+          "self_cpu_seconds": 0.07976694000000001,
+          "cumulative_cpu_seconds": 0.171463036
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/util/_concurrency_py3k.py",
+          "line": 167,
+          "function": "greenlet_spawn",
+          "calls": 22730,
+          "self_cpu_seconds": 0.076851211,
+          "cumulative_cpu_seconds": 2.955924008
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/util/langhelpers.py",
+          "line": 1293,
+          "function": "__getattr__",
+          "calls": 27007,
+          "self_cpu_seconds": 0.070615096,
+          "cumulative_cpu_seconds": 0.13325662200000002
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.len>",
+          "calls": 177201,
+          "self_cpu_seconds": 0.067992226,
+          "cumulative_cpu_seconds": 0.06804352600000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/sql/crud.py",
+          "line": 869,
+          "function": "_append_param_parameter",
+          "calls": 15668,
+          "self_cpu_seconds": 0.06446903200000001,
+          "cumulative_cpu_seconds": 0.39295230200000003
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/aiosqlite/core.py",
+          "line": 150,
+          "function": "_execute",
+          "calls": 34310,
+          "self_cpu_seconds": 0.06382712800000001,
+          "cumulative_cpu_seconds": 0.300525773
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/ext/asyncio/engine.py",
+          "line": 621,
+          "function": "execute",
+          "calls": 19674,
+          "self_cpu_seconds": 0.06278254500000001,
+          "cumulative_cpu_seconds": 3.7069322550000003
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.venv/lib/python3.12/site-packages/sqlalchemy/dialects/sqlite/base.py",
+          "line": 1625,
+          "function": "visit_on_conflict_do_update",
+          "calls": 978,
+          "self_cpu_seconds": 0.058274044000000004,
+          "cumulative_cpu_seconds": 0.228734513
+        }
+      ],
+      "top_autoagent_cumulative": [
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/app/app.py",
+          "line": 633,
+          "function": "_complete_close",
+          "calls": 1,
+          "self_cpu_seconds": 4.5e-06,
+          "cumulative_cpu_seconds": 7.8495581
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/writer.py",
+          "line": 403,
+          "function": "_worker",
+          "calls": 12103,
+          "self_cpu_seconds": 0.029259401,
+          "cumulative_cpu_seconds": 6.780631688000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/executor/future.py",
+          "line": 123,
+          "function": "<lambda>",
+          "calls": 62,
+          "self_cpu_seconds": 0.00028789500000000003,
+          "cumulative_cpu_seconds": 6.768287497
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/executor/future.py",
+          "line": 41,
+          "function": "notify",
+          "calls": 62,
+          "self_cpu_seconds": 0.00036250400000000004,
+          "cumulative_cpu_seconds": 6.767877702000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/app/runtime_loop.py",
+          "line": 93,
+          "function": "close",
+          "calls": 1,
+          "self_cpu_seconds": 0.002379267,
+          "cumulative_cpu_seconds": 6.766121600000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/writer.py",
+          "line": 372,
+          "function": "_commit",
+          "calls": 11838,
+          "self_cpu_seconds": 0.022531115,
+          "cumulative_cpu_seconds": 6.700355487
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 372,
+          "function": "write",
+          "calls": 11838,
+          "self_cpu_seconds": 0.030160066000000003,
+          "cumulative_cpu_seconds": 6.613205161000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 376,
+          "function": "write_transaction",
+          "calls": 10888,
+          "self_cpu_seconds": 0.035643706000000004,
+          "cumulative_cpu_seconds": 5.249617394
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/writer.py",
+          "line": 104,
+          "function": "execute",
+          "calls": 6216,
+          "self_cpu_seconds": 0.014064405,
+          "cumulative_cpu_seconds": 3.074033093
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 341,
+          "function": "projections",
+          "calls": 3124,
+          "self_cpu_seconds": 0.012273458000000001,
+          "cumulative_cpu_seconds": 2.7524847940000003
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 323,
+          "function": "upsert",
+          "calls": 4440,
+          "self_cpu_seconds": 0.031297007,
+          "cumulative_cpu_seconds": 2.728521417
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/execution_state.py",
+          "line": 14,
+          "function": "read",
+          "calls": 2839,
+          "self_cpu_seconds": 0.013370428,
+          "cumulative_cpu_seconds": 1.615797192
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/queries.py",
+          "line": 56,
+          "function": "_rows",
+          "calls": 1890,
+          "self_cpu_seconds": 0.010104583,
+          "cumulative_cpu_seconds": 1.401846893
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/projections.py",
+          "line": 166,
+          "function": "runtime",
+          "calls": 3933,
+          "self_cpu_seconds": 0.018208601,
+          "cumulative_cpu_seconds": 1.2024264960000002
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/database.py",
+          "line": 104,
+          "function": "accept",
+          "calls": 2946,
+          "self_cpu_seconds": 0.007862684,
+          "cumulative_cpu_seconds": 1.062723198
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/writer.py",
+          "line": 137,
+          "function": "accept",
+          "calls": 3022,
+          "self_cpu_seconds": 0.018540438000000003,
+          "cumulative_cpu_seconds": 0.9066251080000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 225,
+          "function": "row",
+          "calls": 3865,
+          "self_cpu_seconds": 0.013411765,
+          "cumulative_cpu_seconds": 0.8927650020000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/projections.py",
+          "line": 126,
+          "function": "get",
+          "calls": 6279,
+          "self_cpu_seconds": 0.026469614000000002,
+          "cumulative_cpu_seconds": 0.8813601080000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/projections.py",
+          "line": 139,
+          "function": "put",
+          "calls": 3000,
+          "self_cpu_seconds": 0.016369197000000002,
+          "cumulative_cpu_seconds": 0.44681828
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 44,
+          "function": "prepare",
+          "calls": 190,
+          "self_cpu_seconds": 0.002374096,
+          "cumulative_cpu_seconds": 0.42583320100000005
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/storage.py",
+          "line": 238,
+          "function": "source",
+          "calls": 1871,
+          "self_cpu_seconds": 0.004963947000000001,
+          "cumulative_cpu_seconds": 0.399900884
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/app/app.py",
+          "line": 2002,
+          "function": "_emit",
+          "calls": 563,
+          "self_cpu_seconds": 0.002816705,
+          "cumulative_cpu_seconds": 0.353251902
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/app/app.py",
+          "line": 2100,
+          "function": "_emit_executor_event",
+          "calls": 545,
+          "self_cpu_seconds": 0.001226387,
+          "cumulative_cpu_seconds": 0.347755796
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/host/persistence/queries.py",
+          "line": 26,
+          "function": "view",
+          "calls": 1099,
+          "self_cpu_seconds": 0.003870281,
+          "cumulative_cpu_seconds": 0.34738580500000005
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/.autoagent/performance/source-current/autoagent/core/app/app.py",
+          "line": 2013,
+          "function": "_emit_locked",
+          "calls": 558,
+          "self_cpu_seconds": 0.003088889,
+          "cumulative_cpu_seconds": 0.344434098
+        }
+      ]
+    }
+  },
+  {
+    "suite": "cpu-corrected",
+    "case": "cpu-diagnostic",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 1.1800000000000002,
+    "cpu_seconds_per_call": 0.39333333333333337,
+    "cpu_profile": {
+      "total_seconds": 1.1840832040000009,
+      "top_self": [
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/copy.py",
+          "line": 118,
+          "function": "deepcopy",
+          "calls": 48012,
+          "self_cpu_seconds": 0.09568423300000001,
+          "cumulative_cpu_seconds": 0.21808550200000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.isinstance>",
+          "calls": 237965,
+          "self_cpu_seconds": 0.081887317,
+          "cumulative_cpu_seconds": 0.09375792200000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 205,
+          "function": "<genexpr>",
+          "calls": 133068,
+          "self_cpu_seconds": 0.0764909,
+          "cumulative_cpu_seconds": 0.1114846
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/persistence.py",
+          "line": 959,
+          "function": "_estimate_runtime_bytes",
+          "calls": 25281,
+          "self_cpu_seconds": 0.047632953000000006,
+          "cumulative_cpu_seconds": 0.11241989000000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.all>",
+          "calls": 8535,
+          "self_cpu_seconds": 0.043937800000000006,
+          "cumulative_cpu_seconds": 0.15540310000000002
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'get' of 'dict' objects>",
+          "calls": 121405,
+          "self_cpu_seconds": 0.041900894,
+          "cumulative_cpu_seconds": 0.044437093000000004
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'poll' of 'select.epoll' objects>",
+          "calls": 1873,
+          "self_cpu_seconds": 0.041665396,
+          "cumulative_cpu_seconds": 0.002138
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 201,
+          "function": "_estimated_json_size",
+          "calls": 16131,
+          "self_cpu_seconds": 0.036939200000000005,
+          "cumulative_cpu_seconds": 0.2305732
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/serialization.py",
+          "line": 160,
+          "function": "_encode",
+          "calls": 14610,
+          "self_cpu_seconds": 0.036216504000000004,
+          "cumulative_cpu_seconds": 0.08263859800000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.ord>",
+          "calls": 124533,
+          "self_cpu_seconds": 0.0349955,
+          "cumulative_cpu_seconds": 0.0349955
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/copy.py",
+          "line": 217,
+          "function": "_deepcopy_dict",
+          "calls": 4950,
+          "self_cpu_seconds": 0.022099879000000003,
+          "cumulative_cpu_seconds": 0.197215584
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.id>",
+          "calls": 70477,
+          "self_cpu_seconds": 0.021720276,
+          "cumulative_cpu_seconds": 0.021720276
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/serialization.py",
+          "line": 229,
+          "function": "_decode",
+          "calls": 10215,
+          "self_cpu_seconds": 0.016437602000000003,
+          "cumulative_cpu_seconds": 0.026714201000000003
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py",
+          "line": 1922,
+          "function": "_run_once",
+          "calls": 1872,
+          "self_cpu_seconds": 0.016161308000000003,
+          "cumulative_cpu_seconds": 3.5927240080000002
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 97,
+          "function": "_externalize_value",
+          "calls": 5685,
+          "self_cpu_seconds": 0.015014600000000001,
+          "cumulative_cpu_seconds": 0.3908398
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/selectors.py",
+          "line": 451,
+          "function": "select",
+          "calls": 1875,
+          "self_cpu_seconds": 0.012664711,
+          "cumulative_cpu_seconds": 0.030372801
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/copy.py",
+          "line": 172,
+          "function": "_deepcopy_atomic",
+          "calls": 38877,
+          "self_cpu_seconds": 0.011352027,
+          "cumulative_cpu_seconds": 0.011352027
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.len>",
+          "calls": 32542,
+          "self_cpu_seconds": 0.011121606000000001,
+          "cumulative_cpu_seconds": 0.011161306000000001
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/json/encoder.py",
+          "line": 205,
+          "function": "iterencode",
+          "calls": 951,
+          "self_cpu_seconds": 0.010253504,
+          "cumulative_cpu_seconds": 0.010253504
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.sum>",
+          "calls": 4938,
+          "self_cpu_seconds": 0.010112394,
+          "cumulative_cpu_seconds": 0.10835810000000001
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/persistence.py",
+          "line": 977,
+          "function": "<genexpr>",
+          "calls": 9132,
+          "self_cpu_seconds": 0.009750489000000001,
+          "cumulative_cpu_seconds": 0.10380059000000001
+        },
+        {
+          "file": "/home/chengqian/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/copy.py",
+          "line": 231,
+          "function": "_keep_alive",
+          "calls": 8148,
+          "self_cpu_seconds": 0.009520298,
+          "cumulative_cpu_seconds": 0.014728623000000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method posix.urandom>",
+          "calls": 513,
+          "self_cpu_seconds": 0.008427404000000001,
+          "cumulative_cpu_seconds": 0.009528002
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/snapshot.py",
+          "line": 400,
+          "function": "_diff_state_value",
+          "calls": 6633,
+          "self_cpu_seconds": 0.007818888000000001,
+          "cumulative_cpu_seconds": 0.013013308000000001
+        },
+        {
+          "file": "<frozen abc>",
+          "line": 117,
+          "function": "__instancecheck__",
+          "calls": 11556,
+          "self_cpu_seconds": 0.007581707000000001,
+          "cumulative_cpu_seconds": 0.012284905
+        }
+      ],
+      "top_autoagent_cumulative": [
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/hooks.py",
+          "line": 64,
+          "function": "tracked",
+          "calls": 224,
+          "self_cpu_seconds": 0.000562001,
+          "cumulative_cpu_seconds": 1.815640401
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 557,
+          "function": "_prepare_event_item",
+          "calls": 183,
+          "self_cpu_seconds": 0.003263405,
+          "cumulative_cpu_seconds": 1.360435
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 1810,
+          "function": "_persistence_loop",
+          "calls": 280,
+          "self_cpu_seconds": 0.0014895940000000001,
+          "cumulative_cpu_seconds": 1.302834399
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 256,
+          "function": "aclose",
+          "calls": 6,
+          "self_cpu_seconds": 0.0002279,
+          "cumulative_cpu_seconds": 1.1847334
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 824,
+          "function": "_externalize_event_values",
+          "calls": 183,
+          "self_cpu_seconds": 0.0033291,
+          "cumulative_cpu_seconds": 1.0937977
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 68,
+          "function": "externalize",
+          "calls": 1740,
+          "self_cpu_seconds": 0.0031792,
+          "cumulative_cpu_seconds": 0.916038
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 1915,
+          "function": "_import_incoming",
+          "calls": 15,
+          "self_cpu_seconds": 0.000377,
+          "cumulative_cpu_seconds": 0.8944868
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/app/app.py",
+          "line": 564,
+          "function": "_aexecute_admitted",
+          "calls": 96,
+          "self_cpu_seconds": 0.000433103,
+          "cumulative_cpu_seconds": 0.5766343
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/app/app.py",
+          "line": 675,
+          "function": "_aexecute_prepared",
+          "calls": 75,
+          "self_cpu_seconds": 0.000381997,
+          "cumulative_cpu_seconds": 0.513921398
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/executor/workflow_executor.py",
+          "line": 205,
+          "function": "ainvoke",
+          "calls": 75,
+          "self_cpu_seconds": 0.000530094,
+          "cumulative_cpu_seconds": 0.44308520100000004
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/executor/workflow_executor.py",
+          "line": 130,
+          "function": "_record_event",
+          "calls": 183,
+          "self_cpu_seconds": 0.001843299,
+          "cumulative_cpu_seconds": 0.414123299
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 97,
+          "function": "_externalize_value",
+          "calls": 5685,
+          "self_cpu_seconds": 0.015014600000000001,
+          "cumulative_cpu_seconds": 0.3908398
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/executor/workflow_executor.py",
+          "line": 465,
+          "function": "_drive",
+          "calls": 75,
+          "self_cpu_seconds": 0.0008794100000000001,
+          "cumulative_cpu_seconds": 0.38909010200000005
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/store.py",
+          "line": 646,
+          "function": "arecord_event",
+          "calls": 183,
+          "self_cpu_seconds": 0.0026704930000000003,
+          "cumulative_cpu_seconds": 0.33318630000000005
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 2013,
+          "function": "_persist_batch",
+          "calls": 276,
+          "self_cpu_seconds": 0.000886404,
+          "cumulative_cpu_seconds": 0.319324406
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 161,
+          "function": "_externalize_candidate",
+          "calls": 5685,
+          "self_cpu_seconds": 0.0053359,
+          "cumulative_cpu_seconds": 0.2559766
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 195,
+          "function": "_obviously_inline",
+          "calls": 5685,
+          "self_cpu_seconds": 0.0039564000000000005,
+          "cumulative_cpu_seconds": 0.23642860000000002
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/artifact.py",
+          "line": 201,
+          "function": "_estimated_json_size",
+          "calls": 16131,
+          "self_cpu_seconds": 0.036939200000000005,
+          "cumulative_cpu_seconds": 0.2305732
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/backends/database.py",
+          "line": 2290,
+          "function": "_persist_events",
+          "calls": 174,
+          "self_cpu_seconds": 0.0039614,
+          "cumulative_cpu_seconds": 0.2066426
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/scheduler/scheduler.py",
+          "line": 78,
+          "function": "next",
+          "calls": 36,
+          "self_cpu_seconds": 0.00021360000000000001,
+          "cumulative_cpu_seconds": 0.168828102
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/executor/workflow_executor.py",
+          "line": 870,
+          "function": "_submit_ready_requests",
+          "calls": 36,
+          "self_cpu_seconds": 0.0008998000000000001,
+          "cumulative_cpu_seconds": 0.148996498
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/executor/workflow_executor.py",
+          "line": 1106,
+          "function": "_apply_progress",
+          "calls": 36,
+          "self_cpu_seconds": 0.00025249800000000003,
+          "cumulative_cpu_seconds": 0.1339895
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/scheduler/scheduler.py",
+          "line": 208,
+          "function": "_advance_completed",
+          "calls": 36,
+          "self_cpu_seconds": 0.00041870700000000004,
+          "cumulative_cpu_seconds": 0.1285856
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/runtime/persistence.py",
+          "line": 193,
+          "function": "freeze_event_envelope",
+          "calls": 183,
+          "self_cpu_seconds": 0.0015939020000000001,
+          "cumulative_cpu_seconds": 0.122355398
+        },
+        {
+          "file": "/home/chengqian/projects/AutoAgent/v1/autoagent/core/executor/workflow_executor.py",
+          "line": 1583,
+          "function": "_record_operator_call",
+          "calls": 36,
+          "self_cpu_seconds": 0.0003614,
+          "cumulative_cpu_seconds": 0.11543940200000001
+        }
+      ]
+    }
+  },
+  {
+    "suite": "eviction",
+    "case": "idle-release",
+    "profile": "v2-evict",
+    "status": "completed",
+    "running_cpu_seconds": 4.12,
+    "cpu_seconds_per_call": 0.515
+  },
+  {
+    "suite": "eviction",
+    "case": "idle-release",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 4.0200000000000005,
+    "cpu_seconds_per_call": 0.5025000000000001
+  },
+  {
+    "suite": "stress-final",
+    "case": "large-text-32m",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 164.45999999999998,
+    "cpu_seconds_per_call": 82.22999999999999
+  },
+  {
+    "suite": "stress-final",
+    "case": "map-10000",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 65.29,
+    "cpu_seconds_per_call": 65.29
+  },
+  {
+    "suite": "stress-final",
+    "case": "large-text-8m",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 21.439999999999998,
+    "cpu_seconds_per_call": 10.719999999999999
+  },
+  {
+    "suite": "long-chain",
+    "case": "chain-long-deadline",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 142.87,
+    "cpu_seconds_per_call": 142.87
+  },
+  {
+    "suite": "long-chain",
+    "case": "chain-long-deadline",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 134.41,
+    "cpu_seconds_per_call": 134.41
+  },
+  {
+    "suite": "trace-reader",
+    "case": "trace-reader",
+    "profile": "v2-default",
+    "status": "completed",
+    "running_cpu_seconds": 6.06,
+    "cpu_seconds_per_call": 0.7575,
+    "trace": {
+      "samples": 24,
+      "p50_ms": 7.83204549952643,
+      "p95_ms": 8.891934851635597,
+      "median_response_bytes": 3157.0
+    }
+  },
+  {
+    "suite": "trace-reader",
+    "case": "trace-reader",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 0.5700000000000001,
+    "cpu_seconds_per_call": 0.07125000000000001,
+    "trace": {
+      "samples": 24,
+      "p50_ms": 1.3572629995906027,
+      "p95_ms": 13.091233899649524,
+      "median_response_bytes": 46458.0
+    }
+  },
+  {
+    "suite": "trace-reader",
+    "case": "trace-reader",
+    "profile": "v2-buffered",
+    "status": "completed",
+    "running_cpu_seconds": 2.64,
+    "cpu_seconds_per_call": 0.33,
+    "trace": {
+      "samples": 24,
+      "p50_ms": 7.681666998905712,
+      "p95_ms": 10.728596199805901,
+      "median_response_bytes": 3157.0
+    }
+  },
+  {
+    "suite": "trace-reader",
+    "case": "trace-reader",
+    "profile": "v1-full",
+    "status": "completed",
+    "running_cpu_seconds": 0.53,
+    "cpu_seconds_per_call": 0.06625,
+    "trace": {
+      "samples": 24,
+      "p50_ms": 1.2558154994621873,
+      "p95_ms": 12.761618650620221,
+      "median_response_bytes": 46450.5
+    }
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-monitored-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.75,
+    "cpu_seconds_per_call": 0.2916666666666667
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-monitored-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.7,
+    "cpu_seconds_per_call": 0.29
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.84,
+    "cpu_seconds_per_call": 0.2946666666666667
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.78,
+    "cpu_seconds_per_call": 0.29266666666666663
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-monitored-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.91,
+    "cpu_seconds_per_call": 0.297
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.71,
+    "cpu_seconds_per_call": 0.2903333333333334
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-monitored-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.870000000000001,
+    "cpu_seconds_per_call": 0.2956666666666667
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.76,
+    "cpu_seconds_per_call": 0.292
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.97,
+    "cpu_seconds_per_call": 0.29900000000000004
+  },
+  {
+    "suite": "monitor-join-ab",
+    "case": "chain",
+    "profile": "v2-monitored-join",
+    "status": "completed",
+    "running_cpu_seconds": 8.78,
+    "cpu_seconds_per_call": 0.29266666666666663
+  },
+  {
+    "suite": "soak-monitor-final",
+    "case": "soak",
+    "profile": "v2-monitored",
+    "status": "completed",
+    "running_cpu_seconds": 1653.03,
+    "cpu_seconds_per_call": 0.5393246329526916
+  },
+  {
+    "suite": "soak-v1-standard",
+    "case": "soak",
+    "profile": "v1-standard",
+    "status": "completed",
+    "running_cpu_seconds": 111.09,
+    "cpu_seconds_per_call": 0.030858333333333335
+  },
+  {
+    "suite": "soak-v1-lru",
+    "case": "soak",
+    "profile": "v1-full-lru",
+    "status": "completed",
+    "running_cpu_seconds": 160.37,
+    "cpu_seconds_per_call": 0.044547222222222224
+  }
+]

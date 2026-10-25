@@ -1,0 +1,20 @@
+{
+  "targets": [
+    "autoagent/host/models.py",
+    "autoagent/host/observation.py",
+    "autoagent/host/persistence/codec.py",
+    "autoagent/host/persistence/database.py",
+    "autoagent/host/persistence/maintenance.py",
+    "autoagent/host/persistence/metadata.py",
+    "autoagent/host/persistence/models.py",
+    "autoagent/host/persistence/ports.py",
+    "autoagent/host/persistence/projections.py",
+    "autoagent/host/persistence/storage.py",
+    "autoagent/host/persistence/writer.py"
+  ],
+  "aligned_unrelated_files": [
+    "autoagent/agent/providers/openai.py",
+    "autoagent/agent/providers/litellm.py"
+  ],
+  "reason": "Provider files changed between the initial baseline and step 4 freeze; align them in the final control to isolate persistence changes"
+}

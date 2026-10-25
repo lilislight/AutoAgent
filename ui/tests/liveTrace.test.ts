@@ -105,3 +105,14 @@ test('long-lived Wait and Pause snapshots keep all Timeline geometry fixed until
   model.apply(resumed);
   assert.equal(model.overview(500).idle,null);assert.equal(model.overview(500).end_at_us,500);
 });
+test('Map counts follow the displayed occurrence independently through live updates and terminal fallback',()=>{
+  const model=new TraceModel(data());
+  const a=row('a','mapped','running',10,null),b=row('b','mapped','completed',20,30,2);
+  const call=(id:string,occurrence:string)=>({...row(id,'mapped','completed',21,25),kind:'call' as const,occurrence_id:occurrence,operator_id:'tool',unit_index:0});
+  let graph=model.apply(delta(model.data,'c1',5,{node:[a,b],call:[call('a1','a'),call('a2','a'),call('b1','b')]}));
+  assert.equal(graph.nodes[0].occurrence_id,'a');assert.equal(graph.nodes[0].call_count,2);
+  graph=model.apply(delta(model.data,'c2',6,{node:[{...a,status:'completed',end_at_us:40}]}));
+  assert.equal(graph.nodes[0].occurrence_id,'b');assert.equal(graph.nodes[0].call_count,1);
+  const repeated=delta(model.data,'c3',7,{call:[{...call('b1','b'),status:'completed'}]});
+  assert.equal(model.apply(repeated).nodes[0].call_count,1);
+});

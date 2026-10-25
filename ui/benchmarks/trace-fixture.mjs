@@ -6,7 +6,7 @@ export function makeTraceFixture(count) {
     const status=stage===0?'ready':stage===4?'completed':'running';
     const marker={event_id:`e:${i}`,sequence:i+2,occurred_at_us:time,event_name:['node_occurrence.created','node_occurrence.started','operator_call.started','operator_call.completed','node_occurrence.completed'][stage]};
     headers.push(marker);
-    events.push({...marker,changes:stage===0||stage===1||stage===4?[{entity_type:'node',entity_id:id,node_id:nodeId,change:{status}}]:[],call_starts:stage===2?[{node_id:nodeId,count:1}]:[],evaluations:[],routes:[],child_ids:[]});
+    events.push({...marker,changes:stage===0||stage===1||stage===4?[{entity_type:'node',entity_id:id,node_id:nodeId,change:{status}}]:[],call_starts:stage===2?[{node_id:nodeId,occurrence_id:id,count:1}]:[],evaluations:[],routes:[],child_ids:[]});
     if(stage===0)node.push({id,kind:'node',invocation_id:'i',occurrence_id:id,node_id:nodeId,start_at_us:time,end_at_us:time+400,status:'completed',values:[],ordinal:unit+1});
     if(stage===2)call.push({id:`call:${unit}`,kind:'call',invocation_id:'i',occurrence_id:id,node_id:nodeId,start_at_us:time,end_at_us:time+100,status:'completed',operator_id:'simulate',unit_index:0,values:[]});
   }

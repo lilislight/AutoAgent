@@ -23,6 +23,8 @@ self.onmessage=(event:MessageEvent)=>{
       else if(op==='position')value=model.position(args);
       else if(op==='groups')value=model.groups(args);
       else if(op==='markers')value=model.markers(args);
+      else if(op==='family-links')value=model.family.handoffs(args);
+      else if(op==='family-children')value={...model.family.children(args.through,args.cursor),frontier:model.data.manifest.frontier};
       else throw new Error('Unknown local trace query.');
     }
     self.postMessage({id,value});

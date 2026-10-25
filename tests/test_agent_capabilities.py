@@ -41,8 +41,12 @@ def identity(value: Value) -> Value:
     return value
 
 
-def request():
-    return LLMRequest(model="test-model", input=(LLMMessage(role="user", content=(TextContent(text="Hello"),)),))
+def request(**options):
+    return LLMRequest(**{
+        "model": "test-model",
+        "input": (LLMMessage(role="user", content=(TextContent(text="Hello"),)),),
+        **options,
+    })
 
 
 def response():
@@ -112,9 +116,7 @@ class AgentCapabilityTests(unittest.TestCase):
         provider = DemoLLM()
         with closing(AutoAgentApp()) as app:
             app.register_capability(LLM_CALL)
-            for mode in (False, True):
-                operator = llm_call_operator(provider, id=str(mode), streaming=mode)
-                app.register_operator(operator, capability_id=LLM_CALL.id)
+            app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id)
             with self.assertRaisesRegex(ValueError, "contract"):
                 app.register_operator(Operator(provider.ainvoke), capability_id=LLM_CALL.id)
 
@@ -136,9 +138,9 @@ assert EMBEDDING.id == 'embedding.call'
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_adapter_options_reject_invalid_providers(self):
-        """Bad Provider methods and non-boolean streaming settings fail before registration."""
-        for factory in (lambda: llm_call_operator(object()), lambda: llm_call_operator(object(), streaming=True),
-                        lambda: llm_call_operator(DemoLLM(), streaming="yes"), lambda: embedding_operator(object())):
+        """Bad Providers and resolver hooks fail before Operator registration."""
+        for factory in (lambda: llm_call_operator(object()), lambda: llm_call_operator(resolver=object()),
+                        lambda: llm_call_operator(DemoLLM(), streaming=True), lambda: embedding_operator(object())):
             with self.assertRaises(TypeError):
                 factory()
 
@@ -155,9 +157,9 @@ class AgentCapabilityExecutionTests(unittest.IsolatedAsyncioTestCase):
                          compiler.compile_or_raise(explicit).workflow_revision_id)
         self.assertIsNone(node.stream)
         async with aclosing(AutoAgentApp()) as app:
-            app.register_operator(llm_call_operator(provider, streaming=True), capability_id=LLM_CALL.id)
+            app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id)
             custom = Workflow("custom", nodes=[Node("call", LLM_CALL, stream=Stream(TextReducer()))])
-            result = await app.ainvoke(custom, request())
+            result = await app.ainvoke(custom, request(streaming=True))
         self.assertEqual(result.status, "completed", result.error)
         self.assertEqual(result.output, {"text": "Answer"})
 
@@ -173,15 +175,15 @@ class AgentCapabilityExecutionTests(unittest.IsolatedAsyncioTestCase):
         workflow = Workflow("mapped-llm", nodes=[Node("call", LLM_CALL,
             user_events=llm_events)])
         async with aclosing(AutoAgentApp(user_event_sink=Sink())) as app:
-            app.register_operator(llm_call_operator(provider, streaming=True), capability_id=LLM_CALL.id, default=True)
-            result = await app.ainvoke(workflow, request())
+            app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
+            result = await app.ainvoke(workflow, request(streaming=True))
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual([event.kind for event in events], ["llm.delta", "llm.completed"])
             payload = events[-1].to_record()["payload"]
             self.assertEqual(ValueContract.create(LLMResponse, location="event").restore(payload).text, "Answer")
 
-    async def test_both_llm_implementations_reduce_to_the_same_response(self):
-        """Swapping implementations preserves the Workflow Revision and final LLMResponse."""
+    async def test_per_request_streaming_reduces_to_the_same_response(self):
+        """One Operator serves both transport modes without changing the Workflow Revision."""
         events = []
         class Sink:
             async def append_user_event(self, event):
@@ -189,16 +191,12 @@ class AgentCapabilityExecutionTests(unittest.IsolatedAsyncioTestCase):
         provider = DemoLLM()
         workflow = Workflow("llm", nodes=[Node("call", LLM_CALL)])
         async with aclosing(AutoAgentApp(user_event_sink=Sink())) as app:
-            ordinary = llm_call_operator(provider, id="ordinary")
-            streamed = llm_call_operator(provider, id="streamed", streaming=True)
-            app.register_operator(ordinary, capability_id=LLM_CALL.id, default=True)
-            app.register_operator(streamed, capability_id=LLM_CALL.id)
+            app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
             first = await app.ainvoke(workflow, request())
             self.assertEqual(first.status, "completed", first.error)
             self.assertEqual(events, [])
             events.clear()
-            app.set_operator_enabled(ordinary.id, False)
-            second = await app.ainvoke(workflow, request())
+            second = await app.ainvoke(workflow, request(streaming=True))
             self.assertEqual(second.status, "completed", second.error)
             self.assertEqual(first.ref.workflow_revision_id, second.ref.workflow_revision_id)
             self.assertEqual(first.output, second.output)
@@ -226,9 +224,9 @@ class AgentCapabilityExecutionTests(unittest.IsolatedAsyncioTestCase):
         provider = DemoLLM()
         provider.block_stream = True
         async with aclosing(AutoAgentApp()) as app:
-            app.register_operator(llm_call_operator(provider, streaming=True), capability_id=LLM_CALL.id)
+            app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id)
             result = await app.ainvoke(Workflow("timeout", nodes=[Node("call", LLM_CALL,
-                timeout=TimeoutPolicy(.02))]), request())
+                timeout=TimeoutPolicy(.02))]), request(streaming=True))
         self.assertEqual(result.error.type, "NodeTimeoutError")
         self.assertEqual(provider.streams_closed, 1)
         self.assertFalse(provider.closed)
@@ -238,8 +236,8 @@ class AgentCapabilityExecutionTests(unittest.IsolatedAsyncioTestCase):
         provider = DemoLLM()
         provider.omit_terminal = True
         async with aclosing(AutoAgentApp()) as app:
-            app.register_operator(llm_call_operator(provider, streaming=True), capability_id=LLM_CALL.id)
-            result = await app.ainvoke(Workflow("truncated", nodes=[Node("call", LLM_CALL)]), request())
+            app.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id)
+            result = await app.ainvoke(Workflow("truncated", nodes=[Node("call", LLM_CALL)]), request(streaming=True))
         self.assertEqual(result.status, "failed")
         self.assertIn("terminal response", result.error.message)
 
@@ -277,7 +275,7 @@ class HostAgentCapabilityTests(unittest.IsolatedAsyncioTestCase):
         llm, embedding = DemoLLM(), DemoEmbedding()
         @asynccontextmanager
         async def resources(setup):
-            setup.register_operator(llm_call_operator(llm, streaming=True), capability_id=LLM_CALL.id, default=True)
+            setup.register_operator(llm_call_operator(llm), capability_id=LLM_CALL.id, default=True)
             setup.register_operator(embedding_operator(embedding), capability_id=EMBEDDING.id, default=True)
             try:
                 yield
@@ -287,7 +285,7 @@ class HostAgentCapabilityTests(unittest.IsolatedAsyncioTestCase):
         workflows = [Workflow("llm", nodes=[Node("call", LLM_CALL)]),
                      Workflow("embedding", nodes=[Node("call", EMBEDDING)])]
         async with self.host(workflows=workflows, lifespan=resources) as host:
-            generated = await host.join(await host.execute("llm", request()))
+            generated = await host.join(await host.execute("llm", request(streaming=True)))
             embedded = await host.join(await host.execute("embedding", EmbeddingRequest(model="test-embedding", input="hello")))
             self.assertEqual(generated.status, "completed", generated.error)
             self.assertEqual(embedded.status, "completed", embedded.error)

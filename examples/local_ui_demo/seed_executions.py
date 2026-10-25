@@ -52,6 +52,26 @@ async def seed_parallel_waits(host):
     return ref
 
 
+async def seed_nested_reviews(host, *, session_id=None):
+    """Show both nested entry routes and both exits in one shared Session."""
+    for entry, amount, destination in (
+        ("submit_standard", 200, "dispatch"),
+        ("submit_standard", 1800, "manual_review"),
+        ("submit_priority", 200, "dispatch"),
+        ("submit_priority", 800, "manual_review"),
+    ):
+        ref = await host.execute("nested-review-demo", {"order_id": f"{entry}-{amount}", "amount": amount},
+                                 entry_node_id=entry, session_id=session_id)
+        result = await host.join(ref)
+        if result.status != "completed":
+            raise RuntimeError(f"Nested review failed: {result.status}, {result.error}")
+        if result.output[destination]["destination"] != destination:
+            raise RuntimeError("Nested review reached an unexpected exit")
+        session_id = ref.session_id
+        print("Nested review:", entry, "amount:", amount, "->", destination,
+              "Invocation:", ref.invocation_id, "Session:", session_id)
+
+
 async def seed_revisions():
     """Create genuine execution history across two Revisions and two Workflows."""
     from .revision_demo import build_revision_review
@@ -73,11 +93,14 @@ async def seed_revisions():
     print("Shared Session (2 Workflows, 3 Revisions, 4 Invocations):", session)
 
 
-async def main(*, pagination=False, maps_only=False, children_count=5, replay_rounds=None, parallel_waits=False, revisions_only=False):
+async def main(*, pagination=False, maps_only=False, children_count=5, replay_rounds=None, parallel_waits=False, revisions_only=False, nested_only=False):
     if revisions_only:
         await seed_revisions()
         return
     async with AutoAgentHost.from_project(Path(__file__).parent) as host:
+        if nested_only:
+            await seed_nested_reviews(host)
+            return
         if parallel_waits:
             await seed_parallel_waits(host)
             return
@@ -114,7 +137,8 @@ async def main(*, pagination=False, maps_only=False, children_count=5, replay_ro
             result = await host.join(ref)
             print(f"Loop ({rounds} passes)", result.status, ref.invocation_id, "Session:", ref.session_id)
         await seed_mapped_review(host, session_id=shared_session, children_count=children_count)
-        print("Shared Session (4 Workflows, 5 Invocations):", shared_session)
+        await seed_nested_reviews(host, session_id=shared_session)
+        print("Shared Session (5 Workflows, 9 Invocations):", shared_session)
         if pagination:
             for index in range(60):
                 ref = await host.execute("document-formatting", {"text":f"Pagination Session {index + 1:02d}"}, entry_node_id="format")
@@ -137,10 +161,11 @@ if __name__ == "__main__":
     mode.add_argument('--maps-only', action='store_true', help='Only execute the Map and Map Spawn example.')
     mode.add_argument('--revisions-only', action='store_true', help='Only create Revision Compare and cross-Revision Session examples.')
     mode.add_argument('--parallel-waits', action='store_true', help='Only create one Invocation with twenty pending external approvals.')
+    mode.add_argument('--nested-only', action='store_true', help='Only create four inline nested Workflow executions covering two entries and two exits.')
     parser.add_argument('--children', type=int, default=5, help='Number of review Child Tasks (1–200, default: 5).')
     args = parser.parse_args()
     if args.replay_rounds is not None and not 1 <= args.replay_rounds <= 200:
         parser.error('--replay-rounds must be between 1 and 200')
     if not 1 <= args.children <= 200:
         parser.error('--children must be between 1 and 200')
-    asyncio.run(main(pagination=args.pagination, maps_only=args.maps_only, children_count=args.children, replay_rounds=args.replay_rounds, parallel_waits=args.parallel_waits, revisions_only=args.revisions_only))
+    asyncio.run(main(pagination=args.pagination, maps_only=args.maps_only, children_count=args.children, replay_rounds=args.replay_rounds, parallel_waits=args.parallel_waits, revisions_only=args.revisions_only, nested_only=args.nested_only))

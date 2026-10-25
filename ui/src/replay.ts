@@ -19,6 +19,7 @@ export class ReplayAccumulator {
   // active occurrences and the latest terminal occurrence per logical Node.
   private nodeOrder?: ReadonlyMap<string, number>;
   private identities?: ReadonlyMap<string, { node_id: string; created_sequence: number }>;
+  private callHistory?: ReadonlyMap<string, { sequence: number; count: number }[]>;
   private terminal = new Map<string, ReplayOccurrence>();
   private routeOrder?: ReadonlyMap<string, number>;
   private routeHistory?: ReadonlyMap<string, { sequence: number; route: ExecutionTrace['active_routes'][number] }[]>;
@@ -36,7 +37,8 @@ export class ReplayAccumulator {
     const base = this.base;
     this.occurrences = new Map<string, ReplayOccurrence>(window.baseline!.occurrences.map(row => [row.occurrence_id, { ...row }]));
     this.totals = new Map(base.nodes.map(row => [row.node_id, row.occurrences]));
-    this.callCounts = new Map(base.nodes.map(row => [row.node_id, row.call_count ?? 0]));
+    const representedCalls = new Map(base.nodes.map(row=>[row.occurrence_id,row.call_count??0]));
+    this.callCounts = new Map(window.baseline!.occurrences.map(row => [row.occurrence_id, row.call_count ?? representedCalls.get(row.occurrence_id) ?? 0]));
     this.edges = new Map(base.edges.map(row => [row.edge_id, { ...row }]));
     this.routes = new Map(base.active_routes.map(row => [`${row.edge_id}:${row.target_occurrence_id}`, { ...row }]));
     this.children = new Set(window.baseline!.child_ids);
@@ -53,6 +55,15 @@ export class ReplayAccumulator {
       if (delta.entity_type === 'node' && node && !identities.has(delta.entity_id)) identities.set(delta.entity_id, { node_id: node, created_sequence: event.sequence });
     }
     copy.identities = identities;
+    const callHistory = new Map<string, { sequence: number; count: number }[]>();
+    for (const [id, count] of copy.callCounts) callHistory.set(id, [{ sequence: copy.boundary?.sequence ?? 0, count }]);
+    for (const event of events) for (const start of event.call_starts) {
+      const rows = callHistory.get(start.occurrence_id) ?? [];
+      rows.push({ sequence: event.sequence, count: (rows.at(-1)?.count ?? 0) + start.count });
+      callHistory.set(start.occurrence_id, rows);
+    }
+    copy.callHistory = callHistory;
+    copy.callCounts.clear();
     const nodes = new Map<string, number>();
     for (const row of identities.values()) if (!nodes.has(row.node_id)) nodes.set(row.node_id, nodes.size);
     copy.nodeOrder = nodes;
@@ -88,7 +99,7 @@ export class ReplayAccumulator {
   apply(event: ReplayWindow['events'][number]) {
     this.boundary = event;
     if (event.initial_edges) this.edges = new Map(event.initial_edges.map(row=>[row.edge_id,{...row}]));
-    for (const started of event.call_starts) this.callCounts.set(started.node_id, (this.callCounts.get(started.node_id) ?? 0) + started.count);
+    if (!this.callHistory) for (const started of event.call_starts) this.callCounts.set(started.occurrence_id, (this.callCounts.get(started.occurrence_id) ?? 0) + started.count);
     for (const evaluation of event.evaluations) {
       const previous = this.edges.get(evaluation.edge_id);
       this.edges.set(evaluation.edge_id, { edge_id: evaluation.edge_id, condition_result: evaluation.condition_result, evaluations: (previous?.evaluations ?? 0) + 1 });
@@ -137,6 +148,13 @@ export class ReplayAccumulator {
     if (status && ACTIVE.has(status)) activeRoutes.push({ ...route, status });
   }
   this.invocation.last_sequence = this.boundary?.sequence ?? 0;
-  return { ...this.base, invocation:{...this.invocation}, nodes: [...representatives.values()].sort((a,b) => this.nodeOrder ? this.nodeOrder.get(a.node_id)! - this.nodeOrder.get(b.node_id)! : 0).map(row => ({ node_id: row.node_id, status: row.status, occurrence_id: row.occurrence_id, occurrences: this.totals.get(row.node_id) ?? 0, call_count: this.callCounts.get(row.node_id) ?? 0 })), edges: [...this.edges.values()], active_routes: activeRoutes, child_count: this.childCount, last_event: this.boundary, observed_at_us: this.boundary?.occurred_at_us ?? this.base.observed_at_us };
+  return { ...this.base, invocation:{...this.invocation}, nodes: [...representatives.values()].sort((a,b) => this.nodeOrder ? this.nodeOrder.get(a.node_id)! - this.nodeOrder.get(b.node_id)! : 0).map(row => ({ node_id: row.node_id, status: row.status, occurrence_id: row.occurrence_id, occurrences: this.totals.get(row.node_id) ?? 0, call_count: this.callsAt(row.occurrence_id) })), edges: [...this.edges.values()], active_routes: activeRoutes, child_count: this.childCount, last_event: this.boundary, observed_at_us: this.boundary?.occurred_at_us ?? this.base.observed_at_us };
+  }
+  private callsAt(id: string): number {
+    if (!this.callHistory) return this.callCounts.get(id) ?? 0;
+    const rows = this.callHistory.get(id) ?? [], sequence = this.boundary?.sequence ?? 0;
+    let lo = 0, hi = rows.length;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (rows[mid].sequence <= sequence) lo = mid + 1; else hi = mid; }
+    return rows[lo - 1]?.count ?? 0;
   }
 }

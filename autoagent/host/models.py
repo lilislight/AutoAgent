@@ -49,6 +49,10 @@ class HostSettings:
     memory_target_ratio: float = 0.65
     memory_high_ratio: float = 0.80
     memory_critical_ratio: float = 0.90
+    memory_monitor_enabled: bool = False
+    memory_monitor_interval_seconds: float = 1
+    memory_monitor_history_samples: int = 300
+    memory_monitor_top_sessions: int = 10
     cold_after_seconds: float = 300
     max_idle_seconds: float = 1800
     min_residency_seconds: float = 5
@@ -67,6 +71,15 @@ class HostSettings:
     background_retry_seconds: float = 5
 
     def __post_init__(self):
+        if type(self.memory_monitor_enabled) is not bool:
+            raise ValueError('memory_monitor_enabled must be a boolean.')
+        for name, upper in (('memory_monitor_history_samples', 3600), ('memory_monitor_top_sessions', 100)):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= upper:
+                raise ValueError(f'{name} must be an integer between 1 and {upper}.')
+        interval = self.memory_monitor_interval_seconds
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < 0.05:
+            raise ValueError('memory_monitor_interval_seconds must be finite and at least 0.05.')
         for name in ('operation_concurrency','operation_receipts'):
             if type(getattr(self,name)) is not int or getattr(self,name)<1:
                 raise ValueError(f'{name} must be a positive integer.')
@@ -116,6 +129,12 @@ class HostSettings:
         def number(key, default):
             return float(env.get(key, str(default)))
 
+        def boolean(key, default):
+            value = env.get(key, str(default)).lower()
+            if value not in ('true', 'false', '1', '0'):
+                raise ValueError(f'{key} must be true, false, 1 or 0.')
+            return value in ('true', '1')
+
         return cls(
             operation_concurrency=integer("AUTOAGENT_HOST_OPERATION_CONCURRENCY", 32),
             operation_receipts=integer("AUTOAGENT_HOST_OPERATION_RECEIPTS", 256),
@@ -124,6 +143,10 @@ class HostSettings:
             memory_target_ratio=number("AUTOAGENT_HOST_MEMORY_TARGET_RATIO", 0.65),
             memory_high_ratio=number("AUTOAGENT_HOST_MEMORY_HIGH_RATIO", 0.8),
             memory_critical_ratio=number("AUTOAGENT_HOST_MEMORY_CRITICAL_RATIO", 0.9),
+            memory_monitor_enabled=boolean("AUTOAGENT_MEMORY_MONITOR_ENABLED", False),
+            memory_monitor_interval_seconds=number("AUTOAGENT_MEMORY_MONITOR_INTERVAL_SECONDS", 1),
+            memory_monitor_history_samples=integer("AUTOAGENT_MEMORY_MONITOR_HISTORY_SAMPLES", 300),
+            memory_monitor_top_sessions=integer("AUTOAGENT_MEMORY_MONITOR_TOP_SESSIONS", 10),
             cold_after_seconds=number("AUTOAGENT_HOST_COLD_AFTER_SECONDS", 300),
             max_idle_seconds=number("AUTOAGENT_HOST_MAX_IDLE_SECONDS", 1800),
             min_residency_seconds=number("AUTOAGENT_HOST_MIN_RESIDENCY_SECONDS", 5),
@@ -157,6 +180,8 @@ class HostSettings:
                 encoding_cache_bytes=integer(
                     "AUTOAGENT_ENCODING_CACHE_BYTES", 16777216
                 ),
+                workflow_graph_cache_bytes=integer("AUTOAGENT_WORKFLOW_GRAPH_CACHE_BYTES", 4194304),
+                writer_metadata_cache_bytes=integer("AUTOAGENT_WRITER_METADATA_CACHE_BYTES", 4194304),
                 trace_snapshot_bytes=integer("AUTOAGENT_TRACE_SNAPSHOT_BYTES", 134217728),
                 trace_snapshot_ttl_seconds=number("AUTOAGENT_TRACE_SNAPSHOT_TTL_SECONDS", 300),
                 inspection_scan_events=integer("AUTOAGENT_INSPECTION_SCAN_EVENTS", 100000),

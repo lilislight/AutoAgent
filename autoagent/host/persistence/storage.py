@@ -9,14 +9,17 @@ import time
 from dataclasses import dataclass
 from uuid import uuid4
 
-from sqlalchemy import event, insert, inspect, select, text, update
+from sqlalchemy import event, func, insert, inspect, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from .codec import DOMAIN, Encoded, EncodingMemo, assign, canonical, encode
+from .codec import DOMAIN, Encoded, EncodingMemo, assign, canonical, canonical_text, encode
 from .models import ConflictError, FormatError
+from .metadata import MetadataCache
+from .identities import SourceIdentities
+from .graph_metadata import WorkflowGraphCache, outgoing_edges
 from .projections import ProjectionBatch, light_record
 from .schema import meta
 
@@ -39,6 +42,23 @@ class Prepared:
     light: dict
     binding: str | None = None
     anchor: bool = False
+    texts: dict | None = None
+    admitted: bool = False
+
+
+def source_texts(encoded, kind):
+    """Finalize driver text in the codec executor and release encoded containers."""
+    record = encoded.record
+    if kind in ("runtime_event", "user_event"):
+        texts = {"payload_text": canonical_text(record["payload"])}
+        if kind == "runtime_event":
+            texts["delta_text"] = canonical_text(record["delta"]) if record["delta"] is not None else None
+        encoded.record = {key: value for key, value in record.items() if key not in ("payload", "delta")}
+    else:
+        column = SOURCES[kind][2]
+        texts = {column: canonical_text(record)}
+        encoded.record = {key: value for key, value in record.items() if key not in ("definition", "sessions")}
+    return texts
 
 
 def prepare(entries, config):
@@ -58,9 +78,14 @@ def prepare(entries, config):
                 entry.kind,
                 entry.identity,
                 encoded,
-                light_record(record, availability=entry.kind == "checkpoint" or record.get('event_name') in ('invocation.forked','fork.state_imported')),
+                light_record(record, availability=entry.kind == "checkpoint" or record.get('event_name') in ('invocation.forked','fork.state_imported'))
+                if entry.kind in ("runtime_event", "checkpoint") else
+                {key: value for key, value in record.items() if key != "payload"}
+                if entry.kind == "user_event" else {},
                 entry.binding,
                 entry.anchor,
+                source_texts(encoded, entry.kind),
+                getattr(entry, 'admitted', False),
             )
         )
         size += addition
@@ -69,7 +94,8 @@ def prepare(entries, config):
 
 
 class Storage:
-    def __init__(self, url, *, read_only=False):
+    def __init__(self, url, *, read_only=False, graph_cache_bytes=4 * 1024 * 1024,
+                 metadata_cache_bytes=4 * 1024 * 1024):
         parsed = make_url(url)
         if parsed.drivername not in ("sqlite+aiosqlite", "postgresql+asyncpg"):
             raise ValueError("Use sqlite+aiosqlite or postgresql+asyncpg.")
@@ -80,6 +106,12 @@ class Storage:
         self.engine = None
         self._lock_file = None
         self._pg_lock = None
+        self.graph_cache = WorkflowGraphCache(graph_cache_bytes)
+        self.identities = SourceIdentities(min(metadata_cache_bytes // 8, 512 * 1024))
+        self.metadata_cache = MetadataCache(metadata_cache_bytes - len(self.identities.bits))
+        self._store_order = None
+        self._committing_batch = None
+        self.committed_invocations = set()
 
     async def open(self):
         if self.read_only:
@@ -135,6 +167,14 @@ class Storage:
 
         async with self.engine.begin() as conn:
             await self._validate_schema(conn, create=True)
+        if self.identities.bits:
+            async with self.engine.connect() as conn:
+                for kind, (name, key, _) in SOURCES.items():
+                    table = meta.tables[name]
+                    async with conn.stream(select(table.c[key]).execution_options(yield_per=1000)) as rows:
+                        async for identity in rows.scalars():
+                            self.identities.add(kind, identity)
+            self.identities.ready = True
 
     async def _open_reader(self):
         """Open an existing database without writer ownership, DDL or registration."""
@@ -197,6 +237,13 @@ class Storage:
                 raise FormatError(
                     "Persistence columns do not match the format version."
                 )
+            if create:
+                # This non-unique access path does not change the stored format.
+                # Ensure existing writer databases receive the current index;
+                # read-only opens perform no DDL.
+                index = next(i for i in meta.tables['edge_evaluations'].indexes
+                             if i.name == 'edge_source_lookup')
+                await conn.run_sync(lambda c: index.create(c, checkfirst=True))
         else:
             if not create:
                 raise FormatError("Database is not a complete Persistence schema.")
@@ -212,6 +259,12 @@ class Storage:
             )
 
     async def close(self):
+        self.identities.clear()
+        self._store_order = None
+        self.metadata_cache.clear()
+        self.committed_invocations.clear()
+        if self.graph_cache is not None:
+            self.graph_cache.clear()
         if self._pg_lock is not None:
             await self._pg_lock.close()
             self._pg_lock = None
@@ -222,18 +275,60 @@ class Storage:
             self._lock_file.close()
             self._lock_file = None
 
-    async def row(self, conn, name, **identity):
+    async def row(self, conn, name, *, columns=None, **identity):
         table = meta.tables[name]
+        statement = select(*(table.c[k] for k in columns)) if columns else select(table)
         row = (
             (
                 await conn.execute(
-                    select(table).where(*(table.c[k] == v for k, v in identity.items()))
+                    statement.where(*(table.c[k] == v for k, v in identity.items()))
                 )
             )
             .mappings()
             .first()
         )
         return dict(row) if row else None
+
+    async def has_row(self, conn, name, **identity):
+        table = meta.tables[name]
+        statement = select(next(iter(table.primary_key.columns))).where(
+            *(table.c[k] == v for k, v in identity.items())
+        ).limit(1)
+        return await conn.scalar(statement) is not None
+
+    async def writer_row(self, conn, name, *, columns=None, **identity):
+        """Read committed metadata on the Writer path, never from query snapshots."""
+        key = tuple(identity[c.name] for c in meta.tables[name].primary_key)
+        row = self.metadata_cache.get((name, key))
+        if row is None:
+            return await self.row(conn, name, columns=columns, **identity)
+        return {k: row.get(k) for k in columns} if columns else row
+
+    async def source_header(self, conn, kind, identity):
+        name, key, _ = SOURCES[kind]
+        if not self.identities.may_contain(kind, identity):
+            return None
+        columns = (key, "operator_definition_id") if kind == "runtime_event" else (key,)
+        return await self.row(conn, name, columns=columns, **{key: identity})
+
+    async def definition_header(self, conn, kind, identity):
+        """Reuse only committed immutable definition metadata, never payloads."""
+        cache_key = ('definition_header', (kind, identity))
+        row = self.metadata_cache.get(cache_key)
+        if row is None:
+            name, key, _ = SOURCES[kind]
+            columns = (key, 'operator_id') if kind == 'operator_definition' else (key,)
+            row = await self.row(conn, name, columns=columns, **{key: identity})
+            if row is not None:
+                self.metadata_cache.put(cache_key, row)
+        return row
+
+    async def workflow_graph(self, conn, revision):
+        graph = self.graph_cache.get(revision)
+        if graph is None:
+            graph = outgoing_edges(await self.source(conn, "workflow_revision", revision))
+            self.graph_cache.put(revision, graph)
+        return graph
 
     async def source(self, conn, kind, identity):
         if kind not in SOURCES:
@@ -336,7 +431,8 @@ class Storage:
                 )
             else:
                 statement = statement.on_conflict_do_nothing(index_elements=keys)
-            await conn.execute(statement, group)
+            for start in range(0, len(group), 500):
+                await conn.execute(statement, group[start:start + 500])
 
     async def projections(self, conn, batch):
         await self.upsert(conn, "sessions", batch.changed("sessions"))
@@ -344,16 +440,23 @@ class Storage:
         nodes = batch.changed("node_executions")
         # The Parent occurrence FK introduces a dependency across these tables.
         pending = list(invs)
+        parent_keys = list({(row["parent_invocation_id"], row["parent_occurrence_id"])
+                            for row in pending if row.get("parent_invocation_id") is not None})
+        available = set()
+        table = meta.tables["node_executions"]
+        for start in range(0, len(parent_keys), 500):
+            available.update(await conn.execute(select(table.c.invocation_id, table.c.occurrence_id).where(
+                tuple_(table.c.invocation_id, table.c.occurrence_id).in_(parent_keys[start:start + 500]))))
+        pending_ids = {row["invocation_id"] for row in pending}
+        existing_nodes = [row for row in nodes if row["invocation_id"] not in pending_ids]
+        await self.upsert(conn, "node_executions", existing_nodes)
+        available.update((row["invocation_id"], row["occurrence_id"]) for row in existing_nodes)
+        nodes = [row for row in nodes if row["invocation_id"] in pending_ids]
         while pending:
             ready = []
             for row in pending:
                 parent = row.get("parent_invocation_id")
-                if parent is None or await self.row(
-                    conn,
-                    "node_executions",
-                    invocation_id=parent,
-                    occurrence_id=row["parent_occurrence_id"],
-                ):
+                if parent is None or (parent, row["parent_occurrence_id"]) in available:
                     ready.append(row)
             if not ready:
                 raise ConflictError(
@@ -364,64 +467,137 @@ class Storage:
             await self.upsert(
                 conn, "node_executions", [r for r in nodes if r["invocation_id"] in ids]
             )
+            available.update((row["invocation_id"], row["occurrence_id"])
+                             for row in nodes if row["invocation_id"] in ids)
+            nodes = [r for r in nodes if r["invocation_id"] not in ids]
             pending = [r for r in pending if r["invocation_id"] not in ids]
         await self.upsert(conn, "node_executions", nodes)
-        for name in ("operator_calls", "waits", "edge_evaluations", "graph_changes"):
+        for name in ("operator_calls", "waits"):
             await self.upsert(conn, name, batch.changed(name))
+        for name in ("edge_evaluations", "graph_changes"):
+            keys = meta.tables[name].primary_key.columns.keys()
+            fresh, existing = [], []
+            for row in batch.changed(name):
+                target = (
+                    fresh
+                    if tuple(row[k] for k in keys) in batch.new_facts[name]
+                    else existing
+                )
+                target.append(row)
+            if fresh:
+                await self.insert_rows(conn, name, fresh)
+            await self.upsert(conn, name, existing)
+
+    async def write_artifacts(self, conn, entries):
+        """Prefetch each batch's hashes once; write bodies before dependencies."""
+        artifacts = {digest: value for entry in entries
+                     for digest, value in entry.encoded.artifacts.items()}
+        hashes, existing = list(artifacts), set()
+        table = meta.tables["artifacts"]
+        for start in range(0, len(hashes), 500):
+            existing.update((await conn.execute(select(table.c.hash).where(
+                table.c.hash.in_(hashes[start:start + 500])))).scalars())
+        missing = [value for digest, value in artifacts.items() if digest not in existing]
+        await self.insert_rows(conn, "artifacts", [
+            {key: value[key] for key in ("hash", "value_type", "logical_bytes", "body")}
+            for value in missing])
+        await self.insert_rows(conn, "artifact_dependencies", [
+            {"parent_hash": value["hash"], "slot": index, "path": path, "child_hash": digest}
+            for value in missing for index, (path, digest) in enumerate(value["deps"])])
+
+    async def insert_rows(self, conn, name, rows):
+        """Bound parameter groups while preserving input and dependency order."""
+        for start in range(0, len(rows), 500):
+            await conn.execute(insert(meta.tables[name]), rows[start:start + 500])
 
     async def write(self, entries):
-        async with self.engine.begin() as conn:
-            return await self.write_transaction(conn, entries)
+        try:
+            async with self.engine.begin() as conn:
+                order = await self.write_transaction(conn, entries)
+            # The context manager has completed COMMIT before publication.
+            self._store_order = order
+            if self._committing_batch is not None:
+                self._committing_batch.publish()
+                self.committed_invocations = {
+                    identity for row in self._committing_batch.rows["invocations"].values() if row
+                    for identity in (row["invocation_id"], row.get("root_invocation_id")) if identity
+                }
+            for entry in entries:
+                if entry.kind == 'user_event':
+                    self.metadata_cache.put(('user_event_tail', (entry.light['invocation_id'],)), entry.light['sequence'])
+            return order
+        except BaseException:
+            # Includes uncertain COMMIT outcomes and metadata read before rollback.
+            self.graph_cache.clear()
+            self.metadata_cache.clear()
+            self.committed_invocations.clear()
+            self._store_order = None
+            raise
+        finally:
+            self._committing_batch = None
 
     async def write_transaction(self, conn, entries):
-        batch = ProjectionBatch(conn, self.source)
-        order = await conn.scalar(
-            select(meta.tables["persistence_meta"].c.last_store_order)
-        )
+        batch = ProjectionBatch(conn, self.source, graph_loader=self.workflow_graph,
+                                metadata_cache=self.metadata_cache)
+        self._committing_batch = batch
+        order = self._store_order
+        if order is None:
+            order = await conn.scalar(select(meta.tables['persistence_meta'].c.last_store_order))
+        identities = {}
+        for entry in entries:
+            identities.setdefault(entry.kind, set()).add(entry.identity)
+        existing_sources = {}
+        for kind, values in identities.items():
+            name, key, _ = SOURCES[kind]
+            table = meta.tables[name]
+            possible = [identity for identity in values if self.identities.may_contain(kind, identity)]
+            # Publish conservative membership before any SQL insert. Rollback
+            # leaves extra positives; a committed source can never be missed.
+            for identity in values:
+                self.identities.add(kind, identity)
+            values = possible
+            found = existing_sources[kind] = set()
+            for start in range(0, len(values), 500):
+                found.update((await conn.execute(select(table.c[key]).where(
+                    table.c[key].in_(values[start:start + 500])))).scalars())
+        user_tails = {}
+        users = list({entry.light["invocation_id"] for entry in entries
+                      if entry.kind == "user_event" and not entry.admitted})
+        table = meta.tables["user_events"]
+        for start in range(0, len(users), 500):
+            for iid, sequence in await conn.execute(select(table.c.invocation_id, func.max(table.c.sequence)).where(
+                table.c.invocation_id.in_(users[start:start + 500])).group_by(table.c.invocation_id)):
+                user_tails[iid] = sequence
+        await batch.prefetch([entry.light for entry in entries if entry.kind == "runtime_event"])
+        await self.write_artifacts(conn, entries)
+        sources, references, members = {}, [], []
+
+        async def flush_sources():
+            for name, rows in sources.items():
+                await self.insert_rows(conn, name, rows)
+            await self.insert_rows(conn, "artifact_refs", references)
+            await self.insert_rows(conn, "checkpoint_sessions", members)
+            sources.clear()
+            references.clear()
+            members.clear()
+
         for entry in entries:
             name, key, _body_col = SOURCES[entry.kind]
-            row = await self.row(conn, name, **{key: entry.identity})
+            row = entry.identity in existing_sources[entry.kind]
             logical = entry.light
-            if row is not None:
+            if row:
                 # Admission handles logical idempotency; no second projection.
                 continue
-            arts = entry.encoded.artifacts
-            missing = []
-            hashes = list(arts)
-            existing = set()
-            for start in range(0, len(hashes), 500):
-                existing.update(
-                    (
-                        await conn.execute(
-                            select(meta.tables["artifacts"].c.hash).where(
-                                meta.tables["artifacts"].c.hash.in_(
-                                    hashes[start : start + 500]
-                                )
-                            )
-                        )
-                    ).scalars()
-                )
-            missing = [a for h, a in arts.items() if h not in existing]
-            if missing:
-                await conn.execute(
-                    insert(meta.tables["artifacts"]),
-                    [
-                        {
-                            k: a[k]
-                            for k in ("hash", "value_type", "logical_bytes", "body")
-                        }
-                        for a in missing
-                    ],
-                )
-                dependencies = [
-                    {"parent_hash": a["hash"], "slot": i, "path": p, "child_hash": h}
-                    for a in missing
-                    for i, (p, h) in enumerate(a["deps"])
-                ]
-                if dependencies:
-                    await conn.execute(
-                        insert(meta.tables["artifact_dependencies"]), dependencies
-                    )
+            existing_sources[entry.kind].add(entry.identity)
+            if logical.get("event_name") in ("invocation.forked", "fork.state_imported"):
+                # Fork projection reads historical source positions/graph facts.
+                # Materialize its dependencies before that SQL snapshot.
+                await flush_sources()
+                await self.projections(conn, batch)
+                for values in batch.dirty.values():
+                    values.clear()
+                for values in batch.new_facts.values():
+                    values.clear()
             record = entry.encoded.record
             if entry.kind == "workflow_revision":
                 data = {
@@ -430,24 +606,16 @@ class Storage:
                     "workflow_version": record["workflow_version"],
                     "definition_hash": record["definition_hash"],
                     "registered_at_us": time.time_ns() // 1000,
-                    "snapshot_text": canonical(record).decode(),
+                    "snapshot_text": entry.texts["snapshot_text"],
                 }
             elif entry.kind == "operator_definition":
                 data = {
                     "definition_id": entry.identity,
                     "operator_id": record["operator_id"],
                     "version": record["version"],
-                    "definition_text": canonical(record).decode(),
+                    "definition_text": entry.texts["definition_text"],
                 }
             elif entry.kind == "runtime_event":
-                table = meta.tables["runtime_events"]
-                if await conn.scalar(
-                    select(table.c.event_id).where(
-                        table.c.session_id == logical["session_id"],
-                        table.c.sequence == logical["sequence"],
-                    )
-                ):
-                    raise ConflictError("Runtime Session sequence already exists.")
                 session = await batch.get("sessions", session_id=logical["session_id"])
                 expected = (session or {}).get("durable_sequence", 0) + 1
                 if logical["sequence"] != expected:
@@ -470,22 +638,16 @@ class Storage:
                     event_id=entry.identity,
                     store_order=order,
                     operator_definition_id=entry.binding,
-                    payload_text=canonical(record["payload"]).decode(),
-                    delta_text=canonical(record["delta"]).decode()
-                    if record["delta"] is not None
-                    else None,
+                    payload_text=entry.texts["payload_text"],
+                    delta_text=entry.texts["delta_text"],
                 )
-                await batch.runtime(logical, order, entry.binding)
+                await batch.runtime(logical, order, entry.binding, new_event=True)
             elif entry.kind == "user_event":
-                table = meta.tables["user_events"]
-                latest = await conn.scalar(
-                    select(table.c.sequence)
-                    .where(table.c.invocation_id == logical["invocation_id"])
-                    .order_by(table.c.sequence.desc())
-                    .limit(1)
-                )
-                if logical["sequence"] != (latest or 0) + 1:
-                    raise ConflictError("User Event sequence is not contiguous.")
+                if not entry.admitted:
+                    latest = user_tails.get(logical["invocation_id"], 0)
+                    if logical["sequence"] != (latest or 0) + 1:
+                        raise ConflictError("User Event sequence is not contiguous.")
+                    user_tails[logical["invocation_id"]] = logical["sequence"]
                 data = {
                     k: record[k]
                     for k in (
@@ -499,7 +661,7 @@ class Storage:
                 }
                 data.update(
                     event_id=entry.identity,
-                    payload_text=canonical(record["payload"]).decode(),
+                    payload_text=entry.texts["payload_text"],
                 )
             else:
                 data = {
@@ -509,7 +671,7 @@ class Storage:
                         s["captured_at_us"] for s in logical["sessions"]
                     ),
                     "digest": record["digest"],
-                    "checkpoint_text": canonical(record).decode(),
+                    "checkpoint_text": entry.texts["checkpoint_text"],
                 }
                 for session in logical["sessions"]:
                     previous = await batch.get(
@@ -527,7 +689,7 @@ class Storage:
                             "Checkpoint import requires fresh Session histories."
                         )
                 await batch.checkpoint(logical, entry.identity, anchor=entry.anchor)
-            await conn.execute(insert(meta.tables[name]), data)
+            sources.setdefault(name, []).append(data)
             refs = [
                 {
                     "owner_kind": entry.kind,
@@ -538,11 +700,9 @@ class Storage:
                 }
                 for i, (path, h) in enumerate(entry.encoded.refs)
             ]
-            if refs:
-                await conn.execute(insert(meta.tables["artifact_refs"]), refs)
+            references.extend(refs)
             if entry.kind == "checkpoint":
-                await conn.execute(
-                    insert(meta.tables["checkpoint_sessions"]),
+                members.extend(
                     [
                         {
                             "checkpoint_id": entry.identity,
@@ -554,8 +714,12 @@ class Storage:
                             ).get("workflow_revision_id"),
                         }
                         for s in logical["sessions"]
-                    ],
+                    ]
                 )
+            if entry.kind in ("workflow_revision", "operator_definition"):
+                # Later entries may load definitions and their Artifact refs.
+                await flush_sources()
+        await flush_sources()
         await self.projections(conn, batch)
         if any(entry.kind == 'checkpoint' and entry.anchor for entry in entries):
             await conn.execute(update(meta.tables['persistence_meta']).values(store_id=uuid4().hex))

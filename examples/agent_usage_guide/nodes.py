@@ -66,7 +66,7 @@ async def main():
 
     cases = (
         ("llm", Node("generate", LLM_CALL), request(), LLMResponse),
-        ("llm_stream", Node("generate", LLM_CALL), request(), LLMResponse),
+        ("llm_stream", Node("generate", LLM_CALL), request(streaming=True), LLMResponse),
         ("embedding", Node("embed", EMBEDDING), EmbeddingRequest(model="demo-embedding", input=("one", "two")), EmbeddingResponse),
         ("tool", Node("lookup", tools.as_operator()), LLMToolCall(call_id="stock", name="stock", arguments='{"item":"apple"}'), LLMToolResult),
         ("mcp_tool", Node("add", remote.as_operator()), LLMToolCall(call_id="add", name="remote_add", arguments='{"a":2,"b":3}'), LLMToolResult),
@@ -82,19 +82,13 @@ async def main():
     # Standalone Core App binds declarations explicitly; Host does this at startup.
     app.register_capability(LLM_CALL)
     app.register_capability(EMBEDDING)
-    ordinary = llm_call_operator(llm, id="guide.llm.ordinary")
-    streamed = llm_call_operator(llm, id="guide.llm.streamed", streaming=True)
-    app.register_operator(ordinary, capability_id=LLM_CALL.id, default=True)
-    app.register_operator(streamed, capability_id=LLM_CALL.id)
+    app.register_operator(llm_call_operator(llm), capability_id=LLM_CALL.id, default=True)
     app.register_operator(embedding_operator(embedding), capability_id=EMBEDDING.id, default=True)
     report = {}
     async with offline_http() as api:
         try:
             await app.aprepare()
             for name, node, value, output_type in cases:
-                # Explicit implementation selection for this demo, without a Resolver.
-                # Disabling the ordinary default makes the sole streamed candidate win.
-                app.set_operator_enabled(ordinary.id, name != "llm_stream")
                 result = await app.ainvoke(Workflow(name, nodes=[node]), value)
                 assert result.status == "completed", result.error
                 # Runtime output is a portable record; explicitly restore the business model.

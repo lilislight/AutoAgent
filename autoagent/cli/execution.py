@@ -24,10 +24,12 @@ def validate_options(options):
         raise CliError("USAGE_ERROR", "--request-timeout requires --server; it controls remote HTTP requests.")
     if remote and (hasattr(options, "project") or hasattr(options, "env_file") or getattr(options, "no_env_file", False)):
         raise CliError("USAGE_ERROR", "--server cannot be combined with --project or project environment-file options.")
-    if remote and options.group not in ("invoke", "invocation") and not (getattr(options, "history_query", False) or getattr(options, 'management_query', False)):
+    if remote and options.group not in ("invoke", "invocation", "memory") and not (getattr(options, "history_query", False) or getattr(options, 'management_query', False)):
         raise CliError("USAGE_ERROR", "--server is supported by execution and persisted-history commands.")
     if options.group == "server" and hasattr(options, "output"):
         raise CliError("USAGE_ERROR", "server writes its ready report to stdout; --output is not supported.")
+    if options.group == 'memory' and not 0 <= options.history <= 3600:
+        raise CliError('USAGE_ERROR', '--history must be between 0 and 3600.')
     for key in ("request_timeout", "wait_timeout"):
         value = getattr(options, key, None)
         if value is not None and (not math.isfinite(value) or value < 0 or key == "request_timeout" and value == 0):

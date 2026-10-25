@@ -17,6 +17,12 @@ dependencies = [
 autoagent = "autoagent.cli.main:main"
 
 [project.optional-dependencies]
+evaluation = [
+  "sqlalchemy[asyncio]>=2.0.54,<2.1",
+  "aiosqlite>=0.22,<1",
+  "asyncpg>=0.31,<1",
+  "python-dotenv>=1.1,<2",
+]
 cli = [
   "httpx>=0.28,<1",
   "sqlalchemy[asyncio]>=2.0.54,<2.1",
@@ -62,7 +68,7 @@ persistence = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.host", "autoagent.host.*", "autoagent.server", "autoagent.cli", "autoagent.cli.*"]
+include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.host", "autoagent.host.*", "autoagent.server", "autoagent.cli", "autoagent.cli.*", "autoagent.evaluation", "autoagent.evaluation.*"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]

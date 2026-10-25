@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from autoagent.core.compiler.snapshot import WorkflowDefinitionSnapshot
 from autoagent.core.operators import Operator
@@ -12,7 +13,7 @@ from autoagent.core.runtime.user_events import UserEvent
 
 from .checkpoints import Checkpoints, checkpoint_key
 from .maintenance import Maintenance
-from .models import OperatorDefinition, PersistenceConfig, ReadView
+from .models import ClosedError, OperatorDefinition, PersistenceConfig, ReadView
 from .queries import Queries
 from .exploration import RevisionComparison, SessionInformation
 from .tracing import TraceQueries
@@ -280,6 +281,27 @@ class DatabaseSink:
     async def wait_trace_commit(self, revision, timeout):
         return await self._writer.run(self._writer.wait_committed, revision, timeout)
 
+    @asynccontextmanager
+    async def execution_notifications(self, invocation_id):
+        """Scope commit notifications to the lifetime of an execution observer."""
+        writer = self._writer
+        subscription = asyncio.create_task(writer.run(writer.subscribe_execution, invocation_id))
+        try:
+            # Registration can finish on the Writer before its result reaches
+            # this loop. Preserve that result so cancellation can still remove it.
+            token, revision = await asyncio.shield(subscription)
+
+            async def changed(after, timeout, root_id):
+                return await writer.run(writer.wait_execution_change, token, after, timeout, root_id)
+
+            yield revision, changed
+        finally:
+            try:
+                token, _ = await subscription
+                await writer.run(writer.unsubscribe_execution, token)
+            except ClosedError:
+                pass
+
     async def execution_timeline(self, invocation_id):
         return await self._writer.run(TimelineQueries(self._queries).overview, invocation_id)
 
@@ -316,10 +338,15 @@ class DatabaseSink:
         from .history import History
         return await self._writer.run(History(self._queries).invocation, invocation_id)
 
-    async def inspect_execution_state(self, invocation_id, *, sequence, scope=None, pointer=None):
+    async def capture_execution_evidence(self, invocation_id, *, limit=1000):
+        from .evidence import capture
+        await self.flush()
+        return await self._writer.run(capture, self._queries, invocation_id, limit)
+
+    async def inspect_execution_state(self, invocation_id, *, sequence, scope=None, pointer=None, field=None):
         from .inspection import StateInspection
         return await self._writer.run(StateInspection(self._queries, self.config).read,
-            invocation_id, sequence=sequence, scope=scope, pointer=pointer)
+            invocation_id, sequence=sequence, scope=scope, pointer=pointer, field=field)
 
     async def execution_events(self, invocation_id, **options):
         from .history import History

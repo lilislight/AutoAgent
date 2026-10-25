@@ -83,6 +83,7 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         self._execution_operations = None
         self._environment_context = None
         self._import_context = None
+        self._memory_monitor = None
 
     @classmethod
     def from_project(
@@ -156,9 +157,13 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
 
     async def _open(self):
         try:
+            from .memory import MemoryMonitor
+            self._memory_monitor = MemoryMonitor(self)
+            await self._memory_monitor.start()
             if self._read_only:
                 self._persistence = await DatabaseSink.open(self.settings.resolved_database_url(self.root),
                     config=self.settings.persistence, read_only=True)
+                await self._memory_monitor.ready()
                 if self._state != "closing":
                     self._state = "ready"
                 return
@@ -198,10 +203,13 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
             await self._runtime.prepare()
             self._runtime.residency = Residency(self._runtime, self.settings)
             self._runtime.residency.start()
+            await self._memory_monitor.ready()
             if self._state != "closing":
                 self._state = "ready"
         except BaseException:
             try:
+                if self._memory_monitor is not None:
+                    await self._memory_monitor.stop()
                 if self._runtime is not None:
                     await self._runtime.app.aclose(timeout=None)
             finally:
@@ -230,6 +238,8 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
                     await self._runtime.residency.finish()
             completed = True
         finally:
+            if self._memory_monitor is not None:
+                await self._memory_monitor.stop()
             for task in tuple(self._operations):
                 task.cancel()
             await asyncio.gather(*tuple(self._operations), return_exceptions=True)
@@ -278,6 +288,13 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         task.add_done_callback(_consume)
         # A request disconnect does not cancel an admitted Core operation.
         return await asyncio.shield(task)
+
+    async def memory_snapshot(self, *, history=0):
+        """Read bounded telemetry without loading or walking Runtime State."""
+        self._check_loop()
+        if self._state != 'ready':
+            raise HostError('Host is not ready.')
+        return self._memory_monitor.snapshot(history=history)
 
     async def check_workflows(self, workflow_ids=None):
         """Compile project definitions without opening Core or Persistence."""

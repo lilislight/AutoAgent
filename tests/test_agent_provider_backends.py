@@ -25,7 +25,7 @@ from autoagent.agent import (
     LiteLLMProviderConfig, LLMJsonFormat, LLMJsonSchemaFormat, LLMMessage,
     LLMNativeData, LLMOutputOptions, LLMProviderError, LLMProviderOptions,
     LLMReasoning, LLMRequest, LLMResponse, LLMStreamReducer,
-    LLMToolDefinition, LLMUnsupportedRequest, ProviderSource,
+    LLMToolDefinition, LLMToolResult, LLMUnsupportedRequest, ProviderSource,
     TextContent, URLSource, VideoContent,
 )
 from tests.test_agent_providers import TrackingStream, chat_body, chat_chunk, request, response_body, sse
@@ -43,6 +43,21 @@ class Source:
 
     async def aclose(self):
         self.closed = True
+
+
+class ResponsesSource:
+    """LiteLLM Responses iterators expose their resource without a close method."""
+
+    def __init__(self, source, *, bridged):
+        self.source = source
+        if bridged:
+            self.litellm_custom_stream_wrapper = source
+        else:
+            self.response = source
+            self.response.headers = {}
+
+    def __aiter__(self):
+        return self.source.__aiter__()
 
 
 class SDK:
@@ -302,6 +317,52 @@ class LiteLLMContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value.parse(dict), {"ok": True})
         await provider.aclose()
 
+    async def test_responses_iterators_close_their_owned_resource_on_completion(self):
+        """Native HTTP and Chat bridge iterators release streams without owning global SDK pools."""
+        for bridged in (False, True):
+            with self.subTest(bridged=bridged):
+                source = Source([{"type": "response.completed", "response": response_body()}])
+                wrapped = ResponsesSource(source, bridged=bridged)
+                provider = LiteLLMProvider(protocol="openai.responses", sdk=SDK(source=wrapped))
+                chunks = [chunk async for chunk in provider.astream(request())]
+                self.assertEqual(chunks[-1].response.text, "Answer")
+                self.assertTrue(source.closed)
+                self.assertEqual(provider._active, 0)
+                await provider.aclose()
+
+    async def test_responses_iterators_close_on_early_exit_and_cancellation(self):
+        """Closing or cancelling a Responses consumer releases the nested per-call resource."""
+        for bridged in (False, True):
+            for cancel in (False, True):
+                with self.subTest(bridged=bridged, cancel=cancel):
+                    source = Source([{"type": "response.output_text.delta", "output_index": 0, "delta": "A"}], wait=True)
+                    wrapped = ResponsesSource(source, bridged=bridged)
+                    provider = LiteLLMProvider(protocol="openai.responses", sdk=SDK(source=wrapped))
+                    stream = provider.astream(request())
+                    self.assertEqual((await anext(stream)).delta, "A")
+                    if cancel:
+                        pending = asyncio.create_task(anext(stream))
+                        await asyncio.sleep(0)
+                        pending.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await pending
+                    else:
+                        await stream.aclose()
+                    self.assertTrue(source.closed)
+                    self.assertEqual(provider._active, 0)
+                    await provider.aclose()
+
+    async def test_responses_iterator_cleanup_preserves_the_original_failure(self):
+        """A remote failure is retained while the nested Responses stream is still closed."""
+        source = Source([{"type": "error", "message": "remote failure"}])
+        wrapped = ResponsesSource(source, bridged=True)
+        provider = LiteLLMProvider(protocol="openai.responses", sdk=SDK(source=wrapped))
+        with self.assertRaisesRegex(LLMProviderError, "remote failure"):
+            async for _chunk in provider.astream(request()):
+                pass
+        self.assertTrue(source.closed)
+        await provider.aclose()
+
     async def test_embeddings_normalize_order_and_pass_api_options(self):
         """Embedding extensions reach LiteLLM while vectors retain input alignment."""
         sdk = SDK({"object": "list", "model": "embed", "data": [
@@ -465,6 +526,71 @@ class LiteLLMSDKTests(unittest.IsolatedAsyncioTestCase):
                 response = await provider.ainvoke(EmbeddingRequest(model="text-embedding-3-small", input="hello"))
                 self.assertEqual(response.vectors, ((.1, .2),))
         self.assertTrue(body.closed)
+
+    async def test_actual_sdk_bridged_responses_stream_replays_tools_and_closes_http(self):
+        """LM Studio's real Responses bridge completes both tool and answer turns without cleanup errors."""
+        if self.isolated():
+            return
+        import httpx
+        bodies, streams = [], []
+        async def send(client, http_request, **kwargs):
+            self.assertTrue(http_request.url.path.endswith("/chat/completions"))
+            body = json.loads(http_request.content)
+            bodies.append(body)
+            if len(bodies) == 1:
+                events = [chat_chunk({"reasoning_content": "thought"}),
+                    chat_chunk({"tool_calls": [{"index": 0, "id": "call-1", "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"}}]}),
+                    chat_chunk({}, "tool_calls")]
+            else:
+                events = [chat_chunk({"content": "Answer"}), chat_chunk({}, "stop")]
+            stream = TrackingStream(sse(events, done=True))
+            streams.append(stream)
+            return httpx.Response(200, request=http_request, stream=stream,
+                headers={"content-type": "text/event-stream"})
+        config = LiteLLMProviderConfig(model_prefix="lm_studio", base_url="http://lm-studio.test/v1", api_key="offline")
+        with patch.object(httpx.AsyncClient, "send", send):
+            async with LiteLLMProvider(config, protocol="openai.responses") as provider:
+                value = request(model="google/gemma-4-e4b", tools=(tool_definition(),))
+                chunks = [chunk async for chunk in provider.astream(value)]
+                response = chunks[-1].response
+                self.assertEqual(response.finish_reason, "tool_calls")
+                self.assertEqual([item.type for item in response.output], ["reasoning", "tool_call"])
+                self.assertEqual(response.tool_calls[0].call_id, "call-1")
+                followup = value.model_copy(update={"input": (*value.input, *response.output,
+                    LLMToolResult(call_id="call-1", content=(TextContent(text="Found"),)))})
+                chunks = [chunk async for chunk in provider.astream(followup)]
+                self.assertEqual(chunks[-1].response.text, "Answer")
+                self.assertEqual(provider._active, 0)
+        self.assertEqual(len(bodies), 2)
+        self.assertTrue(all(stream.closed for stream in streams))
+        self.assertEqual(bodies[0]["model"], "google/gemma-4-e4b")
+        self.assertTrue(any(message.get("tool_call_id") == "call-1" for message in bodies[1]["messages"]))
+
+    async def test_actual_sdk_responses_stream_early_close_releases_http(self):
+        """Closing native and Chat-bridged Responses streams after a delta releases the actual HTTP body."""
+        if self.isolated():
+            return
+        import httpx
+        for route in ("openai", "lm_studio"):
+            with self.subTest(route=route):
+                if route == "lm_studio":
+                    events = [chat_chunk({"content": "A"})]
+                else:
+                    events = [{"type": "response.output_text.delta", "output_index": 0,
+                        "item_id": "msg_1", "content_index": 0, "sequence_number": 1, "delta": "A"}]
+                body = TrackingStream(sse(events), pause=True)
+                async def send(client, http_request, **kwargs):
+                    return httpx.Response(200, request=http_request, stream=body,
+                        headers={"content-type": "text/event-stream"})
+                config = LiteLLMProviderConfig(model_prefix=route, base_url="http://local-model.test/v1", api_key="offline")
+                with patch.object(httpx.AsyncClient, "send", send):
+                    async with LiteLLMProvider(config, protocol="openai.responses") as provider:
+                        stream = provider.astream(request(model="gpt-4o" if route == "openai" else "google/gemma-4-e4b"))
+                        self.assertEqual((await anext(stream)).delta, "A")
+                        await stream.aclose()
+                        self.assertEqual(provider._active, 0)
+                self.assertTrue(body.closed)
 
     async def test_actual_sdk_rate_limit_does_not_retry_or_fallback(self):
         """A failed SDK request retains status while Core owns retry decisions."""

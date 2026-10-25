@@ -1,0 +1,25 @@
+{
+  "reason": "A single buffered Invocation can be one write batch; the second injected write failure occurred only at close. Two serial calls force a second measured write without changing product code.",
+  "old_entry_sha256": "3ab2eba63fd50639914807c061abf24399f5ee9d31dc24d754f54b03a1b6d988",
+  "new_entry_sha256": "bc3c8c1452402835765db565d43c07f0d286e39e48300f14b8b9afbe58963304",
+  "preserved_trials": [
+    {
+      "job": "extras-sqlite-storage-fault-r0-b0-durable",
+      "original_directory": "/home/chengqian/projects/AutoAgent/.autoagent/performance/v2-optimization/step-09/runs/extras-sqlite-storage-fault-r0-b0-durable",
+      "retained_directory": ".autoagent/performance/v2-optimization/step-09/fault-fixture-preliminary/extras-sqlite-storage-fault-r0-b0-durable"
+    },
+    {
+      "job": "extras-sqlite-storage-fault-r0-final-durable",
+      "original_directory": "/home/chengqian/projects/AutoAgent/.autoagent/performance/v2-optimization/step-09/runs/extras-sqlite-storage-fault-r0-final-durable",
+      "retained_directory": ".autoagent/performance/v2-optimization/step-09/fault-fixture-preliminary/extras-sqlite-storage-fault-r0-final-durable"
+    },
+    {
+      "job": "extras-sqlite-storage-fault-r0-b0-buffered",
+      "original_directory": "/home/chengqian/projects/AutoAgent/.autoagent/performance/v2-optimization/step-09/runs/extras-sqlite-storage-fault-r0-b0-buffered",
+      "retained_directory": ".autoagent/performance/v2-optimization/step-09/fault-fixture-preliminary/extras-sqlite-storage-fault-r0-b0-buffered"
+    }
+  ],
+  "formal_cases_affected": 0,
+  "product_files_changed": [],
+  "worker_controller_business_diagnostics_unchanged": true
+}

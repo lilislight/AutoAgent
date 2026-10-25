@@ -25,7 +25,7 @@ except ModuleNotFoundError as exc:
 
 from typing_extensions import TypedDict
 from autoagent import (AggregationContext, ConditionContext, ContextOperation, ContextPatch,
-                       Edge, InputMappingContext, Map, Node, OutputBindingContext, Workflow)
+                       AwaitAnyRequest, Edge, InputMappingContext, Map, Node, OutputBindingContext, RuntimeHandle, Workflow)
 from autoagent.host import AutoAgentHost, HostSettings
 
 
@@ -81,6 +81,87 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 yield connection
         finally:
             await engine.dispose()
+
+    async def test_family_handoff_metadata_is_exact_cached_and_excludes_business_values(self):
+        """Spawn/Await links preserve exact boundaries and never export business Input or Output."""
+        from autoagent import Await, RuntimeHandle, Spawn, Wait
+        from autoagent.host.persistence.reading import SourceReader
+        child = Workflow('handoff-child', nodes=[Node('approval', Wait(Value, Value))])
+
+        def handle(context: InputMappingContext) -> RuntimeHandle:
+            return context.incoming['spawned']
+
+        parent = Workflow('handoff-parent', nodes=[Node('spawn', Spawn(child, 'approval')),
+            Node('await_child', Await(), input_mapping=handle)], edges=[Edge('spawn', 'await_child', id='spawned')])
+        async with self.host([parent]) as host:
+            root = await host.execute(parent.id, {'text': 'private-business-value'})
+            await host.join(root)
+            original = SourceReader.read
+
+            async def metadata_only(reader, path=(), **options):
+                self.assertEqual(tuple(path[:2]), ('payload', 'request'))
+                self.assertIn(path[-1], ('invocation_id', 'kind', 'cases'))
+                return await original(reader, path, **options)
+
+            async with self.client(create_app(host, ui=False)) as client:
+                with patch.object(SourceReader, 'read', metadata_only):
+                    response = await client.get('/api/v2/trace-dataset', params={'invocation_id': root.invocation_id})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    manifest = response.json()
+                    self.assertEqual(manifest['sections']['link']['count'], 2)
+                    page = await client.get('/api/v2/trace-dataset-page', params={
+                        'snapshot_id': manifest['snapshot_id'], 'section': 'link', 'page': 0})
+                    self.assertEqual(page.status_code, 200, page.text)
+                    links = page.json()['items']
+                self.assertEqual({row['kind'] for row in links}, {'spawn', 'await'})
+                self.assertEqual({row['node_id'] for row in links}, {'spawn', 'await_child'})
+                self.assertEqual(len({row['target']['invocation_id'] for row in links}), 1)
+                self.assertNotIn('private-business-value', str(links))
+                self.assertTrue(all(row['target']['created_sequence'] <= row['sequence'] for row in links))
+                replay = await host.get_trace_dataset(root.invocation_id, replay=True, through_sequence=manifest['through_sequence'])
+                events = []
+                for page_index in range(replay['sections']['event']['pages']):
+                    events.extend((await host.get_trace_dataset_page(replay['snapshot_id'], 'event', page_index))['items'])
+                for link in links:
+                    event = next(row for row in events if row['sequence'] == link['sequence'])
+                    self.assertEqual(event['event_id'], link['event_id'])
+                    self.assertEqual(event['event_name'], 'child_invocation.planned' if link['kind'] == 'spawn' else 'node_occurrence.waiting')
+                target = links[0]['target']['invocation_id']
+                wait = (await host.list_execution_waits(target)).items[0]
+                await host.respond(root, wait['wait_id'], {'text': 'approved'})
+                await host.join(root)
+                with patch.object(SourceReader, 'read', side_effect=AssertionError('No repeated handle reads')):
+                    delta = await host.get_trace_dataset(root.invocation_id, cursor=manifest['cursor'])
+                self.assertEqual(delta['sections']['link']['count'], 0)
+
+    async def test_mapped_children_and_composite_await_export_only_exact_child_handles(self):
+        """Mapped children share a source occurrence and AwaitAny links retain both exact targets."""
+        from autoagent import AwaitAny, Spawn, Wait
+
+        def inputs(context: InputMappingContext) -> list[Value]:
+            return [{'text': 'first'}, {'text': 'second'}]
+
+        def handles(context: InputMappingContext) -> AwaitAnyRequest:
+            return AwaitAnyRequest(handles=context.incoming['spawned'])
+
+        child = Workflow('handoff-map-child', nodes=[Node('approval', Wait(Value, Value))])
+        parent = Workflow('handoff-map-parent', nodes=[
+            Node('spawn', Spawn(child, 'approval'), input_mapping=inputs, map=Map(max_parallelism=2)),
+            Node('await_any', AwaitAny(), input_mapping=handles)], edges=[Edge('spawn', 'await_any', id='spawned')])
+        async with self.host([parent]) as host:
+            root = await host.execute(parent.id, {'text': 'private'})
+            await host.join(root)
+            manifest = await host.get_trace_dataset(root.invocation_id)
+            links = []
+            for page in range(manifest['sections']['link']['pages']):
+                links.extend((await host.get_trace_dataset_page(manifest['snapshot_id'], 'link', page))['items'])
+            self.assertEqual(len(links), 4)
+            spawn = [row for row in links if row['kind'] == 'spawn']
+            awaiting = [row for row in links if row['kind'] == 'await']
+            self.assertEqual(len({row['occurrence_id'] for row in spawn}), 1)
+            self.assertEqual({row['target']['invocation_id'] for row in spawn}, {row['target']['invocation_id'] for row in awaiting})
+            self.assertEqual({row['target']['unit_index'] for row in awaiting}, {0, 1})
+            self.assertNotIn('private', str(links))
 
     async def test_trace_dataset_downloads_all_metadata_without_replay_or_business_values(self):
         """Paged exports include every timing/header record while raw values and Replay remain unread."""
@@ -240,6 +321,70 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(any('payload_text' in statement or 'delta_text' in statement for statement in statements))
             finally:
                 event.remove(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
+
+    async def test_inline_group_boundaries_round_trip_through_saved_graph_and_object_api(self):
+        """Registered and saved Revisions retain exact nested membership without large Node definitions."""
+        from examples.local_ui_demo.nested_demo import nested_review
+        async with self.host([nested_review()]) as host:
+            ref = await host.execute('nested-review-demo', {'order_id': 'group', 'amount': 200}, entry_node_id='submit_standard')
+            await host.join(ref)
+            revision = (await host.get_execution_trace(ref.invocation_id))['invocation']['workflow_revision_id']
+            graph = await host.get_workflow_graph(revision)
+            groups = graph['definition']['groups']
+            self.assertEqual(len(groups), 2)
+            self.assertEqual(groups[1]['parent_group_id'], groups[0]['id'])
+            self.assertEqual(groups[0]['node_ids'], ['review.standard_in', 'review.priority_in'])
+            self.assertNotIn('input_mapping', graph['definition']['nodes'][0])
+            app = create_app(host, settings=ServerSettings(ui_directory=self.ui))
+            async with self.client(app) as client:
+                response = await client.get('/api/v2/workflow-graph', params={'revision_id': revision})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()['definition']['groups'], groups)
+                response = await client.get('/api/v2/workflow-object', params={'revision_id': revision, 'kind': 'group', 'identity': groups[1]['id']})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), groups[1])
+
+    async def test_map_counts_are_scoped_to_each_loop_occurrence_in_current_and_replay(self):
+        """Repeated Map Nodes expose 3/2/1 Calls independently, including partial Replay baselines."""
+        from sqlalchemy import select
+        from autoagent.host.persistence.schema import meta
+        from autoagent.host.persistence.reading import SourceReader
+        def mapped(ctx: InputMappingContext) -> list[Value]:
+            value = next(iter(ctx.incoming.values())) if ctx.incoming else ctx.invocation_input
+            return [{'text': value['text'][1:]} for _ in value['text']]
+        def aggregate(ctx: AggregationContext) -> Value:
+            return ctx.outputs[0]
+        def again(ctx: ConditionContext) -> bool:
+            return bool(ctx.output['text'])
+        def done(ctx: ConditionContext) -> bool:
+            return not again(ctx)
+        wf = Workflow('map-loop-counts', nodes=[Node('start', identity), Node('mapped', identity, input_mapping=mapped, map=Map(aggregate=aggregate, max_parallelism=3)), Node('finish', identity)], edges=[Edge('start', 'mapped'), Edge('mapped', 'mapped', again), Edge('mapped', 'finish', done)])
+        async with self.host([wf]) as host:
+            root = await host.execute(wf.id, {'text': 'abc'}, entry_node_id='start')
+            self.assertEqual((await host.join(root)).status, 'completed')
+            calls, nodes, events = (meta.tables[k] for k in ('operator_calls', 'node_executions', 'runtime_events'))
+            async with self.database_connection(host) as conn:
+                occurrences = (await conn.execute(select(nodes.c.occurrence_id).where(nodes.c.invocation_id == root.invocation_id, nodes.c.node_id == 'mapped').order_by(nodes.c.ordinal))).scalars().all()
+                starts = (await conn.execute(select(calls.c.occurrence_id, events.c.sequence).join(events, events.c.event_id == calls.c.input_ref['id'].as_string()).where(calls.c.invocation_id == root.invocation_id, calls.c.occurrence_id.in_(occurrences)).order_by(events.c.sequence))).all()
+            self.assertEqual(len(occurrences), 3)
+            expected = dict(zip(occurrences, (3, 2, 1)))
+            self.assertEqual(next(r for r in (await host.get_execution_trace(root.invocation_id))['nodes'] if r['node_id'] == 'mapped')['call_count'], 1)
+            seen = {}
+            with patch.object(SourceReader, 'read', side_effect=AssertionError('Counts must not read business values')):
+                for occurrence, sequence in starts:
+                    seen[occurrence] = seen.get(occurrence, 0) + 1
+                    frame = await host.get_timeline_frame(root.invocation_id, sequence=sequence)
+                    node = next(r for r in frame['trace']['nodes'] if r['node_id'] == 'mapped')
+                    self.assertEqual(node['occurrence_id'], occurrence)
+                    self.assertEqual(node['call_count'], seen[occurrence])
+                    window = await host.get_timeline_replay(root.invocation_id, sequence=sequence, limit=4)
+                    counts = {r['occurrence_id']: r['call_count'] for r in window['baseline']['occurrences']}
+                    for event in window['events']:
+                        if event['sequence'] <= sequence:
+                            for row in event['call_starts']:
+                                counts[row['occurrence_id']] = counts.get(row['occurrence_id'], 0) + row['count']
+                    self.assertEqual(counts[occurrence], seen[occurrence])
+            self.assertEqual(seen, expected)
 
     async def test_map_call_counts_replay_at_start_boundaries_without_reading_inputs(self):
         """Graph and bounded Replay count only Calls started by the selected Event, including across batches."""

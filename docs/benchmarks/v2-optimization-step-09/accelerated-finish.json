@@ -1,0 +1,55 @@
+{
+  "reason": "User requested accelerated finish; remaining long soaks stopped or not started.",
+  "completed_one_hour": [
+    "sqlite/durable"
+  ],
+  "interrupted": {
+    "backend": "sqlite",
+    "mode": "buffered",
+    "completed": 3212,
+    "observed_load_seconds": 3211.310544309992,
+    "peak_rss_mib": 123.578125,
+    "latency_ms": {
+      "p50": 254.327087503043,
+      "p95": 307.84401485143457,
+      "p99": 385.3931854842813
+    },
+    "last_health": {
+      "seconds": 3179.234270367975,
+      "completed": 3180,
+      "health": {
+        "state": "open",
+        "queued_count": 0,
+        "retained_bytes": 0,
+        "accepted_frontier": 104912,
+        "durable_frontier": 104912,
+        "fault": null
+      },
+      "resident": 128,
+      "residency_entries": 256,
+      "caches": {
+        "graph_cache": {
+          "bytes": 2191,
+          "budget": 4194304,
+          "entries": 1,
+          "hits": 15969,
+          "misses": 3117,
+          "evictions": 0
+        },
+        "metadata_cache": {
+          "bytes": 36688,
+          "budget": 4194304,
+          "entries": 13,
+          "hits": 16559,
+          "misses": 69853,
+          "evictions": 0
+        }
+      }
+    },
+    "server_exit_code": 0
+  },
+  "not_started": [
+    "postgres/durable",
+    "postgres/buffered"
+  ]
+}

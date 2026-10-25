@@ -95,14 +95,16 @@ class StateInspection:
     def __init__(self, queries, config):
         self.queries, self.config = queries, config
 
-    async def read(self, iid, *, sequence, scope=None, pointer=None):
+    async def read(self, iid, *, sequence, scope=None, pointer=None, field=None):
         if not isinstance(iid, str) or not iid.strip() or len(iid) > 4096:
             raise ValueError("Invocation ID must be nonempty and at most 4096 characters.")
         if type(sequence) is not int or not 1 <= sequence <= 9007199254740991:
             raise ValueError("sequence must be a positive Session Event sequence within the supported integer range.")
         if scope not in (None, "session", "invocation"):
             raise ValueError("scope must be session or invocation.")
-        if pointer is not None and scope is None:
+        if field not in (None, 'output', 'error') or field is not None and scope is not None:
+            raise ValueError("Select either Context scope or Invocation output/error.")
+        if pointer is not None and scope is None and field is None:
             raise ValueError("A Context scope is required with a JSON Pointer.")
         pointer_tokens(pointer)
         budget = ReadBudget(self.config)
@@ -124,16 +126,18 @@ class StateInspection:
             anchor = (await conn.execute(select(members.c.checkpoint_id, members.c.sequence)
                 .where(members.c.session_id == inv.session_id, members.c.sequence <= sequence)
                 .order_by(members.c.sequence.desc(), members.c.checkpoint_id).limit(1))).first()
-            paths = {"context": (scope, "context")} if scope else {
+            paths = {"context": ("invocation", field)} if field else {"context": (scope, "context")} if scope else {
                 key: ("invocation", key) for key in _SUMMARY_FIELDS}
             resolved, sources = await self._resolve(conn, inv.session_id, sequence, anchor, paths, budget, pointer)
             result = dict(position=position, view="durable")
             # The source position is fixed even if this store frontier advances.
             result["read"] = dict(frontier=frontier, scanned_events=budget.scanned)
-            if scope:
+            if scope or field:
                 value = resolved["context"]
                 result.update(scope=scope, pointer=pointer or "", available=value is not _MISSING,
                     value=None if value is _MISSING else value, source=sources["context"])
+                if field:
+                    result['field'] = field
                 if value is _MISSING:
                     result["reason"] = sources["context"].get("reason", "path_not_found")
                 budget.check_result(result["value"])

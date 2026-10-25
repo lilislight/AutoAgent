@@ -7,14 +7,15 @@ import json
 
 from ..models import (
     DataSource, ImageContent, LLMMessage, LLMNativeData, LLMProviderItem,
-    LLMReasoning, LLMResponse, LLMStreamChunk, LLMToolCall, LLMToolResult,
+    LLMReasoning, LLMStreamChunk, LLMToolCall, LLMToolResult,
     TextContent, URLSource,
 )
-from ._common import check_native, unsupported
+from ._common import check_native, native_fields, replay_digest, unsupported
 from .chat_completions import ChatCompletionsAdapter
 
 
 _REPLAY_FIELDS = ("reasoning_content", "thinking_blocks", "reasoning_items", "provider_specific_fields")
+_REASONING_FIELDS = ("reasoning_content", "thinking_blocks", "reasoning_items")
 
 
 class ExtendedChatAdapter(ChatCompletionsAdapter):
@@ -29,12 +30,11 @@ class ExtendedChatAdapter(ChatCompletionsAdapter):
             group = extra.get("_group_id")
             if isinstance(item, LLMReasoning):
                 fields = deepcopy(extra.get("_chat_fields", {}))
-                original = fields.get("reasoning_content")
-                if original is None and fields.get("thinking_blocks"):
-                    original = "".join(b.get("thinking", "") for b in fields["thinking_blocks"])
-                if original is not None and item.text != original:
+                if extra.get("_text_digest") is not None and replay_digest(item.text) != extra["_text_digest"]:
                     unsupported("Original Chat reasoning must be replayed unmodified.", provider_id, self.protocol)
-                if item.text is not None:
+                for index, start, end in extra.get("_thinking_text", []):
+                    fields["thinking_blocks"][index]["thinking"] = item.text[start:end]
+                if item.text is not None and ("_text_digest" not in extra or extra.get("_reasoning_content")):
                     fields["reasoning_content"] = item.text
                 if item.encrypted_content is not None or item.summary:
                     unsupported("Chat reasoning replay needs its original SDK blocks, not Responses summary/encrypted data.", provider_id, self.protocol)
@@ -84,25 +84,21 @@ class ExtendedChatAdapter(ChatCompletionsAdapter):
                     unsupported("Chat cannot replay this provider item.", provider_id, self.protocol)
                 if not messages or messages[-1]["role"] != "assistant" or (group is not None and group != last_group):
                     messages.append({"role": "assistant", "content": None})
+                for field, value in extra.get("_message_fields", {}).items():
+                    if field in _REPLAY_FIELDS:
+                        messages[-1][field] = value
                 messages[-1].setdefault("tool_calls", []).append({k: v for k, v in extra.items() if not k.startswith("_")})
                 last_group, pending_reasoning = group, False
         return messages
 
-    def decode_response(self, raw, *, provider_id, request=None):
-        raw = deepcopy(raw)
-        if raw.get("error") or not raw.get("choices"):
-            return super().decode_response(raw, provider_id=provider_id, request=request)
-        message = raw["choices"][0]["message"]
-        fields = {key: message[key] for key in _REPLAY_FIELDS if message.get(key) is not None}
-        images = message.get("images") or []
-        synthetic = message.get("content") is None and not message.get("refusal") and not message.get("audio")
-        if synthetic and (fields or images):
-            message["content"] = ""
-        response = super().decode_response(raw, provider_id=provider_id, request=request)
-        output = list(response.output)
-        group = raw.get("id") or next((i.native.payload.get("_group_id") for i in output if i.native), None)
-        if synthetic and (fields or images):
-            output = [i for i in output if not isinstance(i, LLMMessage)]
+    def _decode_output(self, message, *, provider_id, request=None):
+        message = deepcopy(message)
+        fields = {key: message.pop(key) for key in _REASONING_FIELDS if message.get(key) is not None}
+        images = message.pop("images", None) or []
+        provider_fields = message.get("provider_specific_fields")
+        if isinstance(provider_fields, dict):
+            message["provider_specific_fields"] = {key: value for key, value in provider_fields.items() if value is not None} or None
+        output = super()._decode_output(message, provider_id=provider_id, request=request)
         if images:
             parts = []
             for image in images:
@@ -117,17 +113,46 @@ class ExtendedChatAdapter(ChatCompletionsAdapter):
                 parts.append(ImageContent(source=source))
             index = next((n for n, i in enumerate(output) if isinstance(i, LLMMessage)), None)
             if index is None:
+                # Extensions from a tool-only message move to the media message,
+                # which becomes their sole owner when reconstructing the turn.
+                data = native_fields(message, {"role", "content", "refusal", "audio", "tool_calls", "annotations"}, provider_id, self.protocol)
+                payload = data.payload if data else {}
+                if output and output[0].native:
+                    data = deepcopy(output[0].native.payload)
+                    payload = data.pop("_message_fields", {})
+                    output[0] = output[0].model_copy(update={"native": LLMNativeData(
+                        provider_id=provider_id, protocol=self.protocol, payload=data) if data else None})
                 output.insert(0, LLMMessage(role="assistant", content=tuple(parts), native=LLMNativeData(
-                    provider_id=provider_id, protocol=self.protocol, payload={"_group_id": group, "images": images})))
+                    provider_id=provider_id, protocol=self.protocol, payload=payload) if payload else None))
             else:
                 output[index] = output[index].model_copy(update={"content": output[index].content + tuple(parts)})
-        if fields:
+        if any(fields.get(key) for key in _REASONING_FIELDS):
+            if not output and message.get("provider_specific_fields") is not None:
+                fields["provider_specific_fields"] = message["provider_specific_fields"]
             text = fields.get("reasoning_content")
             if text is None and fields.get("thinking_blocks"):
                 text = "".join(b.get("thinking", "") for b in fields["thinking_blocks"])
+            payload = {"_text_digest": replay_digest(text)}
+            if "reasoning_content" in fields:
+                fields.pop("reasoning_content")
+                payload["_reasoning_content"] = True
+            # Keep block signatures and boundaries, referencing the canonical
+            # text instead of storing another copy inside each thinking block.
+            references = []
+            for index, block in enumerate(fields.get("thinking_blocks") or []):
+                value = block.get("thinking")
+                if isinstance(value, str) and text is not None:
+                    start = text.find(value)
+                    if start >= 0:
+                        references.append([index, start, start + len(value)])
+                        block.pop("thinking")
+            if references:
+                payload["_thinking_text"] = references
+            if fields:
+                payload["_chat_fields"] = fields
             output.insert(0, LLMReasoning(text=text, native=LLMNativeData(provider_id=provider_id,
-                protocol=self.protocol, payload={"_group_id": group, "_chat_fields": fields})))
-        return LLMResponse.model_validate({**response.model_dump(mode="python"), "output": tuple(output)})
+                protocol=self.protocol, payload=payload)))
+        return output
 
     def _has_extra_stream_output(self, delta):
         return any(delta.get(field) for field in (*_REPLAY_FIELDS, "images"))

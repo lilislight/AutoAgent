@@ -111,6 +111,7 @@ class Project:
     name: str
     entrypoints: tuple[str, ...] | None = None
     lifespan_entrypoint: str | None = None
+    evaluation_entrypoints: tuple[str, ...] = ()
 
     @classmethod
     def find(cls, path="."):
@@ -140,7 +141,7 @@ class Project:
             ) from exc
         if raw.get("schema_version") != 1 or type(raw.get("schema_version")) is not int:
             raise ProjectError("Project schema_version must be 1.")
-        if set(raw) - {"schema_version", "project", "workflows"}:
+        if set(raw) - {"schema_version", "project", "workflows", "evaluations"}:
             raise ProjectError("Unknown project manifest fields.")
         metadata = raw.get("project", {})
         if not isinstance(metadata, dict) or set(metadata) - {
@@ -162,13 +163,19 @@ class Project:
             entries = tuple(validate_entrypoint(item["entrypoint"]) for item in entries)
             if len(entries) != len(set(entries)):
                 raise ProjectError("Duplicate Workflow entrypoints.")
+        evaluations = raw.get('evaluations', [])
+        if not isinstance(evaluations, list) or any(not isinstance(item, dict) or set(item) != {'entrypoint'} for item in evaluations):
+            raise ProjectError('evaluations must be an array of entrypoint tables.')
+        evaluations = tuple(validate_entrypoint(item['entrypoint']) for item in evaluations)
+        if len(evaluations) != len(set(evaluations)):
+            raise ProjectError('Duplicate Evaluation entrypoints.')
         lifespan = metadata.get("lifespan")
         if lifespan is not None:
             lifespan = validate_entrypoint(lifespan)
         name = metadata.get("name", root.name)
         if not isinstance(name, str) or not name.strip():
             raise ProjectError("Project name cannot be empty.")
-        return cls(root, name, entries, lifespan)
+        return cls(root, name, entries, lifespan, evaluations)
 
     def load(self):
         with _IMPORT_LOCK, import_scope(self.root):

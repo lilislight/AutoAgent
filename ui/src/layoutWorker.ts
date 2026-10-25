@@ -5,7 +5,8 @@ import type { GraphDefinition } from "./types";
 
 const cache = new Map<string, Layout>();
 
-export async function layoutWorkflow(hash: string, definition: GraphDefinition, signal: AbortSignal): Promise<Layout> {
+export async function layoutWorkflow(hash: string, definition: GraphDefinition, signal: AbortSignal, folded: ReadonlySet<string> = new Set()): Promise<Layout> {
+  hash = JSON.stringify([hash, [...folded].sort()]);
   const cached = cache.get(hash);
   if (cached) {
     cache.delete(hash);
@@ -22,7 +23,7 @@ export async function layoutWorkflow(hash: string, definition: GraphDefinition, 
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort();
     });
-    const value = await Promise.race([computeLayout(definition, engine as unknown as LayoutEngine), boundary]);
+    const value = await Promise.race([computeLayout(definition, engine as unknown as LayoutEngine, folded), boundary]);
     cache.set(hash, value);
     if (cache.size > 8) cache.delete(cache.keys().next().value!);
     return value;

@@ -6,50 +6,53 @@ import { SessionIcon, WorkflowIcon } from "./Sidebar";
 import { ExecutionFilterDialog, EMPTY_EXECUTION_FILTERS, executionFilterCount } from "./ExecutionFilters";
 import { RunSessionPopover } from './RunSessionPopover';
 import { StatusBadge, formatTime } from "./TraceDetails";
+import { DirectorySkeleton } from './LoadingState';
 
 function useCursorPage<T>(key: unknown[], fetch: (cursor: string | null, signal: AbortSignal) => Promise<T & { next_cursor: string | null }>) {
+  const client = useQueryClient();
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [index, setIndex] = useState(0);
-  const [generation, setGeneration] = useState(0);
-  const query = useQuery({ queryKey: [...key, generation, cursors[index]], queryFn: ({ signal }) => fetch(cursors[index], signal), staleTime: 10_000, gcTime: 60_000, refetchOnWindowFocus: false });
+  const query = useQuery({ queryKey: [...key, cursors[index]], queryFn: ({ signal }) => fetch(cursors[index], signal),
+    staleTime: 10_000, gcTime: 60_000, refetchOnWindowFocus: false });
   const next = () => {
     const cursor = query.data?.next_cursor;
     if (!cursor || query.isFetching) return;
     setCursors(current => [...current.slice(0, index + 1), cursor]); setIndex(index + 1);
   };
-  return { query, index, cursor: cursors[index], next, refresh: () => { setCursors([null]); setIndex(0); setGeneration(current => current + 1); }, previous: () => setIndex(current => Math.max(0, current - 1)) };
+  return { query, index, cursor: cursors[index], next, refresh: () => { setCursors([null]); setIndex(0); void client.invalidateQueries({ queryKey: key }); }, previous: () => setIndex(current => Math.max(0, current - 1)) };
 }
 
 function HistoryPanel({ title, count, page, onRefresh, children, action }: { action?: ReactNode; title: string; count: ReactNode; onRefresh?: () => void; page: { index: number; cursor: string | null; next: () => void; previous: () => void; fetching: boolean; hasNext: boolean }; children: ReactNode }) {
   const scroll = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { scroll.current?.scrollTo({ top: 0 }); }, [page.cursor]);
   const refresh = () => { scroll.current?.scrollTo({ top: 0 }); onRefresh?.(); };
-  return <><div className="history-section-heading"><strong>{title}</strong><div className="history-heading-actions"><span>{count}</span>{onRefresh ? <button type="button" className={`history-refresh ${page.fetching ? "is-refreshing" : ""}`} aria-label={`Refresh ${title.toLowerCase()}`} title={`Refresh ${title.toLowerCase()}`} disabled={page.fetching} onClick={refresh}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1.6 8M4 4v6h6" /></svg></button> : null}{action}</div></div>
+  return <><div className="history-section-heading"><strong>{title}</strong><div className="history-heading-actions"><span>{count}</span>{onRefresh ? <button type="button" className={`history-refresh ${page.fetching && typeof count === 'number' ? "is-refreshing" : ""}`} aria-label={`Refresh ${title.toLowerCase()}`} title={`Refresh ${title.toLowerCase()}`} disabled={page.fetching} onClick={refresh}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1.6 8M4 4v6h6" /></svg></button> : null}{action}</div></div>
     <div ref={scroll} className="history-scroll">{children}</div>
     <div className="history-pagination" aria-label={`${title} pagination`}><button aria-label={`Previous ${title.toLowerCase()} page`} disabled={!page.index || page.fetching} onClick={page.previous}>‹</button><span>Page {page.index + 1}</span><button aria-label={`Next ${title.toLowerCase()} page`} disabled={!page.hasNext || page.fetching} onClick={page.next}>›</button></div></>;
 }
-function Sessions({ filters, session, onSession, onRefresh, action }: { action: ReactNode; filters: ExecutionFilters; session: string | null; onSession: (id: string) => void; onRefresh: () => void }) {
+function Sessions({ filters, session, onSession, onRefresh, action, onLoadingChange }: { action: ReactNode; filters: ExecutionFilters; session: string | null; onSession: (id: string) => void; onRefresh: () => void; onLoadingChange?: (loading: boolean) => void }) {
   const page = useCursorPage(["execution-sessions-page", filters], (cursor, signal) => listExecutionSessions(cursor, signal, undefined, filters));
   const { query } = page;
+  useLayoutEffect(() => { onLoadingChange?.(query.isLoading); }, [query.isLoading, onLoadingChange]);
   const rows = query.data?.items ?? [];
   return <HistoryPanel action={action} title="Sessions" count={query.data?.total_count ?? '—'} onRefresh={() => { page.refresh(); onRefresh(); }} page={{ ...page, fetching: query.isFetching, hasNext: Boolean(query.data?.next_cursor) }}>
-    {query.isPending ? <p className="sidebar-message" role="status">Loading sessions…</p> : null}
+    {query.isLoading ? <DirectorySkeleton label="Loading sessions" kind="session" matching={!!executionFilterCount(filters)} /> : null}
     {query.error ? <div className="sidebar-error"><p>{query.error.message}</p><button onClick={() => void query.refetch()}>Retry</button></div> : null}
     {!query.isPending && !query.error && !rows.length ? <p className="sidebar-message">{executionFilterCount(filters) ? "No sessions match these filters." : "No saved sessions yet"}</p> : null}
-    <ul className="workflow-list">{rows.map(row => <li key={row.session_id}><button className={`workflow-item session-item ${row.session_id === session ? "active" : ""}`} aria-current={row.session_id === session ? "true" : undefined} title={row.session_id} onClick={() => onSession(row.session_id)}><span className="workflow-glyph"><SessionIcon /></span><span className="workflow-item-text"><strong>{row.session_id}</strong><span className="workflow-item-meta">{row.invocation_count} {row.invocation_count === 1 ? "invocation" : "invocations"} · {row.workflow_count} {row.workflow_count === 1 ? "workflow" : "workflows"}</span><small title="Most recent persisted execution event">Last activity · {formatTime(row.updated_at_us)}</small>{executionFilterCount(filters) ? <small className="session-match-note">{row.matching_count} matching {row.matching_count === 1 ? "invocation" : "invocations"}</small> : null}</span></button></li>)}</ul>
+    {!query.isLoading ? <ul className="workflow-list">{rows.map(row => <li key={row.session_id}><button className={`workflow-item session-item ${row.session_id === session ? "active" : ""}`} aria-current={row.session_id === session ? "true" : undefined} title={row.session_id} onClick={() => onSession(row.session_id)}><span className="workflow-glyph"><SessionIcon /></span><span className="workflow-item-text"><strong>{row.session_id}</strong><span className="workflow-item-meta">{row.invocation_count} {row.invocation_count === 1 ? "invocation" : "invocations"} · {row.workflow_count} {row.workflow_count === 1 ? "workflow" : "workflows"}</span><small title="Most recent persisted execution event">Last activity · {formatTime(row.updated_at_us)}</small>{executionFilterCount(filters) ? <small className="session-match-note">{row.matching_count} matching {row.matching_count === 1 ? "invocation" : "invocations"}</small> : null}</span></button></li>)}</ul> : null}
   </HistoryPanel>;
 }
 function Invocations({ filters, session, invocation, count, onInvocation, action }: { action: ReactNode; filters: ExecutionFilters; session: string; invocation: string | null; count: number | undefined; onInvocation: (id: string, session: string) => void }) {
   const page = useCursorPage(["session-invocations-page", session, filters], (cursor, signal) => listSessionInvocations(session, cursor, signal, filters));
   const { query } = page;
   return <HistoryPanel action={action} title="Invocations" count={count ?? "—"} page={{ ...page, fetching: query.isFetching, hasNext: Boolean(query.data?.next_cursor) }}>
-    {query.isPending ? <p className="sidebar-message" role="status">Loading invocations…</p> : null}
+    {query.isLoading ? <DirectorySkeleton label="Loading invocations" kind="invocation" count={4} /> : null}
     {query.error ? <div className="sidebar-error"><p>{query.error.message}</p><button onClick={() => void query.refetch()}>Retry</button></div> : null}
     {!query.isPending && !query.error && !query.data?.items.length ? <p className="sidebar-message">{executionFilterCount(filters) ? "No invocations match these filters." : "No saved invocations"}</p> : null}
-    <ul className="workflow-list">{query.data?.items.map(row => <li key={row.invocation_id}><button className={`workflow-item execution-item ${row.invocation_id === invocation ? "active" : ""}`} aria-current={row.invocation_id === invocation ? "true" : undefined} title={row.invocation_id} onClick={() => onInvocation(row.invocation_id, session)}><span className="workflow-glyph"><WorkflowIcon /></span><span className="workflow-item-text"><span className="invocation-row-heading"><strong>{row.workflow_id}</strong><StatusBadge row={row} /></span><span className="invocation-row-meta"><code>{row.invocation_id.slice(0, 8)}</code><span title="Invocation start time">Started · {formatTime(row.started_at_us)}</span></span></span></button></li>)}</ul>
+    {!query.isLoading ? <ul className="workflow-list">{query.data?.items.map(row => <li key={row.invocation_id}><button className={`workflow-item execution-item ${row.invocation_id === invocation ? "active" : ""}`} aria-current={row.invocation_id === invocation ? "true" : undefined} title={row.invocation_id} onClick={() => onInvocation(row.invocation_id, session)}><span className="workflow-glyph"><WorkflowIcon /></span><span className="workflow-item-text"><span className="invocation-row-heading"><strong>{row.workflow_id}</strong><StatusBadge row={row} /></span><span className="invocation-row-meta"><code>{row.invocation_id.slice(0, 8)}</code><span title="Invocation start time">Started · {formatTime(row.started_at_us)}</span></span></span></button></li>)}</ul> : null}
   </HistoryPanel>;
 }
-export function ExecutionDirectory({ session, invocation, onSession, onInvocation, onRunAccepted }: { onRunAccepted: (receipt: AcceptedExecution) => void; session: string | null; invocation: string | null; onSession: (id: string) => void; onInvocation: (id: string, session: string) => void }) {
+export function ExecutionDirectory({ session, invocation, onSession, onInvocation, onRunAccepted, onLoadingChange }: { onRunAccepted: (receipt: AcceptedExecution) => void; session: string | null; invocation: string | null; onSession: (id: string) => void; onInvocation: (id: string, session: string) => void; onLoadingChange?: (loading: boolean) => void }) {
   const queryClient = useQueryClient();
   const [run, setRun] = useState<'new' | 'existing' | null>(null);
   const newButton = useRef<HTMLButtonElement>(null), invokeButton = useRef<HTMLButtonElement>(null);
@@ -81,7 +84,7 @@ export function ExecutionDirectory({ session, invocation, onSession, onInvocatio
     {filtersOpen ? <ExecutionFilterDialog filters={filters} anchor={filterButton} onApply={setFilters} onClose={() => setFiltersOpen(false)} /> : null}
     {run ? <RunSessionPopover anchor={run === 'new' ? newButton : invokeButton} session={run === 'existing' ? session ?? undefined : undefined} onClose={() => setRun(null)} onAccepted={onRunAccepted} /> : null}
     <div className="history-panes" ref={panes}>
-      <section className="history-section session-section" aria-label="Sessions" style={{ flex: split }}><Sessions action={create} key={scope} filters={filters} session={session} onSession={selectSession} onRefresh={() => { if (session) void selectedSession.refetch(); }} /></section>
+      <section className="history-section session-section" aria-label="Sessions" style={{ flex: split }}><Sessions action={create} key={scope} filters={filters} session={session} onSession={selectSession} onLoadingChange={onLoadingChange} onRefresh={() => { if (session) void selectedSession.refetch(); }} /></section>
       <div className="history-divider" role="separator" tabIndex={0} aria-label="Resize sessions and invocations" aria-orientation="horizontal" aria-valuemin={20} aria-valuemax={80} aria-valuenow={Math.round(split * 100)} onPointerDown={event => { if (event.button !== 0) return; dragging.current = true; event.currentTarget.setPointerCapture(event.pointerId); event.preventDefault(); }} onPointerMove={event => { if (dragging.current) resize(event.clientY); }} onPointerUp={event => { dragging.current = false; event.currentTarget.releasePointerCapture(event.pointerId); }} onLostPointerCapture={() => { dragging.current = false; }} onKeyDown={event => { if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); setSplit(current => Math.max(.2, Math.min(.8, current + (event.key === "ArrowUp" ? -.05 : .05)))); } }}><span /></div>
       <section className="history-section invocation-section" aria-label="Invocations" style={{ flex: 1 - split }}>{session ? <Invocations action={invoke} key={`${session}:${scope}`} session={session} filters={filters} invocation={invocation} count={filterCount ? selected?.matching_count : selected?.invocation_count} onInvocation={onInvocation} /> : <><div className="history-section-heading"><strong>Invocations</strong><span>0</span></div><p className="sidebar-message">Select a session to view its invocations.</p></>}</section>
     </div>

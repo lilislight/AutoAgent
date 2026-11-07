@@ -1,3 +1,4 @@
+import { FactsSkeleton, CodeSkeleton } from './LoadingState';
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { compareWorkflowRevisions, getRevisionComparisonObject, getWorkflowGraph, getWorkflowObject, getWorkflowRevision, listWorkflowRevisions } from '../api';
@@ -18,7 +19,7 @@ const symbols:Record<RevisionChangeStatus,string>={added:'+',removed:'−',modif
 
 export function RevisionComparison({ workflowId, base, target, active, theme, onPair, onExit, changeView }: {
   workflowId:string; base:string; target:string; active:boolean; theme:Theme;
-  onPair:(base:string,target:string)=>void; onExit:()=>void; changeView:(view:'workflows'|'executions')=>void;
+  onPair:(base:string,target:string)=>void; onExit:()=>void; changeView:(view:'workflows'|'executions'|'agents')=>void;
 }) {
   const [selected,setSelected]=useState<RevisionChange|null>(null);
   const [selectedGroup,setSelectedGroup]=useState<string|null>(null);
@@ -99,7 +100,7 @@ function ComparisonInspector({base,target,selected,onClose}:{base:string;target:
   const differences=useMemo(()=>detail.data?definitionDifferences(detail.data):[],[detail.data]);
   const [limit,setLimit]=useState(50);
   return <InspectorFrame kind="revision comparison" title={selected.id} context={<span>{selected.ordinal===0?'Unchanged':selected.status[0].toUpperCase()+selected.status.slice(1)} · {selected.kind}</span>} tabs={['Changes','Definition']} initial="Changes" onClose={onClose}>{tab=><>
-    {detail.isPending?<p className="muted" role="status">Loading selected object…</p>:null}
+    {detail.isPending?<FactsSkeleton label="Loading selected object" />:null}
     {detail.error?<div className="sidebar-error" role="alert"><p>{detail.error.message}</p><button onClick={()=>void detail.refetch()}>Retry</button></div>:null}
     {detail.data?tab==='Definition'?<><SelectMenu label="Definition Revision" value={side} options={[{value:'base',label:'Base'},{value:'target',label:'Target'}]} onChange={value=>setSideChoice({identity,side:value})}/>{detail.data[side==='base'?'base':'target'].present?<ComparedDefinition revision={side==='base'?base:target} kind={selected.kind} identity={selected.id} />:<p className="inspector-empty">Absent from {side}.</p>}</>:<>
       {!differences.length?<p className="inspector-empty">No definition changes.</p>:null}
@@ -112,7 +113,7 @@ function ComparisonInspector({base,target,selected,onClose}:{base:string;target:
 
 function ComparedDefinition({revision,kind,identity}:{revision:string;kind:string;identity:string}) {
   const definition=useQuery({queryKey:['definition',revision,kind,identity],queryFn:({signal})=>kind==='workflow'?getWorkflowRevision(revision,signal):getWorkflowObject(revision,kind,identity,signal),staleTime:Infinity,gcTime:60_000,refetchOnWindowFocus:false});
-  if(definition.isPending)return <p className="muted" role="status">Loading definition…</p>;
+  if(definition.isPending)return <CodeSkeleton label="Loading definition" />;
   if(definition.error)return <div className="sidebar-error"><p>{definition.error.message}</p><button onClick={()=>void definition.refetch()}>Retry</button></div>;
   return <JsonValue value={pickDefinition(definition.data)} label="definition"/>;
 }

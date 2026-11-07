@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { CodeSkeleton, FactsSkeleton, RecordsSkeleton } from './LoadingState';
 import { getExecutionRecord } from '../api';
 import type { ExecutionTrace, Selection, TraceRow, WorkflowGraphData } from '../types';
 import { systemCommandId, valueMessage } from '../inspectorModel';
@@ -14,6 +15,19 @@ import { beforeCalls, CallChoice, CallInspector, InspectorPages, InspectorSectio
   RecordChoice, RouteChoice, StageChoice, StageInspector, useInspectorPage, CommandWaitDetails } from './ExecutionInspectorParts';
 
 type Child = { kind: 'call' | 'stage'; row: TraceRow; initial?: InspectorTab } | { kind: 'edge'; id: string; occurrence: string };
+export function PendingExecutionInspector({ workflow, selection, onClose, error, onRetry }: {
+  workflow: WorkflowGraphData; selection: NonNullable<Selection>; onClose: () => void; error?: string; onRetry: () => void;
+}) {
+  const kind = selection.record?.kind === 'call' ? 'call' : selection.record?.kind === 'wait' ? 'system-command' : selection.kind === 'edge' ? 'edge-execution' : 'node-execution';
+  const title = kind === 'call' || kind === 'system-command' ? selection.record!.id : selection.id;
+  return <InspectorFrame kind={kind} title={title} context={<span>{workflow.workflow_id}</span>} initial={selection.record?.section ?? selection.section}
+    tabs={['Summary', 'Input / Output', 'Execution', 'Definition']} onClose={onClose}>
+    {tab => error ? <div className="sidebar-error" role="alert"><p>{error}</p><button onClick={onRetry}>Retry</button></div>
+      : tab === 'Summary' ? <FactsSkeleton label="Loading execution details" />
+        : tab === 'Execution' ? <RecordsSkeleton label="Loading execution records" />
+          : <CodeSkeleton label={`Loading ${tab.toLowerCase()}`} />}
+  </InspectorFrame>;
+}
 function NodeValues({ row, externalWait, pending, onExecution, onActions }: {
   row: TraceRow; externalWait: boolean; pending: boolean; onExecution: () => void; onActions: () => void;
 }) {
@@ -67,7 +81,7 @@ function NodeInspector({ iid, id, record, trace, workflow, onClose, onReselect, 
   if (child?.kind === 'call') return <CallInspector key={child.row.call_id} row={child.row} workflow={workflow} frontier={trace.frontier} initial={child.initial} onBack={back} onClose={onClose} backLabel={backLabel} />;
   if (child?.kind === 'stage') return <StageInspector key={String(child.row.event_id)} row={child.row} nodeId={id} workflow={workflow} onBack={back} onClose={onClose} onEdge={selectEdge} />;
   if (child?.kind === 'edge') return <EdgeInspector key={`${child.id}:${child.occurrence}`} iid={iid} id={child.id} occurrence={child.occurrence} trace={trace} workflow={workflow} onBack={back} backLabel={backLabel} onClose={onClose} />;
-  const tabs: InspectorTab[] = row ? ['Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Definition'];
+  const tabs: InspectorTab[] = row || query.query.isPending ? ['Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Definition'];
   if (canAct) tabs.unshift('Actions');
   return <InspectorFrame kind="node-execution" title={id} initial={returnTab ?? initial} context={<>
     {row ? <StatusBadge row={row} /> : null}
@@ -76,7 +90,7 @@ function NodeInspector({ iid, id, record, trace, workflow, onClose, onReselect, 
   </>} tabs={tabs} onClose={onClose}>
     {(tab, selectTab) => {
       if (tab === 'Definition') return <DefinitionDetails workflow={workflow} kind="node" identity={id} />;
-      if (!row) return <PageFeedback page={query} empty="No occurrence has been recorded for this Node." />;
+      if (!row) return query.query.isPending && query.query.isFetching ? <FactsSkeleton label="Loading Node occurrence" /> : <PageFeedback page={query} empty="No occurrence has been recorded for this Node." />;
       switch (tab) {
         case 'Actions': return <NodeActions key={waitId ?? row.occurrence_id} waits={pendingWaits} waitId={waitId} />;
         case 'Summary': return <>

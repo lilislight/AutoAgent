@@ -15,7 +15,7 @@ from dataclasses import replace
 from sqlalchemy.engine import make_url
 from pydantic import TypeAdapter
 
-from autoagent import InvocationResult, InvocationWait, RuntimeErrorInfo, RuntimeTransitionError, WorkflowCompiler
+from autoagent import InvocationResult, InvocationWait, RuntimeErrorInfo, WorkflowCompiler
 
 from .models import HostError, HostSettings, HostCapacityError, HostNotFoundError, HostRunConflict, ProjectCheck
 from .persistence import DatabaseSink
@@ -31,6 +31,7 @@ from .observation import ExecutionObservation
 from .history import HistoryQueries
 from .forks import ForkControls
 from .operations import ExecutionOperations, OperationControls
+from .user_events import UserEvents, UserEventHub
 
 _json_output = TypeAdapter(object)
 
@@ -40,7 +41,7 @@ def _result_view(result):
     return replace(result, output=_json_output.dump_python(result.output, mode="json"))
 
 
-class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Exploration, ExecutionObservation, HistoryQueries, ForkControls):
+class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, CheckpointControls, Exploration, ExecutionObservation, HistoryQueries, ForkControls):
     """Own runtime and persistence behind business operations, in one caller loop.
 
     CLI/Server use ``async with host``. Loading and residency are automatic;
@@ -59,6 +60,8 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         environment=None,
         root=None,
         read_only=False,
+        usage_policy=None,
+        pricing=None,
     ):
         self.root = Path(root or Path.cwd()).expanduser().resolve()
         self.environment = MappingProxyType(
@@ -67,6 +70,11 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         self.settings = settings or HostSettings.from_environment(self.environment)
         self._workflows, self._operators = tuple(workflows), tuple(operators)
         self._lifespan = lifespan
+        from autoagent.agent.usage import ProjectUsagePolicy
+        if usage_policy is not None and not isinstance(usage_policy, ProjectUsagePolicy):
+            raise TypeError("usage_policy must be ProjectUsagePolicy.")
+        self._usage_policy = usage_policy
+        self._pricing = pricing
         self._project = None
         if type(read_only) is not bool:
             raise ValueError("read_only must be a boolean.")
@@ -80,10 +88,14 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         self._control_requests = 0
         self._runtime = None
         self._persistence = None
+        self._local_projections = None
         self._execution_operations = None
         self._environment_context = None
         self._import_context = None
         self._memory_monitor = None
+        self._user_events = UserEventHub()
+        from .agent_context import HostAgentContext
+        self.agent_context = HostAgentContext(self)
 
     @classmethod
     def from_project(
@@ -162,7 +174,7 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
             await self._memory_monitor.start()
             if self._read_only:
                 self._persistence = await DatabaseSink.open(self.settings.resolved_database_url(self.root),
-                    config=self.settings.persistence, read_only=True)
+                    config=self.settings.persistence, read_only=True, pricing=self._pricing)
                 await self._memory_monitor.ready()
                 if self._state != "closing":
                     self._state = "ready"
@@ -173,7 +185,7 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
             if self._project is not None:
                 self._import_context = import_scope(self.root)
                 self._import_context.__enter__()
-                workflows, declared_lifespan = self._project.load()
+                workflows, declared_lifespan = self._project.load(self.environment)
                 lifespan = lifespan or declared_lifespan
             # Static checks precede creating databases or project resources.
             from autoagent import WorkflowCompiler
@@ -189,8 +201,14 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
             ):
                 Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
             self._persistence = await DatabaseSink.open(
-                url, config=self.settings.persistence
+                url, config=self.settings.persistence, pricing=self._pricing
             )
+            if self.settings.local_projections and self.settings.persistence.projection_cache_enabled:
+                from .projection import LocalProjectionService
+                self._local_projections = LocalProjectionService(
+                    self._persistence, interval=self.settings.local_projection_interval_seconds)
+                self._persistence._local_projections = self._local_projections
+                await self._local_projections.start()
             self._execution_operations = ExecutionOperations(self)
             self._runtime = Runtime(
                 self._persistence,
@@ -199,9 +217,12 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
                 self._operators,
                 lifespan,
                 self.environment,
+                usage_policy=self._usage_policy,
+                agent_context=self.agent_context,
+                on_user_event=self._notice_user_event,
             )
             await self._runtime.prepare()
-            self._runtime.residency = Residency(self._runtime, self.settings)
+            self._runtime.residency = Residency(self._runtime, self.settings, resources=self._memory_monitor.resources)
             self._runtime.residency.start()
             await self._memory_monitor.ready()
             if self._state != "closing":
@@ -213,7 +234,10 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
                 if self._runtime is not None:
                     await self._runtime.app.aclose(timeout=None)
             finally:
+                self._user_events.close()
                 try:
+                    if self._local_projections is not None:
+                        await self._local_projections.close()
                     if self._persistence is not None:
                         await self._persistence.close()
                 finally:
@@ -244,6 +268,8 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
                 task.cancel()
             await asyncio.gather(*tuple(self._operations), return_exceptions=True)
             try:
+                if self._local_projections is not None:
+                    await self._local_projections.close()
                 if self._persistence is not None:
                     await self._persistence.close()
             finally:
@@ -252,6 +278,7 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
                 if completed:
                     self._runtime = None
                     self._persistence = None
+            self._user_events.close()
 
     def _release_environment(self):
         if self._import_context is not None:
@@ -289,12 +316,26 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         # A request disconnect does not cancel an admitted Core operation.
         return await asyncio.shield(task)
 
-    async def memory_snapshot(self, *, history=0):
+    async def memory_snapshot(self, *, history=0, window_seconds=None, points=600):
         """Read bounded telemetry without loading or walking Runtime State."""
         self._check_loop()
         if self._state != 'ready':
             raise HostError('Host is not ready.')
-        return self._memory_monitor.snapshot(history=history)
+        return self._memory_monitor.snapshot(history=history, window_seconds=window_seconds, points=points)
+
+    async def token_usage(self, *, query=None, **filters):
+        """Read token totals for this database/project without loading executions."""
+        return await self._perform(lambda: self._persistence.token_usage(query=query, **filters))
+
+    async def query_projection_status(self):
+        """Read database projection coverage independently of Runtime residency."""
+        return await self._perform(self._persistence.query_projection_status)
+
+    async def build_query_projections(self, *, rebuild=False):
+        """Explicitly build or rebuild optional database query projections."""
+        if type(rebuild) is not bool:
+            raise ValueError('rebuild must be a boolean.')
+        return await self._perform(lambda: self._persistence.build_query_projections(rebuild=rebuild), control=True)
 
     async def check_workflows(self, workflow_ids=None):
         """Compile project definitions without opening Core or Persistence."""
@@ -303,7 +344,7 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         if self._state not in ("new", "ready"):
             raise HostError("Host cannot check Workflows in its current lifecycle state.")
         with environment_scope(self.environment), import_scope(self.root):
-            workflows = self._project.load()[0] if self._project else self._workflows
+            workflows = self._project.load(self.environment)[0] if self._project else self._workflows
             if self._state == "ready":
                 workflows = tuple(self._runtime.setup.workflows)
             if workflow_ids is not None:
@@ -757,8 +798,10 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         async def query():
             async with self._execution(execution) as ref:
                 if self._runtime.resident.get(ref.session_id) == ref:
-                    return _result_view(await self._runtime.app.astatus(ref))
-                return await self._stored_result(ref)
+                    result = await self._runtime.app.astatus(ref)
+                else:
+                    result = await self._stored_result(ref)
+                return _result_view(await self.agent_context.approvals.project(result))
         return await self._perform(query)
 
     async def join(self, execution, *, timeout=None):
@@ -772,10 +815,11 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
                 if pending_fork is not None:
                     return _result_view(await asyncio.wait_for(asyncio.shield(pending_fork), timeout))
                 if self._runtime.resident.get(ref.session_id) == ref:
-                    return _result_view(await self._runtime.app.ajoin(ref, timeout=timeout))
+                    result = await self._runtime.app.ajoin(ref, timeout=timeout)
+                    return _result_view(await self.agent_context.approvals.project(result))
                 result = await self._stored_result(ref)
                 if result.status in ("completed", "failed", "cancelled") or result.control_state == "paused" or result.waits:
-                    return result
+                    return await self.agent_context.approvals.project(result)
                 raise HostError("Invocation is not active in this Host; use recover.")
         return await self._perform(wait)
 
@@ -783,7 +827,7 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         async def deliver():
             async with self._execution(execution, load=True, touch=True) as ref:
                 await self._runtime.activate(ref)
-                await self._runtime.app.asubmit_resume(ref, wait_id, response)
+                await self.agent_context.approvals.respond(ref, wait_id, response)
                 return ref
         return await self._perform(deliver, payload=response, control=True)
 
@@ -805,7 +849,8 @@ class AutoAgentHost(OperationControls, ExecutionControls, CheckpointControls, Ex
         """Recover the same Root graph, hydrating released values from Persistence as needed."""
         async def recover():
             async with self._execution(execution, load=True, touch=True) as ref:
-                return _result_view(await self._runtime.activate(ref, force=True, request_id=request_id, expected_version=expected_version))
+                result = await self._runtime.activate(ref, force=True, request_id=request_id, expected_version=expected_version)
+                return _result_view(await self.agent_context.approvals.project(result))
         return await self._perform(recover, control=True)
 
     async def cancel(self, execution, *, reason=None):

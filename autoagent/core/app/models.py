@@ -64,6 +64,21 @@ class InvocationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InvocationControlSnapshot:
+    """Payload-free acknowledged Core boundary for a complete Root graph."""
+    ref: InvocationRef
+    status: InvocationStatus
+    control_state: str
+    pending_outcome: str | None
+    expected_version: int
+    settled: bool
+    at_boundary: bool
+    needs_recovery: bool
+    revision: int
+    graph_version: tuple[tuple[str, str | None, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class GraphResidencyInfo:
     """Process-local estimates for a Host's graph residency policy."""
 
@@ -118,6 +133,7 @@ __all__ = [
     "AppCheckpoint",
     "CheckpointLoadResult",
     "GraphResidencyInfo",
+    "InvocationControlSnapshot",
     "InvocationRef",
     "InvocationResult",
     "InvocationStatus",

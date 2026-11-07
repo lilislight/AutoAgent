@@ -470,17 +470,21 @@ class AppTests(unittest.TestCase):
             spawned_result.output.invocation_id,
         )
 
-    def test_map_await_child_workflows_preserves_order_and_parallel_limit(self) -> None:
-        """Verify mapped awaited Children run concurrently and return input order."""
+    def test_map_await_child_workflows_preserves_order_and_admission_limit(self) -> None:
+        """Mapped Await limits admission while Child execution uses global capacity."""
 
         active = 0
         peak = 0
+        admitted = asyncio.Event()
 
         async def delayed(value: Value) -> Value:
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
             try:
+                if active == 3:
+                    admitted.set()
+                await asyncio.wait_for(admitted.wait(), 2)
                 await asyncio.sleep((4 - value["value"]) * 0.01)
                 return {"value": value["value"] + 10}
             finally:
@@ -506,7 +510,7 @@ class AppTests(unittest.TestCase):
             [item.output for item in result.output],
             [{"value": 11}, {"value": 12}, {"value": 13}],
         )
-        self.assertEqual(peak, 2)
+        self.assertEqual(peak, 3)
         self.assertEqual(len(child_refs(self.app, result.ref)), 3)
 
     def test_map_await_child_workflows_supports_aggregation_and_empty_input(self) -> None:
@@ -870,8 +874,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(calls, 1)
 
-    def test_default_recovery_replays_running_node_from_checkpoint(self) -> None:
-        """Verify the default policy replays an interrupted Operator in another App."""
+    def test_explicit_recovery_replays_running_node_from_checkpoint(self) -> None:
+        """An explicitly replay-safe interrupted Operator can run in another App."""
         started = threading.Event()
         calls = 0
 
@@ -885,7 +889,7 @@ class AppTests(unittest.TestCase):
 
         workflow = Workflow(
             "event-recovery",
-            nodes=[Node("node", blocking)],
+            nodes=[Node("node", blocking, recovery_mode=Recovery("replay_safe"))],
         )
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 9}, session_id="recovery-session")
@@ -912,8 +916,8 @@ class AppTests(unittest.TestCase):
         finally:
             recovered_app.close()
 
-    def test_crash_recovery_rejects_running_node_without_replay_permission(self) -> None:
-        """Verify crash recovery rejects running node without replay permission."""
+    def test_default_recovery_rejects_running_node_without_replay_permission(self) -> None:
+        """The default policy rejects uncertain crash replay before repeating an effect."""
         started = threading.Event()
         calls = 0
 
@@ -924,7 +928,7 @@ class AppTests(unittest.TestCase):
             await asyncio.sleep(10)
             return value
 
-        workflow = Workflow("unsafe-recovery", nodes=[Node("node", side_effect, recovery_mode=Recovery("never"))])
+        workflow = Workflow("unsafe-recovery", nodes=[Node("node", side_effect)])
         source = AutoAgentApp()
         source.submit_invoke(workflow, {"value": 4}, session_id="unsafe-session")
         self.assertTrue(started.wait(1))

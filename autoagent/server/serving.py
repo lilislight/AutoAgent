@@ -8,9 +8,13 @@ import uvicorn
 
 
 class _Server(uvicorn.Server):
+    on_ready = None
+    on_stopping = None
+    on_stopped = None
+
     async def startup(self, sockets=None):
         await super().startup(sockets=sockets)
-        callback = getattr(self, "on_ready", None)
+        callback = self.on_ready
         if self.started and callback:
             host = self.config.app.state.autoagent_host
             count, cursor = 0, None
@@ -25,13 +29,14 @@ class _Server(uvicorn.Server):
     async def shutdown(self, sockets=None):
         # Uvicorn drains HTTP responses before sending lifespan.shutdown.
         # Close our unbounded responses first, while Host is still available.
-        hubs = tuple(getattr(self.config.app.state, '_autoagent_trace_hubs', ()))
-        callback = getattr(self, "on_stopping", None)
+        hubs = (tuple(getattr(self.config.app.state, '_autoagent_trace_hubs', ()))
+                + tuple(getattr(self.config.app.state, '_autoagent_user_event_hubs', ())))
+        callback = self.on_stopping
         if self.started and callback:
             callback()
         await asyncio.gather(*(hub.close() for hub in hubs))
         await super().shutdown(sockets=sockets)
-        callback = getattr(self, "on_stopped", None)
+        callback = self.on_stopped
         if self.started and callback:
             callback()
 

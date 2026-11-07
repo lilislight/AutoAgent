@@ -13,7 +13,7 @@ class TraceHeads:
         # Capture this before the SQL snapshot: a concurrent commit must wake the
         # waiter even when it happened while the snapshot was being read.
         revision = self.queries.writer.commit_revision
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             invs, metadata = meta.tables['invocations'], meta.tables['persistence_meta']
             inv = (await conn.execute(select(invs.c.root_invocation_id, invs.c.status,
                 invs.c.updated_store_order).where(invs.c.invocation_id == iid))).mappings().first()

@@ -1,3 +1,4 @@
+import { OptionsSkeleton, BusyLabel } from './LoadingState';
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { browseWorkflows, listWorkflowRevisions } from "../api";
@@ -24,14 +25,14 @@ function RevisionOptions({ workflowId, selected, onToggle }: {
   const rows = revisions.data?.pages.flatMap(page => page.items) ?? [];
   return <div className="filter-revision-group" aria-busy={revisions.isFetching}>
     <div className="filter-revision-heading" title={workflowId}><WorkflowIcon /><span>{workflowId}</span></div>
-    {revisions.isPending ? <p className="filter-hint">Loading revisions…</p> : null}
+    {revisions.isLoading ? <OptionsSkeleton label="Loading revisions" variant="filter" /> : null}
     {revisions.error ? <p className="filter-hint">{revisions.error.message} <button type="button" className="text-button" onClick={() => void revisions.refetch()}>Retry</button></p> : null}
     {!revisions.isPending && !revisions.error && !rows.length ? <p className="filter-hint">No saved revisions.</p> : null}
     {rows.map(row => <label className="filter-option" key={row.revision_id} title={row.revision_id}>
       <input type="checkbox" checked={selected.includes(row.revision_id)} disabled={!selected.includes(row.revision_id) && selected.length >= 64} onChange={() => onToggle(row.revision_id)} />
       <span className="filter-revision-label"><span>v{row.workflow_version}</span><code>{row.definition_hash?.slice(0, 12) ?? row.revision_id.split(":").at(-1)?.slice(0, 12)}</code></span>
     </label>)}
-    {revisions.hasNextPage ? <button type="button" className="load-more" disabled={revisions.isFetchingNextPage} onClick={() => void revisions.fetchNextPage()}>More revisions</button> : null}
+    {revisions.hasNextPage ? <button type="button" className="load-more" disabled={revisions.isFetchingNextPage} onClick={() => void revisions.fetchNextPage()}><BusyLabel busy={revisions.isFetchingNextPage} label="Loading more">More revisions</BusyLabel></button> : null}
   </div>;
 }
 
@@ -104,11 +105,11 @@ export function ExecutionFilterDialog({ filters, anchor, onApply, onClose }: {
     <div className="filter-select">
       <button type="button" className="filter-select-trigger" aria-expanded={expanded === "workflows"} aria-controls="filter-workflow-options" onClick={() => setExpanded(current => current === "workflows" ? null : "workflows")}><span>Workflows</span><small>{draft.workflowIds.length ? `${draft.workflowIds.length} selected` : "All"}</small><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button>
       {expanded === "workflows" ? <div className="filter-options" id="filter-workflow-options" role="group" aria-label="Workflow choices" aria-busy={workflows.isFetching}>
-        {workflows.isPending ? <p className="filter-hint">Loading workflows…</p> : null}
+        {workflows.isLoading ? <OptionsSkeleton label="Loading workflows" variant="filter" /> : null}
         {workflows.error ? <p className="filter-hint">{workflows.error.message} <button type="button" className="text-button" onClick={() => void workflows.refetch()}>Retry</button></p> : null}
         {!workflows.isPending && !workflows.error && !rows.length ? <p className="filter-hint">No saved workflows.</p> : null}
         {rows.map(row => <label className="filter-option" key={row.workflow_id} title={row.workflow_id}><input type="checkbox" checked={draft.workflowIds.includes(row.workflow_id)} disabled={!draft.workflowIds.includes(row.workflow_id) && draft.workflowIds.length >= 64} onChange={() => toggleWorkflow(row.workflow_id)} /><WorkflowIcon /><span>{row.workflow_id}</span></label>)}
-        {workflows.hasNextPage ? <button type="button" className="load-more" disabled={workflows.isFetchingNextPage} onClick={() => void workflows.fetchNextPage()}>More workflows</button> : null}
+        {workflows.hasNextPage ? <button type="button" className="load-more" disabled={workflows.isFetchingNextPage} onClick={() => void workflows.fetchNextPage()}><BusyLabel busy={workflows.isFetchingNextPage} label="Loading more">More workflows</BusyLabel></button> : null}
       </div> : null}
     </div>
     <div className="filter-select">

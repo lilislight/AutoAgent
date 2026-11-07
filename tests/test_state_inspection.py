@@ -10,7 +10,7 @@ from unittest.mock import patch
 from sqlalchemy import update
 from typing_extensions import TypedDict
 
-from autoagent import (AutoAgentApp, Await, ContextOperation, ContextPatch, Edge, Node,
+from autoagent import (AutoAgentApp, Await, ContextOperation, ContextPatch, Edge, Node, Recovery,
     OutputBindingContext, Spawn, Wait, Workflow)
 from autoagent.core.runtime.events import RuntimeEvent
 from autoagent.core.runtime.reducer import StateReducer
@@ -51,7 +51,7 @@ class StateInspectionTests(unittest.IsolatedAsyncioTestCase):
 
     def workflow(self, identity="inspect"):
         return Workflow(identity, nodes=[Node("write", echo, output_binding=bind),
-            Node("ask", Wait(Value, Value)), Node("finish", echo, output_binding=bind)],
+            Node("ask", Wait(Value, Value), recovery_mode=Recovery("replay_safe")), Node("finish", echo, output_binding=bind)],
             edges=[Edge("write", "ask", id="ask"), Edge("ask", "finish", id="finish")])
 
     def host(self, workflows=None, *, settings=None, read_only=False):
@@ -273,7 +273,7 @@ class StateInspectionTests(unittest.IsolatedAsyncioTestCase):
                 raise ValueError("expected failure")
             return {"text": "recovered"}
         wf = Workflow("failure", nodes=[Node("write", echo, output_binding=bind),
-            Node("fail", once, output_binding=bind)], edges=[Edge("write", "fail", id="next")])
+            Node("fail", once, output_binding=bind, recovery_mode=Recovery("replay_safe"))], edges=[Edge("write", "fail", id="next")])
         async with self.host([wf]) as host:
             ref = await host.execute(wf.id, {"text": "committed"}, entry_node_id="write")
             await host.join(ref)

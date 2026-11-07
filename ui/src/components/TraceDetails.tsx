@@ -1,3 +1,4 @@
+import { CodeSkeleton } from './LoadingState';
 import { useObservationClock } from './useObservationClock';
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -46,7 +47,7 @@ export type ValueProps = { invocationId: string; kind: string; identity: string;
 const openValues = new Map<string, boolean>();
 export function LoadedValue({ invocationId, kind, identity, field, occurrenceId, label, valueKey }: ValueProps) {
   const query = useQuery({ queryKey: ['trace-value', invocationId, valueKey ?? JSON.stringify([kind, identity, field, occurrenceId])], queryFn: ({ signal }) => kind === 'stage' ? getStageValue(invocationId, occurrenceId!, identity, field, signal) : getExecutionValue(invocationId, kind, identity, field, signal), staleTime: Infinity, gcTime: 30_000, refetchOnWindowFocus: false });
-  if (query.isPending) return <p className="muted" role="status">Loading {label ?? field}…</p>;
+  if (query.isPending) return query.isFetching ? <CodeSkeleton label={`Loading ${label ?? field}`} /> : null;
   if (query.error) return <div className="sidebar-error"><p>{query.error.message}</p><button type="button" onClick={() => void query.refetch()}>Retry</button></div>;
   if (!query.data.available) return <p className="muted">Not recorded.</p>;
   return <JsonValue value={query.data.value} label={label ?? field} />;

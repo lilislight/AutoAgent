@@ -1,3 +1,4 @@
+import { FactsSkeleton, CardsSkeleton, BusyLabel } from './LoadingState';
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -101,18 +102,17 @@ export function SessionCheckpoints({ session, inspectorHost }: { session: string
     <InspectorFrame kind="Checkpoint" title="Saved position" context={<CopyId value={selected ?? undefined} />} tabs={['Details']} onClose={() => { setSelected(null); setConfirmDelete(null); }}>
       {() => <>
         {feedback}
-        {busy && (mutation.variables?.kind === 'create' || mutation.variables?.id === selected) ? <p className="muted" role="status">{mutation.variables?.kind === 'create' ? 'Creating checkpoint…' : 'Saving change…'}</p> : null}
-        {detail.isPending ? <p className="muted" role="status">Loading checkpoint…</p> : null}
+        {detail.isLoading ? <FactsSkeleton label="Loading checkpoint" /> : null}
         {detail.error ? <div className="sidebar-error" role="alert"><p>{detail.error.message}</p><button onClick={() => void detail.refetch()}>Retry</button></div> : null}
         {detail.data ? <CheckpointMetadata checkpoint={detail.data} session={session} /> : null}
         {detail.data && !detail.error ? <section className="checkpoint-management" aria-label="Checkpoint actions">
           {confirmDelete !== detail.data.checkpoint_id ? <div className="checkpoint-actions">
-            <button type="button" className="toolbar-action" disabled={busy || detail.isFetching} onClick={() => mutation.mutate({ kind: 'pin', id: detail.data.checkpoint_id, pinned: !detail.data.pinned })}>{detail.data.pinned ? 'Unpin' : 'Pin checkpoint'}</button>
+            <button type="button" className="toolbar-action" disabled={busy || detail.isFetching} onClick={() => mutation.mutate({ kind: 'pin', id: detail.data.checkpoint_id, pinned: !detail.data.pinned })}><BusyLabel busy={busy && mutation.variables?.kind === 'pin'} label="Saving">{detail.data.pinned ? 'Unpin' : 'Pin checkpoint'}</BusyLabel></button>
             <button type="button" className="toolbar-action checkpoint-danger" disabled={busy || detail.isFetching || !detail.data.deletable} onClick={() => setConfirmDelete(detail.data.checkpoint_id)}>Delete checkpoint</button>
           </div> : null}
           {confirmDelete === detail.data.checkpoint_id ? <div className="checkpoint-delete-confirm" role="group" aria-label="Confirm checkpoint deletion">
             <p>{detail.data.pinned ? 'This checkpoint is pinned. Delete it anyway?' : 'Delete this checkpoint?'}</p><p className="muted">Runtime Events and Invocations are kept.</p>
-            <div className="checkpoint-actions"><button type="button" className="toolbar-action" disabled={busy} onClick={() => setConfirmDelete(null)}>Keep checkpoint</button><button type="button" className="toolbar-action checkpoint-danger" disabled={busy || detail.isFetching || !detail.data.deletable} onClick={() => mutation.mutate({ kind: 'delete', id: detail.data.checkpoint_id })}>Confirm delete</button></div>
+            <div className="checkpoint-actions"><button type="button" className="toolbar-action" disabled={busy} onClick={() => setConfirmDelete(null)}>Keep checkpoint</button><button type="button" className="toolbar-action checkpoint-danger" disabled={busy || detail.isFetching || !detail.data.deletable} onClick={() => mutation.mutate({ kind: 'delete', id: detail.data.checkpoint_id })}><BusyLabel busy={busy && mutation.variables?.kind === 'delete'} label="Deleting">Confirm delete</BusyLabel></button></div>
           </div> : null}
         </section> : null}
       </>}
@@ -123,12 +123,12 @@ export function SessionCheckpoints({ session, inspectorHost }: { session: string
       <div><strong>{list.data ? `${list.data.pages[0].total_count} saved` : 'Checkpoints'}</strong><p className="muted">Pins are kept during automatic cleanup.</p></div>
       <div className="checkpoint-create">
         <label className="checkpoint-sequence">Event sequence<input type="text" inputMode="numeric" placeholder="Latest" aria-label="Checkpoint Event sequence" aria-invalid={!validSequence} title="Leave empty for current state, or enter this Session’s Event sequence. Captures state immediately after that Event." value={sequenceText} disabled={busy} onChange={event => setSequenceText(event.target.value)} /></label>
-        <label><input type="checkbox" checked={pinOnCreate} disabled={busy} onChange={event => setPinOnCreate(event.target.checked)} />Pin on create</label><button type="button" className="toolbar-action" title="Capture the selected recoverable position without changing live execution. Identical graph positions reuse the same checkpoint." disabled={busy || !validSequence} onClick={() => mutation.mutate({ kind: 'create', pinned: pinOnCreate, sequence })}>{busy && mutation.variables?.kind === 'create' ? 'Creating…' : 'Create checkpoint'}</button>
+        <label><input type="checkbox" checked={pinOnCreate} disabled={busy} onChange={event => setPinOnCreate(event.target.checked)} />Pin on create</label><button type="button" className="toolbar-action" title="Capture the selected recoverable position without changing live execution. Identical graph positions reuse the same checkpoint." disabled={busy || !validSequence} onClick={() => mutation.mutate({ kind: 'create', pinned: pinOnCreate, sequence })}><BusyLabel busy={busy && mutation.variables?.kind === 'create'} label="Creating">Create checkpoint</BusyLabel></button>
       </div>
     </div>
     {!validSequence ? <p className="checkpoint-notice is-error" role="alert">Enter a positive Event sequence.</p> : null}
     {!inspectorOpen ? feedback : null}
-    {list.isPending ? <p className="muted" role="status">Loading checkpoints…</p> : null}
+    {list.isLoading ? <CardsSkeleton label="Loading checkpoints" /> : null}
     {list.error ? <div className="sidebar-error" role="alert"><p>{list.error.message}</p><button onClick={() => void list.refetch()}>Retry</button></div> : null}
     {rows.length ? <>
       <div className="checkpoint-columns" aria-hidden="true"><span>Captured</span><span>Session position</span><span>Graph</span></div>
@@ -141,7 +141,7 @@ export function SessionCheckpoints({ session, inspectorHost }: { session: string
         </button></li>;
       })}</ul>
     </> : !list.isPending && !list.error ? <p className="muted">No checkpoints saved. Create one to capture the current recoverable position.</p> : null}
-    {list.hasNextPage ? <button className="load-more" disabled={list.isFetchingNextPage || busy} onClick={() => void list.fetchNextPage()}>{list.isFetchingNextPage ? 'Loading…' : 'Show more'}</button> : null}
+    {list.hasNextPage ? <button className="load-more" disabled={list.isFetchingNextPage || busy} onClick={() => void list.fetchNextPage()}><BusyLabel busy={list.isFetchingNextPage} label="Loading more">Show more</BusyLabel></button> : null}
     {inspectorHost ? createPortal(inspector, inspectorHost) : null}
   </>;
 }

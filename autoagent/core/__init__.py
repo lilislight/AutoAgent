@@ -7,6 +7,7 @@ from .app import (
     CapabilityResolver,
     CheckpointLoadResult,
     GraphResidencyInfo,
+    InvocationControlSnapshot,
     InvocationRef,
     InvocationResult,
     InvocationStatus,
@@ -21,6 +22,7 @@ from .compiler import (
 )
 from .errors import (
     NodeTimeoutError,
+    WaitTimeoutError,
     AutoAgentError,
     LoopControlError,
     RuntimeInfrastructureError,
@@ -74,6 +76,8 @@ from .runtime import (
     OperatorCallCompleted,
     OperatorCallFailed,
     OperatorCallStarted,
+    CommandInvoked,
+    CommandReturned,
     OperatorCallState,
     RuntimeErrorInfo,
     SessionCheckpoint,
@@ -122,7 +126,7 @@ from .workflow import (
 
 __all__ = [
     "RetryPolicy", "BackoffPolicy", "ResourcePolicy",
-    "TimeoutPolicy", "NodeTimeoutError", "run_sync",
+    "TimeoutPolicy", "NodeTimeoutError", "WaitTimeoutError", "run_sync",
     "OperatorCallContext", "operator_call_context",
     "GraphPauseRequested",
     "GraphPaused",
@@ -141,6 +145,7 @@ __all__ = [
     "ChildUnitState",
     "CheckpointLoadResult",
     "GraphResidencyInfo",
+    "InvocationControlSnapshot",
     "CompileResult",
     "ConditionContext",
     "Context",
@@ -188,6 +193,8 @@ __all__ = [
     "OperatorCallCompleted",
     "OperatorCallFailed",
     "OperatorCallStarted",
+    "CommandInvoked",
+    "CommandReturned",
     "OperatorCallState",
     "OutputBindingContext",
     "Recovery",
@@ -245,9 +252,20 @@ __all__ += ["SelfHandle", "OwnerHandle"]
 
 from .commands import AwaitSignal, SignalCase, TimerCase, ChildCase, Select, SelectResult, SuspensionInfo
 __all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "SelectResult", "SuspensionInfo"]
+from .commands import SelectRequest, SignalRequestCase, TimerRequestCase, ChildRequestCase, SendSignalRequest, ReceiveSignalRequest
+__all__ += ["SelectRequest", "SignalRequestCase", "TimerRequestCase", "ChildRequestCase", "SendSignalRequest", "ReceiveSignalRequest"]
 
 from .runtime.recovery import RecoverySource
 __all__ += ["RecoverySource"]
 
 from .runtime.fork import ForkPlan
 __all__ += ['ForkPlan']
+
+from .usage import UsagePolicy, WorkflowResourcePolicy, ResourceBudgetExceeded, UsageAccountingError
+__all__ += ["UsagePolicy", "WorkflowResourcePolicy", "ResourceBudgetExceeded", "UsageAccountingError"]
+
+from .commands import CommandInvoker
+__all__ += ["CommandInvoker"]
+
+from .commands import HasSignal, HasSignalRequest, HasSignalResult
+__all__ += ["HasSignal", "HasSignalRequest", "HasSignalResult"]

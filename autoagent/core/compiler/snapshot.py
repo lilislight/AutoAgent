@@ -9,6 +9,7 @@ from ..commands import Wait
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, asdict
 from ..commands.signals import SignalLimits
+from ..usage import WorkflowResourcePolicy
 from types import MappingProxyType
 from typing import get_args, get_origin
 
@@ -76,6 +77,7 @@ class WorkflowDefinitionSnapshot:
             loops=workflow.loop_regions,
             signal_endpoints=workflow.signal_endpoints,
             signal_limits=workflow.signal_limits,
+            resource=workflow.resource,
             entry_node_ids=workflow.entry_node_ids,
             exit_node_ids=workflow.exit_node_ids,
             groups=workflow.groups,
@@ -150,6 +152,7 @@ def workflow_semantic_definition(
     exit_node_ids: tuple[str, ...],
     signal_endpoints: tuple = (),
     signal_limits: SignalLimits = SignalLimits(),
+    resource: WorkflowResourcePolicy = WorkflowResourcePolicy(),
     groups: tuple = (),
 ) -> dict[str, object]:
     """Build the single canonical definition used by revision and snapshot."""
@@ -161,6 +164,7 @@ def workflow_semantic_definition(
         "failure_mode": failure_mode,
         "signal_endpoints": [{"name": name, "payload_contract": _contract_definition(contract)} for name, contract in signal_endpoints],
         "signal_limits": asdict(signal_limits),
+        "resource": asdict(resource),
         "nodes": [
             {
                 "id": node.id,
@@ -314,7 +318,7 @@ def _hook_definition(handler: Callable[..., object] | None) -> object | None:
 def _callable_name(value: object) -> str:
     return str(
         getattr(value, "__name__", None)
-        or getattr(value, "__class__", type(value)).__name__
+        or type(value).__name__
     )
 
 

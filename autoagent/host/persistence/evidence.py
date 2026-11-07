@@ -9,7 +9,7 @@ from .tracing import summary
 async def capture(queries, invocation_id, limit):
     invs, events, definitions, waits, nodes = (meta.tables[name] for name in
         ("invocations", "runtime_events", "workflow_revisions", "waits", "node_executions"))
-    async with queries.view() as (conn, _, _, frontier):
+    async with queries.view(invocation_id=invocation_id) as (conn, _, _, frontier):
         root_id = await conn.scalar(select(invs.c.root_invocation_id).where(invs.c.invocation_id == invocation_id))
         if root_id is None:
             return None

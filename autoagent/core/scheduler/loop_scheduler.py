@@ -18,7 +18,7 @@ from ..runtime.scheduling import (
     SchedulerDelta,
     boundary_key,
     boundary_resolution_key,
-    occurrence_key, current_occurrence_key,
+    current_occurrence_key,
     resolution_key,
 )
 from ..runtime.state import RuntimeState

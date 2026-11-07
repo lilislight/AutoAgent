@@ -62,7 +62,7 @@ class RecoverySource:
                         touched[path[2]].add(path[3])
                 for oid in inv.scheduler.occurrences if whole else touched['occurrences']:
                     item = inv.scheduler.occurrences.get(oid)
-                    if item is not None and item.execution != NodeExecutionState():
+                    if item is not None and item.execution.phase != "none":
                         work.setdefault(sid, {})[oid] = item.execution
                     if item is not None and item.status == 'completed' and item.output is not None:
                         outputs.setdefault(sid, {})[oid] = item.output

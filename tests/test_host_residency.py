@@ -93,6 +93,12 @@ class CoreResidencyTests(unittest.IsolatedAsyncioTestCase):
 
 class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        physical = patch('autoagent.host.memory_resources.system_memory', return_value=(16 * 1024**3, 12 * 1024**3))
+        controller = patch('autoagent.host.memory_resources.memory_controller', return_value=None)
+        physical.start()
+        controller.start()
+        self.addCleanup(physical.stop)
+        self.addCleanup(controller.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.settings = HostSettings(
@@ -107,6 +113,54 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
 
     def host(self, *, workflows=None, **settings):
         return AutoAgentHost(workflows=workflows or [self.workflow], settings=replace(self.settings, **settings))
+
+    async def test_shared_memory_pressure_rejects_new_and_warm_admissions(self):
+        """Low shared headroom blocks admission even when AutoAgent's own RSS is small."""
+        from autoagent.host.memory_resources import MemoryResourcesSnapshot
+        gib = 1024**3
+        async with self.host(memory_budget_bytes=gib) as host:
+            first = await completed(host, session_id='warm-pressure')
+            policy = host._runtime.residency
+            policy.memory_usage = lambda: 100 * 1024**2
+            policy.baseline = 0
+            critical = MemoryResourcesSnapshot(gib, 'explicit', 16 * gib, 'physical',
+                16 * gib, gib // 2, None, ((16 * gib, gib // 2),))
+            with patch.object(policy.resources, 'sample', return_value=critical):
+                with self.assertRaises(HostCapacityError):
+                    await completed(host, session_id=first.session_id)
+                with self.assertRaises(HostCapacityError):
+                    await host.execute('work', {'text': 'new'})
+            self.assertEqual((await host.get_execution(first.ref)).status, 'completed')
+
+    async def test_large_auto_budget_does_not_stop_existing_live_work(self):
+        """A live graph survives shared pressure while additional execution is rejected."""
+        from autoagent.host.memory_resources import MemoryResourcesSnapshot
+        gib = 1024**3
+        entered, release = threading.Event(), threading.Event()
+        async def blocked(value: Value) -> Value:
+            entered.set()
+            await asyncio.to_thread(release.wait, 5)
+            return value
+        workflow = Workflow('work', nodes=[Node('work', blocked)])
+        async with self.host(workflows=[workflow]) as host:
+            policy = host._runtime.residency
+            normal = MemoryResourcesSnapshot(16 * gib * 4 // 5, 'physical', 16 * gib, 'physical',
+                16 * gib, 12 * gib, None, ((16 * gib, 12 * gib),))
+            with patch.object(policy.resources, 'sample', return_value=normal):
+                policy.memory_usage = lambda: gib
+                policy.baseline = 0
+                ref = await host.execute('work', {'text': 'live'})
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                self.assertEqual(policy.budget, normal.budget_bytes)
+                critical = replace(normal, system_available_bytes=gib // 2, constraints=((16 * gib, gib // 2),))
+                try:
+                    with patch.object(policy.resources, 'sample', return_value=critical):
+                        with self.assertRaises(HostCapacityError):
+                            await host.execute('work', {'text': 'blocked'})
+                        release.set()
+                        self.assertEqual((await host.join(ref, timeout=3)).output, {'text': 'live'})
+                finally:
+                    release.set()
 
     async def test_directory_history_and_explicit_entry_parameters(self):
         """Expose current/historical Revisions and pass explicit admission options."""

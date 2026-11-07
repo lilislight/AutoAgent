@@ -91,7 +91,7 @@ export interface ExecutionOperation {
   operation_id:string; invocation_id:string; action:ExecutionActionKind; status:'running'|'succeeded'|'failed'|'unobserved';
   result:Record<string,unknown>|null; error:{code:string;message:string}|null;
 }
-export interface ExecutionActionSpec {root_invocation_id:string; action:ExecutionActionKind; input_schema:unknown; endpoints:string[]; next_sequence:number}
+export interface ExecutionActionSpec {root_invocation_id:string; action:ExecutionActionKind; input_schema:unknown; endpoints:string[]; next_sequence:number; request:unknown; response_example:unknown}
 export interface ExecutionActionInput {
   invocation_id:string; request_id:string; action:ExecutionActionKind; payload?:unknown; reason?:string;
   target_invocation_id?:string; wait_id?:string; endpoint?:string; source_id?:string; sequence?:number; expected_version?:number;
@@ -103,7 +103,7 @@ export type ExecutionView = 'graph' | 'timeline' | 'split';
 export type Selection = { kind: "node" | "edge" | "group" | "invocation" | "workflow"; id: string; section?: InspectorTab; record?: ExecutionRecordSelection } | null;
 
 export interface LocationState {
-  view: "workflows" | "executions";
+  view: "workflows" | "executions" | "agents";
   execution: string | null;
   workflow: string | null;
   revision: string | null;

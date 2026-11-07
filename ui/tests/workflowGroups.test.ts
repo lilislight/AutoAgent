@@ -77,3 +77,26 @@ test('nested Loop routes remain inside the child container and disappear only wh
   const folded=await computeLayout(graph,new ELK(),new Set(['checks']));
   assert.equal(folded.routes['loop-back'],undefined);assert.ok(folded.routes['6']);
 });
+
+test('expanded and folded Workflow boundaries retain exact attachments for parallel complete and fail Edges',async()=>{
+  const {edgePortId}=await import('../src/graphPorts.js');
+  const {rerouteGroups}=await import('../src/groupGeometry.js');
+  const graph=definition();graph.edges.push({...graph.edges[0],id:'parallel-failure',on:'error',conditional:true});
+  for(const folded of [new Set<string>(),new Set(['checks']),new Set(['review'])]){
+    const layout=await computeLayout(graph,new ELK(),folded),visible=workflowGroups(graph,folded);
+    const moved=rerouteGroups(graph,folded,layout);
+    assert.notDeepEqual(layout.routes['0'],layout.routes['parallel-failure']);
+    assert.notDeepEqual(moved['0'],moved['parallel-failure']);
+    for(const edge of visible.edges)for(const routes of [layout.routes,moved]){
+      const from=routes[edge.id][0],to=routes[edge.id].at(-1)!;
+      const source=layout.positions[edge.source],target=layout.positions[edge.target];
+      const sourcePort=edge.sourceHandle?visible.ports.get(edge.source.slice('@group:'.length))?.find(p=>p.id===edge.sourceHandle):layout.ports![edge.source]?.find(p=>p.id===edgePortId(edge.id,'out'));
+      const targetPort=edge.targetHandle?visible.ports.get(edge.target.slice('@group:'.length))?.find(p=>p.id===edge.targetHandle):layout.ports![edge.target]?.find(p=>p.id===edgePortId(edge.id,'in'));
+      assert.ok(sourcePort && targetPort);
+      assert.ok(Math.abs(from.y-source.y-sourcePort.y)<1e-7);
+      assert.ok(Math.abs(to.y-target.y-targetPort.y)<1e-7);
+      assert.equal(from.x,source.x+layout.sizes![edge.source].width);
+      assert.equal(to.x,target.x);
+    }
+  }
+});

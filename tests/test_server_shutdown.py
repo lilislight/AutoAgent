@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 import httpx
+from fastapi.routing import APIRoute
 
 from autoagent.server import ServerSettings, create_app, create_router
 from autoagent.server.watching import TraceWatchHub
@@ -56,7 +57,7 @@ class ServerShutdownTests(unittest.IsolatedAsyncioTestCase):
         app = FastAPI()
         router = create_router(host, settings=ServerSettings())
         app.include_router(router)
-        endpoint = next(route.endpoint for route in router.routes if route.path.endswith('/trace-watch'))
+        endpoint = next(route.endpoint for route in router.routes if isinstance(route, APIRoute) and route.path.endswith('/trace-watch'))
         async with app.router.lifespan_context(app):
             response = await endpoint('test')
             stream = response.body_iterator
@@ -81,8 +82,10 @@ class ServerShutdownTests(unittest.IsolatedAsyncioTestCase):
         async with app.router.lifespan_context(app):
             hubs = tuple(app.state._autoagent_trace_hubs)
             self.assertEqual(len(hubs), 2)
+            user_hubs = tuple(app.state._autoagent_user_event_hubs)
+            self.assertEqual(len(user_hubs), 2)
             async def drain(*, sockets):
-                self.assertTrue(all(hub.closed for hub in hubs))
+                self.assertTrue(all(hub.closed for hub in hubs + user_hubs))
                 self.assertEqual(sockets, ['test'])
             with patch.object(uvicorn.Server, 'shutdown', side_effect=drain) as shutdown:
                 await server.shutdown(sockets=['test'])
@@ -137,7 +140,8 @@ def approval():
                                 await asyncio.sleep(.05)
                             else:
                                 self.fail('Server did not start.')
-                            revision = response.json()['items'][0]['revision_id']
+                            revision = next(item['revision_id'] for item in response.json()['items']
+                                if item['workflow_id'] == 'shutdown-wait')
                             ids = []
                             for _ in range(2):
                                 response = await client.post('/api/v2/executions', json=dict(
@@ -159,9 +163,11 @@ def approval():
                                 async def drain(lines):
                                     async for _ in lines:
                                         pass
-                                for iid in [ids[0], ids[0], ids[1]]:
+                                streams = [('/api/v2/trace-watch', iid) for iid in [ids[0], ids[0], ids[1]]]
+                                streams += [('/api/v2/user-events/watch', iid) for iid in ids]
+                                for path, iid in streams:
                                     response = await stack.enter_async_context(client.stream(
-                                        'GET', '/api/v2/trace-watch', params={'invocation_id': iid},
+                                        'GET', path, params={'invocation_id': iid},
                                     ))
                                     self.assertEqual(response.status_code, 200)
                                     lines = response.aiter_lines()

@@ -1,3 +1,4 @@
+import { BusyLabel, RecordsSkeleton, SkeletonText } from './LoadingState';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
@@ -67,8 +68,8 @@ export const TimelineEvents = memo(function TimelineEvents({ iid, window, full, 
     document.addEventListener('pointerdown',close); document.addEventListener('keydown',escape);
     return () => { document.removeEventListener('pointerdown',close); document.removeEventListener('keydown',escape); };
   }, [cluster]);
-  return <div className="timeline-events" ref={container} aria-label="Runtime Events" aria-busy={query.isFetching || !current}>
-    <div className="timeline-row"><div className="timeline-event-summary"><span title="All Events in the selected time window. Nearby Events are merged by their rendered distance.">{count == null ? 'Loading Events…' : `${count} Events`}</span></div>
+  return <div className="timeline-events" ref={container} aria-label="Runtime Events" aria-busy={query.isFetching}>
+    <div className="timeline-row"><div className="timeline-event-summary"><span title="All Events in the selected time window. Nearby Events are merged by their rendered distance.">{count == null ? query.isFetching ? <><SkeletonText width="36px" /> Events</> : 'Events' : `${count} Events`}</span></div>
       <div className="timeline-track timeline-event-track">{groups.map(group => <button key={`${group.first_sequence}:${group.last_sequence}`} data-event-count={group.count} className={`timeline-event-marker event-category-${eventGroupCategory(group)} ${group.count > 1 ? 'is-cluster' : ''}`} style={{ left:`${group.left}%` }}
         title={group.count > 1 ? `${group.count} Events · #${group.first_sequence}–#${group.last_sequence} · Click to inspect` : `#${group.marker!.sequence} ${group.marker!.event_name}`}
         aria-label={group.count > 1 ? `Inspect ${group.count} Events` : `Inspect Event ${group.marker!.sequence}`} aria-haspopup="dialog" aria-expanded={cluster?.first_sequence===group.first_sequence && cluster.last_sequence===group.last_sequence} onClick={event => { anchor.current=event.currentTarget;setCluster(group); }}><span className="timeline-event-dot" aria-hidden="true">{group.count > 1 ? group.count > 99 ? '99+' : group.count : ''}</span></button>)}</div>
@@ -78,9 +79,9 @@ export const TimelineEvents = memo(function TimelineEvents({ iid, window, full, 
       <header><strong>{cluster.count} Runtime {cluster.count===1?'Event':'Events'}</strong><button aria-label="Close Events" onClick={() => setCluster(null)}>×</button></header>
       {cluster.count > 1 ? <div className="timeline-cluster-zoom">{zoomTarget ? <button onClick={()=>{onZoom(zoomTarget);setCluster(null);}}>Zoom into interval</button> : <span className="muted">Same timestamp · ordered by Event sequence</span>}</div> : null}
       {markers.map(marker => <div className={`timeline-event-record event-category-${eventCategory(marker.event_name)}`} key={marker.event_id}><code>#{marker.sequence}</code><span className="timeline-event-kind" title={marker.event_name}><i aria-hidden="true" /><span className="timeline-event-name">{marker.event_name}</span></span><small>{timelineTimestamp(marker.occurred_at_us)}</small><div className="timeline-event-actions"><button onClick={() => { onReplay({ sequence:marker.sequence }); setCluster(null); }} aria-label={`Replay Event ${marker.sequence}`}>Replay here</button><button onClick={event=>{onFork(marker.sequence,event.currentTarget,anchor.current);setCluster(null);}} aria-label={`Fork after Event ${marker.sequence}`}>Fork here</button></div></div>)}
-      {!cluster.marker && details.isPending ? <p className="timeline-message">Loading Event headers…</p> : null}
+      {!cluster.marker && details.isPending ? <RecordsSkeleton label="Loading Event headers" /> : null}
       {details.error ? <div className="timeline-message">{details.error.message}<button onClick={() => void details.refetch()}>Retry</button></div> : null}
-      {!cluster.marker && details.hasNextPage ? <button className="load-more" disabled={details.isFetchingNextPage} onClick={() => void details.fetchNextPage()}>{details.isFetchingNextPage ? 'Loading…' : 'More Events'}</button> : null}
+      {!cluster.marker && details.hasNextPage ? <button className="load-more" disabled={details.isFetchingNextPage} onClick={() => void details.fetchNextPage()}><BusyLabel busy={details.isFetchingNextPage} label="Loading Events">More Events</BusyLabel></button> : null}
     </div>, document.body) : null}
   </div>;
 });

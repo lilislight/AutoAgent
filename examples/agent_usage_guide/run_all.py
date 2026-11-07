@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--http", action="store_true")
     parser.add_argument("--recording", action="store_true", help="Include Host/SQLite recording and Capability examples; requires autoagent[host]")
     options = parser.parse_args()
-    commands = [(name, []) for name in ("llm", "media", "embeddings", "tools", "skills", "mcp", "nodes")]
+    commands = [(name, []) for name in ("llm", "media", "embeddings", "tools", "permissions", "skills", "mcp", "nodes")]
     commands.extend(("providers", ["--backend", backend, "--protocol", protocol])
         for backend in ("openai", "deepseek") for protocol in ("chat", "responses"))
     if options.litellm:
@@ -25,7 +25,7 @@ def main():
     if options.http:
         commands.extend((("mcp_http", []), ("mcp_auth", [])))
     if options.recording:
-        commands.extend((("recording", []), ("capabilities", [])))
+        commands.extend((("recording", []), ("token_usage", []), ("capabilities", [])))
     for name, arguments in commands:
         module = "examples.agent_usage_guide." + name
         print(f"\n>>> {module} {' '.join(arguments)}", flush=True)

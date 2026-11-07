@@ -1,6 +1,5 @@
 """Bounded, source-scoped history queries for local read-only Host and HTTP."""
 
-import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib

@@ -1,4 +1,4 @@
-// Orthogonal routing adapted from the archived UI for V2 definition graphs.
+// Orthogonal routing and shared-lane avoidance for Workflow graphs.
 export const GRAPH_NODE_WIDTH = 232;
 export const GRAPH_NODE_HEIGHT = 106;
 export const GRAPH_ROUTE_CLEARANCE = 18;
@@ -21,7 +21,8 @@ export interface RoutableEdge {
   id: string;
   source: string;
   target: string;
-  order: number;
+  sourceOffset?:number;
+  targetOffset?:number;
 }
 
 export interface GraphRect {
@@ -41,17 +42,17 @@ interface SearchState {
   previous: string | null;
 }
 
-export function sourcePort(position: GraphPoint): GraphPoint {
+export function sourcePort(position: GraphPoint,offset=GRAPH_NODE_HEIGHT/2): GraphPoint {
   return {
     x: position.x + GRAPH_NODE_WIDTH,
-    y: position.y + GRAPH_NODE_HEIGHT / 2,
+    y: position.y + offset,
   };
 }
 
-export function targetPort(position: GraphPoint): GraphPoint {
+export function targetPort(position: GraphPoint,offset=GRAPH_NODE_HEIGHT/2): GraphPoint {
   return {
     x: position.x,
-    y: position.y + GRAPH_NODE_HEIGHT / 2,
+    y: position.y + offset,
   };
 }
 
@@ -62,27 +63,13 @@ export function routeEdgesAroundNodes(
   edgeIds: Iterable<string>,
 ): Record<string, GraphEdgeRoute> {
   const requested = new Set(edgeIds);
-  const parallelLanes = edgeLaneOffsets(edges);
-  const obstacles = nodes.flatMap((node) => {
-    const position = positions[node.id];
-    return position ? [expandedNodeRect(position)] : [];
+  const obstacles = nodes.flatMap(node => positions[node.id] ? [expandedNodeRect(positions[node.id])] : []);
+  const pairs = edges.flatMap(edge => {
+    const source=positions[edge.source],target=positions[edge.target];
+    return source && target ? [{id:edge.id,source:sourcePort(source,edge.sourceOffset),target:targetPort(target,edge.targetOffset),obstacles}] : [];
   });
-  return Object.fromEntries(
-    edges.flatMap((edge) => {
-      if (!requested.has(edge.id)) return [];
-      const sourcePosition = positions[edge.source];
-      const targetPosition = positions[edge.target];
-      if (!sourcePosition || !targetPosition) return [];
-      const points = routeSingleEdge(
-        sourcePosition,
-        targetPosition,
-        obstacles,
-        parallelLanes[edge.id]?.offset ?? 0,
-        parallelLanes[edge.id]?.index ?? 0,
-      );
-      return [[edge.id, { points, label: routeMidpoint(points) }]];
-    }),
-  );
+  const routes=routePortPairs(pairs);
+  return Object.fromEntries(Object.entries(routes).filter(([id])=>requested.has(id)).map(([id,points])=>[id,{points,label:routeMidpoint(points)}]));
 }
 
 export function routeMidpoint(points: GraphPoint[]): GraphPoint {
@@ -107,6 +94,26 @@ export function routeMidpoint(points: GraphPoint[]): GraphPoint {
     remaining -= segment.length;
   }
   return points.at(-1) ?? { x: 0, y: 0 };
+}
+
+/** Wide hit areas are useful except where they would cover a neighbouring Edge. */
+export function routeInteractionWidths(routes:Record<string,GraphPoint[]>):Record<string,number> {
+  const widths:Record<string,number>=Object.fromEntries(Object.keys(routes).map(id=>[id,48]));
+  const segments=Object.entries(routes).flatMap(([id,points])=>points.slice(1).map((b,i)=>({id,a:points[i],b})));
+  for(let i=0;i<segments.length;i++)for(let j=0;j<i;j++){
+    const a=segments[i],b=segments[j];if(a.id===b.id)continue;
+    let gap=Infinity,shared=0;
+    if(a.a.x===a.b.x && b.a.x===b.b.x){
+      gap=Math.abs(a.a.x-b.a.x);shared=Math.min(Math.max(a.a.y,a.b.y),Math.max(b.a.y,b.b.y))-Math.max(Math.min(a.a.y,a.b.y),Math.min(b.a.y,b.b.y));
+    }else if(a.a.y===a.b.y && b.a.y===b.b.y){
+      gap=Math.abs(a.a.y-b.a.y);shared=Math.min(Math.max(a.a.x,a.b.x),Math.max(b.a.x,b.b.x))-Math.max(Math.min(a.a.x,a.b.x),Math.min(b.a.x,b.b.x));
+    }
+    if(gap>0 && gap<48 && shared>24){
+      const width=Math.max(8,gap*.8);
+      widths[a.id]=Math.min(widths[a.id],width);widths[b.id]=Math.min(widths[b.id],width);
+    }
+  }
+  return widths;
 }
 
 export function roundedRoutePath(points: GraphPoint[], radius = 12): string {
@@ -151,90 +158,71 @@ export function segmentIntersectsRect(
   return true;
 }
 
-function routeSingleEdge(
-  sourcePosition: GraphPoint,
-  targetPosition: GraphPoint,
-  obstacles: GraphRect[],
-  laneOffset: number,
-  laneIndex: number,
-): GraphPoint[] {
-  const extraClearance = laneIndex * 8;
-  const laneObstacles = extraClearance ? obstacles.map(rect => ({
-    left: rect.left - extraClearance, top: rect.top - extraClearance,
-    right: rect.right + extraClearance, bottom: rect.bottom + extraClearance,
-  })) : obstacles;
-  const source = sourcePort(sourcePosition);
-  const target = targetPort(targetPosition);
-  const sourceOutside = {
-    x: source.x + GRAPH_ROUTE_CLEARANCE + extraClearance,
-    y: source.y + laneOffset,
-  };
-  const targetOutside = {
-    x: target.x - GRAPH_ROUTE_CLEARANCE - extraClearance,
-    y: target.y + laneOffset,
-  };
-  const routed = routeBetween(sourceOutside, targetOutside, laneObstacles);
-  const points = [
-    source,
-    { x: sourceOutside.x, y: source.y },
-    sourceOutside,
-    ...routed.slice(1, -1),
-    targetOutside,
-    { x: targetOutside.x, y: target.y },
-    target,
-  ];
-  return simplifyOrthogonalPoints(points);
+export interface PortPair {
+  id:string; source:GraphPoint; target:GraphPoint; obstacles:GraphRect[]; bounds?:GraphRect;
+}
+interface VisibilityGrid { points:GraphPoint[]; indexes:Map<string,number>; neighbors:number[][] }
+
+/** Route one batch together: existing Edges have a cost, rather than being invisible. */
+export function routePortPairs(pairs:PortPair[]):Record<string,GraphPoint[]> {
+  const contexts=new Map<string,{obstacles:GraphRect[];bounds?:GraphRect;terminals:GraphPoint[];grid?:VisibilityGrid}>();
+  const entries=pairs.map(pair=>{
+    const start={x:pair.source.x+GRAPH_ROUTE_CLEARANCE,y:pair.source.y};
+    const end={x:pair.target.x-GRAPH_ROUTE_CLEARANCE,y:pair.target.y};
+    const key=JSON.stringify([pair.bounds,pair.obstacles]);
+    let context=contexts.get(key);
+    if(!context){context={obstacles:pair.obstacles,bounds:pair.bounds,terminals:[]};contexts.set(key,context);}
+    context.terminals.push(start,end);
+    return {pair,start,end,context};
+  });
+  const reservations=new RouteReservations(),routes:Record<string,GraphPoint[]>={};
+  // Keep short forward connections direct; later return paths can take outer lanes.
+  entries.sort((a,b)=>Number(a.end.x<a.start.x)-Number(b.end.x<b.start.x) ||
+    manhattanDistance(a.start,a.end)-manhattanDistance(b.start,b.end));
+  for(const {pair,start,end,context} of entries){
+    context.grid??=visibilityGrid(context.terminals,context.obstacles,context.bounds);
+    const {points,indexes,neighbors}=context.grid;
+    const from=indexes.get(pointKey(start)),to=indexes.get(pointKey(end));
+    const path=from!==undefined && to!==undefined?searchOrthogonalPath(points,neighbors,from,to,reservations):null;
+    const routed=path??boundedFallback(start,end,pair.obstacles,pair.bounds);
+    const result=simplifyOrthogonalPoints([pair.source,...routed,pair.target]);
+    reservations.add(result);routes[pair.id]=result;
+  }
+  return routes;
 }
 
-/** Route between explicit handles, including handles on folded Workflow groups. */
-export function routePortPair(source: GraphPoint, target: GraphPoint, obstacles: GraphRect[], bounds?: GraphRect): GraphPoint[] {
-  const start = {x:source.x + GRAPH_ROUTE_CLEARANCE,y:source.y};
-  const end = {x:target.x - GRAPH_ROUTE_CLEARANCE,y:target.y};
-  return simplifyOrthogonalPoints([source,...routeBetween(start,end,obstacles,bounds),target]);
+function visibilityGrid(terminals:GraphPoint[],obstacles:GraphRect[],bounds?:GraphRect):VisibilityGrid {
+  const lane=14;
+  const xValues=uniqueSorted([...terminals.map(p=>p.x),...obstacles.flatMap(r=>[r.left-lane,r.left,r.right,r.right+lane]),...(bounds?[bounds.left,bounds.right]:[])]);
+  const yValues=uniqueSorted([...terminals.map(p=>p.y),...obstacles.flatMap(r=>[r.top-lane,r.top,r.bottom,r.bottom+lane]),...(bounds?[bounds.top,bounds.bottom]:[])]);
+  const points:GraphPoint[]=[],indexes=new Map<string,number>();
+  for(const x of xValues)for(const y of yValues){
+    const point={x,y};
+    if(bounds && (x<bounds.left || x>bounds.right || y<bounds.top || y>bounds.bottom))continue;
+    if(pointInsideAnyObstacle(point,obstacles))continue;
+    indexes.set(pointKey(point),points.length);points.push(point);
+  }
+  return {points,indexes,neighbors:buildVisibilityNeighbors(points,obstacles)};
 }
 
-function routeBetween(
-  start: GraphPoint,
-  end: GraphPoint,
-  obstacles: GraphRect[],
-  bounds?: GraphRect,
-): GraphPoint[] {
-  const xValues = uniqueSorted([
-    start.x,
-    end.x,
-    ...obstacles.flatMap((rect) => [rect.left, rect.right]),
-    ...(bounds ? [bounds.left,bounds.right] : []),
-  ]);
-  const yValues = uniqueSorted([
-    start.y,
-    end.y,
-    ...obstacles.flatMap((rect) => [rect.top, rect.bottom]),
-    ...(bounds ? [bounds.top,bounds.bottom] : []),
-  ]);
-  const points: GraphPoint[] = [];
-  const pointIndex = new Map<string, number>();
-  for (const x of xValues) {
-    for (const y of yValues) {
-      const point = { x, y };
-      if(bounds && (x<bounds.left||x>bounds.right||y<bounds.top||y>bounds.bottom))continue;
-      if (pointInsideAnyObstacle(point, obstacles)) continue;
-      pointIndex.set(pointKey(point), points.length);
-      points.push(point);
+class RouteReservations {
+  private horizontal=new Map<number,[number,number][]>();
+  private vertical=new Map<number,[number,number][]>();
+  add(points:GraphPoint[]){
+    for(let i=1;i<points.length;i++){
+      const a=points[i-1],b=points[i],horizontal=a.y===b.y;
+      const map=horizontal?this.horizontal:this.vertical,key=horizontal?a.y:a.x;
+      const low=horizontal?Math.min(a.x,b.x):Math.min(a.y,b.y),high=horizontal?Math.max(a.x,b.x):Math.max(a.y,b.y);
+      const ranges=map.get(key)??[];ranges.push([low,high]);map.set(key,ranges);
     }
   }
-  const startIndex = pointIndex.get(pointKey(start));
-  const endIndex = pointIndex.get(pointKey(end));
-  if (startIndex === undefined || endIndex === undefined) {
-    return boundedFallback(start,end,obstacles,bounds);
+  cost(a:GraphPoint,b:GraphPoint){
+    const horizontal=a.y===b.y,map=horizontal?this.horizontal:this.vertical;
+    const low=horizontal?Math.min(a.x,b.x):Math.min(a.y,b.y),high=horizontal?Math.max(a.x,b.x):Math.max(a.y,b.y);
+    let shared=0;
+    for(const [from,to] of map.get(horizontal?a.y:a.x)??[])shared+=Math.max(0,Math.min(high,to)-Math.max(low,from));
+    return shared*12;
   }
-  const neighbors = buildVisibilityNeighbors(points, obstacles);
-  const path = searchOrthogonalPath(
-    points,
-    neighbors,
-    startIndex,
-    endIndex,
-  );
-  return path ?? boundedFallback(start,end,obstacles,bounds);
 }
 
 function boundedFallback(start:GraphPoint,end:GraphPoint,obstacles:GraphRect[],bounds?:GraphRect):GraphPoint[]{
@@ -290,6 +278,7 @@ function searchOrthogonalPath(
   neighbors: number[][],
   start: number,
   end: number,
+  reservations:RouteReservations,
 ): GraphPoint[] | null {
   const queue = new MinHeap<SearchState>((state) => state.estimate);
   const best = new Map<string, number>();
@@ -325,7 +314,7 @@ function searchOrthogonalPath(
       const cost =
         current.cost +
         manhattanDistance(points[current.point], points[neighbor]) +
-        bendCost;
+        bendCost + reservations.cost(points[current.point],points[neighbor]);
       const nextKey = stateKey(neighbor, direction);
       if (cost >= (best.get(nextKey) ?? Number.POSITIVE_INFINITY)) continue;
       const next: SearchState = {
@@ -373,26 +362,6 @@ function fallbackOuterRoute(
     { x: end.x, y },
     end,
   ]);
-}
-
-function edgeLaneOffsets(edges: RoutableEdge[]): Record<string, { offset: number; index: number }> {
-  const groups = new Map<string, RoutableEdge[]>();
-  for (const edge of edges) {
-    const key = `${edge.source}\u0000${edge.target}`;
-    groups.set(key, [...(groups.get(key) ?? []), edge]);
-  }
-  const result: Record<string, { offset: number; index: number }> = {};
-  for (const group of groups.values()) {
-    group.sort(
-      (left, right) =>
-        left.order - right.order || left.id.localeCompare(right.id),
-    );
-    const center = (group.length - 1) / 2;
-    group.forEach((edge, index) => {
-      result[edge.id] = { offset: (index - center) * 12, index };
-    });
-  }
-  return result;
 }
 
 function expandedNodeRect(position: GraphPoint): GraphRect {

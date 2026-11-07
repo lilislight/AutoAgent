@@ -17,14 +17,14 @@ from .scheduling import (
     LoopBoundaryResolution,
     occurrence_key,
 )
-from ..commands.models import SYSTEM_COMMAND_IDS
+from ..commands.models import SYSTEM_COMMAND_IDS, INLINE_COMMAND_IDS
 from .values import DurableValue, freeze, thaw
 from ._chunked import ChunkedUnits, runtime_mapping, child_units
 from ..context import ContextPatch
 from .events import EdgeConditionResult, _patch_to_record, _patch_from_record
 
 
-RUNTIME_STATE_SCHEMA_VERSION = 17
+RUNTIME_STATE_SCHEMA_VERSION = 19
 InvocationStatus = Literal[
     "created", "running", "waiting", "settling", "completed", "failed", "cancelled"
 ]
@@ -46,6 +46,7 @@ class WaitState:
     resumed_at_us: int | None = None
     kind: str = "external"
     registered_sequence: int = 0
+    deadline_at_us: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,7 @@ class OperatorCallState:
     execution_duration_ns: int | None = None
     retry_attempt: int = 0
     retry_at_us: int | None = None
+    deadline_at_us: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +96,7 @@ class NodeExecutionState:
     phase: str = "none"
     completed_stages: tuple[str, ...] = ()
     mapped_input: DurableValue = None
-    resolved_capability_id: str | None = None
-    resolved_operator_id: str | None = None
+    capability_bindings: DurableValue = field(default_factory=lambda: freeze({}))
     aggregate_output: DurableValue = None
     pending_context_patch: ContextPatch = ContextPatch()
     routing: tuple[EdgeConditionResult, ...] = ()
@@ -103,6 +104,7 @@ class NodeExecutionState:
     fault: RuntimeErrorInfo | None = None
     reused_calls: DurableValue = field(default_factory=lambda: freeze({}))
     command_inputs: DurableValue = field(default_factory=lambda: freeze({}))
+    inline_commands: DurableValue = field(default_factory=lambda: freeze({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -618,6 +620,9 @@ def _validate_scheduler(
     _validate_waits(scheduler.waits, occurrences, session)
     from .waits import validate_wait_call
     for wait in scheduler.waits.values():
+        call = scheduler.operator_calls.get(wait.id)
+        if wait.deadline_at_us != (call.deadline_at_us if call is not None else None):
+            raise ValueError('Wait deadline must match its Command Call.')
         if wait.kind != "external":
             validate_wait_call(wait, scheduler.operator_calls)
     _validate_child_plans(child_plans, occurrences)
@@ -719,6 +724,7 @@ def _validate_operator_calls(
             raise ValueError("Operator Call references an unknown Node Occurrence.")
         _non_negative(call.retry_attempt, "Operator Call retry_attempt")
         _optional_non_negative(call.retry_at_us, "Operator Call retry_at_us")
+        _optional_non_negative(call.deadline_at_us, "Operator Call deadline_at_us")
         _non_negative(call.unit_index, "Operator Call unit_index")
         _non_negative(call.queue_duration_ns, "Operator Call queue_duration_ns")
         _optional_non_negative(call.execution_duration_ns, "Operator Call execution_duration_ns")
@@ -774,7 +780,6 @@ def _validate_waits(
 ) -> None:
     if not isinstance(waits, Mapping):
         raise TypeError("Scheduler waits must be a mapping.")
-    active_occurrence_ids: set[str] = set()
     for key, wait in waits.items():
         _non_empty_string_value(key, "Wait key")
         if not isinstance(wait, WaitState):
@@ -789,6 +794,7 @@ def _validate_waits(
         if wait.kind not in {'external', 'signal', 'timer', 'child', 'any'}:
             raise ValueError('Invalid Wait kind.')
         _non_negative(wait.registered_sequence, "Wait registered_sequence")
+        _optional_non_negative(wait.deadline_at_us, "Wait deadline_at_us")
         if wait.kind != 'external' and wait.request is not None:
             from .waits import validate_condition
             validate_condition(wait.kind, wait.request)
@@ -810,17 +816,12 @@ def _validate_waits(
         if wait.status in {"waiting", "cancelled"} and wait.response is not None:
             raise ValueError("A non-resumed Wait cannot carry a response.")
         if wait.status == "waiting":
-            if occurrence.status != "waiting":
-                raise ValueError("A waiting Wait requires a waiting Node Occurrence.")
-            if wait.occurrence_id in active_occurrence_ids:
-                raise ValueError(
-                    "A Node Occurrence cannot own multiple waiting Waits."
-                )
-            active_occurrence_ids.add(wait.occurrence_id)
+            if occurrence.status not in {"waiting", "running"}:
+                raise ValueError("A waiting Wait requires an active Node Occurrence.")
         elif wait.status == "cancelled":
-            if occurrence.status != "cancelled":
+            if occurrence.status == "skipped":
                 raise ValueError(
-                    "A cancelled Wait requires a cancelled Node Occurrence."
+                    "A cancelled Wait cannot belong to a skipped Node Occurrence."
                 )
         elif occurrence.status == "skipped":
             raise ValueError("A resumed Wait cannot belong to a skipped Occurrence.")
@@ -1216,6 +1217,7 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
                     "unit_index": item.unit_index,
                     "retry_attempt": item.retry_attempt,
                     "retry_at_us": item.retry_at_us,
+                    "deadline_at_us": item.deadline_at_us,
                     "status": item.status,
                     "input": thaw(item.input),
                     "output": thaw(item.output),
@@ -1237,6 +1239,7 @@ def _invocation_record(value: InvocationState | ChildResult | None) -> dict[str,
                     "created_at_us": item.created_at_us,
                     "resumed_at_us": item.resumed_at_us,
                     "kind": item.kind, "registered_sequence": item.registered_sequence,
+                    "deadline_at_us": item.deadline_at_us,
                 }
                 for key, item in value.scheduler.waits.items()
             },
@@ -1514,6 +1517,7 @@ def _call_from_record(value: object) -> OperatorCallState:
         unit_index=_integer(record, "unit_index"),
         retry_attempt=_integer(record, "retry_attempt"),
         retry_at_us=_optional_integer(record, "retry_at_us"),
+        deadline_at_us=_optional_integer(record, "deadline_at_us"),
         status=status,  # type: ignore[arg-type]
         input=freeze(record.get("input")),
         output=freeze(record.get("output")),
@@ -1539,6 +1543,7 @@ def _wait_from_record(value: object) -> WaitState:
         created_at_us=_integer(record, "created_at_us"),
         resumed_at_us=_optional_integer(record, "resumed_at_us"),
         kind=_string(record, "kind"), registered_sequence=_integer(record, "registered_sequence"),
+        deadline_at_us=_optional_integer(record, "deadline_at_us"),
     )
 
 
@@ -1718,8 +1723,7 @@ def _boolean(record: dict[str, object], key: str) -> bool:
 def _execution_record(value: NodeExecutionState) -> dict[str, object]:
     return {
         "phase": value.phase, "completed_stages": list(value.completed_stages), "mapped_input": thaw(value.mapped_input),
-        "resolved_capability_id": value.resolved_capability_id,
-        "resolved_operator_id": value.resolved_operator_id,
+        "capability_bindings": thaw(value.capability_bindings),
         "aggregate_output": thaw(value.aggregate_output),
         "pending_context_patch": _patch_to_record(value.pending_context_patch),
         "routing": [{"edge_id": r.edge_id, "selected": r.selected, "duration_ns": r.duration_ns} for r in value.routing],
@@ -1727,6 +1731,7 @@ def _execution_record(value: NodeExecutionState) -> dict[str, object]:
         "fault": _error_record(value.fault),
         "reused_calls": thaw(value.reused_calls),
         "command_inputs": thaw(value.command_inputs),
+        "inline_commands": thaw(value.inline_commands),
     }
 
 
@@ -1735,8 +1740,7 @@ def _execution_from_record(record: object) -> NodeExecutionState:
         raise TypeError("Node execution must be a mapping.")
     return NodeExecutionState(
         phase=_string(record, "phase"), completed_stages=tuple(record["completed_stages"]), mapped_input=freeze(record.get("mapped_input")),
-        resolved_capability_id=_optional_string(record, "resolved_capability_id"),
-        resolved_operator_id=_optional_string(record, "resolved_operator_id"),
+        capability_bindings=freeze(record.get("capability_bindings", {})),
         aggregate_output=freeze(record.get("aggregate_output")),
         pending_context_patch=_patch_from_record(record.get("pending_context_patch")),
         routing=tuple(EdgeConditionResult(**item) for item in record["routing"]),
@@ -1744,13 +1748,26 @@ def _execution_from_record(record: object) -> NodeExecutionState:
         fault=_error_from_record(record.get("fault")),
         reused_calls=freeze(record.get("reused_calls", {})),
         command_inputs=freeze(record.get("command_inputs", {})),
+        inline_commands=freeze(record.get("inline_commands", {})),
     )
 
 
 def _validate_execution(execution: NodeExecutionState) -> None:
     if not isinstance(execution, NodeExecutionState):
         raise TypeError("Occurrence execution must be NodeExecutionState.")
-    for cache in (execution.reused_calls, execution.command_inputs):
+    if not isinstance(execution.inline_commands, Mapping):
+        raise TypeError("Nested Commands must be a mapping.")
+    for key, call in execution.inline_commands.items():
+        if (not isinstance(call, Mapping) or set(call) != {"id", "parent_call_id", "operator_id", "unit_index",
+                "key", "status", "input", "output", "deadline_at_us"} or key != call["id"]
+                or call["status"] not in {"running", "completed"}
+                or call["operator_id"] not in INLINE_COMMAND_IDS):
+            raise ValueError("Invalid nested Command record.")
+        for name in ("id", "parent_call_id", "key"):
+            _non_empty_string_value(call[name], "Nested Command " + name)
+        _non_negative(call["unit_index"], "Nested Command unit_index")
+        _optional_non_negative(call["deadline_at_us"], "Nested Command deadline")
+    for cache in (execution.reused_calls, execution.command_inputs, execution.capability_bindings):
         if not isinstance(cache, Mapping):
             raise TypeError('Recovery Unit caches must be mappings.')
         for key in cache:
@@ -1768,11 +1785,12 @@ def _validate_execution(execution: NodeExecutionState) -> None:
         raise ValueError("Unknown completed execution stage.")
     if len(set(execution.completed_stages)) != len(execution.completed_stages):
         raise ValueError("Completed execution stages cannot repeat.")
-    for value in (execution.resolved_capability_id, execution.resolved_operator_id):
-        _optional_non_empty_string(value, "Resolved execution identity")
-    if "capability_resolved" in execution.completed_stages and (
-        execution.resolved_capability_id is None or execution.resolved_operator_id is None
-    ):
+    for binding in execution.capability_bindings.values():
+        if not isinstance(binding, Mapping) or set(binding) != {"capability_id", "operator_id"}:
+            raise ValueError("Invalid per-unit Capability binding.")
+        for value in binding.values():
+            _non_empty_string_value(value, "Resolved execution identity")
+    if "capability_resolved" in execution.completed_stages and not execution.capability_bindings:
         raise ValueError("Resolved capability requires durable identities.")
     if not isinstance(execution.pending_context_patch, ContextPatch):
         raise TypeError("Execution pending patch must be ContextPatch.")

@@ -16,11 +16,12 @@
       })();
     </script>
     <link rel="icon" type="image/svg+xml" href="/src/autoagent.svg" />
+    <link rel="stylesheet" href="/src/loading.css" />
     <!--AUTOAGENT_CONFIG-->
     <title>AutoAgent Tracing</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="app-boot-loading" role="status" aria-label="Loading AutoAgent"><span class="loading-spinner" aria-hidden="true"></span></div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

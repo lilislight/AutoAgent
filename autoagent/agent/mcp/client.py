@@ -87,6 +87,17 @@ class MCPClient:
         self._generation = 0
         self._registries = WeakSet()
         self._legacy_resources = set()
+        self._message_observers = set()
+
+    def observe_messages(self, callback):
+        """Observe SDK messages without replacing application callbacks.
+
+        Observers run synchronously on the owning loop and must not block or
+        issue RPCs. Use them to signal a consuming task; remove them with the
+        returned function when that task's lifespan ends.
+        """
+        self._message_observers.add(callback)
+        return lambda: self._message_observers.discard(callback)
 
     @property
     def generation(self) -> int:
@@ -201,6 +212,8 @@ class MCPClient:
                 async def observe_message(message):
                     if isinstance(message, Exception) and self._is_connection_error(message):
                         self._failure = self._error(message, "connection")
+                    for callback in tuple(self._message_observers):
+                        callback(message)
                     if message_handler is not None:
                         await message_handler(message)
                 options["message_handler"] = observe_message

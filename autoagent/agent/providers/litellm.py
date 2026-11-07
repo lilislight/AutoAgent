@@ -93,6 +93,9 @@ class _LiteLLMTransport:
         return await getattr(sdk, operation)(**params)
 
     def _error(self, error):
+        from autoagent.core.usage import UsageAccountingError
+        if isinstance(error, UsageAccountingError):
+            return error
         status = getattr(error, "status_code", None)
         return self.error_type(str(error), provider_id=self.provider_id, protocol=self.protocol,
             status_code=status, request_id=getattr(error, "request_id", None),

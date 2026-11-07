@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-from autoagent import ConditionContext, Edge, Node, Spawn, Wait, Workflow
+from fastapi.routing import APIRoute
+from autoagent import ConditionContext, Edge, Node, Recovery, Spawn, Wait, Workflow
 from autoagent.host import AutoAgentHost, HostCapacityError, HostSettings
 from autoagent.host.persistence.datasets import TraceDatasets
 from autoagent.host.persistence.reading import SourceReader
@@ -142,7 +143,7 @@ class LiveTraceTests(unittest.IsolatedAsyncioTestCase):
             root=await host.execute(wf.id,{'text':'ask'},entry_node_id='approval')
             await host.join(root)
             router=create_router(host,settings=ServerSettings(trace_coalesce_ms=0))
-            endpoint=next(route.endpoint for route in router.routes if route.path.endswith('/trace-watch'))
+            endpoint=next(route.endpoint for route in router.routes if isinstance(route, APIRoute) and route.path.endswith('/trace-watch'))
             response=await endpoint(root.invocation_id)
             iterator=response.body_iterator
             self.assertIn('retry:',await anext(iterator))
@@ -176,12 +177,12 @@ class LiveTraceTests(unittest.IsolatedAsyncioTestCase):
             if len(attempts) == 1:
                 raise ValueError('temporary failure')
             return value
-        wf = Workflow('live-recover', nodes=[Node('work', flaky)])
+        wf = Workflow('live-recover', nodes=[Node('work', flaky, recovery_mode=Recovery('replay_safe'))])
         async with self.host(wf) as host:
             root = await host.execute(wf.id, {'text': 'retry'}, entry_node_id='work')
             await host.join(root)
             router = create_router(host, settings=ServerSettings(trace_coalesce_ms=0, trace_heartbeat_seconds=.1))
-            endpoint = next(route.endpoint for route in router.routes if route.path.endswith('/trace-watch'))
+            endpoint = next(route.endpoint for route in router.routes if isinstance(route, APIRoute) and route.path.endswith('/trace-watch'))
             response = await endpoint(root.invocation_id)
             iterator = response.body_iterator
             try:

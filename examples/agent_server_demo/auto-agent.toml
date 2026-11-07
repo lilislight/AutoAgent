@@ -1,0 +1,11 @@
+schema_version = 1
+
+[project]
+name = "agent-server-demo"
+description = "Interactive Agent, approvals, user questions and subagents through Server and UI"
+
+[[workflows]]
+entrypoint = "agent_demo.project:main_agent"
+
+[[workflows]]
+entrypoint = "agent_demo.project:research_agent"

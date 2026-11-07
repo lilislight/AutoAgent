@@ -729,10 +729,14 @@ class PostgreSQLHostTests(HostTests):
 class HostConfigurationTests(unittest.TestCase):
     def test_env_example_covers_every_host_setting(self):
         """Document every environment setting used by the actual parser."""
+        from autoagent.host.agent_context import HostAgentContext
+        from autoagent.host.project import Project
+
         names = {
             value
-            for value in HostSettings.from_environment.__func__.__code__.co_consts
-            if isinstance(value, str) and value.startswith("AUTOAGENT_")
+            for parser in (HostSettings.from_environment.__func__, HostAgentContext.__init__, Project.load)
+            for value in parser.__code__.co_consts
+            if isinstance(value, str) and value.startswith("AUTOAGENT_") and value.isidentifier()
         }
         documented = {
             line.split("=", 1)[0]

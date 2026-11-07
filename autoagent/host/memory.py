@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
 import heapq
 import logging
+import math
 import os
 from pathlib import Path
 import threading
 import time
+from uuid import uuid4
 
-from .residency import automatic_budget
+from .memory_resources import MemoryResources
+from .memory_history import (DEFAULT_HISTORY_POINTS, MAX_HISTORY_POINTS, MAX_HISTORY_SECONDS, WIDTH,
+                             MemoryHistory, history_points)
 
 log = logging.getLogger(__name__)
 
@@ -94,50 +97,6 @@ def process_sample():
     return result
 
 
-def cgroup_directory():
-    """Locate this process's memory controller, including nested cgroup v2."""
-    try:
-        groups = Path('/proc/self/cgroup').read_text().splitlines()
-        mounts = Path('/proc/self/mountinfo').read_text().splitlines()
-        for group in groups:
-            _, controllers, relative = group.split(':', 2)
-            for mount in mounts:
-                before, after = mount.split(' - ', 1)
-                fs, _, options = after.split(' ', 2)
-                if not (fs == 'cgroup2' and not controllers or fs == 'cgroup' and 'memory' in controllers.split(',') and 'memory' in options.split(',')):
-                    continue
-                fields = before.split()
-                root, point = fields[3:5]
-                relative_path = Path(relative).relative_to(root)
-                candidate = Path(point) / relative_path
-                if candidate.is_dir():
-                    return candidate, fs == 'cgroup2'
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
-
-
-def cgroup_sample(location):
-    """Controller usage includes sibling processes and file cache, unlike RSS."""
-    if location is None:
-        return None
-    directory, unified = location
-    result = dict(scope='shared_cgroup', current_bytes=None, limit_bytes=None, events={})
-    for key, name in (('current_bytes', 'memory.current' if unified else 'memory.usage_in_bytes'),
-                      ('limit_bytes', 'memory.max' if unified else 'memory.limit_in_bytes')):
-        try:
-            value = int((directory / name).read_text().strip())
-            result[key] = value if value < 1 << 60 else None
-        except (OSError, ValueError):
-            pass
-    if unified:
-        try:
-            result['events'] = {key: int(value) for key, value in (line.split() for line in (directory / 'memory.events').read_text().splitlines())}
-        except (OSError, ValueError):
-            pass
-    return result
-
-
 class MemoryMonitor:
     """A process sampler independent of the Runtime loop, with cached Host counters.
 
@@ -150,16 +109,17 @@ class MemoryMonitor:
         self.host = host
         self.settings = host.settings
         self.enabled = self.settings.memory_monitor_enabled
-        self.history = deque(maxlen=self.settings.memory_monitor_history_samples)
+        self.history = MemoryHistory(self.settings.memory_monitor_history_samples,
+                                     self.settings.memory_monitor_history_seconds)
+        self.monitor_id = uuid4().hex
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = self.task = None
-        self.location = cgroup_directory()
+        self.resources = MemoryResources(self.settings.memory_budget_bytes)
         self.latest = None
         self.counters = None
         self.pressure = 'unknown'
         self.next_sample = 0
-        self.budget = self.settings.memory_budget_bytes or automatic_budget()
 
     async def start(self):
         if not self.enabled:
@@ -187,6 +147,9 @@ class MemoryMonitor:
             if last_thread is not None:
                 await asyncio.to_thread(last_thread.join)
             self.thread = None
+        with self.lock:
+            self.history.clear()
+            self.latest = self.counters = None
 
     async def ready(self):
         """Refresh once after startup without making telemetry a readiness dependency."""
@@ -224,6 +187,7 @@ class MemoryMonitor:
                         checkpoint_jobs=len(residency.jobs) if residency is not None else 0,
                         requests=len(self.host._operations), request_bytes=self.host._request_bytes,
                         persistence=health,
+                        projections=await self.host._persistence.projection_cache_statistics() if self.host._persistence is not None else {},
                         residency=dict(estimated_bytes=estimated, estimated_graphs=known,
                                        tail_bytes=tail_bytes, tail_events=tail_events,
                                        estimates='cached; may be stale; not additive with process RSS', top_sessions=top))
@@ -242,48 +206,69 @@ class MemoryMonitor:
     def _sample(self, *, process=None):
         started = time.monotonic()
         sample = dict(timestamp_us=time.time_ns() // 1000, monotonic_seconds=started,
-                      pid=os.getpid(), process=process if process is not None else process_sample(), cgroup=cgroup_sample(self.location))
+                      pid=os.getpid(), process=process if process is not None else process_sample())
+        resources = self.resources.sample()
+        sample['cgroup'] = resources.cgroup
+        sample['resources'] = resources.metadata()
         runtime = self.host._runtime
         residency = runtime.residency if runtime is not None else None
-        budget = residency.budget if residency is not None else self.budget
+        budget = residency.budget if residency is not None and self.settings.memory_budget_bytes else resources.budget_bytes
         rss = sample['process']['rss_bytes']
         ratio = rss / budget if rss is not None and budget else None
-        pressure = 'unknown' if ratio is None else (
-            'critical' if ratio >= self.settings.memory_critical_ratio else
-            'high' if ratio >= self.settings.memory_high_ratio else
-            'normal' if ratio <= self.settings.memory_target_ratio else
+        effective_ratio = max(ratio or 0., resources.pressure_ratio()) if ratio is not None or resources.constraints else None
+        pressure = 'unknown' if effective_ratio is None else (
+            'critical' if effective_ratio >= self.settings.memory_critical_ratio else
+            'high' if effective_ratio >= self.settings.memory_high_ratio else
+            'normal' if effective_ratio <= self.settings.memory_target_ratio else
             self.pressure if self.pressure in ('high', 'critical') else 'normal')
         if pressure != self.pressure:
             if pressure in ('high', 'critical'):
-                log.warning('Host memory pressure=%s rss_bytes=%s budget_bytes=%s', pressure, rss, budget)
+                log.warning('Host memory pressure=%s rss_bytes=%s budget_bytes=%s shared_pressure=%.3f',
+                            pressure, rss, budget, resources.pressure_ratio())
             elif self.pressure in ('high', 'critical'):
                 log.info('Host memory pressure=%s rss_bytes=%s budget_bytes=%s', pressure, rss, budget)
             self.pressure = pressure
         sample.update(budget_bytes=budget or None, budget_ratio=ratio, pressure=pressure)
         with self.lock:
+            if self.stop_event.is_set() or self.latest is not None and started <= self.latest['monotonic_seconds']:
+                return
             sample['host'] = self.counters
             sample['sampling_ms'] = (time.monotonic() - started) * 1000
             self.latest = sample
-            self.history.append(sample)
+            if self.enabled:
+                self.history.append(sample)
 
-    def snapshot(self, *, history=0):
+    def snapshot(self, *, history=0, window_seconds=None, points=DEFAULT_HISTORY_POINTS):
         if type(history) is not int or not 0 <= history <= self.settings.memory_monitor_history_samples:
             raise ValueError('history must be within the configured memory history capacity.')
-        with self.lock:
-            latest = deepcopy(self.latest)
-            samples = deepcopy(list(self.history)[-history:]) if history else []
+        if type(points) is not int or not 2 <= points <= MAX_HISTORY_POINTS:
+            raise ValueError(f'points must be between 2 and {MAX_HISTORY_POINTS}.')
+        if window_seconds is not None and (isinstance(window_seconds, bool) or not isinstance(window_seconds, (int, float))
+                or not math.isfinite(window_seconds) or not 0 < window_seconds <= MAX_HISTORY_SECONDS):
+            raise ValueError(f'window_seconds must be positive and at most {MAX_HISTORY_SECONDS}.')
         now = time.monotonic()
+        with self.lock:
+            latest = self.latest
+            packed, retained = self.history.capture(history=history, window_seconds=window_seconds, now=now)
+            storage_bytes = self.history.storage_bytes
+        latest = deepcopy(latest)
         age = max(0, now - latest['monotonic_seconds']) if latest else None
-        return dict(enabled=self.enabled, interval_seconds=self.settings.memory_monitor_interval_seconds,
-                    history_capacity=self.history.maxlen, sample_age_seconds=age,
+        return dict(enabled=self.enabled, monitor_id=self.monitor_id,
+                    interval_seconds=self.settings.memory_monitor_interval_seconds,
+                    history_capacity=self.history.capacity, history_retention_seconds=self.history.retention_seconds,
+                    history_retained_samples=retained, history_storage_bytes=storage_bytes,
+                    history_count=len(packed) // WIDTH,
+                    history_points_limit=points, sample_age_seconds=age,
                     stale=age is None or age > self.settings.memory_monitor_interval_seconds * 3,
-                    latest=latest, history=samples)
+                    latest=latest, history=history_points(packed, points))
 
 
 def prometheus(snapshot):
     """Small dependency-free exposition with fixed labels and no Session IDs."""
     sample = snapshot['latest']
-    metrics = dict(enabled=int(snapshot['enabled']), stale=int(snapshot['stale']))
+    metrics = dict(enabled=int(snapshot['enabled']), stale=int(snapshot['stale']),
+                   history_storage_bytes=snapshot['history_storage_bytes'],
+                   history_retained_samples=snapshot['history_retained_samples'])
     if sample:
         metrics.update(rss_bytes=sample['process']['rss_bytes'], peak_rss_bytes=sample['process']['peak_rss_bytes'],
                        budget_bytes=sample['budget_bytes'], sample_age_seconds=snapshot['sample_age_seconds'])

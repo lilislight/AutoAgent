@@ -36,11 +36,39 @@ class MCPToolRegistry:
         self._snapshot = None
         self._revision = 0
         self._generation = None
+        self._observers = set()
         client._registries.add(self)
+
+    def subscribe(self, callback):
+        """Observe completed catalog publications on the client's owning loop.
+
+        The callback is synchronous so reconnect cannot finish before dependent
+        registries have published the new generation. The returned function
+        removes the observer; clients and transports remain application-owned.
+        """
+        self._observers.add(callback)
+        return lambda: self._observers.discard(callback)
+
+    def _notify(self):
+        for callback in tuple(self._observers):
+            callback(self)
 
     @property
     def revision(self) -> int:
         return self._revision
+
+    @property
+    def server_id(self) -> str:
+        return self._client.config.server_id
+
+    @property
+    def generation(self) -> int:
+        return self._client.generation
+
+    @property
+    def metadata(self) -> dict:
+        """Full discovery contracts, including output schemas and annotations."""
+        return {name: tool.metadata for name, tool in self.snapshot._tools.items()}
 
     @property
     def snapshot(self) -> ToolSet:
@@ -67,6 +95,7 @@ class MCPToolRegistry:
             self._snapshot = replacement
             self._generation = generation
             self._revision += 1
+            self._notify()
             return replacement
 
     async def _restore(self, sdk, generation):
@@ -81,6 +110,7 @@ class MCPToolRegistry:
         self._snapshot = replacement
         self._generation = generation
         self._revision += 1
+        self._notify()
 
     async def aprepare(self) -> None:
         await self._client.aprepare()
@@ -94,6 +124,37 @@ class MCPToolRegistry:
     async def watch(self, *, policy=None):
         """Refresh on subscribed changes and expose resync boundaries to the caller."""
         await self.aprepare()
+        if self._client.protocol_version < "2026-07-28":
+            from .recovery import MCPChangeEvent, MCPSubscriptionUpdate
+            changed = asyncio.Event()
+            def notice(message):
+                if getattr(message, "method", None) == "notifications/tools/list_changed" or (
+                    isinstance(message, Exception) and self._client._is_connection_error(message)
+                ):
+                    changed.set()
+            unsubscribe = self._client.observe_messages(notice)
+            try:
+                # Subscribe before the first refetch so a change during initial
+                # discovery cannot disappear between discovery and listening.
+                await self.refresh()
+                yield MCPSubscriptionUpdate(type="connected", generation=self._client.generation, resync_required=True,
+                    honored={})
+                while True:
+                    await changed.wait()
+                    changed.clear()
+                    previous = self._client.generation
+                    if not self._client.is_connected:
+                        await self._client.areconnect(policy=policy, expected_generation=previous)
+                    await self.refresh()
+                    if self._client.generation != previous:
+                        yield MCPSubscriptionUpdate(type="connected", generation=self._client.generation, resync_required=True,
+                            honored={})
+                    else:
+                        yield MCPSubscriptionUpdate(type="notification", generation=self._client.generation,
+                            event=MCPChangeEvent(type="tools_list_changed"))
+            finally:
+                unsubscribe()
+            return
         async with self._client.listen_resilient(tools_list_changed=True, policy=policy) as subscription:
             async for update in subscription:
                 await self.refresh()

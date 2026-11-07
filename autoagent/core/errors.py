@@ -14,6 +14,13 @@ class NodeTimeoutError(TimeoutError, AutoAgentError):
         super().__init__(f"Node {node_id!r} Operator Call exceeded {seconds:g} seconds.")
 
 
+class WaitTimeoutError(TimeoutError, AutoAgentError):
+    """A durable Command wait reached its recorded deadline."""
+
+    def __init__(self, node_id: str):
+        super().__init__(f"Node {node_id!r} wait reached its deadline.")
+
+
 class WorkflowCompileError(AutoAgentError):
     """The Workflow cannot be compiled into executable IR."""
 

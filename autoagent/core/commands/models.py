@@ -50,6 +50,15 @@ class RuntimeObservation(BaseModel):
     waits: list[RuntimeWait] = Field(default_factory=list)
     version: str = ""
 
+    def target_only(self):
+        """Observe this Invocation without descendant waits or their changing versions."""
+        from ..runtime.state import child_input_digest
+        waits = [wait for wait in self.waits if wait.handle == self.handle]
+        version = child_input_digest({'handle': self.handle.model_dump(), 'status': self.status,
+            'pending_outcome': self.pending_outcome,
+            'waits': sorted((wait.handle.session_id, wait.wait_id, wait.kind) for wait in waits)})
+        return self.model_copy(update={'waits': waits, 'version': version})
+
 
 class SystemCommand(ABC):
     """Definition of a Core primitive, not a user-supplied Runtime mutator."""
@@ -76,7 +85,7 @@ class Wait(SystemCommand):
 
 @dataclass(frozen=True, slots=True)
 class Spawn(SystemCommand):
-    workflow: Workflow
+    workflow: Workflow | str
     entry_node_id: str
     id: ClassVar[str] = 'system_command:spawn'
 
@@ -199,4 +208,6 @@ class Timer(SystemCommand):
     id: ClassVar[str] = 'system_command:timer'
 
 
-SYSTEM_COMMAND_IDS = frozenset({Spawn.id, Await.id, Wait.id, Resume.id, Status.id, Cancel.id, AwaitAny.id, Timer.id, 'system_command:send_signal', 'system_command:receive_signal', 'system_command:await_signal', 'system_command:select'})
+SYSTEM_COMMAND_IDS = frozenset({Spawn.id, Await.id, Wait.id, Resume.id, Status.id, Cancel.id, AwaitAny.id, Timer.id, 'system_command:has_signal', 'system_command:send_signal', 'system_command:receive_signal', 'system_command:await_signal', 'system_command:select'})
+INLINE_COMMAND_IDS = frozenset({Spawn.id, Resume.id, Status.id, Cancel.id,
+    'system_command:has_signal', 'system_command:send_signal', 'system_command:receive_signal'})

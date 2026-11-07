@@ -55,11 +55,12 @@ class PlannerIndexTests(unittest.TestCase):
         from autoagent import AutoAgentApp, Node, Wait, Workflow
         from autoagent.core.errors import RuntimeInfrastructureError
         from autoagent.core.runtime import RuntimeRepository
+        from autoagent.core.runtime import CommandsPending
         from tests.benchmarks.benchmark_core_execution import Value
         class Sink:
             pending = None
             async def append(self, event):
-                if isinstance(event.payload, WaitRequested):
+                if isinstance(event.payload, CommandsPending):
                     if self.pending is None:
                         self.pending = event
                         raise OSError('lost ACK')

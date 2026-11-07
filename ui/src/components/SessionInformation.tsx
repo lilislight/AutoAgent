@@ -1,3 +1,4 @@
+import { BusyLabel, FactsSkeleton, RecordsSkeleton, SkeletonText } from './LoadingState';
 import { useId, useState } from 'react';
 import { useInfiniteQuery, useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionHistory, getSessionInformation, getSessionWorkflows } from '../api';
@@ -29,7 +30,7 @@ export function SessionInformation({ session, onInvocation, onDefinition }: {
       <button type="button" className="toolbar-action" disabled={info.isFetching || (tab==='Checkpoints'?checkpointFetching>0:query.isFetching)} onClick={()=>{void info.refetch();if(tab==='Checkpoints'){void client.invalidateQueries({queryKey:['session-checkpoints',session]});void client.invalidateQueries({queryKey:['checkpoint-details']});}else void query.refetch();}}>Refresh</button></header>
     <div className="session-info-scroll">
       {info.error ? <div className="sidebar-error" role="alert"><p>{info.error.message}</p><button onClick={()=>void info.refetch()}>Retry</button></div> : null}
-      {info.isPending ? <p className="muted" role="status">Loading Session…</p> : info.data ? <>
+      {info.isLoading ? <><div className="session-facts" aria-hidden="true">{["Invocations", "Workflows", "Revisions"].map(label => <span key={label}><strong><SkeletonText width="36px" /></strong> {label}</span>)}</div><FactsSkeleton label="Loading Session information" className="session-times" labels={["Created", "Last activity"]} /></> : info.data ? <>
         <div className="session-facts"><span><strong>{info.data.invocation_count}</strong> {info.data.invocation_count===1?'Invocation':'Invocations'}</span><span><strong>{info.data.workflow_count}</strong> {info.data.workflow_count===1?'Workflow':'Workflows'}</span><span><strong>{info.data.revision_count}</strong> {info.data.revision_count===1?'Revision':'Revisions'}</span></div>
         <dl className="session-times"><div><dt>Created</dt><dd>{formatTime(info.data.created_at_us)}</dd></div><div><dt>Last activity</dt><dd>{formatTime(info.data.updated_at_us)}</dd></div>{info.data.parent_invocation_id ? <div><dt>Parent Invocation</dt><dd><button className="text-action" onClick={()=>onInvocation({invocation_id:info.data.parent_invocation_id!,values:[]})}>{info.data.parent_invocation_id}</button></dd></div> : null}</dl>
       </> : null}
@@ -37,7 +38,7 @@ export function SessionInformation({ session, onInvocation, onDefinition }: {
       <div id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-${tab}-tab`}>
         {tab==='Checkpoints' ? <SessionCheckpoints session={session} inspectorHost={inspectorHost} /> : <>
         {revision && tab==='Invocations' ? <div className="session-revision-filter">Revision <code>{revision.split(':').at(-1)?.slice(0,8)}</code><button type="button" className="icon-button" aria-label="Show all Session Invocations" onClick={()=>setRevision(null)}>×</button></div> : null}
-        {query.isPending ? <p className="muted" role="status">Loading {tab.toLowerCase()}…</p> : null}
+        {query.isLoading ? <RecordsSkeleton label={`Loading ${tab.toLowerCase()}`} /> : null}
         {query.error ? <div className="sidebar-error" role="alert"><p>{query.error.message}</p><button onClick={()=>void query.refetch()}>Retry</button></div> : null}
         {tab==='Invocations' ? <ol className="session-history-list">{rows.map(row=><li key={row.invocation_id}>
           <span className="session-history-order" title={row.opening_sequence===null?'Imported history begins at a Checkpoint':`Session opening Event #${row.opening_sequence}`}>#{row.ordinal}</span>
@@ -48,7 +49,7 @@ export function SessionInformation({ session, onInvocation, onDefinition }: {
           <div className="session-row-actions"><button className="text-action" onClick={()=>onDefinition(workflow,row.workflow_revision_id)}>Definition</button><button className="text-action" onClick={()=>{setRevision(row.workflow_revision_id);setTab('Invocations');}}>Invocations</button></div>
         </div>)}</section>)}</div>}
         {!query.isPending && !query.error && (tab==='Invocations'?!rows.length:!groups.size) ? <p className="muted">No saved {tab.toLowerCase()}.</p> : null}
-        {query.hasNextPage ? <button className="load-more" disabled={query.isFetchingNextPage} onClick={()=>void query.fetchNextPage()}>{query.isFetchingNextPage?'Loading…':'Show more'}</button> : null}
+        {query.hasNextPage ? <button className="load-more" disabled={query.isFetchingNextPage} onClick={()=>void query.fetchNextPage()}><BusyLabel busy={query.isFetchingNextPage} label="Loading more">Show more</BusyLabel></button> : null}
         </>}
       </div>
     </div>

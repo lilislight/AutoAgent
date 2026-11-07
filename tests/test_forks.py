@@ -22,7 +22,9 @@ def echo(value: Value) -> Value:
     return value
 
 
-def observed(ctx: UserEventContext) -> UserEventSpec:
+def observed(ctx: UserEventContext) -> UserEventSpec | None:
+    if ctx.phase != "output":
+        return None
     return UserEventSpec(kind=ctx.node_id, payload=ctx.value)
 
 
@@ -155,7 +157,7 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeline_omits_reused_map_calls_and_abandoned_inflight_call(self):
         """A partially completed Map shows its new replayed Call but omits inherited results and lost source Calls."""
         GATE.clear()
-        wf=Workflow('fork-map-timing',nodes=[Node('map',partial_map,input_mapping=two_children,map=Map(max_parallelism=2))])
+        wf=Workflow('fork-map-timing',nodes=[Node('map',partial_map,input_mapping=two_children,map=Map(max_parallelism=2), recovery_mode=Recovery("replay_safe"))])
         try:
             async with self.host([wf]) as host:
                 ref=await host.execute(wf.id,{'text':'source'},entry_node_id='map')
@@ -208,7 +210,7 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeline_hides_inherited_null_map_results(self):
         """Imported null Input/Output Calls need no value refs to be excluded from branch timing."""
         GATE.clear()
-        wf=Workflow('fork-null-map',nodes=[Node('map',partial_null_map,input_mapping=null_units,map=Map(max_parallelism=2))])
+        wf=Workflow('fork-null-map',nodes=[Node('map',partial_null_map,input_mapping=null_units,map=Map(max_parallelism=2), recovery_mode=Recovery("replay_safe"))])
         try:
             async with self.host([wf]) as host:
                 ref=await host.execute(wf.id,None,entry_node_id='map')
@@ -322,7 +324,7 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_terminal_failure_reopens_only_in_branch(self):
         """Terminal Fork uses Recovery's reopening rules without modifying failed source history."""
-        wf=Workflow('fork-failure',nodes=[Node('entry',fail)])
+        wf=Workflow('fork-failure',nodes=[Node('entry',fail, recovery_mode=Recovery("replay_safe"))])
         async with self.host([wf]) as host:
             ref=await host.execute(wf.id,{'text':'bad'},entry_node_id='entry')
             await host.join(ref)
@@ -437,7 +439,7 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
             result=await host.join(fork['invocation_id'])
             self.assertEqual(result.waits[0].condition['deadline_at_us'],source.waits[0].condition['deadline_at_us'])
         GATE.clear()
-        running=Workflow('fork-shutdown',nodes=[Node('blocked',blocked)])
+        running=Workflow('fork-shutdown',nodes=[Node('blocked',blocked, recovery_mode=Recovery("replay_safe"))])
         try:
             async with self.host([running]) as host:
                 runtime=host._runtime
@@ -505,7 +507,7 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_source_reopens_as_new_wait(self):
         """Cancelled graphs reopen under new identities and leave the cancellation audit untouched."""
-        wf=Workflow('fork-cancelled',nodes=[Node('wait',Wait(Value,Value))])
+        wf=Workflow('fork-cancelled',nodes=[Node('wait',Wait(Value,Value), recovery_mode=Recovery("replay_safe"))])
         async with self.host([wf]) as host:
             ref=await host.execute(wf.id,{'text':'wait'},entry_node_id='wait')
             await host.join(ref)

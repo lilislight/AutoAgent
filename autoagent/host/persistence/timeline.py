@@ -123,7 +123,7 @@ class TimelineQueries:
         return statement.subquery()
 
     async def overview(self, iid):
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             return await self._overview(conn, frontier, iid)
 
     async def _overview(self, conn, frontier, iid):
@@ -189,7 +189,7 @@ class TimelineQueries:
         if kind != 'node' and not occurrence_id:
             raise ValueError('A Node Occurrence is required for Call and Wait pages.')
         spans = self.spans(kind, iid)
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             invs = meta.tables['invocations']
             if await conn.scalar(select(invs.c.invocation_id).where(invs.c.invocation_id == iid)) is None:
                 return None
@@ -251,7 +251,7 @@ class TimelineQueries:
             predicates.append(spans.c.occurrence_id == occurrence_id)
         if node_id is not None:
             predicates.append(spans.c.node_id == node_id)
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             target = (await conn.execute(select(spans.c._order, spans.c.id).where(
                 *predicates, spans.c.id == identity))).first()
             if target is None:
@@ -291,7 +291,7 @@ class TimelineQueries:
             e.c.occurred_at_us >= start_us, e.c.occurred_at_us < end_us)
         if through_sequence is not None:
             statement = statement.where(e.c.sequence <= through_sequence)
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             if await self.storage.row(conn, 'invocations', invocation_id=iid) is None:
                 return None
             rows = (await conn.execute(statement.group_by(bucket, e.c.event_name).order_by(bucket))).mappings()
@@ -330,7 +330,7 @@ class TimelineQueries:
             statement = statement.where(events.c.sequence <= through_sequence)
         if cursor is not None:
             statement = statement.where(tuple_(events.c.sequence, events.c.event_id) > tuple(cursor))
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             if await conn.scalar(select(meta.tables['invocations'].c.invocation_id).where(
                 meta.tables['invocations'].c.invocation_id == iid)) is None:
                 return None
@@ -345,7 +345,7 @@ class TimelineQueries:
                 raise ValueError('Invalid Timeline position.')
         if sequence is not None and at_us is not None or direction not in (-1, 0, 1) or direction and sequence is None:
             raise ValueError('Expected one Timeline position and a valid direction.')
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             return await self._frame(conn, frontier, iid, sequence=sequence, at_us=at_us, direction=direction)
 
     async def _frame(self, conn, frontier, iid, *, sequence=None, at_us=None, direction=0):
@@ -448,7 +448,7 @@ class TimelineQueries:
             except (ValueError, AttributeError):
                 raise ValueError('Invalid Edge evaluation identity.') from None
             edges, events, nodes = (meta.tables[n] for n in ('edge_evaluations', 'runtime_events', 'node_executions'))
-            async with self.queries.view() as (conn, _, _, _):
+            async with self.queries.view(invocation_id=iid) as (conn, _, _, _):
                 from .tracing import edge_scope
                 scope, position = await edge_scope(self.storage,conn,iid)
                 row = (await conn.execute(select(*edges.c, events.c.sequence, events.c.occurred_at_us,
@@ -467,7 +467,7 @@ class TimelineQueries:
             raise ValueError('Unknown execution record kind.')
         name, key = {'node': ('node_executions', 'occurrence_id'),
                      'call': ('operator_calls', 'call_id'), 'wait': ('waits', 'wait_id')}[kind]
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, _):
             row = await self.storage.row(conn, name, invocation_id=iid, **{key: identity})
             if row is None:
                 return None

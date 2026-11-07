@@ -16,7 +16,8 @@ from typing_extensions import TypedDict
 
 from autoagent import Node, Workflow
 from autoagent.host import AutoAgentHost, HostSettings
-from autoagent.host.memory import cgroup_sample, process_sample
+from autoagent.host.memory import process_sample
+from autoagent.host.memory_resources import cgroup_sample
 from autoagent.server import create_app
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 
@@ -31,6 +32,12 @@ def identity(value: Value) -> Value:
 
 class HostMemoryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        physical = patch('autoagent.host.memory_resources.system_memory', return_value=(16 * 1024**3, 12 * 1024**3))
+        controller = patch('autoagent.host.memory_resources.memory_controller', return_value=None)
+        physical.start()
+        controller.start()
+        self.addCleanup(physical.stop)
+        self.addCleanup(controller.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.url = 'sqlite+aiosqlite:///' + str(self.root / 'runtime.db')
@@ -63,11 +70,14 @@ class HostMemoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(snapshot['history']), 3)
             self.assertFalse(snapshot['stale'])
             self.assertGreater(snapshot['latest']['process']['rss_bytes'], 0)
+            self.assertEqual(snapshot['latest']['resources']['budget_source'], 'explicit')
+            self.assertEqual(snapshot['latest']['budget_bytes'], self.settings.memory_budget_bytes)
             self.assertEqual(snapshot['latest']['host']['resident_graphs'], 0)
             snapshot['latest']['host']['resident_graphs'] = 999
             self.assertEqual((await host.memory_snapshot())['latest']['host']['resident_graphs'], 0)
         self.assertFalse(thread.is_alive())
         self.assertIsNone(monitor.task)
+        self.assertEqual(monitor.history.storage_bytes, 0)
 
     async def test_http_metrics_and_cli_read_the_running_server(self):
         """HTTP and CLI expose bounded telemetry without importing project code."""
@@ -79,7 +89,12 @@ class HostMemoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertTrue(response.json()['enabled'])
                 self.assertEqual((await client.get('/api/v2/memory', params={'history': 4})).status_code, 400)
-                self.assertEqual((await client.get('/api/v2/memory', params={'history': 3601})).status_code, 422)
+                self.assertEqual((await client.get('/api/v2/memory', params={'history': 604801})).status_code, 422)
+                window = await client.get('/api/v2/memory', params={'window_seconds': 86400, 'points': 2})
+                self.assertEqual(window.status_code, 200, window.text)
+                self.assertLessEqual(len(window.json()['history']), 2)
+                for invalid in ({'window_seconds': 0}, {'window_seconds': 604801}, {'points': 2001}, {'points': 1}):
+                    self.assertEqual((await client.get('/api/v2/memory', params=invalid)).status_code, 422)
                 metrics = await client.get('/api/v2/memory/metrics')
                 self.assertIn('autoagent_memory_rss_bytes', metrics.text)
                 self.assertNotIn('session_id', metrics.text)
@@ -224,15 +239,36 @@ class PostgreSQLHostMemoryTests(HostMemoryTests):
 
 
 class MemoryConfigurationTests(unittest.TestCase):
+    def test_shared_pressure_is_visible_with_low_process_rss(self):
+        """The monitor explains shared memory pressure without misreporting process budget usage."""
+        from types import SimpleNamespace
+        from autoagent.host.memory import MemoryMonitor
+        from autoagent.host.memory_resources import MemoryResourcesSnapshot
+        gib = 1024**3
+        monitor = MemoryMonitor(SimpleNamespace(settings=HostSettings(memory_budget_bytes=3 * gib), _runtime=None))
+        shared = MemoryResourcesSnapshot(3 * gib, 'explicit', 16 * gib, 'physical',
+            16 * gib, gib // 2, None, ((16 * gib, gib // 2),))
+        with patch.object(monitor.resources, 'sample', return_value=shared), patch('autoagent.host.memory.log'):
+            monitor._sample(process={'rss_bytes': 100 * 1024**2, 'peak_rss_bytes': 100 * 1024**2})
+        sample = monitor.snapshot()['latest']
+        self.assertEqual(sample['pressure'], 'critical')
+        self.assertLess(sample['budget_ratio'], .1)
+        self.assertEqual(sample['resources']['budget_source'], 'explicit')
+        self.assertEqual(sample['resources']['system_available_bytes'], gib // 2)
+
     def test_environment_and_limits(self):
         """Strict booleans and bounded sampling settings reject invalid deployment values."""
         settings = HostSettings.from_environment({'AUTOAGENT_MEMORY_MONITOR_ENABLED': 'true',
-            'AUTOAGENT_MEMORY_MONITOR_INTERVAL_SECONDS': '.5', 'AUTOAGENT_MEMORY_MONITOR_HISTORY_SAMPLES': '60'})
+            'AUTOAGENT_MEMORY_MONITOR_INTERVAL_SECONDS': '.5', 'AUTOAGENT_MEMORY_MONITOR_HISTORY_SAMPLES': '60',
+            'AUTOAGENT_MEMORY_MONITOR_HISTORY_SECONDS': '7200'})
         self.assertTrue(settings.memory_monitor_enabled)
         self.assertEqual(settings.memory_monitor_interval_seconds, .5)
         self.assertEqual(settings.memory_monitor_history_samples, 60)
+        self.assertEqual(settings.memory_monitor_history_seconds, 7200)
+        self.assertEqual(HostSettings().memory_monitor_history_samples, 86400)
         for changes in ({'memory_monitor_enabled': 1}, {'memory_monitor_interval_seconds': 0},
-                        {'memory_monitor_history_samples': 3601}, {'memory_monitor_top_sessions': 0}):
+                        {'memory_monitor_history_samples': 604801}, {'memory_monitor_top_sessions': 0},
+                        {'memory_monitor_history_seconds': 0}, {'memory_monitor_history_seconds': float('nan')}):
             with self.assertRaises(ValueError):
                 replace(settings, **changes)
         with self.assertRaises(ValueError):
@@ -247,7 +283,9 @@ class MemoryConfigurationTests(unittest.TestCase):
             self.assertIsNone(cgroup_sample(None))
         host = SimpleNamespace(settings=HostSettings(memory_budget_bytes=100), _runtime=None)
         monitor = MemoryMonitor(host)
-        with patch('autoagent.host.memory.process_sample', side_effect=[{'rss_bytes': x} for x in (81, 78, 64, 91, 85)]), patch('autoagent.host.memory.log') as logger:
+        from autoagent.host.memory_resources import MemoryResourcesSnapshot
+        healthy = MemoryResourcesSnapshot(100, 'explicit', 1000, 'physical', 1000, 1000, None, ((1000, 1000),))
+        with patch('autoagent.host.memory.process_sample', side_effect=[{'rss_bytes': x} for x in (81, 78, 64, 91, 85)]), patch('autoagent.host.memory.log') as logger, patch.object(monitor.resources, 'sample', return_value=healthy):
             for _ in range(5):
                 monitor._sample()
             self.assertEqual(logger.warning.call_count, 3)

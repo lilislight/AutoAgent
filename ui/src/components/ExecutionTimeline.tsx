@@ -1,3 +1,4 @@
+import { TimelineSkeleton, LoadingIndicator } from './LoadingState';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { getExecutionTimeline, getTimelineActivity, getTimelineItems, getTimelinePosition } from '../api';
@@ -55,7 +56,7 @@ function PageControls({ page, label }: { page: ReturnType<typeof usePage>; label
   return <nav className="timeline-pagination" aria-label={`${label} pagination`}><button disabled={!page.index || page.query.isFetching} onClick={page.previous}>Previous</button><span>Page {page.index + 1}</span><button disabled={!page.query.data?.next_cursor || page.query.isFetching} onClick={page.next}>Next</button></nav>;
 }
 function QueryMessage({ page, label }: { page: ReturnType<typeof usePage>; label: string }) {
-  return page.query.isPending ? <p className="timeline-message" role="status">Loading {label}…</p> : page.query.error ? <div className="timeline-message sidebar-error"><p>{page.query.error.message}</p><button onClick={() => void page.query.refetch()}>Retry</button></div> : !page.query.data?.items.length ? <p className="timeline-message muted">No {label} in this window.</p> : null;
+  return page.query.isPending ? (page.query.isFetching ? <TimelineSkeleton label={`Loading ${label}`} count={2} /> : null) : page.query.error ? <div className="timeline-message sidebar-error"><p>{page.query.error.message}</p><button onClick={() => void page.query.refetch()}>Retry</button></div> : !page.query.data?.items.length ? <p className="timeline-message muted">No {label} in this window.</p> : null;
 }
 function PauseSegments({ pauses, row, window, observed }: { pauses?:PauseInterval[]; row?:TimelineRow; window:TimeWindow; observed:number }) {
   if(row?.kind==='wait')return null;
@@ -260,7 +261,7 @@ function TimelineBody({ overview: saved, ...props }: Props & { overview: Timelin
       <div className="timeline-row-options"><TimelineNodeFilter nodes={props.workflow.definition.nodes.map(node => node.id)} value={nodeFilter} onChange={value => { setNodeFilter(value); setFocusEnabled(false); }} /><button aria-pressed={props.replay.enabled} disabled={!props.trace.last_event} onClick={() => { if (props.replay.enabled) props.replay.stop(); else { props.onReplay(props.replay.resumePosition() ?? { at_us: window.start }); } }}>{props.replay.enabled ? "End replay" : "Replay"}</button><button className="timeline-collapse-all" disabled={!expanded.size} onClick={() => setExpanded(new Set())}>Collapse all</button></div>
       <div className={`timeline-toolbar-track ${props.replay.enabled ? 'timeline-replay-controls' : ''}`}>
         {props.replay.enabled ? <div className="timeline-replay-track"><input type="range" aria-label="Replay time" min={0} max={width} step={1} value={Math.max(0, Math.min(width, (props.replay.cursorTime ?? window.start) - window.start))} onChange={event => props.onReplay({ at_us: window.start + Number(event.target.value) })} />{props.replay.marker && replayVisible ? <output className={`timeline-replay-label ${(props.replay.cursorTime! - window.start) / width > .5 ? 'align-end' : ''}`} style={{ left: `${(props.replay.cursorTime! - window.start) / width * 100}%` }} title={`Event #${props.replay.marker.sequence} · ${props.replay.marker.event_name}`}>#{props.replay.marker.sequence} · {props.replay.marker.event_name}</output> : null}</div> : null}
-        <span className={`timeline-update-status ${props.replay.enabled ? 'sr-only' : ''}`} role="status">{`${elapsedLabel(width)} visible`}</span>
+        <span className={`timeline-update-status ${props.replay.enabled ? 'sr-only' : ''}`} role="status">{updating && page.query.data && !props.replay.enabled ? <LoadingIndicator label="Updating Timeline" small /> : null}{`${elapsedLabel(width)} visible`}</span>
       </div>
     </div>
     {focusEnabled && props.focus && (page.location.error || !canReveal) ? <div className="timeline-location-notice" role="status"><span>Selected record is outside the current range or filter.</span><button onClick={() => { navigate(focusWindow(full, props.focus!.interval, overview.observed_at_us), true); }}>Focus selected interval</button>{nodeFilter ? <button onClick={() => setNodeFilter(null)}>Show all nodes</button> : null}<button aria-label="Dismiss location notice" onClick={() => setFocusEnabled(false)}>×</button></div> : null}
@@ -284,8 +285,8 @@ export default function ExecutionTimeline(props: Props) {
   const overview = useSnapshotMetadata(props.trace.invocation.invocation_id, query.data);
   const hasTimes = overview && fullWindow(overview);
   return <section className="execution-timeline" aria-label="Execution Timeline">
-    {!props.ready ? <div className="timeline-message" role="status">{props.loadingStatus}{props.loadError ? <><p>{props.loadError}</p><button onClick={props.onRetry}>Retry</button></> : null}</div> : null}
+    {!props.ready ? props.loadError ? <div className="timeline-message" role="alert"><p>{props.loadError}</p><button onClick={props.onRetry}>Retry</button></div> : <TimelineSkeleton label={props.loadingStatus} /> : null}
     {props.ready && query.error ? <div className="timeline-message sidebar-error"><p>{query.error.message}</p><button onClick={() => void query.refetch()}>Retry</button></div> : null}
-    {!props.ready ? null : !overview && query.isPending ? <p className="timeline-message" role="status">Loading Timeline…</p> : hasTimes ? <TimelineBody {...props} overview={overview!} /> : !query.error ? <p className="timeline-message muted">No recorded execution times.</p> : null}
+    {!props.ready ? null : !overview && query.isPending ? <TimelineSkeleton /> : hasTimes ? <TimelineBody {...props} overview={overview!} /> : !query.error ? <p className="timeline-message muted">No recorded execution times.</p> : null}
   </section>;
 }

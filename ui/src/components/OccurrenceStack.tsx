@@ -1,3 +1,4 @@
+import { CardsSkeleton, InlineLoading } from './LoadingState';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { getExecutionItems } from "../api";
@@ -154,7 +155,7 @@ export function OccurrenceStack({ invocationId, target, onPick, onClose }: {
     <div className="occurrence-stack-content" style={placementStyle}>
       <div className="occurrence-stack-heading"><div><span>{target.kind === "node" ? "NODE OCCURRENCES" : "EDGE EVALUATIONS"}</span><strong id={headingId} title={target.id}>{target.id} <small>×{target.total}</small></strong></div><button className="stack-close" aria-label="Close execution stack" onClick={() => close()}>×</button></div>
       <div className="occurrence-stack-scene" aria-busy={query.isFetching} onClick={event => { if (event.target === event.currentTarget) close(); }}>
-        {query.isPending || restoring ? <div className="stack-message" role="status"><span className="flow-loading-spinner" />Loading executions…</div> : null}
+        {query.isPending || restoring ? <div className="stack-message"><CardsSkeleton label="Loading executions" /></div> : null}
         {query.error && !rows.length ? <div className="stack-message"><span>{query.error.message}</span><button className="text-button" onClick={() => void query.refetch()}>Retry</button></div> : null}
         {!query.isPending && !query.error && !rows.length ? <div className="stack-message">No recorded executions.</div> : null}
         {visible.map((row, offset) => {
@@ -179,7 +180,7 @@ export function OccurrenceStack({ invocationId, target, onPick, onClose }: {
         })}
       </div>
       {query.isFetchNextPageError ? <div className="occurrence-stack-error" role="alert"><span>{query.error?.message}</span><button className="text-button" onClick={() => void query.fetchNextPage()}>Retry</button></div> : null}
-      <div className="occurrence-stack-controls"><button aria-label="Older execution" disabled={index >= target.total - 1 || phase === "closing"} onClick={() => nudge(1)}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 12 5-5 5 5" /></svg></button><span role="status" aria-live="polite">{query.isFetchingNextPage ? "Loading more…" : rows.length ? `${target.kind === "node" ? "Occurrence" : "Evaluation"} ${target.total - index} of ${target.total}` : ""}</span><button aria-label="Newer execution" disabled={!index || phase === "closing"} onClick={() => nudge(-1)}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 8 5 5 5-5" /></svg></button></div>
+      <div className="occurrence-stack-controls"><button aria-label="Older execution" disabled={index >= target.total - 1 || phase === "closing"} onClick={() => nudge(1)}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 12 5-5 5 5" /></svg></button><span role="status" aria-live="polite">{query.isFetchingNextPage ? <InlineLoading label="Loading more executions" /> : rows.length ? `${target.kind === "node" ? "Occurrence" : "Evaluation"} ${target.total - index} of ${target.total}` : ""}</span><button aria-label="Newer execution" disabled={!index || phase === "closing"} onClick={() => nudge(-1)}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 8 5 5 5-5" /></svg></button></div>
     </div>
   </div>;
 }

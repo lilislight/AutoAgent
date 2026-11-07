@@ -13,6 +13,7 @@ from pathlib import Path
 from autoagent import RuntimeTransitionError
 
 from .models import HostCapacityError
+from .memory_resources import MemoryResources
 
 log = logging.getLogger(__name__)
 
@@ -24,18 +25,6 @@ def process_memory_bytes():
     except (OSError, ValueError, IndexError):
         import resource
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if os.uname().sysname == 'Darwin' else 1024)
-
-
-def automatic_budget():
-    budget = 512 * 1024 * 1024
-    for name in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
-        try:
-            limit = int(Path(name).read_text().strip())
-            if 0 < limit < (1 << 60):
-                budget = min(budget, int(limit * 0.8))
-        except (OSError, ValueError):
-            pass
-    return budget
 
 
 @dataclass(slots=True)
@@ -62,7 +51,7 @@ class Entry:
 class Residency:
     """Policy metadata is bounded; business State stays in Core or Persistence."""
 
-    def __init__(self, runtime, settings):
+    def __init__(self, runtime, settings, *, resources: MemoryResources):
         self.runtime, self.settings = runtime, settings
         self.entries = OrderedDict()
         self.loading = set()
@@ -71,7 +60,8 @@ class Residency:
         self.cursor = None
         self.fault = None
         self.stopping = False
-        self.budget = settings.memory_budget_bytes or automatic_budget()
+        self.resources = resources
+        self.budget = resources.sample().budget_bytes
         self.memory_usage = process_memory_bytes
         self.baseline = self.memory_usage()
         self.last_rss = self.baseline
@@ -120,27 +110,44 @@ class Residency:
         self.last_rss = rss
         return max(self.baseline, rss - self.reclaimed_credit)
 
+    def _resources(self):
+        sample = self.resources.sample()
+        if not self.settings.memory_budget_bytes:
+            self.budget = sample.budget_bytes
+        return sample
+
     async def reserve(self, sid):
         if self.fault is not None:
             raise HostCapacityError('Host residency persistence failed; admission is stopped.') from self.fault
         if sid in self.runtime.resident or sid in self.loading:
             return
-        if len(self.runtime.resident) + len(self.loading) >= self.settings.max_resident_graphs or self._usage() >= self.budget * self.settings.memory_high_ratio:
+        shared = self._resources()
+        if (len(self.runtime.resident) + len(self.loading) >= self.settings.max_resident_graphs
+                or self._usage() >= self.budget * self.settings.memory_high_ratio
+                or shared.pressure_ratio() >= self.settings.memory_high_ratio):
             await self.cycle(activate=False, force_slot=True, exclude=sid)
             pending = tuple(self.jobs)
             if pending:
                 await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
-        if len(self.runtime.resident) + len(self.loading) >= self.settings.max_resident_graphs or self.memory_usage() >= self.budget * self.settings.memory_critical_ratio:
+        shared = self._resources()
+        if shared.pressure_ratio() >= self.settings.memory_critical_ratio:
+            raise HostCapacityError('Shared system or Cgroup memory headroom is exhausted.')
+        if (len(self.runtime.resident) + len(self.loading) >= self.settings.max_resident_graphs
+                or self.memory_usage() >= self.budget * self.settings.memory_critical_ratio):
             raise HostCapacityError('Host graph or memory capacity is exhausted.')
         self.loading.add(sid)
         self.entry(sid).loaded_at = time.monotonic()
 
     async def admit_resident(self, sid):
         """A warm Session can reuse State but still needs process headroom."""
-        if self._usage() >= self.budget * self.settings.memory_high_ratio:
+        shared = self._resources()
+        if self._usage() >= self.budget * self.settings.memory_high_ratio or shared.pressure_ratio() >= self.settings.memory_high_ratio:
             await self.cycle(activate=False, exclude=sid)
             if self.jobs:
                 await asyncio.shield(asyncio.gather(*tuple(self.jobs), return_exceptions=True))
+        shared = self._resources()
+        if shared.pressure_ratio() >= self.settings.memory_critical_ratio:
+            raise HostCapacityError('Shared system or Cgroup memory headroom is exhausted.')
         if self.memory_usage() >= self.budget * self.settings.memory_critical_ratio:
             raise HostCapacityError('Host memory capacity is exhausted.')
 
@@ -174,14 +181,16 @@ class Residency:
     async def cycle(self, *, activate=True, force_slot=False, exclude=None):
         async with self.cycle_lock:
             now, candidates = time.monotonic(), []
+            shared = self._resources()
+            shared_ratio = shared.pressure_ratio()
             usage = self._usage()
-            if usage >= self.budget * self.settings.memory_high_ratio:
+            if usage >= self.budget * self.settings.memory_high_ratio or shared_ratio >= self.settings.memory_high_ratio:
                 self.draining = True
-            if usage <= self.budget * self.settings.memory_target_ratio:
+            if usage <= self.budget * self.settings.memory_target_ratio and shared_ratio <= self.settings.memory_target_ratio:
                 self.draining = False
             # Freed Python arenas may still be resident. They can reduce soft
             # reclamation pressure, but never bypass the actual RSS hard limit.
-            critical = self.memory_usage() >= self.budget * self.settings.memory_critical_ratio
+            critical = self.memory_usage() >= self.budget * self.settings.memory_critical_ratio or shared_ratio >= self.settings.memory_critical_ratio
             for sid, ref in tuple(self.runtime.resident.items()):
                 item = self.entry(sid)
                 if item.users or item.job is not None or sid == exclude or now < item.retry_at:
@@ -204,6 +213,7 @@ class Residency:
                 if (tail or aged) and item.saved_version != info.version and not self.draining and not force_slot:
                     self._snapshot(item, info, evict=False)
             projected, evictions = usage, 0
+            shared_reclaim = shared.reclaim_bytes(self.settings.memory_target_ratio) if self.draining else 0
             for rank, item, info in sorted(candidates, key=lambda x: x[0]):
                 if len(self.jobs) >= self.settings.unload_concurrency:
                     break
@@ -212,7 +222,7 @@ class Residency:
                 age = now - item.last_access
                 cold = age >= self.settings.cold_after_seconds
                 expired = age >= self.settings.max_idle_seconds
-                pressure = self.draining and projected > self.budget * self.settings.memory_target_ratio
+                pressure = self.draining and (projected > self.budget * self.settings.memory_target_ratio or shared_reclaim > 0)
                 slot = force_slot and evictions == 0
                 moderate = usage >= self.budget * self.settings.memory_target_ratio and cold and rank[0] == 0
                 if rank[0] == 2 and not critical:
@@ -221,6 +231,7 @@ class Residency:
                     continue
                 self._snapshot(item, info, evict=True)
                 projected -= info.estimated_bytes
+                shared_reclaim -= info.estimated_bytes
                 evictions += 1
             if activate and not self.stopping and self.fault is None:
                 await self._activate_due()

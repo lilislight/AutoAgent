@@ -46,7 +46,16 @@ class InspectionError(PersistenceError):
 @dataclass(frozen=True, slots=True)
 class PersistenceConfig:
     mode: WriteMode = "durable"
-    artifact_threshold_bytes: int = MIB
+    projection_mode: Literal['transactional', 'background'] = 'background'
+    projection_worker_enabled: bool = True
+    projection_cache_enabled: bool = True
+    projection_batch_count: int = 256
+    projection_idle_seconds: float = 5
+    projection_busy_seconds: float = 10
+    projection_work_seconds: float = 0.1
+    projection_quiet_seconds: float = 0.5
+    projection_cpu_ratio: float = 0.75
+    artifact_threshold_bytes: int = 8192
     batch_count: int = 256
     batch_bytes: int = 4 * MIB
     batch_delay_ms: float = 100
@@ -57,6 +66,10 @@ class PersistenceConfig:
     encoding_cache_bytes: int = 16 * MIB
     workflow_graph_cache_bytes: int = 4 * MIB
     writer_metadata_cache_bytes: int = 4 * MIB
+    projection_cache_bytes: int = 16 * MIB
+    projection_cache_entry_bytes: int = 4 * MIB
+    projection_cache_ttl_seconds: float = 60
+    projection_build_bytes: int = 128 * MIB
     trace_snapshot_bytes: int = 128 * MIB
     trace_snapshot_ttl_seconds: float = 300
     inspection_scan_events: int = 100_000
@@ -66,17 +79,32 @@ class PersistenceConfig:
     retry_delay_ms: float = 50
 
     def __post_init__(self):
+        if self.projection_mode not in ('transactional', 'background'):
+            raise ValueError('projection_mode must be transactional or background.')
+        for name in ('projection_worker_enabled', 'projection_cache_enabled'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'{name} must be a boolean.')
+        for name in ('projection_idle_seconds', 'projection_busy_seconds', 'projection_work_seconds', 'projection_quiet_seconds'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < float('inf'):
+                raise ValueError(f'{name} must be positive and finite.')
+        if isinstance(self.projection_cpu_ratio, bool) or not isinstance(self.projection_cpu_ratio, (int, float)) or not 0 < self.projection_cpu_ratio <= 1:
+            raise ValueError('projection_cpu_ratio must be in (0, 1].')
         if self.mode not in {"durable", "buffered"}:
             raise ValueError("mode must be durable or buffered.")
         for name in (
             "artifact_threshold_bytes",
             "batch_count",
+            "projection_batch_count",
             "batch_bytes",
             "queue_count",
             "queue_bytes",
             "encoding_cache_bytes",
             "workflow_graph_cache_bytes",
             "writer_metadata_cache_bytes",
+            "projection_cache_bytes",
+            "projection_cache_entry_bytes",
+            "projection_build_bytes",
             "trace_snapshot_bytes",
             "inspection_scan_events",
             "inspection_read_bytes",
@@ -85,7 +113,7 @@ class PersistenceConfig:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
-        for name in ("batch_delay_ms", "durable_batch_delay_ms", "retry_delay_ms", "trace_snapshot_ttl_seconds"):
+        for name in ("batch_delay_ms", "durable_batch_delay_ms", "retry_delay_ms", "trace_snapshot_ttl_seconds", "projection_cache_ttl_seconds"):
             value = getattr(self, name)
             if (
                 isinstance(value, bool)

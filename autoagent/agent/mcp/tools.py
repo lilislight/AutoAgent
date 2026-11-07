@@ -66,6 +66,10 @@ class MCPTool:
         self._validator = validator_type(schema, registry=Registry(retrieve=_no_remote_schema))
 
     @property
+    def server_id(self) -> str:
+        return self._client.config.server_id
+
+    @property
     def definition(self) -> LLMToolDefinition:
         return LLMToolDefinition.model_validate(self._definition.model_dump(mode="python"))
 

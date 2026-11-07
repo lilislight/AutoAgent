@@ -106,7 +106,8 @@ class Diagnostics:
         from autoagent.core.app import _residency
 
         self.wrap(writer.Writer, 'accept', 'admission_and_ack')
-        self.wrap(writer, 'retained_objects', 'queue_residency')
+        self.wrap(writer.Writer, 'try_accept', 'local_admission')
+        self.wrap(writer.Writer, '_account', 'queue_residency')
         self.wrap(writer, 'prepare', 'encoding')
         if hasattr(storage, 'source_texts'):
             self.wrap(storage, 'source_texts', 'source_texts')
@@ -123,16 +124,20 @@ class Diagnostics:
             def __init__(self, lock):
                 self.lock = lock
 
+            @property
+            def waiters(self):
+                return self.lock.waiters
+
             async def __aenter__(self):
                 started = time.perf_counter()
-                await self.lock.acquire()
+                await self.lock.__aenter__()
                 self.acquired = time.perf_counter()
                 diagnostic.record('admission_lock_wait', self.acquired - started)
                 return self
 
             async def __aexit__(self, *args):
                 diagnostic.record('admission_lock_hold', time.perf_counter() - self.acquired)
-                self.lock.release()
+                await self.lock.__aexit__(*args)
 
         async def started(instance):
             await original_start(instance)
@@ -142,7 +147,7 @@ class Diagnostics:
             def notified():
                 # Acceptance and commit update queue accounting before notifying;
                 # this observes exact high watermarks without a sampling task.
-                with diagnostic.lock:
+                with instance.queue_lock, diagnostic.lock:
                     queue = diagnostic.data['queue']
                     queue['peak_count'] = max(queue['peak_count'], instance.pending_count)
                     queue['peak_retained_bytes'] = max(queue['peak_retained_bytes'], instance.retained)

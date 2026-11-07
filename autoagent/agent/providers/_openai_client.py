@@ -75,6 +75,9 @@ class OpenAIClientOwner:
         await self.aclose()
 
     def _error(self, error: Exception) -> ProviderError:
+        from autoagent.core.usage import UsageAccountingError
+        if isinstance(error, UsageAccountingError):
+            return error
         retryable = False
         status = getattr(error, "status_code", None)
         request_id = getattr(error, "request_id", None)

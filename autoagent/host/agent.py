@@ -124,6 +124,8 @@ async def agent_resources(setup):
             if settings is None or (settings.model is None and settings.api_key is None):
                 continue
             provider = await stack.enter_async_context(settings.create_provider(embedding=embedding))
+            if not embedding and setup.agent_context is not None and not setup.agent_context.resources.has("provider", "default"):
+                setup.agent_context.resources.register_provider("default", provider)
             identity = f"{capability.id}.{settings.provider}.{settings.backend}"
             operator = (embedding_operator(provider, id=identity) if embedding else
                         llm_call_operator(provider, id=identity))

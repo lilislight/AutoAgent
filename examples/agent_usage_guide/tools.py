@@ -9,7 +9,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from autoagent.agent import (
-    DataSource, ImageContent, LLMToolCall, Tool, ToolBusinessError, ToolContext,
+    DataSource, ImageContent, LLMToolCall, Tool, ToolBusinessError, ToolContext, ToolDecision,
     ToolExecutionError, ToolHooks, ToolOutput, ToolOutputError, ToolSet, tool,
 )
 from .support import show
@@ -66,7 +66,8 @@ async def main():
 
     def policy(incoming, current):
         if incoming.name == "preview":
-            raise ToolBusinessError("Preview is disabled for this example user", code="policy_denied")
+            return ToolDecision(action="deny", reason="Preview is disabled for this example user")
+        return ToolDecision(action="allow")
 
     def before(incoming, current):
         events.append({"event": "before", "tool": incoming.name, "call": current.call_id})
@@ -94,7 +95,7 @@ async def main():
         (call("stock", '{"item":"unknown"}'), "not_found"),
         (call("quote", '{"quantity":0}'), "invalid_arguments"),
         (call("missing"), "unknown_tool"),
-        (call("preview"), "policy_denied"),
+        (call("preview"), "tool_access_denied"),
     ):
         result = await tools.ainvoke(incoming)
         assert result.is_error and result.structured_content["error"]["kind"] == expected

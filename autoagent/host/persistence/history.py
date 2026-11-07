@@ -19,7 +19,7 @@ class History:
 
     async def invocation(self, iid):
         invs, definitions, events = (meta.tables[name] for name in ("invocations", "workflow_revisions", "runtime_events"))
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             row = (await conn.execute(select(invs, definitions.c.workflow_id, definitions.c.workflow_version)
                 .join(definitions, invs.c.workflow_revision_id == definitions.c.revision_id)
                 .where(invs.c.invocation_id == iid))).mappings().first()
@@ -51,7 +51,7 @@ class History:
         if cursor is not None and (not isinstance(cursor, (tuple, list)) or len(cursor) != 2 or type(cursor[0]) is not int or not isinstance(cursor[1], str)):
             raise ValueError("Invalid Event cursor.")
         table = meta.tables["runtime_events"]
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             if await self.queries.storage.row(conn, "invocations", invocation_id=iid) is None:
                 return None
             where = [table.c.invocation_id == iid, table.c.sequence > max(after, cursor[0] if cursor else 0)]
@@ -70,7 +70,7 @@ class History:
         if pointer is not None and field is None:
             raise ValueError("A JSON Pointer requires an Event field.")
         table = meta.tables["runtime_events"]
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, _):
             row = (await conn.execute(select(table.c.event_id, table.c.session_id, table.c.invocation_id,
                 table.c.sequence, table.c.event_name, table.c.occurred_at_us, table.c.delta_text.is_not(None).label("has_delta"))
                 .where(table.c.event_id == event_id, table.c.invocation_id == iid))).mappings().first()

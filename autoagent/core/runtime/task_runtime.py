@@ -7,6 +7,7 @@ contains only objects that cannot be serialized: asyncio Tasks and Events.
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 
 
 class TaskRuntime:
@@ -14,7 +15,7 @@ class TaskRuntime:
 
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._wake_events: dict[str, asyncio.Event] = {}
+        self._wake_events: dict[str, asyncio.Event] = defaultdict(asyncio.Event)
 
     def track(
         self,
@@ -41,7 +42,7 @@ class TaskRuntime:
         return self.task(session_id) is not None
 
     def wake_event(self, session_id: str) -> asyncio.Event:
-        return self._wake_events.setdefault(session_id, asyncio.Event())
+        return self._wake_events[session_id]
 
     def wake(self, session_id: str) -> None:
         self.wake_event(session_id).set()

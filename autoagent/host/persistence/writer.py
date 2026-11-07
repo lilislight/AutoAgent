@@ -6,7 +6,7 @@ import asyncio
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from itertools import islice
@@ -14,7 +14,10 @@ from itertools import islice
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, OperationalError
 
-from .codec import canonical, retained_objects
+from autoagent.core.runtime._memory import retained_entries
+
+from .codec import canonical
+from .admission import Admission
 from .models import (
     CapacityError,
     ClosedError,
@@ -35,9 +38,8 @@ class Entry:
     anchor: bool
     ticket: int
     objects: dict
-    done: asyncio.Future
+    done: Future
     accepted_at: float
-    admitted: bool = True
 
 
 OBSERVABLE_EVENTS = frozenset({
@@ -48,7 +50,7 @@ OBSERVABLE_EVENTS = frozenset({
 
 
 class Writer:
-    """All mutable state and SQLAlchemy objects belong to this dedicated loop."""
+    """SQL belongs to one loop; the bounded queue has short shared critical sections."""
 
     def __init__(self, url, config, *, read_only=False):
         self.config = config
@@ -57,13 +59,16 @@ class Writer:
             url, read_only=read_only,
             graph_cache_bytes=config.workflow_graph_cache_bytes,
             metadata_cache_bytes=config.writer_metadata_cache_bytes,
+            config=config,
         )
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
             target=self._thread_main, name="autoagent-persistence", daemon=True
         )
         self._closed = False
-        self._lifecycle_lock = threading.Lock()
+        self.queue_lock = threading.RLock()
+        self._lifecycle_lock = self.queue_lock
+        self._wake_scheduled = False
         self._close_future = None
         self.thread.start()
         self._startup = asyncio.run_coroutine_threadsafe(self._start(), self.loop)
@@ -80,7 +85,7 @@ class Writer:
         )
         self.condition, self.admission, self.mutation = (
             asyncio.Condition(),
-            asyncio.Lock(),
+            Admission(self.queue_lock),
             asyncio.Lock(),
         )
         self.pending, self.objects = deque(), {}
@@ -130,6 +135,9 @@ class Writer:
 
     async def ready(self):
         try:
+            if self._startup.done():
+                self._startup.result()
+                return
             await asyncio.shield(asyncio.wrap_future(self._startup))
         except Exception:
             with self._lifecycle_lock:
@@ -150,6 +158,114 @@ class Writer:
     async def cpu(self, function, *args):
         return await self.loop.run_in_executor(self.executor, function, *args)
 
+    async def _account(self, value):
+        objects = {}
+        for key, item, size in retained_entries((value,)):
+            objects[key] = (item, size)
+            # Small Events finish without an executor roundtrip. Large object
+            # graphs yield to commits, control reads and shutdown regularly.
+            if len(objects) % 512 == 0:
+                await asyncio.sleep(0)
+        return objects
+
+    def try_accept(self, kind, identity, value, *, binding=None, strict_binding=False):
+        """Accept cache-proven Events locally; a miss uses serialized SQL admission."""
+        if self.config.mode != "buffered" or not self._startup.done():
+            return None
+        if self._startup.cancelled() or self._startup.exception() is not None:
+            # ready() owns startup failure cleanup, including stopping the loop.
+            return None
+        with self.queue_lock:
+            if self._close_future is not None:
+                raise ClosedError("Persistence is closing or closed.")
+            self.check_open()
+            if self.admission.waiters:
+                return None
+            if kind == 'runtime_event' and value.event_name in ('operator_call.started', 'capability.resolved') and binding is None:
+                binding = self.operator_bindings.get(value.payload.operator_id)
+            existing = self.pending_by_identity.get((kind, identity))
+            if existing is not None:
+                if existing.value is value and (not strict_binding or existing.binding == binding):
+                    return sum(size for _, size in existing.objects.values())
+                return None
+            if self.storage.identities.may_contain(kind, identity):
+                return None
+            stream_key = self._stream_key(kind, value)
+            tail = self.pending_tails.get(stream_key)
+            if tail is not None:
+                latest = tail.value.sequence
+            elif kind == "runtime_event":
+                row = self.storage.metadata_cache.get(('sessions', (value.session_id,)))
+                if row is None:
+                    return None
+                latest = row['durable_sequence']
+            else:
+                latest = self.storage.metadata_cache.get(('user_event_tail', (value.invocation_id,)))
+                if latest is None:
+                    return None
+            if value.sequence != latest + 1:
+                raise ConflictError(f"Expected stream sequence {latest + 1}, got {value.sequence}.")
+            if kind == 'runtime_event':
+                revision = getattr(value.payload, 'workflow_revision_id', None)
+                if revision and self.storage.metadata_cache.get(('definition_header', ('workflow_revision', revision))) is None:
+                    return None
+                if binding:
+                    definition = self.storage.metadata_cache.get(('definition_header', ('operator_definition', binding)))
+                    if definition is None:
+                        return None
+                    if definition['operator_id'] != value.payload.operator_id:
+                        raise ConflictError("Operator binding must match a durably registered implementation.")
+            objects = {}
+            for key, item, size in retained_entries((value,)):
+                objects[key] = (item, size)
+                # Large graphs use cooperative accounting on the Writer loop.
+                if len(objects) > 512:
+                    return None
+            record_size = sum(size for _, size in objects.values())
+            if record_size > self.config.queue_bytes:
+                raise CapacityError("One record exceeds queue_bytes; raise the explicit budget.")
+            if not self._fits(objects):
+                return None
+            self._enqueue(kind, identity, value, binding, False, objects, False)
+            if not self._wake_scheduled:
+                self._wake_scheduled = True
+                self.loop.call_soon_threadsafe(self._wake)
+            return record_size
+
+    def _wake(self):
+        with self.queue_lock:
+            self._wake_scheduled = False
+        async def notify():
+            async with self.condition:
+                self.condition.notify_all()
+        asyncio.create_task(notify())
+
+    def _fits(self, objects):
+        added = sum(size for key, (_, size) in objects.items() if key not in self.objects)
+        return self.pending_count < self.config.queue_count and self.retained + added <= self.config.queue_bytes
+
+    def _enqueue(self, kind, identity, value, binding, anchor, objects, durable):
+        """Caller owns queue_lock; retain ownership until the transaction commits."""
+        self.accepted_ticket += 1
+        entry = Entry(kind, identity, value, binding, anchor, self.accepted_ticket,
+                      objects, Future(), time.monotonic())
+        self.pending.append(entry)
+        self.pending_by_identity[(kind, identity)] = entry
+        stream_key = self._stream_key(kind, value)
+        if stream_key is not None:
+            self.pending_tails[stream_key] = entry
+        self.pending_count += 1
+        if durable:
+            self.flush_ticket = entry.ticket
+        for key, (item, size) in objects.items():
+            previous = self.objects.get(key)
+            if previous:
+                self.objects[key] = (previous[0], previous[1], previous[2] + 1)
+            else:
+                self.objects[key] = (item, size, 1)
+                self.retained += size
+        return entry.done
+
     async def accept(
         self,
         kind,
@@ -165,6 +281,12 @@ class Writer:
         # Serial admission preserves order even when measuring large shared values.
         async with self.admission:
             self.check_open()
+            objects = await self._account(value)
+            record_size = sum(size for _, size in objects.values())
+            if record_size > self.config.queue_bytes:
+                raise CapacityError(
+                    "One record exceeds queue_bytes; raise the explicit budget."
+                )
             existing = self.pending_by_identity.get((kind, identity))
             if existing:
                 previous_value = existing.value
@@ -219,7 +341,7 @@ class Writer:
                                         "Historical Operator binding conflicts."
                                     )
                             self.check_open()
-                            return
+                            return record_size
                         if kind in ("runtime_event", "user_event"):
                             field = (
                                 "session_id"
@@ -274,62 +396,18 @@ class Writer:
                             await self._validate_checkpoint(
                                 conn, value, anchor, *checkpoint_frontiers
                             )
-                objects = await self.cpu(retained_objects, value)
-                if sum(size for _, size in objects.values()) > self.config.queue_bytes:
-                    raise CapacityError(
-                        "One record exceeds queue_bytes; raise the explicit budget."
-                    )
                 async with self.condition:
                     while True:
                         self.check_open()
-                        added = sum(
-                            size
-                            for key, (_, size) in objects.items()
-                            if key not in self.objects
-                        )
-                        if (
-                            self.pending_count < self.config.queue_count
-                            and self.retained + added <= self.config.queue_bytes
-                        ):
-                            break
+                        with self.queue_lock:
+                            if self._fits(objects):
+                                completion = self._enqueue(kind, identity, value, binding, anchor, objects, durable)
+                                break
                         await self.condition.wait()
-                    self.accepted_ticket += 1
-                    completion = self.loop.create_future()
-                    completion.add_done_callback(
-                        lambda f: f.exception() if not f.cancelled() else None
-                    )
-                    entry = Entry(
-                        kind,
-                        identity,
-                        value,
-                        binding,
-                        anchor,
-                        self.accepted_ticket,
-                        objects,
-                        completion,
-                        time.monotonic(),
-                    )
-                    self.pending.append(entry)
-                    self.pending_by_identity[(kind, identity)] = entry
-                    if stream_key is not None:
-                        self.pending_tails[stream_key] = entry
-                    self.pending_count += 1
-                    if durable:
-                        self.flush_ticket = entry.ticket
-                    for key, (item, size) in objects.items():
-                        previous = self.objects.get(key)
-                        if previous:
-                            self.objects[key] = (
-                                previous[0],
-                                previous[1],
-                                previous[2] + 1,
-                            )
-                        else:
-                            self.objects[key] = (item, size, 1)
-                            self.retained += size
                     self.condition.notify_all()
         if durable or self.config.mode == "durable":
-            await asyncio.shield(completion)
+            await asyncio.shield(asyncio.wrap_future(completion))
+        return record_size
 
     @staticmethod
     def _stream_key(kind, value):
@@ -391,8 +469,9 @@ class Writer:
         if self.fault:
             raise PersistenceError("Persistence writer faulted.") from self.fault
         async with self.condition:
-            ticket = self.accepted_ticket
-            self.flush_ticket = max(self.flush_ticket, ticket)
+            with self.queue_lock:
+                ticket = self.accepted_ticket
+                self.flush_ticket = max(self.flush_ticket, ticket)
             self.condition.notify_all()
             await self.condition.wait_for(
                 lambda: self.durable_ticket >= ticket or self.fault is not None
@@ -476,26 +555,24 @@ class Writer:
                 )
                 if not self.pending:
                     return
-                delay = (
-                    self.pending[0].accepted_at
-                    + (self.config.durable_batch_delay_ms if self.config.mode == "durable" else self.config.batch_delay_ms) / 1000
-                    - time.monotonic()
-                )
-                if (
-                    delay > 0
-                    and len(self.pending) < self.config.batch_count
-                    and self.retained < self.config.batch_bytes
-                    and self.retained < self.config.queue_bytes * self.config.batch_queue_ratio
-                    and self.pending_count < self.config.queue_count * self.config.batch_queue_ratio
-                    and self.state == "open"
-                    and self.pending[0].ticket > self.flush_ticket
-                ):
+                with self.queue_lock:
+                    delay = (self.pending[0].accepted_at + (
+                        self.config.durable_batch_delay_ms if self.config.mode == "durable"
+                        else self.config.batch_delay_ms) / 1000 - time.monotonic())
+                    coalesce = (
+                        delay > 0 and len(self.pending) < self.config.batch_count
+                        and self.retained < self.config.batch_bytes
+                        and self.retained < self.config.queue_bytes * self.config.batch_queue_ratio
+                        and self.pending_count < self.config.queue_count * self.config.batch_queue_ratio
+                        and self.state == "open" and self.pending[0].ticket > self.flush_ticket)
+                if coalesce:
                     try:
                         await asyncio.wait_for(self.condition.wait(), timeout=delay)
                     except TimeoutError:
                         pass
                     continue
-                entries = list(islice(self.pending, self.config.batch_count))
+                with self.queue_lock:
+                    entries = list(islice(self.pending, self.config.batch_count))
             prepared = None
             try:
                 prepared = await self.cpu(prepare, entries, self.config)
@@ -503,63 +580,64 @@ class Writer:
                 async with self.mutation:
                     order = await self._commit(prepared)
                     async with self.condition:
-                        self.store_order = order
-                        self.commit_revision += 1
-                        if any(entry.kind == "runtime_event" and entry.value.event_name in OBSERVABLE_EVENTS for entry in entries):
-                            self.notify_executions(self.storage.committed_invocations)
-                        for entry in entries:
-                            assert self.pending[0] is entry
-                            self.pending.popleft()
-                            del self.pending_by_identity[(entry.kind, entry.identity)]
-                            stream_key = self._stream_key(entry.kind, entry.value)
-                            if self.pending_tails.get(stream_key) is entry:
-                                del self.pending_tails[stream_key]
-                            self.pending_count -= 1
-                            self.durable_ticket = entry.ticket
-                            for key in entry.objects:
-                                obj, retained, refs = self.objects[key]
-                                if refs == 1:
-                                    del self.objects[key]
-                                    self.retained -= retained
-                                else:
-                                    self.objects[key] = (obj, retained, refs - 1)
-                            entry.objects.clear()
-                            entry.value = None
-                            entry.done.set_result(None)
-                        # Release all batch data before waking blocked producers.
-                        prepared.clear()
-                        entries.clear()
-                        entry = obj = None
+                        with self.queue_lock:
+                            self.store_order = order
+                            self.commit_revision += 1
+                            if any(entry.kind == "runtime_event" and entry.value.event_name in OBSERVABLE_EVENTS for entry in entries):
+                                self.notify_executions(self.storage.committed_invocations)
+                            for entry in entries:
+                                assert self.pending[0] is entry
+                                self.pending.popleft()
+                                del self.pending_by_identity[(entry.kind, entry.identity)]
+                                stream_key = self._stream_key(entry.kind, entry.value)
+                                if self.pending_tails.get(stream_key) is entry:
+                                    del self.pending_tails[stream_key]
+                                self.pending_count -= 1
+                                self.durable_ticket = entry.ticket
+                                for key in entry.objects:
+                                    obj, retained, refs = self.objects[key]
+                                    if refs == 1:
+                                        del self.objects[key]
+                                        self.retained -= retained
+                                    else:
+                                        self.objects[key] = (obj, retained, refs - 1)
+                                entry.objects.clear()
+                                entry.value = None
+                                entry.done.set_result(None)
+                            # Release all batch data before waking blocked producers.
+                            prepared.clear()
+                            entries.clear()
+                            entry = obj = None
                         self.condition.notify_all()
             except Exception as exc:  # noqa: BLE001 -- wake all producers on writer fault
                 async with self.condition:
-                    self.fault, self.state = exc, "faulted"
-                    for entry in self.pending:
-                        if not entry.done.done():
-                            entry.done.set_exception(
-                                PersistenceError(
-                                    "Batch failed; its ordered tail remains uncommitted."
+                    with self.queue_lock:
+                        self.fault, self.state = exc, "faulted"
+                        for entry in self.pending:
+                            if not entry.done.done():
+                                entry.done.set_exception(
+                                    PersistenceError(
+                                        "Batch failed; its ordered tail remains uncommitted."
+                                    )
                                 )
-                            )
                     self.condition.notify_all()
                 return
             finally:
                 prepared = entries = None
 
     async def health(self):
-        return PersistenceHealth(
-            self.state,
-            self.pending_count,
-            self.retained,
-            self.accepted_ticket,
-            self.durable_ticket,
-            str(self.fault) if self.fault else None,
-        )
+        with self.queue_lock:
+            return PersistenceHealth(
+                self.state, self.pending_count, self.retained,
+                self.accepted_ticket, self.durable_ticket,
+                str(self.fault) if self.fault else None,
+            )
 
     async def _shutdown(self):
         async with self.condition:
-            if self.state == "open":
-                self.state = "closing"
+            with self.queue_lock:
+                if self.state == "open":
+                    self.state = "closing"
             self.condition.notify_all()
         if self.task:
             await self.task
@@ -574,13 +652,14 @@ class Writer:
         self.fault = None
         await self.storage.close()
         self.executor.shutdown(wait=True)
-        self.pending.clear()
-        self.pending_by_identity.clear()
-        self.pending_tails.clear()
-        self.objects.clear()
-        self.execution_watches.clear()
-        self.pending_count = self.retained = 0
-        self.state = "closed"
+        with self.queue_lock:
+            self.pending.clear()
+            self.pending_by_identity.clear()
+            self.pending_tails.clear()
+            self.objects.clear()
+            self.execution_watches.clear()
+            self.pending_count = self.retained = 0
+            self.state = "closed"
         if failure:
             raise PersistenceError(
                 "Close failed to persist the buffered tail: " + failure

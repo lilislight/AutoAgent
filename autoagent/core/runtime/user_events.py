@@ -13,12 +13,13 @@ from .values import DurableValue, freeze, thaw
 class UserEvent:
     session_id: str
     invocation_id: str
-    sequence: int
+    sequence: int | None
     kind: str
     payload: DurableValue
     occurrence_id: str | None = None
     occurred_at_us: int = field(default_factory=unix_time_us)
     id: str = field(default_factory=lambda: str(uuid4()))
+    persist: bool = True
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -34,7 +35,11 @@ class UserEvent:
             or not self.occurrence_id.strip()
         ):
             raise ValueError("User Event occurrence_id must be non-empty or None.")
-        if (
+        if type(self.persist) is not bool:
+            raise TypeError("User Event persist must be a boolean.")
+        if not self.persist and self.sequence is not None:
+            raise ValueError("Transient User Events cannot have a history sequence.")
+        if self.persist and (
             not isinstance(self.sequence, int)
             or isinstance(self.sequence, bool)
             or self.sequence < 1
@@ -58,6 +63,7 @@ class UserEvent:
             "payload": thaw(self.payload),
             "occurrence_id": self.occurrence_id,
             "occurred_at_us": self.occurred_at_us,
+            "persist": self.persist,
         }
 
     @classmethod
@@ -68,7 +74,7 @@ class UserEvent:
             id=_string(value, "id"),
             session_id=_string(value, "session_id"),
             invocation_id=_string(value, "invocation_id"),
-            sequence=_integer(value, "sequence"),
+            sequence=None if _required_value(value, "sequence") is None else _integer(value, "sequence"),
             kind=_string(value, "kind"),
             payload=_required_value(value, "payload"),
             occurrence_id=(
@@ -77,6 +83,7 @@ class UserEvent:
                 else None
             ),
             occurred_at_us=_integer(value, "occurred_at_us"),
+            persist=value.get("persist", True),
         )
 
 
@@ -116,8 +123,9 @@ class InMemoryUserEventJournal:
         payload: object,
         occurrence_id: str | None,
         occurred_at_us: int,
+        persist: bool = True,
     ) -> UserEvent:
-        sequence = self._sequences.get(invocation_id, 0) + 1
+        sequence = self._sequences.get(invocation_id, 0) + 1 if persist else None
         event = UserEvent(
             session_id=session_id,
             invocation_id=invocation_id,
@@ -126,9 +134,11 @@ class InMemoryUserEventJournal:
             payload=payload,  # type: ignore[arg-type]
             occurrence_id=occurrence_id,
             occurred_at_us=occurred_at_us,
+            persist=persist,
         )
         self._events.setdefault(invocation_id, []).append(event)
-        self._sequences[invocation_id] = sequence
+        if persist:
+            self._sequences[invocation_id] = sequence
         return event
 
     def events(self, invocation_id: str) -> tuple[UserEvent, ...]:

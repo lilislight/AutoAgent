@@ -73,3 +73,6 @@ __all__ = [
     "workflow_hook",
     "workflow_hook_version",
 ]
+
+from ..usage import UsagePolicy, WorkflowResourcePolicy, ResourceBudgetExceeded, UsageAccountingError
+__all__ += ["UsagePolicy", "WorkflowResourcePolicy", "ResourceBudgetExceeded", "UsageAccountingError"]

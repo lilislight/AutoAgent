@@ -129,10 +129,21 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
             await hub.close()
             hubs.discard(hub)
     router = APIRouter(prefix=settings.api_prefix, tags=["AutoAgent Workflows"], lifespan=watch_lifespan)
+    from .agent import agent_router
+    router.include_router(agent_router(host, settings, _query))
+
+    @router.get('/query-projections')
+    async def query_projections():
+        return await _query(host.query_projection_status(), settings)
+
+    @router.post('/query-projections/build')
+    async def build_query_projections(rebuild: bool = False):
+        return await _query(host.build_query_projections(rebuild=rebuild), settings)
 
     @router.get('/memory')
-    async def memory(history: int = Query(0, ge=0, le=3600)):
-        return await _query(host.memory_snapshot(history=history), settings)
+    async def memory(history: int = Query(0, ge=0, le=604800),
+        window_seconds: float | None = Query(None, gt=0, le=604800), points: int = Query(600, ge=2, le=2000)):
+        return await _query(host.memory_snapshot(history=history, window_seconds=window_seconds, points=points), settings)
 
     @router.get('/memory/metrics', response_class=PlainTextResponse)
     async def memory_metrics():

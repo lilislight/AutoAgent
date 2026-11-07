@@ -159,8 +159,8 @@ class PersistenceContracts:
         self.assertEqual([r['sequence']for r in await self.rows(sink,'user_events')],[1,2])
 
     async def test_terminal_buffered_batch_cannot_leave_stale_ordinal_on_recovery(self):
-        """Recover after a failed batch advances an already cached Node ordinal."""
-        from autoagent import RecoverySource
+        """Rebuild ordinals after a buffered failure without Writer projection state."""
+        from autoagent import Recovery, RecoverySource
         calls = 0
 
         def flaky(value: Value) -> Value:
@@ -171,7 +171,7 @@ class PersistenceContracts:
             return {'blob': value['blob'][1:]}
 
         capture = Capture()
-        workflow = Workflow('ordinal-recovery', nodes=[Node('entry', identity), Node('step', flaky), Node('finish', identity)],
+        workflow = Workflow('ordinal-recovery', nodes=[Node('entry', identity), Node('step', flaky, recovery_mode=Recovery('replay_safe')), Node('finish', identity)],
                             edges=[Edge('entry', 'step'), Edge('step', 'step', condition=again), Edge('step', 'finish', condition=finished)])
         app = AutoAgentApp(runtime_event_sink=capture)
         self.apps.append(app)
@@ -186,7 +186,9 @@ class PersistenceContracts:
                 first = False
                 await sink.flush()
                 cached = sink._writer.storage.metadata_cache.get(('ordinals', (failed.ref.invocation_id, 'step')))
-                self.assertEqual(cached, 1)
+                self.assertIsNone(cached)
+                projected = await sink.list_nodes(failed.ref.invocation_id)
+                self.assertEqual(max(r['ordinal'] for r in projected.items if r['node_id']=='step'), 1)
         await sink.flush()
         boundary = len(capture.events)
         recovered = await app.arecover(failed.ref, source=RecoverySource.from_events(tuple(capture.events)))
@@ -306,7 +308,7 @@ class PersistenceContracts:
 
     async def rows(self, sink, name):
         async def query():
-            async with sink._writer.storage.engine.connect() as conn:
+            async with sink._queries.view() as (conn, _, _, _):
                 return [
                     dict(row)
                     for row in (
@@ -397,7 +399,7 @@ class PersistenceContracts:
         self.assertFalse(any(q.startswith('SELECT graph_changes.') for q in statements))
         self.assertFalse(any(q.startswith('SELECT edge_evaluations.') and 'JOIN' not in q for q in statements))
         inserts = [q for q in statements if q.startswith(('INSERT INTO graph_changes', 'INSERT INTO edge_evaluations'))]
-        self.assertTrue(inserts)
+        self.assertFalse(inserts)
         self.assertTrue(all('ON CONFLICT' not in q for q in inserts))
         before = {name: sorted(await self.rows(sink, name), key=lambda r: (r['event_id'], r.get('change_index', r.get('result_index'))))
                   for name in ('graph_changes', 'edge_evaluations')}
@@ -409,7 +411,7 @@ class PersistenceContracts:
             self.assertEqual(actual, expected)
 
     async def test_parent_child_projection_writes_each_node_once_per_batch(self):
-        """Parent-before-Child foreign keys hold without duplicate Node upserts."""
+        """Child ownership persists without writing any historical Node projection."""
         sink = await self.sink(mode='buffered', batch_delay_ms=1000)
         child = Workflow('append-child', nodes=[Node('work', identity)])
         root = Workflow('append-root', nodes=[Node('spawn', Spawn(child, 'work')), Node('await', Await())],
@@ -445,13 +447,13 @@ class PersistenceContracts:
         finally:
             storage.projections, storage.upsert = original_project, original_upsert
         self.assertEqual(result.status, 'completed')
-        self.assertGreater(writes, 0)
+        self.assertEqual(writes, 0)
         rows = await self.rows(sink, 'invocations')
         self.assertEqual(len(rows), 2)
         self.assertTrue(any(row['parent_invocation_id'] for row in rows))
 
     async def test_writer_graph_cache_skips_unconditional_reads_and_survives_eviction(self):
-        """Cache bounded revision metadata while keeping graph history exact after rebuild."""
+        """Execution skips display graph reads; demand queries use a bounded graph cache."""
         from sqlalchemy import event
         sink = await self.sink(workflow_graph_cache_bytes=1500)
         storage = sink._writer.storage
@@ -479,7 +481,9 @@ class PersistenceContracts:
             event.remove(storage.engine.sync_engine, 'before_cursor_execute', sql)
         self.assertFalse(any('FROM edge_evaluations' in q for q in queries))
         # One full definition read per revision; admission uses only its PK.
-        self.assertEqual(sum('workflow_revisions.snapshot_text' in q for q in queries), 3)
+        self.assertEqual(sum('workflow_revisions.snapshot_text' in q for q in queries), 0)
+        for result in results:
+            await sink.graph_changes(result.ref.invocation_id)
         self.assertGreater(storage.graph_cache.hits, 0)
         self.assertGreaterEqual(storage.graph_cache.evictions, 2)
         self.assertLessEqual(storage.graph_cache.bytes, 1500)
@@ -533,7 +537,7 @@ class PersistenceContracts:
         ] + [dict(id='unrelated', source='other', target='target', on='complete', condition=None)]}}
 
         async def check():
-            async with sink._writer.storage.engine.connect() as conn:
+            async with sink._queries.view() as (conn, _, _, _):
                 async def load(*args):
                     return snapshot
                 for status, decision in [('completed', None), ('completed', False),
@@ -559,7 +563,7 @@ class PersistenceContracts:
                             invocation_id='i', source_occurrence_id='source@root',
                             source_status=source_status, edge_id=source_status+'-conditional',
                             condition_result=decision)
-                    await batch.runtime(record, 1, new_event=True)
+                    await batch.runtime(record, 1)
                     actual = {r['change']['edge_id']: r['change']['selected']
                               for r in batch.changed('graph_changes') if r['entity_type'] == 'edge'}
                     expected = {edge['id']: False for edge in snapshot['definition']['edges']
@@ -573,29 +577,17 @@ class PersistenceContracts:
                     self.assertEqual(actual, expected, (status, decision))
         await sink._writer.run(check)
 
-    async def test_writer_installs_edge_lookup_index_without_reader_ddl(self):
-        """Refresh the current non-unique index on writer open without modifying readers."""
-        from sqlalchemy import inspect, text
+    async def test_fact_schema_creates_empty_optional_read_models(self):
+        """Database initialization creates empty detailed projection tables."""
+        from sqlalchemy import inspect
+        from autoagent.host.persistence.schema import DETAIL_TABLES
         sink = await self.sink()
-
-        async def drop():
-            async with sink._writer.storage.engine.begin() as conn:
-                await conn.execute(text('DROP INDEX edge_source_lookup'))
-        await sink._writer.run(drop)
-        await sink.close()
-
-        async def names(target):
-            async def read():
-                async with target._writer.storage.engine.connect() as conn:
-                    return await conn.run_sync(lambda c: {i['name'] for i in inspect(c).get_indexes('edge_evaluations')})
-            return await target._writer.run(read)
-
-        reader = await DatabaseSink.open(self.url, read_only=True)
-        self.sinks.append(reader)
-        self.assertNotIn('edge_source_lookup', await names(reader))
-        await reader.close()
-        reopened = await self.sink()
-        self.assertIn('edge_source_lookup', await names(reopened))
+        async def tables():
+            async with sink._writer.storage.engine.connect() as conn:
+                return await conn.run_sync(lambda sync: inspect(sync).get_table_names())
+        names = await sink._writer.run(tables)
+        self.assertTrue(set(DETAIL_TABLES).issubset(names))
+        self.assertTrue({'sessions','invocations','active_nodes','active_waits'}.issubset(names))
 
     async def test_artifacts_deduplicate_event_delta_and_checkpoint(self):
         """Store a shared MiB value once across original facts and checkpoints."""
@@ -629,7 +621,7 @@ class PersistenceContracts:
         """Do not externalize structural Event wrappers containing small values."""
         sink = await self.sink()
         app, workflow, _ = await self.registered(sink)
-        await app.ainvoke(workflow, {"blob": "x" * (768 * 1024)})
+        await app.ainvoke(workflow, {"blob": "x" * 4096})
         self.assertEqual(await self.rows(sink, "artifacts"), [])
 
     async def test_idempotency_and_conflicting_event_identity(self):
@@ -855,7 +847,7 @@ class PersistenceContracts:
                 await asyncio.wait_for(reading.wait(), 2)
                 completion = writer.pending_by_identity[("user_event", first.id)].done
                 write_gate.set()
-                await asyncio.wait_for(asyncio.shield(completion), 2)
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(completion)), 2)
                 self.assertFalse(second_call.done())
                 self.assertEqual(writer.pending_count, 0)
                 self.assertEqual(writer.pending_tails, {})

@@ -10,7 +10,7 @@ import unittest
 
 from typing_extensions import TypedDict
 
-from autoagent import AwaitSignal, Edge, Node, SignalEndpoint, Spawn, Wait, Workflow
+from autoagent import AwaitSignal, Edge, Node, Recovery, SignalEndpoint, Spawn, Wait, Workflow
 from autoagent.evaluation import (CheckResult, EvalCase, EvalSuite, EventCount, OutputEquals,
     RunOptions, StatusIs, compare_runs, load_report, run_suite)
 from autoagent.host import AutoAgentHost, HostSettings
@@ -158,7 +158,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
                 await failed.value('error') == error))
             return completed
         result = await self.run_eval(self.suite(scenario=scenario), factory=self.factory([
-            Workflow('echo', nodes=[Node('echo', flaky)])]))
+            Workflow('echo', nodes=[Node('echo', flaky, recovery_mode=Recovery('replay_safe'))])]))
         self.assertTrue(result['ok'], result)
 
     async def test_signal_and_pause_continue_use_normal_host_controls(self):

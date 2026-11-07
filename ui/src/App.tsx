@@ -15,6 +15,8 @@ import { ExecutionWorkspace } from "./components/ExecutionWorkspace";
 import { useTheme, type Theme } from "./theme";
 import { getExecutionLayout, setExecutionLayout } from './components/useExecutionLayout';
 import brandIcon from "./autoagent.svg";
+import { MemoryMonitorButton } from './components/MemoryMonitor';
+import AgentWorkspace from "./agent/AgentWorkspace";
 import type { AcceptedExecution, ExecutionTrace, LocationState, Selection, TraceRow, WorkflowGraphData } from "./types";
 
 const WorkflowGraph = lazy(() => import("./components/WorkflowGraph"));
@@ -24,7 +26,7 @@ type FlowSnapshot = { key: string; workflow: WorkflowGraphData; trace: Execution
 const familyGroup = (value: FlowSnapshot) => value.trace?.invocation.root_invocation_id ?? null;
 
 function restoreLocation() {
-  const state = readLocation(window.location.search);
+  const state = readLocation(window.location.search || (config.defaultView === 'agents' ? '?view=agents' : ''));
   return state.view === 'executions' ? { ...state, executionView: state.executionView ?? getExecutionLayout().view } : state;
 }
 function useLocation() {
@@ -35,6 +37,7 @@ function useLocation() {
     const update = () => {
       const value = restoreLocation();
       if (value.executionView) setExecutionLayout({ view: value.executionView });
+      if (value.view !== activeView.current && document.activeElement instanceof HTMLElement && document.activeElement.closest('.workspace-tab')) document.activeElement.blur();
       activeView.current = value.view;
       setViews(current => ({ ...current, [value.view]: value }));
       setLocation(value);
@@ -48,6 +51,7 @@ function useLocation() {
     setViews(current => ({ ...current, [value.view]: value }));
     // Background panels may finish loading without changing the active tab or URL.
     if (!activate && value.view !== activeView.current) return;
+    if (value.view !== activeView.current && document.activeElement instanceof HTMLElement && document.activeElement.closest('.workspace-tab')) document.activeElement.blur();
     activeView.current = value.view;
     const url = new URL(window.location.href);
     url.search = writeLocation(value);
@@ -79,6 +83,7 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   }, [location.execution, location.selection]);
   const inspectorOpen = Boolean(location.selection);
   const executionMode = location.view === "executions";
+  const [directoryLoading, setDirectoryLoading] = useState(true);
   const isAccepted = accepted?.invocation_id===location.execution;
   const [workflowFocus, setWorkflowFocus] = useState(0);
   const trace = useQuery({
@@ -111,7 +116,7 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   }, [traceSession, location, navigate]);
   const workflow = detail.data?.workflow_id === workflowId && detail.data?.workflow_revision_id === revision ? detail.data : undefined;
   const flowKey = executionMode ? location.execution ? `execution:${location.execution}` : null : revision ? `workflow:${revision}` : null;
-  const flowFailed = Boolean(detail.error && !detail.isFetching || executionMode && !waitingForTrace && trace.error && !trace.data && !trace.isFetching);
+  const flowFailed = Boolean(detail.error && !detail.data && !detail.isFetching || executionMode && !waitingForTrace && trace.error && !trace.data && !trace.isFetching);
   const flowPending = waitingForTrace || detail.isFetching || executionMode && trace.isFetching;
   const candidate = useMemo<FlowSnapshot | null>(() => flowKey && workflow && (!executionMode || activeTrace)
     ? { key: flowKey, workflow, trace: executionMode ? activeTrace! : null } : null, [flowKey, workflow, executionMode, activeTrace]);
@@ -142,10 +147,10 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
     {comparing ? <RevisionComparison workflowId={location.workflow!} base={location.compareBase!} target={location.revision!} active={active} theme={theme} changeView={changeView} onPair={(base, target) => navigate({ ...location, compareBase: base, revision: target, selection: null })} onExit={exitComparison} /> : null}
     <div className={`workspace workspace-tab ${active && !comparing ? "" : "is-inactive"}`} data-workspace-view={location.view} aria-hidden={!active || comparing} inert={!active || comparing}>
       <Sidebar view={location.view} onChange={changeView}>{executionMode
-        ? <ExecutionDirectory onRunAccepted={onRunAccepted} session={traceSession ?? location.session} invocation={location.execution}
+        ? <ExecutionDirectory onRunAccepted={onRunAccepted} onLoadingChange={setDirectoryLoading} session={traceSession ?? location.session} invocation={location.execution}
           onSession={session => navigate({ ...location, session, execution: null, selection: null })}
           onInvocation={(execution, session) => navigate({ ...location, execution, session, selection: null })} />
-        : <WorkflowDirectory workflowId={location.workflow} revisionId={location.revision} onSelect={select} />}</Sidebar>
+        : <WorkflowDirectory workflowId={location.workflow} revisionId={location.revision} onSelect={select} onLoadingChange={setDirectoryLoading} />}</Sidebar>
       <main className="main-workspace" aria-label={presentedWorkflowId ? `Workflow graph: ${presentedWorkflowId}` : "Workflow graphs"}>
         {executionMode && location.session && !location.execution ? <SessionInformation key={location.session} session={location.session} onInvocation={openFamilyMember} onDefinition={onOpenWorkflow} /> : null}
         <div className={`workspace-flow-container ${executionMode && location.session && !location.execution ? 'is-inactive' : ''}`}>
@@ -160,7 +165,7 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
                 <InspectorPresence open={Boolean(selection)}>{selection ? <Inspector workflow={snapshot.workflow} selection={selection} onClose={closeInspector} onRunAccepted={onRunAccepted} onEntry={id => { chooseObject({ kind: "node", id }); setWorkflowFocus(value => value + 1); }} /> : null}</InspectorPresence></FlowLoadingSurface>
             </>;
           }}
-          fallback={<FlowLoadingSurface loadingLabel={waitingForTrace?'Run accepted · Waiting for saved trace':undefined}><div className="empty-state"><div className="empty-glyph"><WorkflowIcon /></div><h2>{waitingForTrace?'Waiting for saved trace':executionMode ? trace.isFetching || detail.isFetching ? "Loading execution" : trace.error || detail.error ? "Could not load execution" : "Explore workflow executions" : detail.isFetching ? "Loading workflow definition" : detail.error ? "Could not load definition" : "Explore workflow definitions"}</h2><p>{waitingForTrace?'The Run was accepted. Its trace will appear after persistence commits.':(executionMode ? trace.error?.message : null) ?? detail.error?.message ?? (executionMode ? location.session ? "Select an invocation from this session to inspect its execution." : "Select a session, then an invocation to inspect its execution." : "Select a workflow to explore its nodes, edges, and execution rules.")}</p>{!waitingForTrace && (trace.error || detail.error) ? <button className="refresh-button" onClick={() => { if (trace.error) void trace.refetch(); else void detail.refetch(); }}>Retry</button> : null}</div></FlowLoadingSurface>}
+          fallback={<FlowLoadingSurface pending={!flowKey && directoryLoading} loadingLabel={waitingForTrace?'Run accepted · Waiting for saved trace':undefined}><div className="empty-state"><div className="empty-glyph"><WorkflowIcon /></div><h2>{waitingForTrace?'Waiting for saved trace':executionMode ? trace.isFetching || detail.isFetching ? "Loading execution" : trace.error || detail.error ? "Could not load execution" : "Explore workflow executions" : detail.isFetching ? "Loading workflow definition" : detail.error ? "Could not load definition" : "Explore workflow definitions"}</h2><p>{waitingForTrace?'The Run was accepted. Its trace will appear after persistence commits.':(executionMode ? trace.error?.message : null) ?? detail.error?.message ?? (executionMode ? location.session ? "Select an invocation from this session to inspect its execution." : "Select a session, then an invocation to inspect its execution." : "Select a workflow to explore its nodes, edges, and execution rules.")}</p>{!waitingForTrace && (trace.error || detail.error) ? <button className="refresh-button" onClick={() => { if (trace.error) void trace.refetch(); else void detail.refetch(); }}>Retry</button> : null}</div></FlowLoadingSurface>}
         />
         </div>
       </main>
@@ -171,6 +176,13 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
 export default function App() {
   const [location, navigate, views] = useLocation();
   const [theme, toggleTheme] = useTheme();
+  const previousView = useRef(location.view);
+  useEffect(() => {
+    if (previousView.current === location.view) return;
+    previousView.current = location.view;
+    const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>('.workspace-tab:not(.is-inactive) .activity-button.active')?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [location.view]);
   const queryClient=useQueryClient();
   const [accepted,setAccepted]=useState<AcceptedExecution|null>(null);
   const runAccepted=useCallback((receipt:AcceptedExecution)=>{
@@ -190,14 +202,14 @@ export default function App() {
   }, [location.view, navigate, views]);
   return <div className="app-shell">
     <header className="topbar"><a className="brand" href={config.uiBase} aria-label="AutoAgent Tracing"><img className="brand-symbol" src={brandIcon} width="36" height="36" alt="" />AutoAgent Tracing</a>
-      <div className="topbar-actions"><span className="local-badge"><span />Local</span>
+      <div className="topbar-actions"><MemoryMonitorButton /><span className="local-badge"><span />Local</span>
       <button className="theme-switch" role="switch" aria-checked={theme === "dark"} aria-label="Dark theme" onClick={toggleTheme} title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>
         <svg className="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
         <svg className="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A9 9 0 0 1 8.5 4 9 9 0 1 0 20 15.5Z" /></svg>
         <span className="theme-switch-thumb" aria-hidden="true" />
       </button></div></header>
     <div className="workspace-tabs">
-      {Object.values(views).map(value => <BrowserWorkspace key={value.view} location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} theme={theme} accepted={accepted} onRunAccepted={runAccepted} onTraceSaved={traceSaved} onOpenWorkflow={openWorkflow} />)}
+      {Object.values(views).map(value => value.view === 'agents' ? <AgentWorkspace key="agents" location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} onTrace={(iid, sid) => navigate({ view: 'executions', execution: iid, session: sid, workflow: null, revision: null, selection: null })} /> : <BrowserWorkspace key={value.view} location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} theme={theme} accepted={accepted} onRunAccepted={runAccepted} onTraceSaved={traceSaved} onOpenWorkflow={openWorkflow} />)}
     </div>
   </div>;
 }

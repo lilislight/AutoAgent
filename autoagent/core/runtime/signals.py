@@ -110,7 +110,8 @@ def signal_delta(planner, state, payload, occurred_at_us, session_id, invocation
         if inv.status not in {'running', 'waiting'} or payload.message_id in signals['messages']:
             raise RuntimeTransitionError('SIGNAL_TARGET_UNAVAILABLE', 'Signal target is stopping, terminal or delivery is duplicated.')
         receipt = freeze({'message_id': payload.message_id, 'endpoint': payload.endpoint, 'accepted_sequence': state.sequence + 1})
-        message = freeze({**receipt, 'accepted_at_us': occurred_at_us, 'payload': payload.payload})
+        message = freeze({**receipt, 'accepted_at_us': occurred_at_us, 'payload': payload.payload,
+            'sender_id': payload.origin['invocation_id'] if payload.origin is not None else None})
         put(('messages', payload.message_id), freeze({'message': message, 'size_bytes': payload.size_bytes}), 'add')
         put(('bytes',), signals['bytes'] + payload.size_bytes)
         if payload.origin is not None:
@@ -125,7 +126,8 @@ def signal_delta(planner, state, payload, occurred_at_us, session_id, invocation
                 raise RuntimeTransitionError('SIGNAL_SEQUENCE_INVALID', 'Signal sequence is not next.')
             put(('sources', source), freeze({**payload.external, 'receipt': receipt}), 'replace' if previous else 'add')
     elif isinstance(payload, SignalsReceived):
-        call = inv.scheduler.operator_calls.get(payload.call_id)
+        from .inline import runtime_call
+        call = runtime_call(inv, payload.call_id)
         if inv.stopping or call is None or call.status != 'running' or call.operator_id != 'system_command:receive_signal':
             raise RuntimeTransitionError('SIGNAL_RECEIVE_CALL_INVALID', 'Receive requires its active Call.')
         endpoint, limit = call.input['endpoint'], call.input['limit']
@@ -133,7 +135,11 @@ def signal_delta(planner, state, payload, occurred_at_us, session_id, invocation
         if payload.message_ids != selected:
             raise RuntimeTransitionError('SIGNAL_RECEIVE_ORDER_INVALID', 'Receive must take the next Endpoint messages.')
         messages = [signals['messages'][mid]['message'] for mid in selected]
-        delta = planner.plan(state, OperatorCallCompleted(call.id, freeze({'messages': messages})),
+        from .events import CommandReturned
+        completion = (OperatorCallCompleted(call.id, freeze({'messages': messages}))
+            if call.id in inv.scheduler.operator_calls else
+            CommandReturned(call.occurrence_id, call.id, freeze({'messages': messages})))
+        delta = planner.plan(state, completion,
             occurred_at_us=occurred_at_us, session_id=session_id, invocation_id=invocation_id,
             _execution_index=execution_index)
         ops.extend(delta.operations)

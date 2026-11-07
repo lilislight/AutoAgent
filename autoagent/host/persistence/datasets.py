@@ -6,7 +6,7 @@ import tempfile
 import time
 from uuid import uuid4
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 
 from .models import CapacityError
 from .replay import replay_events
@@ -88,7 +88,7 @@ class TraceDatasets:
                 await asyncio.to_thread(file.write, payload)
 
             try:
-                async with self.queries.view() as (conn, _, _, frontier):
+                async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
                     store_id = await conn.scalar(select(meta.tables['persistence_meta'].c.store_id))
                     previous = decode_trace_cursor(cursor, store_id, iid, frontier) if cursor is not None else old['manifest']['frontier'] if old else None
                     if replay and cursor is not None:

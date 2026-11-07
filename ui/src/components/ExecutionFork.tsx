@@ -1,3 +1,4 @@
+import { FactsSkeleton, RecordsSkeleton, BusyLabel } from './LoadingState';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -86,7 +87,7 @@ export function ForkDialog({trace,target,onClose,onAccepted}:{trace:ExecutionTra
     onClick={event=>{const box=dialog.current?.getBoundingClientRect();if(event.target===dialog.current&&box&&!mutation.isPending&&(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom))onClose();}}>
     <header><strong id={title}>Fork after Event #{sequence}</strong><button type="button" aria-label="Close Fork" disabled={mutation.isPending} onClick={onClose}>×</button></header>
     <p>The Root and its related children become an independent branch. The source keeps running.</p>
-    {plan.isPending ? <p role="status">Checking the historical position…</p> : null}
+    {plan.isPending ? <FactsSkeleton label="Loading Fork plan" className="fork-plan" labels={["Related Sessions", "Calls to replay", "Timers"]} /> : null}
     {plan.error ? <p role="alert">{plan.error.message}</p> : null}
     {plan.data?.available ? <><dl className="fork-plan"><dt>Related Sessions</dt><dd>{plan.data.members?.length}</dd>
       <dt>Calls to replay</dt><dd>{plan.data.replay_calls?.length ?? 0}</dd><dt>Timers</dt><dd>Keep absolute deadlines</dd></dl>
@@ -94,8 +95,8 @@ export function ForkDialog({trace,target,onClose,onAccepted}:{trace:ExecutionTra
       <label htmlFor={sessionLabel}>New Root Session ID <small>Optional</small></label><input id={sessionLabel} value={session} maxLength={4096} onChange={event=>setSession(event.target.value)} placeholder="Generate automatically" disabled={mutation.isPending}/></> : null}
     {plan.data&&!plan.data.available ? <p role="alert">{plan.data.reason} Choose another Runtime Event.</p> : null}
     {mutation.error ? <p role="alert">{mutation.error.message}</p> : null}
-    {ambiguous?<div className="inspector-notice"><p>Creation could not be confirmed. Check this Session before creating another Fork.</p><code>{submittedSession}</code><button type="button" disabled={checking} onClick={()=>void checkCreated()}>{checking?'Checking…':'Check created Session'}</button>{checkError?<p role="alert">{checkError}</p>:null}</div>:null}
-    <footer><button type="button" disabled={mutation.isPending} onClick={onClose}>Cancel</button><button type="button" className="primary-button" disabled={!plan.data?.available||mutation.isPending||ambiguous} onClick={()=>mutation.mutate()}>{mutation.isPending?'Creating…':'Create Fork'}</button></footer>
+    {ambiguous?<div className="inspector-notice"><p>Creation could not be confirmed. Check this Session before creating another Fork.</p><code>{submittedSession}</code><button type="button" disabled={checking} onClick={()=>void checkCreated()}><BusyLabel busy={checking} label="Checking">Check created Session</BusyLabel></button>{checkError?<p role="alert">{checkError}</p>:null}</div>:null}
+    <footer><button type="button" disabled={mutation.isPending} onClick={onClose}>Cancel</button><button type="button" className="primary-button" disabled={!plan.data?.available||mutation.isPending||ambiguous} onClick={()=>mutation.mutate()}><BusyLabel busy={mutation.isPending} label="Creating">Create Fork</BusyLabel></button></footer>
   </dialog>;
 }
 
@@ -112,7 +113,7 @@ export function ForkHistory({trace,onOpen}:{trace:ExecutionTrace;onOpen:(iid:str
   return <div className="fork-history"><div className="fork-history-heading"><button type="button" aria-expanded={expanded} onClick={()=>setExpanded(value=>!value)}>{expanded?'▾':'▸'} Inherited history · through Source Event #{origin.source_sequence}</button>
     <button type="button" onClick={()=>{replayPositions.request(`${config.apiPrefix}|${trace.source_id ?? 'unknown'}|${origin.source_invocation_id}`,{sequence:origin.source_sequence});onOpen(origin.source_invocation_id);}}>Open source at Fork ↗</button></div>
     {expanded?<div className="fork-source-events">{rows.map(e=><div key={String(e.event_id)}><code>Source #{e.sequence}</code><span>{String(e.event_name)}</span></div>)}
-      {events.isPending?<p>Loading source Event headers…</p>:null}{events.error?<p role="alert">{events.error.message}</p>:null}
+      {events.isLoading?<RecordsSkeleton label="Loading source Event headers" />:null}{events.error?<p role="alert">{events.error.message}</p>:null}
       {events.hasNextPage?<button disabled={events.isFetchingNextPage} onClick={()=>void events.fetchNextPage()}>More source Events</button>:null}
       <p className="fork-boundary">Fork boundary · New execution time starts here. Earlier User Events are not inherited.</p></div>:null}</div>;
 }

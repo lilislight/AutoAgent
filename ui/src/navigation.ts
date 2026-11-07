@@ -10,14 +10,15 @@ export function readLocation(search: string): LocationState {
   const edge = params.get("edge");
   const group = params.get('group');
   const execution = params.get("execution");
-  const view = params.get("view") === "executions" ? "executions" : "workflows";
+  const view = params.get("view") === "agents" ? "agents" : params.get("view") === "executions" ? "executions" : "workflows";
   const state: LocationState = {
-    view, execution: view === "executions" ? execution : null,
+    view, execution: view !== "workflows" ? execution : null,
     workflow: view === "workflows" ? params.get("workflow") : null,
     revision: view === "workflows" ? params.get("revision") : null,
-    session: view === "executions" ? params.get("session") : null,
+    session: view !== "workflows" ? params.get("session") : null,
     selection: node ? { kind: "node", id: node } : edge ? { kind: "edge", id: edge } : group ? {kind:'group',id:group} : view === "executions" && params.has("invocation") ? { kind: "invocation", id: params.get("invocation")! } : view === "workflows" && params.has("definition") ? { kind: "workflow", id: params.get("definition")! } : null,
   };
+  if (view === 'agents') state.selection = null;
   if (view === 'workflows' && params.get('compare')) state.compareBase = params.get('compare')!;
   if (view === 'executions') {
     const pane = params.get('pane');
@@ -43,6 +44,12 @@ export function readLocation(search: string): LocationState {
 
 export function writeLocation(state: LocationState): string {
   const params = new URLSearchParams();
+  if (state.view === "agents") {
+    params.set('view', 'agents');
+    if (state.session) params.set('session', state.session);
+    if (state.execution) params.set('execution', state.execution);
+    return `?${params.toString()}`;
+  }
   if (state.view === "executions") { params.set("view", "executions"); if (state.execution) params.set("execution", state.execution); }
   if (state.view === "workflows" && state.workflow) params.set("workflow", state.workflow);
   if (state.view === "workflows" && state.revision) params.set("revision", state.revision);

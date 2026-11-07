@@ -1,3 +1,4 @@
+import { OptionsSkeleton, BusyLabel } from './LoadingState';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { listWorkflowRevisions } from "../api";
@@ -32,10 +33,10 @@ export function WorkflowToolbar({ workflow, onRevision, onDefinition, onCompare 
     <div className="workflow-toolbar-heading"><button type="button" className="workflow-title" title="View workflow definition" aria-haspopup="dialog" onClick={onDefinition}>{workflow.workflow_id}</button><div className="revision-selector" ref={container}>
       <button ref={trigger} className="revision-trigger" aria-expanded={open} aria-controls="revision-picker" aria-label="Choose workflow revision" onClick={() => setOpen(current => !current)}><span>v{workflow.workflow_version}</span><code title={workflow.workflow_revision_id}>{workflow.definition_hash.slice(0, 8)}</code><svg className="revision-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg></button><span className="revision-identity">{workflow.runnable ? "Registered revision" : workflow.workflow_revision_id === latest ? "Latest saved" : "Saved revision"}</span>
       {open ? <div id="revision-picker" className="revision-picker" role="region" aria-label="Workflow revisions"><div className="revision-picker-heading"><strong>Revisions</strong><button className="icon-button" aria-label="Close revision picker" onClick={close}>×</button></div>
-        {revisions.isPending ? <p className="sidebar-message">Loading revisions…</p> : null}
+        {revisions.isLoading ? <OptionsSkeleton label="Loading revisions" variant="revision" /> : null}
         {revisions.error ? <div className="sidebar-error"><p>{revisions.error.message}</p><button onClick={() => void revisions.refetch()}>Retry</button></div> : null}
-        {rows.map(row => <button key={row.revision_id} className={`revision-choice ${row.revision_id === workflow.workflow_revision_id ? "active" : ""}`} aria-pressed={row.revision_id === workflow.workflow_revision_id} title={row.revision_id} onClick={() => { onRevision(row.revision_id); close(); }}><span className="revision-choice-top"><span>v{row.workflow_version}</span><code>{row.definition_hash?.slice(0, 8) ?? row.revision_id.split(":").at(-1)?.slice(0, 8)}</code>{row.runnable ? <span className="revision-tag">Registered</span> : null}{row.revision_id === latest ? <span className="revision-tag saved">Latest saved</span> : null}</span><small>Saved {formatTime(row.registered_at_us)}{row.revision_id === workflow.workflow_revision_id ? " · Viewing" : ""}</small></button>)}
-        {revisions.hasNextPage ? <button className="load-more" disabled={revisions.isFetchingNextPage} onClick={() => void revisions.fetchNextPage()}>More revisions</button> : null}
+        {rows.map(row => <button key={row.revision_id} className={`revision-choice ${row.revision_id === workflow.workflow_revision_id ? "active" : ""}`} aria-pressed={row.revision_id === workflow.workflow_revision_id} title={row.revision_id} onClick={() => { onRevision(row.revision_id); close(); }}><span className="revision-choice-top"><span title={`v${row.workflow_version}`}>v{row.workflow_version}</span><code>{row.definition_hash?.slice(0, 8) ?? row.revision_id.split(":").at(-1)?.slice(0, 8)}</code>{row.runnable ? <span className="revision-tag">Registered</span> : null}{row.revision_id === latest ? <span className="revision-tag saved">Latest saved</span> : null}</span><small>Saved {formatTime(row.registered_at_us)}{row.revision_id === workflow.workflow_revision_id ? " · Viewing" : ""}</small></button>)}
+        {revisions.hasNextPage ? <button className="load-more" disabled={revisions.isFetchingNextPage} onClick={() => void revisions.fetchNextPage()}><BusyLabel busy={revisions.isFetchingNextPage} label="Loading more">More revisions</BusyLabel></button> : null}
       </div> : null}
     </div></div>
     <CompareButton workflow={workflow} onCompare={onCompare} />
@@ -67,5 +68,5 @@ function CompareButton({ workflow, onCompare }: { workflow: WorkflowGraphData; o
     } catch (error) { if (!abort.signal.aborted) setMessage(error instanceof Error ? error.message : 'Could not load Revisions.'); }
     finally { if (!abort.signal.aborted) setBusy(false); }
   };
-  return <div className="comparison-launch"><button type="button" className="toolbar-action" disabled={busy} onClick={() => void compare()}>{busy ? 'Finding Revisions…' : 'Compare revisions'}</button>{message ? <span className="comparison-launch-message" role="status">{message}</span> : null}</div>;
+  return <div className="comparison-launch"><button type="button" className="toolbar-action" disabled={busy} onClick={() => void compare()}><BusyLabel busy={busy} label="Finding Revisions">Compare revisions</BusyLabel></button>{message ? <span className="comparison-launch-message" role="status">{message}</span> : null}</div>;
 }

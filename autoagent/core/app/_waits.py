@@ -1,7 +1,7 @@
 """Resident wake scheduling; durable waits themselves belong to Runtime State."""
 import asyncio
 from ..commands import RuntimeHandle, SuspensionInfo
-from ..runtime.events import WaitRequested, CommandAwakened
+from ..runtime.events import WaitRequested, CommandAwakened, OperatorCallFailed, RuntimeErrorInfo
 from ..runtime.state import child_input_digest
 from ..runtime.values import thaw
 from ..errors import RuntimeTransitionError
@@ -18,7 +18,8 @@ class WaitRuntime:
 
     def _refresh_wait_session(self, sid):
         inv = self._repository.state(sid).invocation
-        if inv and not inv.terminal and not inv.stopping and any(w.status == 'waiting' and w.kind != 'external' for w in inv.scheduler.waits.values()):
+        if inv and not inv.terminal and not inv.stopping and any(w.status == 'waiting' and (w.kind != 'external'
+                or getattr(inv.scheduler.operator_calls.get(w.id), 'deadline_at_us', None) is not None) for w in inv.scheduler.waits.values()):
             self._wait_sessions.add(sid)
             root = self._root_session_id(sid)
             self._wait_roots.setdefault(root, set()).add(sid)
@@ -83,28 +84,59 @@ class WaitRuntime:
             self._remove_wait_session(sid)
             return []
         deadlines = []
-        waits = sorted((w for w in inv.scheduler.waits.values() if w.status == 'waiting' and w.kind != 'external'), key=lambda w: w.registered_sequence)
+        waits = sorted((w for w in inv.scheduler.waits.values() if w.status == 'waiting' and (w.kind != 'external'
+            or getattr(inv.scheduler.operator_calls.get(w.id), 'deadline_at_us', None) is not None)), key=lambda w: w.registered_sequence)
         for wait in waits:
-            outcome = self._ready_condition(sid, wait.kind, wait.request)
+            current = self._repository.state(sid).invocation
+            if current is None or current.stopping or current.terminal:
+                break
+            wait = current.scheduler.waits.get(wait.id)
+            if wait is None or wait.status != 'waiting':
+                continue
+            call = current.scheduler.operator_calls.get(wait.id)
+            deadline = call.deadline_at_us if call is not None else None
+            if deadline is not None and self._clock_us() >= deadline:
+                from ..errors import WaitTimeoutError
+                from ..executor.commands import retry_at
+                node = self._workflow_for_state(self._repository.state(sid)).node(current.scheduler.occurrences[wait.occurrence_id].node_id)
+                error = WaitTimeoutError(node.id)
+                await self._emit_locked(sid, inv.id, OperatorCallFailed(call.id,
+                    RuntimeErrorInfo(type(error).__name__, str(error)), retry_at_us=retry_at(node, call, error, self._clock_us())))
+                self._wake_command(sid, inv.id)
+                continue
+            outcome = self._ready_condition(sid, wait.kind, wait.request) if wait.kind != 'external' else None
             if outcome is None:
                 deadlines.extend(self._condition_deadlines(wait.kind, wait.request))
+                if deadline is not None:
+                    deadlines.append(deadline)
                 continue
             result, messages = outcome
             await self._emit_locked(sid, inv.id, CommandAwakened(wait.id, result, messages))
-            if self._task_runtime.is_live(sid):
-                self._task_runtime.wake(sid)
-            else:
-                self._start_drive(self._workflow_for_state(self._repository.state(sid)), sid, inv.id, None, None)
+            self._wake_command(sid, inv.id)
         self._refresh_wait_session(sid)
         return deadlines
+
+    def _wake_command(self, sid, iid):
+        if self._task_runtime.is_live(sid):
+            self._task_runtime.wake(sid)
+        else:
+            self._start_drive(self._workflow_for_state(self._repository.state(sid)), sid, iid, None, None)
 
     def _validate_wait_target(self, sid, kind, condition):
         validate_condition(kind, condition)
         if kind == 'child':
             handle = RuntimeHandle.model_validate(thaw(condition['handle']))
             owner = self._parent_plan(handle.session_id, handle.invocation_id)
-            if owner is None or owner[0] != sid:
+            if condition.get('scope', 'direct') == 'graph':
+                if self._root_session_id(handle.session_id) != self._root_session_id(sid):
+                    raise RuntimeTransitionError('RUNTIME_HANDLE_MISMATCH', 'Observed target must belong to the caller graph.')
+            elif owner is None or owner[0] != sid:
                 raise RuntimeTransitionError('AWAIT_NOT_DIRECT_CHILD', 'Child waits require directly owned Children.')
+            target = self._repository.state(handle.session_id).invocation
+            if target is None and owner is not None:
+                plan = self._repository.state(owner[0]).invocation.child_plans[owner[1]]
+                if (plan.workflow_id, plan.workflow_revision_id) == (handle.workflow_id, handle.workflow_revision_id):
+                    return
             if self._runtime_identity(handle.session_id)[0] != handle:
                 raise RuntimeTransitionError('RUNTIME_HANDLE_MISMATCH', 'Child Handle identity does not match.')
         elif kind == 'signal':
@@ -128,22 +160,30 @@ class WaitRuntime:
             self._refresh_wait_session(sid)
             self._schedule_waits(root)
 
-    def _ready_condition(self, sid, kind, condition):
+    def _ready_condition(self, sid, kind, condition, _visiting=frozenset()):
         if kind == 'timer':
             return ({'deadline_at_us': condition['deadline_at_us']}, ()) if self._clock_us() >= condition['deadline_at_us'] else None
         if kind == 'signal':
             inv = self._repository.state(sid).invocation
             selected = tuple(mid for mid, entry in sorted(inv.signals['messages'].items(), key=lambda item: item[1]['message']['accepted_sequence']) if entry['message']['endpoint'] == condition['endpoint'])[:condition['limit']]
             if selected:
+                if not condition.get('consume', True):
+                    return {'available': True, 'endpoint': condition['endpoint']}, ()
                 return {'messages': [inv.signals['messages'][mid]['message'] for mid in selected]}, selected
             return None
         if kind == 'child':
             handle = RuntimeHandle.model_validate(thaw(condition['handle']))
-            sessions = (handle.session_id, *self._descendant_sessions(handle.session_id))
+            if handle.session_id in _visiting:
+                return None
+            visiting = _visiting | {handle.session_id}
+            sessions = ((handle.session_id,) if condition.get('scope') == 'graph'
+                else (handle.session_id, *self._descendant_sessions(handle.session_id)))
             for target in sessions:
                 if target in self._drive_errors:
                     raise self._drive_errors[target]
             inv = self._repository.state(handle.session_id).invocation
+            if inv is None:
+                return None  # Ownership can be durable before Child admission.
             terminal = inv.terminal and not any(self._task_runtime.is_live(target) for target in sessions)
             quiescent = not self._task_runtime.is_live(handle.session_id) and not any(
                 self._task_runtime.is_live(target) and self._repository.state(target).invocation.status in {'created', 'running'}
@@ -152,7 +192,7 @@ class WaitRuntime:
             if waiting:
                 # A nested Await whose condition is already satisfied is a
                 # pending wake, not an externally observable Wait boundary.
-                waiting = not any(self._ready_condition(target, wait.kind, wait.request) is not None
+                waiting = not any(self._ready_condition(target, wait.kind, wait.request, visiting) is not None
                     for target in sessions
                     for wait in self._repository.state(target).invocation.scheduler.waits.values()
                     if wait.status == 'waiting' and wait.kind != 'external')
@@ -163,7 +203,7 @@ class WaitRuntime:
                 return None
             return observation.model_dump(mode='python'), ()
         for case in condition['cases']:
-            outcome = self._ready_condition(sid, case['kind'], case['condition'])
+            outcome = self._ready_condition(sid, case['kind'], case['condition'], _visiting)
             if outcome is not None:
                 result, messages = outcome
                 return ({'case': case['name'], 'value': result} if condition['select'] else result), messages
@@ -197,6 +237,9 @@ class WaitRuntime:
             await self._settle_runtime_commits(sessions)
             waits = self._runtime_waits(sessions)
             deadlines = [d for w in waits if w.kind != 'external' for d in self._condition_deadlines(w.kind, w.condition)]
+            deadlines.extend(call.deadline_at_us for w in waits
+                if (call := self._repository.state(w.handle.session_id).invocation.scheduler.operator_calls.get(w.wait_id)) is not None
+                and call.deadline_at_us is not None)
             can_unload = (not self._graph_controls.get(root) and root not in self._recovering
                 and not self._result_leases.get(root) and not any(self._task_runtime.is_live(s) for s in sessions)
                 and (self._repository.state(root).invocation.control_state == 'paused'

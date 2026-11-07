@@ -10,6 +10,7 @@ from autoagent import (
     RuntimeInfrastructureError, RuntimeTransitionError, RuntimeGraphCheckpoint,
     ReceiveSignal, SendSignal, SelfHandle, OwnerHandle,
     SignalBatch, SignalEndpoint, SignalLimits, SignalReceipt, Wait, Workflow,
+    HasSignal, HasSignalRequest,
 )
 from autoagent.core import RuntimeEvent
 from tests.test_system_commands import Collector, Value, identity
@@ -37,6 +38,50 @@ def waiting_workflow(limits=None):
 
 
 class SignalCommandTests(unittest.TestCase):
+    def test_external_signal_target_cannot_escape_root_graph_or_reuse_stale_identity(self):
+        """External Root control only accepts exact Handles belonging to its execution graph."""
+        app = AutoAgentApp()
+        try:
+            root = app.invoke(waiting_workflow(), {'value': 1})
+            foreign = app.invoke(waiting_workflow(), {'value': 2})
+            handle = RuntimeHandle(**foreign.ref.model_dump())
+            with self.assertRaises(RuntimeTransitionError) as error:
+                app.signal(root.ref, 'message', {'value': 3}, source_id='ui', sequence=1, target=handle)
+            self.assertEqual(error.exception.code, 'RUNTIME_HANDLE_MISMATCH')
+            stale = RuntimeHandle(**dict(root.ref.model_dump(), invocation_id='obsolete'))
+            with self.assertRaises(RuntimeTransitionError) as error:
+                app.signal(root.ref, 'message', {'value': 3}, source_id='ui', sequence=1, target=stale)
+            self.assertEqual(error.exception.code, 'RUNTIME_HANDLE_MISMATCH')
+            receipt = app.signal(root.ref, 'message', {'value': 3}, source_id='ui', sequence=1)
+            self.assertEqual(receipt.handle.invocation_id, root.ref.invocation_id)
+        finally:
+            app.close()
+
+    def test_has_signal_map_observes_endpoints_without_consuming_payloads(self):
+        """HasSignal Map returns endpoint readiness while the following Receive gets the original message."""
+        def checks(context: InputMappingContext) -> list[HasSignalRequest]:
+            return [HasSignalRequest(endpoints=['message']), HasSignalRequest(endpoints=['other'])]
+        sink = Collector()
+        workflow = Workflow('presence', nodes=[
+            Node('send', SendSignal(handle=SelfHandle(), endpoint='message'), input_mapping=self_send),
+            Node('check', HasSignal(), input_mapping=checks, map=Map()),
+            Node('receive', ReceiveSignal(endpoint='message', limit=100))],
+            edges=[Edge('send', 'check'), Edge('check', 'receive')],
+            signal_endpoints=[SignalEndpoint('message', Value), SignalEndpoint('other', Value)])
+        app = AutoAgentApp(runtime_event_sink=sink)
+        try:
+            result = app.invoke(workflow, {'value': 1})
+            self.assertEqual(result.status, 'completed', result.error)
+            self.assertEqual([item.payload for item in result.output.messages], [{'value': 7}])
+            check_id = next(item.id for item in app._repository.state(result.ref.session_id).invocation.scheduler.occurrences.values()
+                if item.node_id == 'check')
+            checked = next(event for event in sink.events if event.event_name == 'node_occurrence.completed'
+                and event.payload.occurrence_id == check_id)
+            self.assertEqual([item['has_messages'] for item in checked.payload.output], [True, False])
+            self.assertEqual(sum(event.event_name == 'signal.received' for event in sink.events), 1)
+        finally:
+            app.close()
+
     def test_internal_self_delivery_and_atomic_receive(self):
         """Receive moves accepted messages into its Call result in one event and frees the mailbox."""
         sink = Collector()
@@ -532,10 +577,11 @@ class SignalCommandTests(unittest.TestCase):
         """Signal targets and endpoints are visible in snapshots and invalid authoring fails early."""
         import autoagent
         from autoagent.core import WorkflowCompiler, WorkflowDefinitionSnapshot
-        self.assertFalse(hasattr(autoagent, 'SendSignalRequest'))
-        self.assertFalse(hasattr(autoagent, 'ReceiveSignalRequest'))
-        for factory in (lambda: SendSignal(), lambda: ReceiveSignal(),
-                lambda: SendSignal(handle=None, endpoint='message'),
+        self.assertTrue(hasattr(autoagent, 'SendSignalRequest'))
+        self.assertTrue(hasattr(autoagent, 'ReceiveSignalRequest'))
+        self.assertIsNone(SendSignal().handle)
+        self.assertIsNone(ReceiveSignal().endpoint)
+        for factory in (lambda: SendSignal(handle=None, endpoint='message'),
                 lambda: SendSignal(handle=SelfHandle(), endpoint=''),
                 lambda: ReceiveSignal(endpoint='message', limit=0),
                 lambda: ReceiveSignal(endpoint='message', limit=True)):

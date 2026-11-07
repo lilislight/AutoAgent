@@ -209,12 +209,27 @@ table(
     ),
     UniqueConstraint("parent_invocation_id", "creation_id", "unit_index"),
     ForeignKeyConstraint(["root_invocation_id"], ["invocations.invocation_id"]),
-    ForeignKeyConstraint(
-        ["parent_invocation_id", "parent_occurrence_id"],
-        ["node_executions.invocation_id", "node_executions.occurrence_id"],
-        name="fk_invocation_parent_occurrence",
-        use_alter=True,
-    ),
+)
+table(
+    "active_nodes",
+    c("invocation_id", Text, False, True, "invocations.invocation_id"),
+    c("occurrence_id", Text, False, True),
+    c("node_id", Text, False),
+    c("status", Text, False),
+)
+table(
+    "active_waits",
+    c("invocation_id", Text, False, True, "invocations.invocation_id"),
+    c("wait_id", Text, False, True),
+    c("occurrence_id", Text, False),
+    c("node_id", Text, False),
+    c("kind", Text, False),
+    c("status", Text, False),
+    c("created_at_us", B, False),
+    c("deadline_at_us", B),
+    c("request_ref", J),
+    c("has_independent_case", Boolean, False),
+    c("updated_store_order", B, False),
 )
 table(
     "node_executions",
@@ -335,6 +350,7 @@ table(
 )
 
 indexes = {
+    "active_waits": [("active_wait_deadline", ["deadline_at_us", "invocation_id"])],
     "artifact_dependencies": [("artifact_dep_child", ["child_hash"])],
     "artifact_refs": [("artifact_ref_hash", ["artifact_hash"])],
     "workflow_revisions": [
@@ -401,3 +417,22 @@ for name, items in indexes.items():
 
 g = meta.tables['graph_changes']
 Index('graph_edge_order', g.c.invocation_id, g.c.change['edge_id'].as_string(), g.c.store_order)
+
+DETAIL_TABLES = ('node_executions', 'operator_calls', 'waits', 'edge_evaluations', 'graph_changes')
+table(
+    'query_projection_state',
+    c('id', Integer, False, True),
+    c('store_id', Text, False),
+    c('processed_order', B, False),
+    c('updated_at_us', B, False),
+    CheckConstraint('id = 1'),
+)
+# Reducer state is independent of the current operational Session/Invocation
+# directories. Replaying an old Event must never start from their latest state.
+table(
+    'query_projection_entities',
+    c('kind', Text, False, True),
+    c('identity', Text, False, True),
+    c('data', J, False),
+)
+PERSISTED_TABLES = tuple(meta.tables.values())

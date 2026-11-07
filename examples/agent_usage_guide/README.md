@@ -49,6 +49,7 @@ MCP 使用真实 SDK，通过本地子进程或 `127.0.0.1` HTTP 服务通信。
 | [media.py](media.py) | 图片、音频、视频、PDF、Asset、上传缓存、查询和清理 | 无 |
 | [embeddings.py](embeddings.py) | 四种输入、批量顺序、维度、base64 到浮点向量 | 可选 `--litellm` |
 | [tools.py](tools.py) | 同步/异步 Tool、Schema、Context、Hooks、Policy、错误、媒体输出 | 无 |
+| [permissions.py](permissions.py) | Tool 权限、审批、Core Wait/Resume、批准与拒绝 | 无 |
 | [mcp.py](mcp.py) | stdio、远端 Tool、混合 ToolSet、进度、资源、模板、Prompt、订阅边界、重连 | 无 |
 | [mcp_http.py](mcp_http.py) | 自动启动 HTTP/SSE Server，验证 Bearer 后调用 Tool | 无，需要本地端口 |
 | [mcp_auth.py](mcp_auth.py) | OAuth 配置、存储与回调验证，以及外部 Bearer/OAuth 入口 | 默认离线；真实认证见下文 |
@@ -56,6 +57,7 @@ MCP 使用真实 SDK，通过本地子进程或 `127.0.0.1` HTTP 服务通信。
 | [nodes.py](nodes.py) | LLM/Embedding 标准 Capability、12 种 Node 用法、Operator 内组合、超时 | 无 |
 | [capabilities.py](capabilities.py) | Host 默认注册契约、Provider 绑定、普通/流式共用 LLM Capability | 需要 `host` extra |
 | [recording.py](recording.py) | 无数据库调用、自定义 Recorder、Host 自动记录 LLM 与 Embedding | 需要 `host` extra |
+| [token_usage.py](token_usage.py) | 五种作用域 token/cost 查询、时间窗口、调用前限额检查 | 需要 `host` extra |
 
 ## LLM 的基本用法
 
@@ -227,8 +229,35 @@ LLM 返回的 Tool Call 不会自动执行。`call_id` 关联调用和结果，�
 
 `ToolContext` 注入服务、用户和允许的 Tool，Context 参数不会出现在给模型的 Schema 中。
 可以使用 `context.restrict(...)` 收窄权限。`ToolSet.select(...)` 创建独立的能力快照。
-`ToolHooks` 提供 before、after、on_error；`policy` 可以抛出 `ToolBusinessError` 拒绝执行。
+`ToolHooks` 提供 before、after、on_error；`policy(call, context)` 返回
+`ToolDecision(action="allow" | "deny" | "ask", reason=...)`。
+策略读取 `context.arguments` 中校验、补齐默认值后的只读参数；不通过异常表达普通权限拒绝。
 Hooks 用于观察，不通过返回值替换调用或结果。
+
+```python
+from autoagent.agent import ToolDecision
+
+def policy(call, context):
+    if context.user_id != "alice":
+        return ToolDecision(action="deny", reason="User cannot publish")
+    return ToolDecision(action="ask", reason="Confirm publication")
+
+tools = ToolSet((publish,), policy=policy, context=ToolContext(user_id="alice"))
+decision = await tools.acheck(call)  # 同步策略也可使用 tools.check(call)
+if decision.action == "ask":
+    request = decision.approval_request
+    # 应用通过 Wait(ToolApprovalRequest, ToolApproval) 等待认证客户端响应。
+    # 下行仅模拟客户端批准；不能从 LLM 的 Tool 参数获得 approval。
+    approval = request.respond(approved=True)
+    result = await tools.ainvoke(call, approval=approval)
+```
+
+执行前重新检查当前策略，审批绑定参数、调用 ID、用户/会话、Tool Schema；
+在 Core 内还绑定 Workflow Revision 和 Invocation。拒绝返回错误 ToolResult；
+缺少必需审批抛出 `ToolApprovalRequired`，其 `request` 可序列化。
+审批仅是应用输入，不是密码学凭证；客户端认证、业务幂等由应用负责。
+`tools[name]`、`select(...)` 和组合 ToolSet 均保留原有权限。
+完整 Workflow 路由、Wait 和执行代码见 [permissions.py](permissions.py)。
 
 错误分为两类：
 
@@ -417,7 +446,80 @@ Reducer 与 User Event 相互独立；Host 会持久化显式产生的事件。
 不同的 Node 和 Operator Call 身份。入口 Node 有 Input Mapping 时，示例显式传入
 `request.model_dump(mode="json")` 作为 Invocation 输入，再在映射中恢复类型。
 自定义 Operator 内直接调用 Provider 的方式见 `nodes.py`。
-示例直接使用诊断 SQL，没有引入产品查询 API。
+`recording.py` 直接使用诊断 SQL；公开 Token 汇总查询见下文 `token_usage.py`。
 
 记录包含模型、状态、耗时和上游报告的 Token usage，不包含 Prompt、生成正文、媒体或凭证。
-未报告 usage 时保持未知，不估算为 0。Provider 的 `record_calls=False` 可关闭该 Provider 的记录。
+未报告 usage 时保持未知，不估算为 0。未配置限额时，Provider 的 `record_calls=False` 可关闭该 Provider 的记录。
+
+## Token 统计与限额
+
+运行 `.venv/bin/python -m examples.agent_usage_guide.token_usage`，或使用
+`run_all --recording`。示例使用模拟 HTTP，验证两次调用耗尽 Session 额度，第三次不发请求。
+
+`await host.token_usage(...)` 支持以下过滤：
+
+- `invocation_id, node_id`：一个 Node 在一次 Invocation 中的全部调用。
+- `invocation_id`：该 Invocation 的直接调用，不隐式包含 Spawn 子执行。
+- `session_id`：该 Session 的全部调用，跨 Workflow Revision。
+- `workflow_id`：该 Workflow ID 的全部 Revision。
+- 无身份过滤：当前项目数据库中的全部调用。
+
+可额外传入 `kind="generation" / "embedding"`、`provider_id`、`requested_model`、
+`workflow_revision_id`、`start` 和 `end`。数据库是项目边界，不支持在一个数据库中混放多个项目。
+时间按调用开始时间查询 `[start, end)`，必须带时区；省略边界表示不限制该边。
+`TimeRange.day/month(timezone="Asia/Hong_Kong")` 生成自然日/月边界，
+`TimeRange.last_24_hours()` 生成最近 24 小时。UTC 保存时间；跨午夜调用归入开始时的窗口。
+历史窗口可能随着未结束调用结算而补齐，不是冻结报表。
+
+汇总返回 token 已知部分、`pending_calls`、`unsettled_calls`、`missing_usage_calls` 和
+各字段的 `missing_tokens`。全部缺失的指标为 `None`；无调用为 0。
+Reasoning/cache token 是明细，不能再加到 total。失败和取消只要收到 usage 也累计。
+统计仅覆盖应用记录到的调用及上游报告值，不估算缺失 usage。
+
+限额示例见 `token_usage.py`：Node 使用 `ResourcePolicy(usage=UsagePolicy(...))`；
+Workflow 使用 `WorkflowResourcePolicy(invocation=..., session=...)`；
+Project 和跨 Revision 的 Workflow 周期限额通过 `AutoAgentHost(usage_policy=ProjectUsagePolicy(...))` 配置，
+其 `WindowUsagePolicy` 可使用 `UsageWindow("day" / "month", timezone)` 或明确的 `TimeRange`。
+`UsagePolicy` 支持 `max_input_tokens`、`max_output_tokens`、`max_total_tokens`，省略表示不限，0 表示禁止调用。
+这里的输出额度是累计值，`LLMRequest.max_output_tokens` 仍是单次输出上限。
+
+每次 Provider 请求前在同一数据库事务内检查全部适用额度并登记调用；耗尽抛出
+`ResourceBudgetExceeded`，默认不触发 Core 重试。已经发出的并发请求可能导致超额。
+查询/准入失败阻止发送；未知用量默认阻止后续受限调用，可显式设置 `on_unknown="allow"`。
+结算写入失败保留已获得的响应，不重新发送请求，并保留未结算状态；重启后也不会把旧 running 记录当成零。
+配置限额后 `record_calls=False` 不能绕过必要的计量。
+Standalone Core 可在 Runtime lifespan 中使用 `runtime_llm_recorder(database_sink)`；
+限额要求提供 `LLMUsageLedger`，普通观测 Recorder 无法承担准入职责。
+
+## Cost 统计与限额
+
+Cost 复用 `llm_calls`：终态入库时计算，保存金额、价格版本及计费明细。
+默认读取已安装 LiteLLM 包内附带的模型价格 JSON，不导入 SDK、不联网更新价格。
+常见模型已有价格；未安装 LiteLLM、模型未收录或自定义收费时可覆盖本地价格：
+
+```python
+from autoagent.agent import LocalTokenPricing, TokenPrice
+
+pricing = LocalTokenPricing(overrides={
+    "openai/my-model": TokenPrice("1", "3"),  # 输入/输出：美元 / 百万 token
+    "lm_studio/google/gemma-4-e4b": TokenPrice("0", "0"),
+})
+# AutoAgentHost(..., pricing=pricing)
+# WorkflowResourcePolicy(session=UsagePolicy(max_cost_usd="1.50"))
+```
+
+`pricing.catalog_info` 返回本地价格表版本及条目数。连接的 Provider ID 与计价厂商不一致时，
+可在 Provider config 上设置 `pricing_provider="openai"`；它不进入 API 请求。
+`LocalTokenPricing(catalog_path="/path/prices.json")` 可替换整个本地价格表；
+高级计费可注入实现 `CostCalculator.calculate(record) -> CostEstimate` 的计算器。
+
+`host.token_usage(...)` 同时返回 `cost_usd` 和 `missing_cost_calls`，沿用全部作用域和时间过滤。
+`UsagePolicy(max_cost_usd="...")` 沿用 Token 的所有限额位置、未知值策略和并发语义。
+每次准入使用一次条件聚合查询检查全部适用限额，随后一次插入；首次建表及事务控制不计入这两条业务 SQL。
+
+金额使用美元十进制字符串；数据库保存整数，每单位为 `1e-12 USD`，单次费用向上舍入一次。
+历史记录固定使用结算时的价格，不随价格表升级重算。它是本地价格估算，不代表厂商账单。
+当前支持文本/Embedding 的线性 Token 价格，以及已提供充分明细的缓存、Reasoning、服务等级和长上下文价格。
+多模态、内置收费工具、未支持的缓存时长价格等保留为未知；未知价格不会记成零，默认阻止后续受 cost 限额的调用。
+本地免费模型需显式填写零价格；调用尚未结束和结算失败仍按未结算处理。
+本次增加了 `llm_calls` 字段；已有旧表的开发数据库需要重建该表，不提供旧结构迁移。

@@ -21,6 +21,8 @@ _REASONING_FIELDS = ("reasoning_content", "thinking_blocks", "reasoning_items")
 class ExtendedChatAdapter(ChatCompletionsAdapter):
     """Preserve SDK reasoning blocks and their opaque replay fields as one group."""
 
+    tool_media = True
+
     def _messages(self, request, provider_id):
         messages = []
         last_group = None

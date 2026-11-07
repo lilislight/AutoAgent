@@ -6,8 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from autoagent.agent import (
-    Tool, ToolContext, ToolHooks, ToolSet, LLMToolCall, LLMToolResult,
-    ToolBusinessError, ToolExecutionError, SkillDocument, SkillMetadata,
+    Tool, ToolContext, ToolHooks, ToolSet, LLMToolCall, LLMToolDefinition, LLMToolResult,
+    ToolDecision, ToolExecutionError, SkillDocument, SkillMetadata,
 )
 
 
@@ -16,6 +16,45 @@ def call(name="lookup", *, call_id="1", arguments='{"value":2}'):
 
 
 class ToolContextTests(unittest.IsolatedAsyncioTestCase):
+    def test_composed_advertisements_copy_each_visible_schema_once(self):
+        """Composing bound Tools keeps schema copying linear in advertised names."""
+        def lookup(value: int) -> int:
+            return value
+
+        names = [f'lookup_{index}' for index in range(12)]
+        owner = ToolSet([Tool(lookup, name=name) for name in names])
+        middle = ToolSet([owner[name] for name in names])
+        outer = ToolSet([middle[name] for name in names])
+        with patch.object(LLMToolDefinition, 'model_dump', autospec=True,
+                          side_effect=LLMToolDefinition.model_dump) as copies:
+            definitions = outer.definitions
+        self.assertEqual([item.name for item in definitions], names)
+        self.assertEqual(copies.call_count, len(names))
+        definitions[0].parameters['properties']['value']['type'] = 'string'
+        self.assertEqual(owner.definitions[0].parameters['properties']['value']['type'], 'integer')
+
+    async def test_nested_advertisements_intersect_every_context_boundary(self):
+        """Outer, owner, call and inherited restrictions all constrain bound Tools."""
+        def lookup(value: int) -> int:
+            return value
+
+        names = ('a', 'b', 'c', 'd')
+        owner = ToolSet([Tool(lookup, name=name) for name in names],
+                        context=ToolContext(allowed_tools={'a', 'b', 'c'}))
+        middle = ToolSet([owner[name] for name in names],
+                         context=ToolContext(allowed_tools={'b', 'c', 'd'}))
+        outer = ToolSet([middle[name] for name in names])
+        self.assertEqual([item.name for item in outer.definitions], ['b', 'c'])
+        self.assertEqual([item.name for item in outer.definitions_for(
+            ToolContext(allowed_tools={'c', 'd'}))], ['c'])
+
+        async def advertise(value: int) -> list[str]:
+            return [item.name for item in outer.definitions_for(ToolContext(allowed_tools=set(names)))]
+
+        wrapper = ToolSet([Tool(advertise)], context=ToolContext(allowed_tools={'advertise', 'b'}))
+        result = await wrapper.ainvoke(call('advertise'))
+        self.assertEqual(json.loads(result.content[0].text), ['b'])
+
     async def test_context_is_hidden_and_injected_for_sync_and_async_tools(self):
         """Runtime objects never appear in Tool schemas or model-controlled parameters."""
         def lookup(value: int, context: ToolContext) -> str:
@@ -68,7 +107,8 @@ class ToolContextTests(unittest.IsolatedAsyncioTestCase):
         async def policy(call, ctx):
             events.append("policy")
             if ctx.user_id != "alice":
-                raise ToolBusinessError("Denied", code="access_denied")
+                return ToolDecision(action="deny", reason="Denied")
+            return ToolDecision(action="allow")
         def before(call, ctx):
             events.append("before")
         async def after(call, result, ctx):

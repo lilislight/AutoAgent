@@ -18,9 +18,11 @@ class SourceReader:
         self.cache = {}
 
     @classmethod
-    async def open(cls, storage, conn, kind, identity):
+    async def open(cls, storage, conn, kind, identity, *, row=None, refs=None):
+        """Read one source, reusing rows and references from this SQL snapshot."""
         name, key, body = SOURCES[kind]
-        row = await storage.row(conn, name, **{key: identity})
+        if row is None:
+            row = await storage.row(conn, name, **{key: identity})
         if row is None:
             return None
         if body:
@@ -30,10 +32,11 @@ class SourceReader:
                       "delta": json.loads(row["delta_text"]) if row["delta_text"] else None}
         else:
             record = {"payload": json.loads(row["payload_text"])}
-        table = meta.tables["artifact_refs"]
-        refs = {r.path: r.artifact_hash for r in (await conn.execute(
-            select(table.c.path, table.c.artifact_hash).where(
-                table.c.owner_kind == kind, table.c.owner_id == identity))) }
+        if refs is None:
+            table = meta.tables["artifact_refs"]
+            refs = {r.path: r.artifact_hash for r in (await conn.execute(
+                select(table.c.path, table.c.artifact_hash).where(
+                    table.c.owner_kind == kind, table.c.owner_id == identity))) }
         return cls(storage, conn, record, refs)
 
     async def read(self, path=(), *, deep=True):
@@ -106,3 +109,12 @@ def pointer_tokens(pointer):
     if any(re.search(r"~(?![01])", token) for token in tokens):
         raise ValueError("Invalid JSON Pointer escape; use ~0 for '~' and ~1 for '/'.")
     return tuple(token.replace("~1", "/").replace("~0", "~") for token in tokens)
+
+
+class MetadataReader(SourceReader):
+    """Read structural fields without permitting business-value traversal."""
+    async def read(self, path=(), *, deep=False):
+        if not path or deep or any(token in {'input','output','context','mapped_input',
+            'aggregate_output','response','metrics','message'} for token in path):
+            raise ValueError('MetadataReader requires a shallow metadata field path.')
+        return await self._read(self.record,self.refs,tuple(path),False,frozenset())

@@ -399,6 +399,7 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         """Verify ancestor recovery preflight prevents every Child side effect."""
 
         entered = threading.Event()
+        binding_entered = threading.Event()
         child_calls = 0
 
         async def child_work(value: Value) -> Value:
@@ -408,8 +409,10 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
             await asyncio.Event().wait()
             return value  # pragma: no cover
 
-        def bind_output(_context: OutputBindingContext) -> ContextPatch | None:
-            return None
+        async def bind_output(_context: OutputBindingContext) -> ContextPatch | None:
+            binding_entered.set()
+            await asyncio.Event().wait()
+            return None  # pragma: no cover
 
         child = Workflow(
             "preflight-child",
@@ -423,12 +426,13 @@ class ChildRecoveryIntegrityTests(unittest.TestCase):
         )
         parent = Workflow(
             "preflight-parent",
-            nodes=[Node("child", Await(child, child.nodes[0].id), output_binding=bind_output, recovery_mode=Recovery("never"))],
+            nodes=[Node("child", Spawn(child, child.nodes[0].id), output_binding=bind_output, recovery_mode=Recovery("never"))],
         )
         source = AutoAgentApp()
         try:
             source.submit_invoke(parent, {"value": 1}, session_id="root")
             self.assertTrue(entered.wait(1))
+            self.assertTrue(binding_entered.wait(1))
             checkpoint = source.close(timeout=1, capture_checkpoint=True)
         finally:
             if not source._closed:

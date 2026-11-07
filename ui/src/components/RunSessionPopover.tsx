@@ -1,3 +1,4 @@
+import { CardsSkeleton } from './LoadingState';
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { getWorkflowGraph, browseWorkflows } from '../api';
@@ -29,7 +30,7 @@ export function RunSessionPopover({ anchor, session, onClose, onAccepted }: { an
     <div className="run-field"><span>Workflow</span><SelectMenu label="Workflow" value={revision} onChange={setRevision} searchable onSearch={setSearch} onOpenChange={setChoicesOpen} placeholder="Search registered Workflows…"
       options={rows.map(row => ({value:row.current_revision_id!,label:row.workflow_id,description:`v${row.workflow_version} · ${row.current_revision_id?.split(':').at(-1)?.slice(0,8)}`}))}
       loading={search.trim().toLowerCase() !== query || workflows.isFetching} error={workflows.error?.message} onRetry={()=>void workflows.refetch()} hasMore={workflows.hasNextPage} onMore={()=>{if(!workflows.isFetchingNextPage)void workflows.fetchNextPage();}} /></div>
-    {graph.isFetching ? <p role="status">Loading Workflow…</p> : null}{graph.error ? <p className="run-error">{graph.error.message}<button type="button" onClick={() => void graph.refetch()}>Retry</button></p> : null}
+    {graph.isLoading ? <CardsSkeleton label="Loading Workflow" count={1} /> : null}{graph.error ? <p className="run-error">{graph.error.message}<button type="button" onClick={() => void graph.refetch()}>Retry</button></p> : null}
     {graph.data && graph.data.workflow_revision_id === revision ? <RunWorkflowForm key={revision} workflow={graph.data} sessionMode={session ? 'existing' : 'new'} session={session ?? newId} hideSessionField scope={session ? `session:${session}` : 'new-session'} onAccepted={receipt => { if (!session) setNewId(''); onAccepted(receipt); onClose(); }} /> : null}
   </dialog>;
 }

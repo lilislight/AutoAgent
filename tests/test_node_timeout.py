@@ -39,8 +39,8 @@ class NodeTimeoutDefinitionTests(unittest.TestCase):
         snapshot = WorkflowDefinitionSnapshot.from_workflow_ir(first)
         self.assertEqual(snapshot.definition["nodes"][0]["timeout"]["seconds"], 1)
         self.assertEqual(WorkflowDefinitionSnapshot.from_record(snapshot.to_record()), snapshot)
-        invalid = compiler.compile(Workflow("wait", nodes=[Node("wait", Wait(Value, Value), timeout=TimeoutPolicy(1))]))
-        self.assertIsNone(invalid.workflow_ir)
+        valid = compiler.compile(Workflow("wait", nodes=[Node("wait", Wait(Value, Value), timeout=TimeoutPolicy(1))]))
+        self.assertIsNotNone(valid.workflow_ir)
         invalid = compiler.compile(Workflow("wrong", nodes=[Node("work", identity, timeout=1)]))
         self.assertIsNone(invalid.workflow_ir)
 

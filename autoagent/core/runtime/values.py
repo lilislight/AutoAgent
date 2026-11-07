@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 from types import MappingProxyType
 
@@ -11,6 +13,18 @@ DurableValue = (
     None | bool | int | float | str
     | tuple['DurableValue', ...] | Mapping[str, 'DurableValue']
 )
+
+_record_values = ContextVar('runtime_record_values', default=None)
+
+
+@contextmanager
+def record_values(convert):
+    """Reuse owned immutable JSON conversions inside one internal encoding batch."""
+    token = _record_values.set(convert)
+    try:
+        yield
+    finally:
+        _record_values.reset(token)
 
 
 class _FrozenMap(Mapping):
@@ -120,6 +134,14 @@ def _freeze(value: object, active: set[int], memo: dict[int, object]) -> Durable
 
 def thaw(value: DurableValue) -> object:
     """Return an isolated mutable/JSON view at an external boundary."""
+    if type(value) in (_FrozenMap, _FrozenTuple):
+        convert = _record_values.get()
+        if convert is not None:
+            return convert(value, _thaw)
+    return _thaw(value)
+
+
+def _thaw(value):
     if isinstance(value, Mapping):
         return {key: thaw(item) for key, item in value.items()}
     if isinstance(value, tuple):

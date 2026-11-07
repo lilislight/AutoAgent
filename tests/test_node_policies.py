@@ -84,7 +84,7 @@ class NodePolicyTests(unittest.TestCase):
         self.assertEqual(WorkflowDefinitionSnapshot.from_record(snapshot.to_record()), snapshot)
         workflow.nodes[0].retry = "invalid"
         self.assertFalse(compiler.compile(workflow).ok)
-        self.assertFalse(compiler.compile(Workflow("wait", nodes=[Node("wait", Wait(Value, Value), retry=RetryPolicy())])).ok)
+        self.assertTrue(compiler.compile(Workflow("wait", nodes=[Node("wait", Wait(Value, Value), retry=RetryPolicy())])).ok)
 
     def test_backoff_growth_caps_and_jitter(self):
         """Backoff progression and both jitter modes obey the configured cap."""

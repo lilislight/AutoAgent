@@ -10,6 +10,7 @@ import math
 from sqlalchemy.engine import make_url
 
 from .persistence import PersistenceConfig
+from .memory_history import MAX_HISTORY_SAMPLES, MAX_HISTORY_SECONDS
 
 
 class HostError(RuntimeError):
@@ -40,6 +41,8 @@ class ProjectError(HostError):
 class HostSettings:
     database_url: str = "sqlite+aiosqlite:///.autoagent/runtime.db"
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    local_projections: bool = True
+    local_projection_interval_seconds: float = 0.02
     max_operator_concurrency: int = 32
     operation_concurrency: int = 32
     operation_receipts: int = 256
@@ -51,7 +54,8 @@ class HostSettings:
     memory_critical_ratio: float = 0.90
     memory_monitor_enabled: bool = False
     memory_monitor_interval_seconds: float = 1
-    memory_monitor_history_samples: int = 300
+    memory_monitor_history_samples: int = 86_400
+    memory_monitor_history_seconds: float = 86_400
     memory_monitor_top_sessions: int = 10
     cold_after_seconds: float = 300
     max_idle_seconds: float = 1800
@@ -71,15 +75,23 @@ class HostSettings:
     background_retry_seconds: float = 5
 
     def __post_init__(self):
+        if type(self.local_projections) is not bool:
+            raise ValueError('local_projections must be a boolean.')
+        interval = self.local_projection_interval_seconds
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval <= 0:
+            raise ValueError('local_projection_interval_seconds must be positive and finite.')
         if type(self.memory_monitor_enabled) is not bool:
             raise ValueError('memory_monitor_enabled must be a boolean.')
-        for name, upper in (('memory_monitor_history_samples', 3600), ('memory_monitor_top_sessions', 100)):
+        for name, upper in (('memory_monitor_history_samples', MAX_HISTORY_SAMPLES), ('memory_monitor_top_sessions', 100)):
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= upper:
                 raise ValueError(f'{name} must be an integer between 1 and {upper}.')
         interval = self.memory_monitor_interval_seconds
         if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < 0.05:
             raise ValueError('memory_monitor_interval_seconds must be finite and at least 0.05.')
+        retention = self.memory_monitor_history_seconds
+        if isinstance(retention, bool) or not isinstance(retention, (int, float)) or not math.isfinite(retention) or not 0 < retention <= MAX_HISTORY_SECONDS:
+            raise ValueError(f'memory_monitor_history_seconds must be positive and at most {MAX_HISTORY_SECONDS}.')
         for name in ('operation_concurrency','operation_receipts'):
             if type(getattr(self,name)) is not int or getattr(self,name)<1:
                 raise ValueError(f'{name} must be a positive integer.')
@@ -145,7 +157,8 @@ class HostSettings:
             memory_critical_ratio=number("AUTOAGENT_HOST_MEMORY_CRITICAL_RATIO", 0.9),
             memory_monitor_enabled=boolean("AUTOAGENT_MEMORY_MONITOR_ENABLED", False),
             memory_monitor_interval_seconds=number("AUTOAGENT_MEMORY_MONITOR_INTERVAL_SECONDS", 1),
-            memory_monitor_history_samples=integer("AUTOAGENT_MEMORY_MONITOR_HISTORY_SAMPLES", 300),
+            memory_monitor_history_samples=integer("AUTOAGENT_MEMORY_MONITOR_HISTORY_SAMPLES", 86_400),
+            memory_monitor_history_seconds=number("AUTOAGENT_MEMORY_MONITOR_HISTORY_SECONDS", 86_400),
             memory_monitor_top_sessions=integer("AUTOAGENT_MEMORY_MONITOR_TOP_SESSIONS", 10),
             cold_after_seconds=number("AUTOAGENT_HOST_COLD_AFTER_SECONDS", 300),
             max_idle_seconds=number("AUTOAGENT_HOST_MAX_IDLE_SECONDS", 1800),
@@ -163,12 +176,23 @@ class HostSettings:
             unload_concurrency=integer("AUTOAGENT_HOST_UNLOAD_CONCURRENCY", 2),
             background_batch_size=integer("AUTOAGENT_HOST_BACKGROUND_BATCH_SIZE", 32),
             background_retry_seconds=number("AUTOAGENT_HOST_BACKGROUND_RETRY_SECONDS", 5),
+            local_projections=boolean("AUTOAGENT_LOCAL_PROJECTIONS", True),
+            local_projection_interval_seconds=number("AUTOAGENT_LOCAL_PROJECTION_INTERVAL_SECONDS", 0.02),
             database_url=env.get("AUTOAGENT_DATABASE_URL", cls().database_url),
             max_operator_concurrency=integer("AUTOAGENT_MAX_OPERATOR_CONCURRENCY", 32),
             persistence=PersistenceConfig(
                 mode=env.get("AUTOAGENT_PERSISTENCE_MODE", "durable"),
+                projection_mode=env.get('AUTOAGENT_PROJECTION_MODE', 'background'),
+                projection_worker_enabled=boolean('AUTOAGENT_PROJECTION_WORKER_ENABLED', True),
+                projection_cache_enabled=boolean('AUTOAGENT_PROJECTION_CACHE_ENABLED', True),
+                projection_batch_count=integer('AUTOAGENT_PROJECTION_BATCH_COUNT', 256),
+                projection_idle_seconds=number('AUTOAGENT_PROJECTION_IDLE_SECONDS', 5),
+                projection_busy_seconds=number('AUTOAGENT_PROJECTION_BUSY_SECONDS', 10),
+                projection_work_seconds=number('AUTOAGENT_PROJECTION_WORK_SECONDS', 0.1),
+                projection_quiet_seconds=number('AUTOAGENT_PROJECTION_QUIET_SECONDS', 0.5),
+                projection_cpu_ratio=number('AUTOAGENT_PROJECTION_CPU_RATIO', 0.75),
                 artifact_threshold_bytes=integer(
-                    "AUTOAGENT_ARTIFACT_THRESHOLD_BYTES", 1048576
+                    "AUTOAGENT_ARTIFACT_THRESHOLD_BYTES", 8192
                 ),
                 batch_count=integer("AUTOAGENT_BATCH_COUNT", 256),
                 batch_bytes=integer("AUTOAGENT_BATCH_BYTES", 4194304),
@@ -182,6 +206,10 @@ class HostSettings:
                 ),
                 workflow_graph_cache_bytes=integer("AUTOAGENT_WORKFLOW_GRAPH_CACHE_BYTES", 4194304),
                 writer_metadata_cache_bytes=integer("AUTOAGENT_WRITER_METADATA_CACHE_BYTES", 4194304),
+                projection_cache_bytes=integer("AUTOAGENT_PROJECTION_CACHE_BYTES", 16777216),
+                projection_cache_entry_bytes=integer("AUTOAGENT_PROJECTION_CACHE_ENTRY_BYTES", 4194304),
+                projection_cache_ttl_seconds=number("AUTOAGENT_PROJECTION_CACHE_TTL_SECONDS", 60),
+                projection_build_bytes=integer("AUTOAGENT_PROJECTION_BUILD_BYTES", 134217728),
                 trace_snapshot_bytes=integer("AUTOAGENT_TRACE_SNAPSHOT_BYTES", 134217728),
                 trace_snapshot_ttl_seconds=number("AUTOAGENT_TRACE_SNAPSHOT_TTL_SECONDS", 300),
                 inspection_scan_events=integer("AUTOAGENT_INSPECTION_SCAN_EVENTS", 100000),

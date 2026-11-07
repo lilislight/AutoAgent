@@ -10,6 +10,12 @@ from .execution import command_name, local_error
 
 
 def add_parsers(groups, workflows, invocations, checkpoints, common):
+    projections = groups.add_parser('projection', parents=[common], allow_abbrev=False,
+        help='Inspect or build database query projections from durable facts.')
+    commands = projections.add_subparsers(dest='command', required=True)
+    for name in ('status', 'build', 'rebuild'):
+        parser = commands.add_parser(name, parents=[common], allow_abbrev=False)
+        parser.set_defaults(management_query=True)
     input_help = 'Describe registered Entry input contracts and Session eligibility. Local mode opens project resources; does not submit an Invocation.'
     inputs = workflows.add_parser('inputs', parents=[common], allow_abbrev=False,
         help=input_help, description=input_help)
@@ -56,6 +62,11 @@ def add_parsers(groups, workflows, invocations, checkpoints, common):
 
 
 async def _remote(client, options):
+    if options.group == 'projection':
+        if options.command == 'status':
+            return await client.request('GET', '/query-projections')
+        return await client.request('POST', '/query-projections/build',
+                                    params={'rebuild': str(options.command == 'rebuild').lower()})
     if options.group == 'invocation' and options.command == 'fork':
         if options.plan:
             return await client.request('GET','/execution-fork-plan',params=dict(invocation_id=options.invocation_id,sequence=options.sequence))
@@ -147,11 +158,21 @@ async def run(options):
             from autoagent.host.project import Project
             project = Project.find(getattr(options, 'project', '.'))
             host = AutoAgentHost.from_project(project.root, env_file=getattr(options, 'env_file', None),
-                use_env_file=not getattr(options, 'no_env_file', False))
+                use_env_file=not getattr(options, 'no_env_file', False),
+                read_only=options.group == 'projection' and options.command == 'status')
             root = options._root = host.root
             source = options._source = dict(kind='project', root=str(root), name=project.name)
-            async with host:
-                if options.group == 'workflow':
+            context = host
+            if options.group == 'projection':
+                from dataclasses import replace
+                from autoagent.host.persistence import DatabaseSink
+                context = await DatabaseSink.open(host.settings.resolved_database_url(host.root),
+                    config=replace(host.settings.persistence, projection_worker_enabled=False),
+                    read_only=options.command == 'status')
+            async with context as resource:
+                if options.group == 'projection':
+                    data = await resource.query_projection_status() if options.command == 'status' else await resource.build_query_projections(rebuild=options.command == 'rebuild')
+                elif options.group == 'workflow':
                     revision = options.revision_id
                     if revision is None:
                         listing = await host.list_workflows(workflow_id=options.workflow_id, limit=1)

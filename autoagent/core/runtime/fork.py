@@ -1,13 +1,14 @@
 """Prepare an immutable Root fork without installing State or invoking user code."""
 from dataclasses import dataclass, replace
 from uuid import uuid4
+from urllib.parse import quote
 
 from ..errors import RuntimeTransitionError
 from .checkpoint import SessionCheckpoint
 from .events import InvocationForked, ForkStateImported, ForkInitialized, SignalInherited, RuntimeEvent
 from .graph_checkpoint import RuntimeGraphCheckpoint
 from .operations import StateDelta, StateOperation
-from .recovery import RecoverySource, prepare_recovery
+from .recovery import prepare_recovery
 from .state import RuntimeState, ChildResult, SchedulerState, child_input_digest
 from .signals import empty_signals, payload_size
 from .values import freeze, thaw
@@ -100,13 +101,18 @@ def prepare_fork(graph, workflows, *, source=None, now, session_id=None):
         boundaries[state.session.id] = count+2 if count > 1 else 1
         for key in (*inv.scheduler.operator_calls, *inv.scheduler.waits):
             calls.setdefault(key, str(uuid4()))
+        for occurrence in inv.scheduler.occurrences.values():
+            for key in occurrence.execution.inline_commands:
+                calls.setdefault(key, 'inline:' + quote(occurrence.id, safe='') + ':' + uuid4().hex)
         for index,(key,entry) in enumerate(sorted(inv.signals['messages'].items(), key=lambda pair:pair[1]['message']['accepted_sequence'])):
             # Multiple queued Signals get distinct bootstrap positions so FIFO
             # order survives canonical JSON key sorting and restart validation.
             messages.setdefault(key, str(uuid4()))
             accepted[key] = index+2 if count > 1 else 1
         for plan in inv.child_plans.values():
-            creations[plan.creation_id] = f'{invocations[inv.id]}:{plan.parent_occurrence_id}:child'
+            inline_id = plan.creation_id.removesuffix(':child')
+            creations[plan.creation_id] = (calls[inline_id] + ':child' if inline_id in calls
+                else f'{invocations[inv.id]}:{plan.parent_occurrence_id}:child')
             for unit in plan.units:
                 sessions.setdefault(unit.session_id, str(uuid4()))
                 invocations.setdefault(unit.invocation_id, str(uuid4()))
@@ -155,6 +161,10 @@ def prepare_fork(graph, workflows, *, source=None, now, session_id=None):
         if set(value) == {'message_id','endpoint','accepted_sequence'}:
             result['message_id'] = messages.get(value['message_id'],value['message_id'])
             result['accepted_sequence'] = accepted.get(value['message_id'],1)
+        if set(value) == {'message_id','endpoint','payload','accepted_sequence','sender_id'}:
+            result['message_id'] = messages.get(value['message_id'],value['message_id'])
+            result['accepted_sequence'] = accepted.get(value['message_id'],1)
+            result['sender_id'] = invocations.get(value['sender_id'], value['sender_id'])
         if 'handle' in value and 'wait_id' in value and value['wait_id'] in calls:
             result['wait_id'] = calls[value['wait_id']]
         if 'handle' in value:
@@ -168,6 +178,9 @@ def prepare_fork(graph, workflows, *, source=None, now, session_id=None):
     stamps = {'created_at_us','updated_at_us','started_at_us','completed_at_us','ready_at_us','resumed_at_us'}
     requests = {calls[c.id]:values(thaw(c.input)) for s in states.values() if s.invocation is not None
         for c in s.invocation.scheduler.operator_calls.values() if c.id in calls and c.input is not None}
+    requests.update({calls[c['id']]:values(thaw(c['input'])) for s in states.values() if s.invocation is not None
+        for occurrence in s.invocation.scheduler.occurrences.values()
+        for c in occurrence.execution.inline_commands.values()})
     def structural(value, key=''):
         if isinstance(value, list):
             return [structural(v) for v in value]
@@ -178,9 +191,9 @@ def prepare_fork(graph, workflows, *, source=None, now, session_id=None):
             nk = calls.get(k, messages.get(k, creations.get(k, k)))
             if k in {'session_id','parent_session_id'} and v in sessions:
                 result[nk] = sessions[v]
-            elif k in {'id','invocation_id','parent_invocation_id','latest_invocation_id'} and isinstance(v,str) and v in invocations:
+            elif k in {'id','invocation_id','parent_invocation_id','latest_invocation_id','sender_id'} and isinstance(v,str) and v in invocations:
                 result[nk] = invocations[v]
-            elif k in {'id','call_id','wait_id'} and isinstance(v,str) and v in calls:
+            elif k in {'id','call_id','wait_id','parent_call_id'} and isinstance(v,str) and v in calls:
                 result[nk] = calls[v]
             elif k in {'id','message_id'} and isinstance(v,str) and v in messages:
                 result[nk] = messages[v]

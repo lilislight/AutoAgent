@@ -1,32 +1,39 @@
+import { CodeSkeleton, InlineLoading, BusyLabel } from './LoadingState';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getExecutionActionSpec, getExecutionValue } from '../api';
 import type { PendingResponse, TraceRow, WorkflowGraphData } from '../types';
 import { useActionDraft } from '../actionDrafts';
-import { jsonExample, jsonIssues } from '../jsonSchema';
+import { jsonIssues } from '../jsonSchema';
+import { responseEditor, type ResponseDraft } from '../executionResponse';
 import { useExecutionNavigation } from './ExecutionNavigation';
 import { SelectMenu } from './SelectMenu';
 import { JsonEditor } from './JsonEditor';
-import { LoadedValue } from './TraceDetails';
+import { JsonValue } from './JsonValue';
 import { RunWorkflowForm } from './RunWorkflowForm';
 import { ActionReference } from './ActionReference';
 
 export function ResponseForm({ wait }: { wait: PendingResponse }) {
   const navigation = useExecutionNavigation();
-  const [draft, setDraft] = useActionDraft<{ text?: string }>(`response:${wait.invocation_id}:${wait.wait_id}`, () => ({}));
+  const [draft, setDraft] = useActionDraft<ResponseDraft>(`response:${wait.invocation_id}:${wait.wait_id}`, () => ({}));
   const [error, setError] = useState<string | null>(null);
   const spec = useQuery({ queryKey: ['execution-action-spec', navigation.invocationId, 'respond', wait.invocation_id, wait.wait_id], queryFn: ({ signal }) => getExecutionActionSpec(navigation.invocationId!, 'respond', { target_invocation_id: wait.invocation_id, wait_id: wait.wait_id }, signal), staleTime: 0, retry: false, refetchOnWindowFocus: false });
   const schema = spec.data?.input_schema;
-  const text = draft.text ?? JSON.stringify(jsonExample(schema), null, 2);
+  const { text, requestKey, stale } = responseEditor(spec.data, draft);
+  const refresh = async () => {
+    const updated = await spec.refetch();
+    if (updated.isSuccess) { setDraft({}); setError(null); navigation.clearActionError?.(); }
+  };
   const pending = navigation.pendingResponses?.some(item => item.invocation_id === wait.invocation_id && item.wait_id === wait.wait_id);
-  return <form className="run-form inline-action-form" onSubmit={event => { event.preventDefault(); setError(null); if (!spec.data || navigation.actionBusy || !pending) return; if (jsonIssues(text, schema).length) { setError('Correct the highlighted Response fields.'); return; } void navigation.sendAction?.('respond', { target_invocation_id: wait.invocation_id, wait_id: wait.wait_id, payload: JSON.parse(text) }); }}>
+  return <form className="run-form inline-action-form" onSubmit={event => { event.preventDefault(); setError(null); if (!spec.data || spec.isFetching || stale || navigation.actionBusy || !pending) return; if (jsonIssues(text, schema).length) { setError('Correct the highlighted Response fields.'); return; } void navigation.sendAction?.('respond', { target_invocation_id: wait.invocation_id, wait_id: wait.wait_id, payload: JSON.parse(text) }); }}>
     <div className="run-fields"><div className="action-references"><ActionReference label="Invocation ID" value={wait.invocation_id} /><ActionReference label="Wait ID" value={wait.wait_id} /></div>
-      <section className="response-request"><h3>Wait request</h3><LoadedValue invocationId={wait.invocation_id} kind="wait" identity={wait.wait_id} field="request" label="Wait request" /></section>
-      <JsonEditor label="Response" schema={schema} value={text} onChange={text => { setDraft({ text }); setError(null); navigation.clearActionError?.(); }} errors={navigation.actionErrors} disabled={navigation.actionBusy || !pending} />
+      <section className="response-request"><h3>Current request</h3>{spec.data ? <JsonValue value={spec.data.request} label="Current request" /> : null}<button type="button" disabled={spec.isFetching || navigation.actionBusy || !pending} onClick={() => void refresh()}>Refresh request and reset response</button></section>
+      {stale ? <p className="run-hint" role="status">This response belongs to an earlier request. Refresh the request and review your decisions again.</p> : null}
+      <JsonEditor label="Response" schema={schema} value={text} onChange={text => { setDraft({ text, requestKey: stale ? draft.requestKey : requestKey }); setError(null); navigation.clearActionError?.(); }} errors={navigation.actionErrors} disabled={stale || navigation.actionBusy || !pending || spec.isFetching || !spec.data} />
       {navigation.paused ? <p className="run-hint">The Root is paused. After responding, use Recover to resume execution.</p> : null}
-      {spec.isFetching ? <p role="status">Checking response contract…</p> : null}{spec.error ? <p className="run-error">{spec.error.message}<button type="button" onClick={() => void spec.refetch()}>Retry</button></p> : null}
+      {spec.isFetching ? <InlineLoading label="Checking response contract" /> : null}{spec.error ? <p className="run-error">{spec.error.message}<button type="button" onClick={() => void spec.refetch()}>Retry</button></p> : null}
       {!pending ? <p role="status">This Wait no longer requires a response.</p> : null}{error || navigation.actionError ? <p className="run-error" role="alert">{error ?? navigation.actionError}</p> : null}
-    </div><div className="run-footer"><button type="submit" className="run-primary" disabled={!pending || !spec.data || spec.isFetching || navigation.actionBusy}>{navigation.actionBusy ? 'Submitting…' : 'Respond'}</button></div>
+    </div><div className="run-footer"><button type="submit" className="run-primary" disabled={!pending || !spec.data || spec.isFetching || stale || navigation.actionBusy}><BusyLabel busy={navigation.actionBusy} label="Submitting">Respond</BusyLabel></button></div>
   </form>;
 }
 export function PendingResponseList({ waits }: { waits: PendingResponse[] }) {
@@ -42,6 +49,6 @@ export function InvocationActions({ row, workflow }: { row: TraceRow; workflow: 
   const navigation = useExecutionNavigation();
   const input = useQuery({ queryKey: ['run-again-input', row.invocation_id], queryFn: ({ signal }) => getExecutionValue(row.invocation_id, 'invocation', row.invocation_id, 'input', signal), enabled: workflow.runnable, staleTime: Infinity, gcTime: 30_000, retry: false });
   return <>{navigation.pendingResponses?.length ? <section className="inspector-section"><header><h3>Pending responses</h3><span>{navigation.pendingResponses.length}</span></header><PendingResponseList waits={navigation.pendingResponses} /></section> : null}
-    {workflow.runnable ? <section className="inspector-section"><header><h3>Run again</h3></header>{input.isPending ? <p className="inspector-empty" role="status">Loading original Input…</p> : input.error ? <p className="run-error">{input.error.message}<button type="button" onClick={() => void input.refetch()}>Retry</button></p> : input.data?.available ? <RunWorkflowForm workflow={workflow} initial={{ entry: String(row.entry_node_id), input: input.data.value }} onAccepted={receipt => navigation.onRunAccepted?.(receipt)} scope={`run-again:${row.invocation_id}`} /> : <p className="inspector-empty">Original Input is unavailable.</p>}</section> : null}
+    {workflow.runnable ? <section className="inspector-section"><header><h3>Run again</h3></header>{input.isPending ? <CodeSkeleton label="Loading original Input" /> : input.error ? <p className="run-error">{input.error.message}<button type="button" onClick={() => void input.refetch()}>Retry</button></p> : input.data?.available ? <RunWorkflowForm workflow={workflow} initial={{ entry: String(row.entry_node_id), input: input.data.value }} onAccepted={receipt => navigation.onRunAccepted?.(receipt)} scope={`run-again:${row.invocation_id}`} /> : <p className="inspector-empty">Original Input is unavailable.</p>}</section> : null}
   </>;
 }

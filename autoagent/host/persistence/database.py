@@ -33,9 +33,18 @@ class DatabaseSink:
     mutations are rejected and SQL transactions are read-only.
     """
 
-    def __init__(self, url: str, *, config: PersistenceConfig | None = None, read_only=False):
+    def __init__(self, url: str, *, config: PersistenceConfig | None = None, read_only=False, pricing=None):
+        from autoagent.agent.cost import CostCalculator, LocalTokenPricing
+        if pricing is not None and not isinstance(pricing, CostCalculator):
+            raise TypeError("pricing must implement CostCalculator.")
+        self.pricing = pricing if pricing is not None else LocalTokenPricing()
         self.config = config or PersistenceConfig()
         self._writer = Writer(url, self.config, read_only=read_only)
+        self._local_projections = None
+        self._projection_worker = None
+        self._projection_builds = set()
+        self._projection_executor = None
+        self._projection_closing = False
         self._queries = Queries(self._writer)
         self._traces = TraceQueries(self._queries)
         self._maintenance = Maintenance(self._writer)
@@ -43,12 +52,23 @@ class DatabaseSink:
         self._checkpoint_guard = None
         self._datasets = TraceDatasets(self._queries, self.config, url)
         self._llm_calls = None
+        self._agent_context = None
+
+    async def agent_context_operation(self, method, *args, **kwargs):
+        """Serialize Host settings operations on the owned database loop."""
+        from .agent_context import AgentContextStorage
+        async def operation():
+            if self._agent_context is None:
+                self._agent_context = AgentContextStorage(self._writer)
+            return await getattr(self._agent_context, method)(*args, **kwargs)
+        return await self._writer.run(operation)
 
     @classmethod
-    async def open(cls, url: str, *, config: PersistenceConfig | None = None, read_only=False):
-        result = cls(url, config=config, read_only=read_only)
+    async def open(cls, url: str, *, config: PersistenceConfig | None = None, read_only=False, pricing=None):
+        result = cls(url, config=config, read_only=read_only, pricing=pricing)
         try:
             await result._writer.ready()
+            result._start_projection_worker()
         except BaseException:
             await result.close()
             raise
@@ -56,7 +76,15 @@ class DatabaseSink:
 
     async def __aenter__(self):
         await self._writer.ready()
+        self._start_projection_worker()
         return self
+
+    def _start_projection_worker(self):
+        if (not self._writer.read_only and self.config.projection_mode == 'background'
+                and self.config.projection_worker_enabled and self._projection_worker is None):
+            from .projection_worker import ProjectionWorker
+            self._projection_worker = ProjectionWorker(self._writer)
+            self._projection_worker.start()
 
     async def __aexit__(self, *_):
         await self.close()
@@ -98,9 +126,22 @@ class DatabaseSink:
 
     async def append_runtime_event(
         self, event: RuntimeEvent, *, operator_definition_id: str | None = None
-    ) -> None:
+    ) -> int:
+        """Accept an Event and return its retained byte charge for Host accounting."""
         if not isinstance(event, RuntimeEvent):
             raise TypeError("Expected RuntimeEvent.")
+
+        if event.event_name not in ("operator_call.started", "capability.resolved") and operator_definition_id is not None:
+            raise ValueError("Only CallStarted/CapabilityResolved can carry Operator bindings.")
+        # Local admission uses the same owned queue as the Writer. Unregistered
+        # bindings and cold/history checks still use its asynchronous slow path.
+        binding = operator_definition_id
+        size = self._writer.try_accept(
+            "runtime_event", event.id, event, binding=binding,
+            strict_binding=operator_definition_id is not None,
+        )
+        if size is not None:
+            return size
 
         async def accept():
             binding = operator_definition_id
@@ -113,7 +154,7 @@ class DatabaseSink:
                 raise ValueError(
                     "Only CallStarted/CapabilityResolved can carry Operator bindings."
                 )
-            await self._writer.accept(
+            return await self._writer.accept(
                 "runtime_event",
                 event.id,
                 event,
@@ -121,11 +162,15 @@ class DatabaseSink:
                 strict_binding=operator_definition_id is not None,
             )
 
-        await self._writer.run(accept)
+        return await self._writer.run(accept)
 
     async def append_user_event(self, event: UserEvent) -> None:
+        if isinstance(event, UserEvent) and not event.persist:
+            raise ValueError("Transient User Events cannot be persisted.")
         if not isinstance(event, UserEvent):
             raise TypeError("Expected UserEvent.")
+        if self._writer.try_accept("user_event", event.id, event) is not None:
+            return
         await self._writer.run(self._writer.accept, "user_event", event.id, event)
 
     async def record_llm_call(self, record) -> None:
@@ -136,9 +181,43 @@ class DatabaseSink:
         record = LLMCallRecord.model_validate(record)
         async def write():
             if self._llm_calls is None:
-                self._llm_calls = LLMCallStorage(self._writer)
+                self._llm_calls = LLMCallStorage(self._writer, pricing=self.pricing)
             await self._llm_calls.write(record)
         await self._writer.run(write)
+
+    async def admit_llm_call(self, record, checks) -> None:
+        """Atomically check all applicable settled budgets and register a call."""
+        from autoagent.agent.recording import LLMCallRecord
+        from .llm_calls import LLMCallStorage
+        record = LLMCallRecord.model_validate(record)
+        async def admit():
+            if self._llm_calls is None:
+                self._llm_calls = LLMCallStorage(self._writer, pricing=self.pricing)
+            await self._llm_calls.admit(record, checks)
+        await self._writer.run(admit)
+
+    async def token_usage(self, *, query=None, **filters):
+        """Aggregate recorded token facts; no optional table is created by reads."""
+        from autoagent.agent.usage import TokenUsageQuery
+        from .llm_calls import LLMCallStorage
+        if query is not None and filters:
+            raise ValueError("Pass a TokenUsageQuery or keyword filters, not both.")
+        query = TokenUsageQuery(**filters) if query is None else query
+        if not isinstance(query, TokenUsageQuery):
+            raise TypeError("Expected TokenUsageQuery.")
+        async def read():
+            if self._llm_calls is None:
+                self._llm_calls = LLMCallStorage(self._writer, pricing=self.pricing)
+            return await self._llm_calls.summary(query)
+        return await self._writer.run(read)
+
+    async def mark_llm_call_unsettled(self, llm_call_id: str) -> None:
+        """Forget a transient active call after interrupted admission/settlement."""
+        async def mark():
+            async with self._writer.mutation:
+                if self._llm_calls is not None:
+                    self._llm_calls.active.discard(llm_call_id)
+        await self._writer.run(mark)
 
     def _checkpoint_lock(self):
         # Created and used only on the Writer loop, including cross-loop callers.
@@ -203,7 +282,7 @@ class DatabaseSink:
         from sqlalchemy import select
         from .schema import meta
         async def read():
-            async with self._queries.view() as (conn, _, _, _):
+            async with self._queries.view(control=True) as (conn, _, _, _):
                 row = (await conn.execute(select(meta.tables['runtime_events'].c.event_id,
                     meta.tables['runtime_events'].c.invocation_id,meta.tables['runtime_events'].c.event_name,
                     meta.tables['runtime_events'].c.payload_text).where(
@@ -495,9 +574,10 @@ class DatabaseSink:
         from .controls import ControlQueries
         return await self._writer.run(ControlQueries(self._queries).read, invocation_id, registered, **options)
 
-    async def execution_state(self, invocation_id):
+    async def execution_state(self, invocation_id, *, settled_version=None):
         from .execution_state import ExecutionState
-        return await self._writer.run(ExecutionState(self._queries).read, invocation_id)
+        return await self._writer.run(ExecutionState(self._queries).read, invocation_id,
+                                      settled_version=settled_version)
 
     async def get_session(self, session_id, *, view: ReadView = "durable"):
         return await self._writer.run(
@@ -628,6 +708,66 @@ class DatabaseSink:
     async def flush(self):
         await self._writer.run(self._writer.flush)
 
+    async def projection_cache_statistics(self):
+        async def statistics():
+            result = await self._queries.projection_cache.statistics()
+            result["local"] = self._local_projections.statistics() if self._local_projections else {"enabled": False}
+            # Periodic memory telemetry must stay free of database reads.
+            result['database'] = dict(mode=self.config.projection_mode,
+                worker=self._projection_worker.statistics() if self._projection_worker else {'running': False})
+            return result
+        return await self._writer.run(statistics)
+
+    async def _projection_status(self):
+        from .query_projections import progress
+        from sqlalchemy import select
+        from .schema import meta
+        locked = self._writer.storage.memory
+        if locked:
+            await self._writer.mutation.acquire()
+        try:
+            async with self._writer.storage.query_engine.connect() as conn:
+                if not self._writer.storage.sqlite:
+                    conn = await conn.execution_options(isolation_level='REPEATABLE READ')
+                header = (await conn.execute(select(meta.tables['persistence_meta']))).mappings().one()
+                order = await progress(conn, header['store_id'])
+        finally:
+            if locked:
+                self._writer.mutation.release()
+        return dict(mode=self.config.projection_mode, processed_order=order,
+                    durable_order=header['last_store_order'], lag_events=header['last_store_order']-(order or 0),
+                    worker=self._projection_worker.statistics() if self._projection_worker else {'running': False})
+
+    async def query_projection_status(self):
+        return await self._writer.run(self._projection_status)
+
+    async def build_query_projections(self, *, rebuild=False):
+        """Explicit maintenance; ordinary reads never write projection rows."""
+        if type(rebuild) is not bool:
+            raise ValueError('rebuild must be a boolean.')
+        async def check():
+            self._writer.check_open()
+        await self._writer.run(check)
+        if rebuild:
+            from .query_projections import reset
+            await self._writer.run(self._maintenance.run, reset)
+        from .projection_worker import ProjectionWorker
+        worker = ProjectionWorker(self._writer)
+        async def submit():
+            from concurrent.futures import ThreadPoolExecutor
+            self._writer.check_open()
+            if self._projection_closing:
+                raise ClosedError('Persistence is closing.')
+            if self._projection_executor is None:
+                self._projection_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='autoagent-projection-build')
+            future = self._projection_executor.submit(lambda: asyncio.run(worker.build()))
+            self._projection_builds.add(future)
+            future.add_done_callback(lambda _: self._writer.loop.call_soon_threadsafe(self._projection_builds.discard, future))
+            return future
+        future = await self._writer.run(submit)
+        count = await asyncio.shield(asyncio.wrap_future(future))
+        return {**await self.query_projection_status(), 'processed_events': count}
+
     async def health(self):
         if self._writer._closed or self._writer._close_future is not None:
             from .models import PersistenceHealth
@@ -642,10 +782,22 @@ class DatabaseSink:
         return await self._writer.run(self._writer.health)
 
     async def close(self):
+        if self._projection_executor is not None:
+            async def drain():
+                self._projection_closing = True
+                await asyncio.gather(*(asyncio.wrap_future(future) for future in tuple(self._projection_builds)), return_exceptions=True)
+            await self._writer.run(drain)
+            self._projection_executor.shutdown(wait=True)
+            self._projection_executor = None
+        if self._projection_worker is not None:
+            await self._projection_worker.close()
+            self._projection_worker = None
         if self._datasets.cleaner is None:
             await self._datasets.close()
         elif not self._writer._closed and self._writer._close_future is None:
             await self._writer.run(self._datasets.close)
+        if not self._writer._closed and self._writer._close_future is None:
+            await self._writer.run(self._queries.projection_cache.close)
         await self._writer.close()
 
     async def delete_checkpoint(self, checkpoint_id):

@@ -3,13 +3,30 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from sqlalchemy import case, func, select, tuple_, or_
 
 from .models import Page
-from .projections import ProjectionBatch, light_record
-from .schema import meta
+from .projections import ProjectionBatch, event_metadata
+from .schema import DETAIL_TABLES, meta
+from .operational import OperationalBatch
+from .read_models import ProjectionCache, ProjectionConnection
 from .storage import SOURCES
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedRecord:
+    """A query owns immutable values, never mutable Writer queue entries."""
+    kind: str
+    identity: str
+    value: object
+    binding: str | None
+    order: int
+
+
+def pending_metadata(entries):
+    return [event_metadata(entry.value) for entry in entries]
 
 
 def limit_value(limit):
@@ -22,36 +39,91 @@ class Queries:
     def __init__(self, writer):
         self.writer = writer
         self.storage = writer.storage
+        self.projection_cache = ProjectionCache(writer)
+        import weakref
+        self.storage.projection_cache = weakref.proxy(self.projection_cache)
 
     @asynccontextmanager
-    async def view(self, mode="durable"):
+    async def view(self, mode="durable", *, control=False, invocation_id=None, event_records=None):
         if mode not in ("durable", "accepted"):
             raise ValueError("view must be durable or accepted.")
         locked = mode == "accepted" or self.storage.memory
         if locked:
             await self.writer.mutation.acquire()
         try:
-            async with self.storage.engine.connect() as conn:
+            engine = self.storage.engine if control else self.storage.query_engine
+            async with engine.connect() as raw:
                 if not self.storage.sqlite:
-                    conn = await conn.execution_options(
-                        isolation_level="REPEATABLE READ"
-                    )
-                async with conn.begin():
-                    pending = tuple(self.writer.pending) if mode == "accepted" else ()
-                    overlay = ProjectionBatch(conn, self.storage.source)
-                    order = await conn.scalar(
-                        select(meta.tables["persistence_meta"].c.last_store_order)
-                    )
-                    for entry in pending:
-                        if entry.kind == "runtime_event":
-                            order += 1
-                            record = await self.writer.cpu(entry.value.to_record)
-                            light = await self.writer.cpu(light_record, record)
-                            await overlay.runtime(light, order, entry.binding)
+                    raw = await raw.execution_options(isolation_level="REPEATABLE READ")
+                async with raw.begin():
+                    metadata = (await raw.execute(select(meta.tables['persistence_meta'].c.last_store_order,
+                        meta.tables['persistence_meta'].c.store_id))).one()
+                    order, store_id = metadata
+                    pending=[]
+                    if mode == 'accepted':
+                        with self.writer.queue_lock:
+                            for entry in self.writer.pending:
+                                if entry.kind == 'runtime_event':order += 1
+                                pending.append(AcceptedRecord(entry.kind,entry.identity,entry.value,entry.binding,order))
+                    pending=tuple(pending)
+                    # The SQL snapshot and accepted tail now share a boundary.
+                    # Disk readers must not hold admission/mutation during UI
+                    # reconstruction or a long query.
+                    if locked and not self.storage.memory:
+                        self.writer.mutation.release()
+                        locked = False
+                    if pending and invocation_id:
+                        pending=await self._scope_pending(raw,pending,invocation_id)
+                    conn = raw if control else ProjectionConnection(raw,self.projection_cache,metadata.last_store_order,store_id,scope=invocation_id)
+                    overlay = OperationalBatch(conn) if control else ProjectionBatch(conn,self.storage.source,graph_loader=self.storage.workflow_graph)
+                    runtime=tuple(entry for entry in pending if entry.kind=='runtime_event')
+                    if runtime:
+                        records=await self.writer.cpu(pending_metadata,runtime)
+                        if event_records is not None:
+                            event_records.extend(zip(runtime, records))
+                        for entry,light in zip(runtime,records):
+                            if control:await overlay.runtime(light,entry.order)
+                            else:await overlay.runtime(light,entry.order,entry.binding)
                     yield conn, overlay, pending, order
         finally:
             if locked:
                 self.writer.mutation.release()
+
+    async def _scope_pending(self, conn, pending, invocation_id):
+        """Select one Root family, including Children not yet stored in SQL."""
+        parents={}
+        for entry in pending:
+            if entry.kind!='runtime_event':continue
+            event=entry.value
+            if event.event_name=='child_invocation.planned':
+                parents.update((unit.child_invocation_id,event.invocation_id) for unit in event.payload.units)
+            for operation in event.delta.operations if event.delta else ():
+                if operation.op=='remove':continue
+                path=operation.path
+                plans=(operation.value,) if path[:2]==('invocation','child_plans') and len(path)==3 else (
+                    operation.value.child_plans.values() if path==('invocation',) and operation.value else ())
+                for plan in plans:
+                    parents.update((unit.invocation_id,event.invocation_id) for unit in plan.units)
+        ancestors={invocation_id}
+        root=invocation_id
+        while root in parents:
+            root=parents[root]
+            if root in ancestors:raise ValueError('Cyclic pending Child ownership.')
+            ancestors.add(root)
+        table=meta.tables['invocations']
+        known=await conn.scalar(select(table.c.root_invocation_id).where(table.c.invocation_id.in_(ancestors)).limit(1))
+        root=known or root
+        rows=(await conn.execute(select(table.c.invocation_id,table.c.session_id).where(table.c.root_invocation_id==root))).all()
+        members={row.invocation_id for row in rows}|{root}
+        while True:
+            children={child for child,parent in parents.items() if parent in members}
+            if children<=members:break
+            members.update(children)
+        sessions={row.session_id for row in rows}
+        sessions.update(entry.value.session_id for entry in pending if entry.kind=='runtime_event' and entry.value.invocation_id in members)
+        return tuple(entry for entry in pending if entry.kind!='runtime_event'
+            or entry.value.invocation_id in members
+            or entry.value.invocation_id is None and entry.value.session_id in sessions)
 
     async def _rows(
         self,
@@ -77,19 +149,17 @@ class Queries:
             where.append(tuple_(*(table.c[k] for k in order)) > tuple(cursor))
         changed = overlay.rows.get(name, {})
         # Fetch enough candidates to compensate for overlay removals from filters.
-        result = (
-            await conn.execute(
-                select(table)
-                .where(*where)
-                .order_by(*(table.c[k] for k in order))
-                .limit(limit + len(changed) + 1)
-            )
-        ).mappings()
+        if name in DETAIL_TABLES and not extra_where:
+            result=await conn.detail_rows(name,filters,order=order,cursor=cursor,limit=limit+len(changed)+1)
+            if cursor is not None:result=[row for row in result if tuple(row[k] for k in order)>tuple(cursor)]
+        else:
+            result = (await conn.execute(select(table).where(*where)
+                .order_by(*(table.c[k] for k in order)).limit(limit + len(changed) + 1))).mappings()
         candidates = {tuple(row[k] for k in keys): dict(row) for row in result}
         for key, row in changed.items():
+            candidates.pop(key, None)
             if row is None:
                 continue
-            candidates.pop(key, None)
             if (
                 extra_filter(row)
                 and all(row.get(k) == v for k, v in filters.items())
@@ -222,7 +292,7 @@ class Queries:
             raise ValueError("after must be nonnegative.")
         name, _, _ = SOURCES[kind]
         field = "session_id" if kind == "runtime_event" else "invocation_id"
-        async with self.view(mode) as (conn, _, pending, frontier):
+        async with self.view(mode, invocation_id=invocation_id) as (conn, _, pending, frontier):
             table = meta.tables[name]
             where = [table.c[field] == stream, table.c.sequence > after]
             if occurrence_id is not None:
@@ -273,7 +343,7 @@ class Queries:
             "operator_calls": ("call_id",),
             "waits": ("wait_id",),
         }
-        async with self.view(mode) as (conn, overlay, _, frontier):
+        async with self.view(mode, control=name in ("sessions","invocations"), invocation_id=filters.get("invocation_id")) as (conn, overlay, _, frontier):
             # Stable identity cursors avoid ambiguous ordering for planned NULL timestamps.
             if name == "invocations" and not include_planned:
                 filters = dict(filters)
@@ -310,14 +380,14 @@ class Queries:
             return Page(tuple(page), next_cursor, frontier)
 
     async def get_row(self, name, identity, mode):
-        async with self.view(mode) as (_conn, overlay, _, _):
+        async with self.view(mode, control=name in ("sessions","invocations"), invocation_id=identity.get("invocation_id")) as (_conn, overlay, _, _):
             return await overlay.get(name, **identity)
 
     async def changes(self, iid, after, limit, root_graph, mode):
         limit_value(limit)
         if type(after) is not int or after < 0:
             raise ValueError("after must be nonnegative.")
-        async with self.view(mode) as (conn, overlay, _, frontier):
+        async with self.view(mode, invocation_id=iid) as (conn, overlay, _, frontier):
             graph = meta.tables["graph_changes"]
             invs = meta.tables["invocations"]
             field = "store_order" if root_graph else "sequence"
@@ -423,7 +493,7 @@ class Queries:
             return await self._resolve(conn, pending, reference)
 
     async def detail(self, name, identity, mode):
-        async with self.view(mode) as (conn, overlay, pending, _):
+        async with self.view(mode,invocation_id=identity['invocation_id']) as (conn, overlay, pending, _):
             row = await overlay.get(name, **identity)
             if row is None:
                 return None
@@ -455,15 +525,7 @@ class Queries:
                 if key.endswith("_ref"):
                     result[key[:-4]] = await self._resolve(conn, pending, row[key])
             if name == "node_executions" and not row.get("input_ref"):
-                calls = meta.tables["operator_calls"]
-                stored = (
-                    await conn.execute(
-                        select(calls).where(
-                            calls.c.invocation_id == row["invocation_id"],
-                            calls.c.occurrence_id == row["occurrence_id"],
-                        )
-                    )
-                ).mappings()
+                stored=await conn.detail_rows('operator_calls',dict(invocation_id=row['invocation_id'],occurrence_id=row['occurrence_id']))
                 by_id = {r["call_id"]: dict(r) for r in stored}
                 by_id.update(
                     {
@@ -506,7 +568,7 @@ class Queries:
                 or any(type(v) is not int or v < 0 for v in cursor)
             ):
                 raise ValueError("Invalid Edge detail cursor.")
-        async with self.view(mode) as (conn, overlay, pending, _):
+        async with self.view(mode, invocation_id=iid) as (conn, overlay, pending, _):
             inv = await overlay.get("invocations", invocation_id=iid)
             if inv is None:
                 return {
@@ -618,7 +680,7 @@ class Queries:
 
     async def execution_snapshot(self, iid, mode):
         """Resolve a Root result and its graph waits in one consistent view."""
-        async with self.view(mode) as (conn, overlay, pending, _):
+        async with self.view(mode, control=True, invocation_id=iid) as (conn, overlay, pending, _):
             row = await overlay.get("invocations", invocation_id=iid)
             if row is None:
                 return None
@@ -634,7 +696,7 @@ class Queries:
                         continue
                     wait_cursor = None
                     while True:
-                        waits, wait_cursor = await self._rows(conn, overlay, "waits", {"invocation_id": member["invocation_id"], "status": "waiting"}, ("wait_id",), 1000, wait_cursor)
+                        waits, wait_cursor = await self._rows(conn, overlay, "active_waits", {"invocation_id": member["invocation_id"], "status": "waiting"}, ("wait_id",), 1000, wait_cursor)
                         for wait in waits:
                             request = (await self._resolve(conn, pending, wait.get("request_ref")))["value"]
                             snapshot["waits"].append({"id": wait["wait_id"], "kind": wait["kind"], "request": request})
@@ -650,8 +712,8 @@ class Queries:
         inv = meta.tables["invocations"]
         root = inv.alias("root")
         sess = meta.tables["sessions"]
-        waits = meta.tables["waits"]
-        nodes = meta.tables["node_executions"]
+        waits = meta.tables["active_waits"]
+        nodes = meta.tables["active_nodes"]
         due = select(waits.c.wait_id).join(inv, waits.c.invocation_id == inv.c.invocation_id).where(
             inv.c.root_invocation_id == root.c.invocation_id,
             waits.c.status == "waiting", waits.c.deadline_at_us <= now_us,
@@ -667,14 +729,14 @@ class Queries:
         ).order_by(root.c.invocation_id).limit(limit + 1)
         if cursor is not None:
             query = query.where(root.c.invocation_id > cursor)
-        async with self.view() as (conn, _, _, frontier):
+        async with self.view(control=True) as (conn, _, _, frontier):
             rows = [dict(row) for row in (await conn.execute(query)).mappings()]
         return Page(tuple(rows[:limit]), rows[limit - 1]["invocation_id"] if len(rows) > limit else None, frontier)
 
     async def recovery_bundle(self, root_invocation_id, *, full_history=False):
         """Read one durable Root graph and its histories from one MVCC snapshot."""
         from .checkpoints import progress_order
-        async with self.view() as (conn, _, _, frontier):
+        async with self.view(control=True) as (conn, _, _, frontier):
             invocations = meta.tables["invocations"]
             root = await self.storage.row(
                 conn, "invocations", invocation_id=root_invocation_id
@@ -758,34 +820,24 @@ class Queries:
                     )
                 ).all()
             )
-            calls = meta.tables["operator_calls"]
-            definitions = (
-                await conn.scalars(
-                    select(calls.c.operator_definition_id)
-                    .join(
-                        invocations,
-                        calls.c.invocation_id == invocations.c.invocation_id,
-                    )
-                    .where(
-                        calls.c.invocation_id.in_(ids),
-                        invocations.c.status.in_(
-                            ("created", "running", "waiting", "settling")
-                        ),
-                        calls.c.status.in_(("running", "lost")),
-                        calls.c.operator_definition_id.is_not(None),
-                    )
-                    .distinct()
-                )
-            ).all()
+            # Bindings are immutable CallStarted facts. Core decides which
+            # Calls still require an implementation after restoring the graph.
+            from sqlalchemy import JSON, cast, type_coerce
+            body=type_coerce(events.c.payload_text,JSON) if conn.dialect.name=='sqlite' else cast(events.c.payload_text,JSON)
+            definitions=meta.tables['operator_definitions']
+            bindings={}
+            for item in (await conn.execute(select(events.c.invocation_id,
+                body['call_id'].as_string().label('call_id'),definitions.c.operator_id,definitions.c.definition_id)
+                .join(definitions,events.c.operator_definition_id==definitions.c.definition_id)
+                .where(events.c.invocation_id.in_(ids),events.c.event_name=='operator_call.started')
+                .order_by(events.c.store_order))).mappings():
+                bindings[(item['invocation_id'],item['call_id'])]=dict(item)
             return {
                 "root_session_id": root["session_id"],
                 "checkpoint": checkpoint,
                 "events": histories,
                 "user_frontiers": user_frontiers,
-                "operator_definitions": [
-                    await self.storage.source(conn, "operator_definition", identity)
-                    for identity in definitions
-                ],
+                "operator_bindings": list(bindings.values()),
                 "frontier": frontier,
             }
 

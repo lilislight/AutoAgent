@@ -84,7 +84,7 @@ entrypoint="{self.module}:review"
         self.assertEqual(code, 0, stderr)
         self.assertTrue(report["ok"])
         self.assertEqual(report["source"]["name"], "cli-example")
-        self.assertEqual(report["data"]["summary"]["workflows"], 1)
+        self.assertEqual(report["data"]["summary"]["workflows"], 2)
         self.assertIn("project import log", stderr)
         self.assertIn("project factory log", stderr)
         self.assertFalse((self.root / ".autoagent").exists())
@@ -98,7 +98,7 @@ entrypoint="{self.module}:review"
         self.assertEqual(document["command"], "workflow.compile")
         self.assertTrue(document["data"]["workflow_revision_id"].startswith("review:"))
         node = document["data"]["plan"]["nodes"][0]
-        self.assertEqual(node["recovery"]["mode"], "replay_safe")
+        self.assertEqual(node["recovery"]["mode"], "never")
         self.assertEqual(node["timeout"]["seconds"], 2)
         self.assertEqual(node["input_contract"]["schema"]["required"], ["text"])
         self.assertNotIn("<function", stdout)

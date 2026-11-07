@@ -11,13 +11,17 @@ def validate_condition(kind, condition):
     if not isinstance(condition, Mapping):
         raise ValueError('Wait condition must be a mapping.')
     if kind == 'signal':
-        if set(condition) != {'endpoint', 'limit'} or not isinstance(condition['endpoint'], str) or not condition['endpoint'].strip() or type(condition['limit']) is not int or condition['limit'] < 1:
+        if (set(condition) - {'endpoint', 'limit', 'consume'} or not {'endpoint', 'limit'} <= set(condition)
+                or type(condition.get('consume', True)) is not bool
+                or not isinstance(condition['endpoint'], str) or not condition['endpoint'].strip() or type(condition['limit']) is not int or condition['limit'] < 1):
             raise ValueError('Invalid Signal wait condition.')
     elif kind == 'timer':
         if set(condition) != {'deadline_at_us'} or type(condition['deadline_at_us']) is not int or condition['deadline_at_us'] < 0:
             raise ValueError('Invalid Timer wait condition.')
     elif kind == 'child':
-        if set(condition) != {'handle', 'after'} or (condition['after'] is not None and not isinstance(condition['after'], str)):
+        if (set(condition) - {'handle', 'after', 'scope'} or not {'handle', 'after'} <= set(condition)
+                or condition.get('scope', 'direct') not in {'direct', 'graph'}
+                or (condition['after'] is not None and not isinstance(condition['after'], str))):
             raise ValueError('Invalid Child wait condition.')
         RuntimeHandle.model_validate(thaw(condition['handle']))
     elif kind == 'any':
@@ -55,7 +59,10 @@ def awakening_delta(planner, state, payload, now, sid, iid, index):
         kind, condition = case['kind'], case['condition']
     if kind == 'signal':
         selected = tuple(mid for mid, entry in sorted(inv.signals['messages'].items(), key=lambda item: item[1]['message']['accepted_sequence']) if entry['message']['endpoint'] == condition['endpoint'])[:condition['limit']]
-        if not selected or payload.message_ids != selected or output != freeze({'messages': [inv.signals['messages'][mid]['message'] for mid in selected]}):
+        consume = condition.get('consume', True)
+        expected = (freeze({'messages': [inv.signals['messages'][mid]['message'] for mid in selected]})
+            if consume else freeze({'available': True, 'endpoint': condition['endpoint']}))
+        if not selected or payload.message_ids != (selected if consume else ()) or output != expected:
             raise ValueError('Signal awakening must consume the next matching messages.')
     elif payload.message_ids:
         raise ValueError('Only Signal waits may consume messages.')
@@ -128,5 +135,14 @@ def validate_wait_graph(states, owners):
                 handle = case['condition']['handle']
                 child_state = states.get(handle['session_id'])
                 child = child_state.invocation if child_state else None
-                if owners.get(handle['session_id']) != sid or child is None or (child.id, child.workflow_id, child.workflow_revision_id) != (handle['invocation_id'], handle['workflow_id'], handle['workflow_revision_id']):
+                if case['condition'].get('scope', 'direct') == 'direct' and owners.get(handle['session_id']) != sid:
                     raise ValueError('Child Wait must reference its exact directly owned Child.')
+                identity = (child.id, child.workflow_id, child.workflow_revision_id) if child is not None else None
+                if identity is None:
+                    parent = states.get(owners.get(handle['session_id']))
+                    if parent is not None:
+                        identity = next(((unit.invocation_id, plan.workflow_id, plan.workflow_revision_id)
+                            for plan in parent.invocation.child_plans.values() for unit in plan.units
+                            if unit.session_id == handle['session_id']), None)
+                if identity != (handle['invocation_id'], handle['workflow_id'], handle['workflow_revision_id']):
+                    raise ValueError('Child Wait must reference an exact Handle in the ownership graph.')

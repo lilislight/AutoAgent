@@ -1,0 +1,52 @@
+/* Loaded before JavaScript so cold starts use the same indicator as the app. */
+.app-boot-loading { position:fixed; inset:0; display:grid; place-items:center; background:var(--surface,#f4f6f9); }
+html[data-theme="dark"] .app-boot-loading { background:var(--surface,#292f38); }
+.loading-indicator { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
+.loading-spinner { display:block; width:32px; height:32px; box-sizing:border-box; border:2px solid color-mix(in srgb,var(--accent,#007acc) 20%,transparent); border-top-color:var(--accent,#007acc); border-radius:50%; animation:loading-spin 750ms linear infinite; }
+html[data-theme="dark"] .app-boot-loading .loading-spinner { border-color:#3794ff33; border-top-color:#3794ff; }
+.loading-indicator.is-small .loading-spinner { width:14px; height:14px; }
+.workspace-loading { flex:1; min-height:160px; display:grid; place-items:center; }
+.loading-placeholder { display:block; position:relative; overflow:hidden; border-radius:4px; background:color-mix(in srgb,var(--muted,#657181) 12%,transparent); }
+.loading-placeholder::after { content:""; position:absolute; inset:0; transform:translateX(-100%); background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--muted,#657181) 10%,transparent),transparent); animation:loading-shimmer 1.6s ease-in-out infinite; }
+.skeleton-text { display:inline-block; max-width:100%; vertical-align:top; color:transparent; }
+.directory-skeleton .skeleton-status { color:transparent; }
+.inline-loading { display:inline-flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
+.busy-label { display:inline-grid; align-items:center; vertical-align:middle; }
+.busy-label>span { grid-area:1/1; }
+.busy-label-progress { display:inline-flex; align-items:center; justify-content:center; gap:6px; visibility:hidden; }
+.busy-label.is-busy>.busy-label-idle { visibility:hidden; }
+.busy-label.is-busy>.busy-label-progress { visibility:visible; }
+.busy-label:not(.is-busy) .loading-spinner { animation-play-state:paused; }
+.skeleton-facts dd { min-width:0; }
+.skeleton-record { pointer-events:none; }
+.skeleton-record .record-choice-label { flex:1; }
+.skeleton-record .record-kind-icon { width:25px; height:25px; }
+.code-skeleton { min-height:96px; }
+.skeleton-option { width:100%; pointer-events:none; }
+.skeleton-option strong,.skeleton-option small { display:block; }
+.skeleton-option small { margin-top:5px; font-size:11px; }
+.skeleton-option.select-option>span:first-child { flex:1; }
+.skeleton-checkbox { width:15px; height:15px; flex-shrink:0; }
+.skeleton-option .revision-choice-top>strong { flex:1; font-weight:400; }
+.cards-skeleton { display:grid; gap:10px; }
+.loading-card { min-width:0; padding:14px; border:1px solid var(--line); border-radius:8px; font-size:12px; }
+.loading-card>strong { display:block; }
+.loading-card p { margin:10px 0; }
+.timeline-skeleton { padding:18px 12px; min-height:160px; }
+.timeline-skeleton-row { display:grid; grid-template-columns:minmax(80px,180px) minmax(0,1fr); gap:16px; align-items:center; min-height:44px; border-bottom:1px solid var(--line); }
+.skeleton-track { height:14px; width:100%; opacity:.55; }
+.skeleton-chart { height:180px; margin-top:16px; border-radius:8px; }
+.conversation-skeleton { max-width:760px; margin:0 auto; padding:8px 0; }
+.skeleton-message { display:flex; flex-direction:column; gap:12px; margin-bottom:40px; }
+.skeleton-message>.loading-placeholder { height:12px; width:92%; }
+.skeleton-message>.loading-placeholder:last-child { width:64%; }
+.skeleton-message>.skeleton-author { height:16px; width:110px; margin-bottom:8px; }
+.skeleton-message.is-user { margin-left:22%; padding:18px; border:1px solid var(--line,#cdd5df); border-radius:10px; }
+.workspace-tab:not(.is-inactive)>.main-workspace,.workspace-tab:not(.is-inactive)>.agent-app { animation:workspace-enter 160ms ease-out; }
+.workspace-tab.is-inactive .loading-spinner,.workspace-tab.is-inactive .loading-placeholder::after { animation-play-state:paused; }
+@keyframes loading-spin { to { transform:rotate(360deg); } }
+@keyframes loading-shimmer { to { transform:translateX(100%); } }
+@keyframes workspace-enter { from { opacity:0; } to { opacity:1; } }
+@media(prefers-reduced-motion:reduce) {
+  .loading-spinner,.loading-placeholder::after,.workspace-tab:not(.is-inactive)>.main-workspace,.workspace-tab:not(.is-inactive)>.agent-app { animation:none; }
+}

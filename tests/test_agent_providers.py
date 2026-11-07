@@ -268,6 +268,21 @@ class ProviderSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(value.input[0].content[0].source, AssetSource)
         self.assertEqual(captured[0][1]["input"][0]["content"][0]["image_url"], "data:image/png;base64,YQ==")
 
+    async def test_mutated_media_resolver_sources_fail_before_http(self):
+        """Borrowed resolver models are validated before replacing a media source."""
+        async def resolver(source):
+            return DataSource(data="YQ==", mime_type="image/png").model_copy(
+                update={"data": "invalid base64!"})
+
+        provider, _, captured = self.provider(media_resolver=resolver)
+        value = request(ImageContent(source=AssetSource(uri="asset://image")))
+        with self.assertRaises(LLMProviderError):
+            await provider.ainvoke(value)
+        with self.assertRaises(LLMProviderError):
+            async for _ in provider.astream(value):
+                pass
+        self.assertEqual(captured, [])
+
     async def test_capability_and_protocol_errors_are_detected_before_http(self):
         """Reject unsupported media, native provenance and profile options locally."""
         provider, _, captured = self.provider(model_profiles={"model": LLMModelProfile(sampling=False)})

@@ -153,8 +153,8 @@ class Project:
             raise ProjectError("Invalid project metadata.")
         entries = raw.get("workflows")
         if entries is not None:
-            if not isinstance(entries, list) or not entries:
-                raise ProjectError("workflows must be a nonempty array.")
+            if not isinstance(entries, list):
+                raise ProjectError("workflows must be an array.")
             if any(
                 not isinstance(item, dict) or set(item) != {"entrypoint"}
                 for item in entries
@@ -177,7 +177,7 @@ class Project:
             raise ProjectError("Project name cannot be empty.")
         return cls(root, name, entries, lifespan, evaluations)
 
-    def load(self):
+    def load(self, environment=None):
         with _IMPORT_LOCK, import_scope(self.root):
             if self.entrypoints is not None:
                 definitions = [
@@ -218,10 +218,15 @@ class Project:
                 if any(existing.id == built.id for existing in workflows):
                     raise ProjectError(f"Duplicate Workflow id: {built.id}")
                 workflows.append(built)
-            if not workflows:
-                raise ProjectError(
-                    "No Workflows found; use @workflow or auto-agent.toml entries."
-                )
+            from autoagent.agent import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
+            if any(value.id == BUILTIN_AGENT_WORKFLOW_ID for value in workflows):
+                raise ProjectError(f"Workflow id {BUILTIN_AGENT_WORKFLOW_ID!r} is reserved for the SDK Agent.")
+            env = os.environ if environment is None else environment
+            enabled = env.get("AUTOAGENT_BUILTIN_AGENT_ENABLED", "true").strip().lower()
+            if enabled not in {"true", "false", "1", "0"}:
+                raise ProjectError("AUTOAGENT_BUILTIN_AGENT_ENABLED must be true, false, 1 or 0.")
+            if enabled in {"true", "1"}:
+                workflows.append(builtin_agent_workflow())
             lifespan = (
                 resolve_entrypoint(self.lifespan_entrypoint, self.root)
                 if self.lifespan_entrypoint
@@ -231,7 +236,7 @@ class Project:
 
     def check(self, environment):
         with environment_scope(environment):
-            workflows, _ = self.load()
+            workflows, _ = self.load(environment)
             return ProjectCheck(
                 self.name,
                 tuple(WorkflowCompiler().compile(value) for value in workflows),

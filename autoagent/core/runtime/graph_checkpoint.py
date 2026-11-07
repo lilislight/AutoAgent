@@ -8,6 +8,7 @@ import json
 from .checkpoint import SessionCheckpoint
 from .values import thaw
 from .state import RuntimeState, ChildResult, child_input_digest, validate_pause_boundary
+from .inline import runtime_call
 
 
 def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> None:
@@ -115,7 +116,7 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
             if caller is None or caller.id != origin['invocation_id']:
                 raise ValueError('Signal receipt references a missing caller.')
             if not isinstance(caller, ChildResult):
-                call = caller.scheduler.operator_calls.get(call_id)
+                call = runtime_call(caller, call_id)
                 if call is None or call.operator_id != 'system_command:send_signal':
                     raise ValueError('Signal receipt references a missing SendSignal Call.')
                 if call.input is not None:
@@ -139,7 +140,7 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
             if caller is None or caller.id != origin['invocation_id']:
                 raise ValueError('Cancellation origin references a missing caller.')
             if not isinstance(caller, ChildResult):
-                call = caller.scheduler.operator_calls.get(origin['call_id'])
+                call = runtime_call(caller, origin['call_id'])
                 if call is None or call.operator_id != 'system_command:cancel':
                     raise ValueError('Cancellation origin references a missing Cancel Call.')
                 if call.input is not None:
@@ -163,7 +164,7 @@ def validate_graph(root_session_id: str, states: Mapping[str, RuntimeState]) -> 
                 raise ValueError("Resume receipt references a missing caller Invocation.")
             if isinstance(caller, ChildResult):
                 continue
-            call = caller.scheduler.operator_calls.get(call_id)
+            call = runtime_call(caller, call_id)
             if call is None or call.operator_id != 'system_command:resume':
                 raise ValueError("Resume receipt references a missing Command Call.")
             if call.input is not None:

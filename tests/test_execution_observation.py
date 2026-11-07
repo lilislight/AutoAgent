@@ -32,6 +32,38 @@ def child_handle(context: InputMappingContext) -> RuntimeHandle:
 
 
 class ExecutionObservationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_core_version_reuses_flags_only_for_matching_history(self):
+        """A matching settled Core graph saves SQL; stale hints retain normal validation."""
+        from sqlalchemy import event
+        wf = Workflow('observation-version-fence', nodes=[Node('work', identity)])
+        async with self.host([wf], buffered=True, local_projections=False) as host:
+            ref = await host.execute(wf.id, {'text': 'terminal'}, entry_node_id='work')
+            await host.join(ref)
+            await host._persistence.flush()
+            snapshot = await host._runtime.app.acontrol_snapshot(ref)
+            self.assertTrue(snapshot.settled)
+            statements = []
+            engine = host._persistence._writer.storage.engine.sync_engine
+            def collect(conn, cursor, statement, parameters, context, many):
+                if statement.startswith('SELECT'):
+                    statements.append(statement)
+            event.listen(engine, 'before_cursor_execute', collect)
+            try:
+                normal = await host._persistence.execution_state(ref.invocation_id)
+                normal_count = len(statements)
+                statements.clear()
+                fast = await host._persistence.execution_state(ref.invocation_id,
+                    settled_version=snapshot.graph_version)
+                self.assertEqual(normal, fast)
+                self.assertLess(len(statements), normal_count)
+                statements.clear()
+                stale = tuple((sid, iid, seq - 1) for sid, iid, seq in snapshot.graph_version)
+                checked = await host._persistence.execution_state(ref.invocation_id, settled_version=stale)
+                self.assertEqual(normal, checked)
+                self.assertGreaterEqual(len(statements), normal_count)
+            finally:
+                event.remove(engine, 'before_cursor_execute', collect)
+
     async def test_notification_wait_wakes_on_writer_fault_and_close(self):
         """A failed or closing Writer wakes observers instead of leaving them blocked."""
         wf = Workflow('notification-fault', nodes=[Node('work', identity)])
@@ -80,6 +112,7 @@ class ExecutionObservationTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     await host.join(ref, timeout=2)
                     await host._persistence.flush()
+                state['resident'] = False
                 return state
 
             writer = host._persistence._writer
@@ -90,11 +123,46 @@ class ExecutionObservationTests(unittest.IsolatedAsyncioTestCase):
                 notifications.append(writer.execution_watches[token][1] != after)
                 return await wait(token, after, timeout, root_id)
 
-            with patch.object(host, 'get_execution_state', stale_snapshot), patch.object(writer, 'wait_execution_change', checked):
+            with patch.object(host, '_resident_observation_ref', return_value=None), patch.object(
+                host, 'get_execution_state', stale_snapshot), patch.object(writer, 'wait_execution_change', checked):
                 result = await host.wait_execution(ref.invocation_id, until='terminal', timeout=2)
             self.assertEqual(result['observation'], 'terminal')
             self.assertEqual(notifications, [True])
             self.assertFalse(writer.execution_watches)
+
+    async def test_live_wait_defers_sql_summary_until_the_core_boundary(self):
+        """A live wait queries one final summary without polling SQL while work runs."""
+        entered, release = threading.Event(), threading.Event()
+
+        async def gated(value: Value) -> Value:
+            entered.set()
+            while not release.is_set():
+                await asyncio.sleep(.005)
+            return value
+
+        wf = Workflow('core-observation', nodes=[Node('work', gated)])
+        async with self.host([wf]) as host:
+            ref = await host.execute(wf.id, {'text': 'live'}, entry_node_id='work')
+            original = host.get_execution_state
+            with patch.object(host, 'get_execution_state', wraps=original) as query:
+                observer = asyncio.create_task(host.wait_execution(ref.invocation_id, until='terminal', timeout=3))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    for _ in range(100):
+                        if host._persistence._writer.execution_watches:
+                            break
+                        await asyncio.sleep(.001)
+                    await asyncio.sleep(.02)
+                    self.assertEqual(query.await_count, 0)
+                    release.set()
+                    result = await observer
+                    self.assertEqual(result['observation'], 'terminal')
+                    self.assertEqual(query.await_count, 1)
+                finally:
+                    release.set()
+                    if not observer.done():
+                        observer.cancel()
+                    await asyncio.gather(observer, return_exceptions=True)
 
     async def test_unrelated_notifications_are_filtered_and_subscriptions_released(self):
         """Scope wakeups to selected executions and retain no observer history after exit."""
@@ -172,8 +240,9 @@ class ExecutionObservationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.temp.cleanup()
 
-    def host(self, workflows, *, buffered=False):
+    def host(self, workflows, *, buffered=False, local_projections=True):
         return AutoAgentHost(workflows=workflows, settings=HostSettings(database_url=self.url,
+            local_projections=local_projections,
             persistence=PersistenceConfig(mode="buffered" if buffered else "durable", batch_delay_ms=60_000)), environment={})
 
     async def test_state_and_waits_never_resolve_large_business_values(self):

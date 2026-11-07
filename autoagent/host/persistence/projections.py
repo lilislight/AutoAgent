@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select, tuple_
+from collections.abc import Mapping, Sequence
+from dataclasses import fields, is_dataclass
+
+from sqlalchemy import select
 
 from .schema import meta
 from .graph_metadata import outgoing_edges
@@ -17,13 +20,32 @@ PROJECTION_TABLES = (
     "graph_changes",
 )
 
+BUSINESS_FIELDS = frozenset({
+    "input", "output", "context", "mapped_input", "aggregate_output", "request",
+    "response", "metrics", "origin", "patch", "pending_context_patch", "signals",
+    "resume_receipts", "resume_receipt_frontiers", "cancel_origin", "pending_recovery",
+    "reused_calls", "command_inputs", "reason", "cancel_reason",
+})
+_OPERATION_VALUE_FIELDS = frozenset({
+    "input", "output", "context", "mapped_input", "aggregate_output", "request",
+    "response", "metrics", "origin", "patch", "pending_context_patch", "reason",
+    "cancel_reason", "error", "fault", "pending_recovery", "reused_calls", "command_inputs",
+})
+
+
+def _error_metadata(value):
+    if value is None:
+        return None
+    return {key: value.get(key) if isinstance(value, Mapping) else getattr(value, key, None)
+            for key in ("type", "code", "phase")}
+
 
 def source(kind, identity, path):
     return {"kind": kind, "id": identity, "path": list(path)}
 
 
 def timer_deadline(kind, request):
-    if not isinstance(request, dict):
+    if not isinstance(request, Mapping):
         return None
     if kind == "timer":
         return request.get("deadline_at_us")
@@ -35,215 +57,72 @@ def timer_deadline(kind, request):
 
 def light_record(item, *, availability=False):
     """Detach metadata without retaining input/output/context in query caches."""
-    if isinstance(item, list):
+    if is_dataclass(item):
+        item = {f.name: getattr(item, f.name) for f in fields(item)
+                if f.compare or not f.name.startswith('_')}
+    if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
         return [light_record(x, availability=availability) for x in item]
-    if not isinstance(item, dict):
+    if not isinstance(item, Mapping):
         return item
+    if 'op' in item and 'path' in item:
+        item = {**item, 'path': list(item['path'])}
+        if item['op'] == 'remove':item.pop('value',None)
     result = {}
     if "request" in item:
-        result["deadline_at_us"] = timer_deadline(item.get("kind", item.get("wait_kind")), item["request"])
+        result["has_independent_case"] = item.get("kind", item.get("wait_kind")) not in ("child", "any") or isinstance(item["request"], Mapping) and any(c["kind"] != "child" for c in item["request"].get("cases", ()))
+        deadlines = (item.get('deadline_at_us'), timer_deadline(item.get("kind", item.get("wait_kind")), item["request"]))
+        result["deadline_at_us"] = min((d for d in deadlines if d is not None), default=None)
     for key, value in item.items():
-        if (
-            key == "value"
-            and isinstance(item.get("op"), str)
-            and isinstance(item.get("path"), list)
-            and item["path"]
-            and item["path"][-1]
-            in {
-                "input",
-                "output",
-                "context",
-                "mapped_input",
-                "aggregate_output",
-                "request",
-                "response",
-                "metrics",
-                "origin",
-                "patch",
-                "pending_context_patch",
-                "reason",
-                "cancel_reason",
-                "error",
-                "fault",
-                "pending_recovery",
-                "reused_calls",
-                "command_inputs",
-            }
-        ):
-            result[key] = (
-                value is not None if item["path"][-1] == "pending_recovery" else
-                {k: value.get(k) for k in ("type", "code", "phase")}
-                if isinstance(value, dict) and item["path"][-1] in ("error", "fault")
-                else True
-                if availability and value is not None
-                else None
-            )
+        if key == 'deadline_at_us' and 'request' in item:
             continue
-        if key in {
-            "input",
-            "output",
-            "context",
-            "mapped_input",
-            "aggregate_output",
-            "request",
-            "response",
-            "metrics",
-            "origin",
-            "patch",
-            "pending_context_patch",
-            "signals",
-            "resume_receipts",
-            "resume_receipt_frontiers",
-            "cancel_origin",
-            "pending_recovery",
-            "reused_calls",
-            "command_inputs",
-            "reason",
-            "cancel_reason",
-        }:
-            result[key] = (value is not None) if key == "pending_recovery" else True if availability and value is not None else None
-        elif key in {"error", "fault"}:
-            result[key] = (
-                {k: value.get(k) for k in ("type", "code", "phase")}
-                if isinstance(value, dict)
-                else None
-            )
+        if isinstance(key, tuple):
+            key = '/' + '/'.join(part.replace('~', '~0').replace('/', '~1') for part in key)
+        field = key
+        if (key == "value" and isinstance(item.get("op"), str)
+                and isinstance(item.get("path"), list) and item["path"]
+                and item["path"][-1] in _OPERATION_VALUE_FIELDS):
+            field = item["path"][-1]
+        if field == "pending_recovery":
+            result[key] = value is not None
+        elif field in {"error", "fault"}:
+            result[key] = _error_metadata(value)
+        elif field in BUSINESS_FIELDS:
+            result[key] = True if availability and value is not None else None
         else:
             result[key] = light_record(value, availability=availability)
     return result
 
 
-class ProjectionBatch:
-    """Changed rows only; shared by writes, rebuilds and accepted query overlays."""
+def event_metadata(event):
+    """Read Core-owned immutable metadata without materializing business values."""
+    record = {key:getattr(event,key) for key in ('schema_version','id','session_id',
+        'invocation_id','sequence','event_name','payload','delta','occurred_at_us')}
+    return light_record(record, availability=event.event_name in ('invocation.forked','fork.state_imported'))
 
-    def __init__(self, connection, source_loader, *, graph_loader=None, metadata_cache=None):
+
+class ProjectionBatch:
+    """Query-local display metadata reconstructed from immutable facts."""
+
+    def __init__(self, connection, source_loader, *, graph_loader=None):
         self.connection = connection
         self.source_loader = source_loader
         self.graph_loader = graph_loader
-        self.metadata_cache = metadata_cache
         self.rows = {name: {} for name in PROJECTION_TABLES}
         self.dirty = {name: set() for name in PROJECTION_TABLES}
         self.order = 0
         self.ordinals = {}
-        self.changed_ordinals = set()
-        self.new_facts = {name: set() for name in ("edge_evaluations", "graph_changes")}
 
     async def get(self, name, **identity):
         table = meta.tables[name]
         key = tuple(identity[c.name] for c in table.primary_key)
         if key not in self.rows[name]:
-            cached = self.metadata_cache.get((name, key)) if self.metadata_cache else None
-            if cached is not None:
-                self.rows[name][key] = cached
-                return cached
-            where = [table.c[k] == v for k, v in identity.items()]
-            row = (
-                (await self.connection.execute(select(table).where(*where)))
-                .mappings()
-                .first()
-            )
+            from .schema import DETAIL_TABLES
+            if name in DETAIL_TABLES:
+                row = await self.connection.detail_get(name, identity)
+            else:
+                row = (await self.connection.execute(select(table).filter_by(**identity))).mappings().first()
             self.rows[name][key] = dict(row) if row else None
         return self.rows[name][key]
-
-    def publish(self):
-        """Called only after COMMIT; read snapshots never use this Writer cache."""
-        if self.metadata_cache is not None:
-            terminal = {row["invocation_id"] for row in self.rows["invocations"].values()
-                        if row and row.get("status") in ("completed", "failed", "cancelled")}
-            for name in ("sessions", "invocations", "node_executions", "operator_calls", "waits"):
-                for key, row in self.rows[name].items():
-                    if row and row.get("invocation_id") in terminal:
-                        self.metadata_cache.discard((name, key))
-                        continue
-                    if row is not None:
-                        # Newly inserted sparse rows read back nullable columns
-                        # as None; cache the same shape as a database SELECT.
-                        row = {column.name: row.get(column.name) for column in meta.tables[name].columns}
-                    self.metadata_cache.put((name, key), row)
-            for key in self.changed_ordinals:
-                if key[0] not in terminal:
-                    self.metadata_cache.put(("ordinals", key), self.ordinals[key])
-                else:
-                    # A terminal batch may advance a previously cached scope.
-                    # Recovery must read its committed MAX, not the older value.
-                    self.metadata_cache.discard(("ordinals", key))
-
-    async def prefetch(self, records):
-        """Load known projection identities in parameter-bounded groups."""
-        keys = {name: set() for name in ("sessions", "invocations", "node_executions", "operator_calls", "waits")}
-        scopes = set()
-
-        def scheduler(iid, value):
-            for oid, occurrence in value.get("occurrences", {}).items():
-                keys["node_executions"].add((iid, oid))
-                scopes.add((iid, occurrence["node_id"]))
-            for field, table in (("operator_calls", "operator_calls"), ("waits", "waits")):
-                keys[table].update((iid, key) for key in value.get(field, {}))
-
-        def plans(value):
-            for plan in value.values():
-                for unit in plan.get("units", ()):
-                    keys["sessions"].add((unit["session_id"],))
-                    keys["invocations"].add((unit["invocation_id"],))
-
-        for record in records:
-            if record.get("session_id"):
-                keys["sessions"].add((record["session_id"],))
-            iid = record.get("invocation_id")
-            if not iid:
-                continue
-            keys["invocations"].add((iid,))
-            payload = record.get("payload", {})
-            for field, table in (("occurrence_id", "node_executions"), ("call_id", "operator_calls"), ("wait_id", "waits")):
-                if payload.get(field):
-                    keys[table].add((iid, payload[field]))
-            for operation in (record.get("delta") or {}).get("operations", ()):
-                path, value = operation["path"], operation.get("value")
-                if path == ["invocation"] and isinstance(value, dict):
-                    scheduler(iid, value.get("scheduler", {}))
-                    plans(value.get("child_plans", {}))
-                elif path[:2] == ["invocation", "scheduler"] and len(path) >= 4:
-                    field, identity = path[2:4]
-                    table = {"occurrences": "node_executions", "operator_calls": "operator_calls", "waits": "waits"}.get(field)
-                    if table:
-                        keys[table].add((iid, identity))
-                    if field == "occurrences" and len(path) == 4 and isinstance(value, dict):
-                        scopes.add((iid, value["node_id"]))
-                elif path[:2] == ["invocation", "child_plans"] and len(path) == 3:
-                    plans({path[2]: value})
-        for name, identities in keys.items():
-            table = meta.tables[name]
-            missing = []
-            for key in identities:
-                if key in self.rows[name]:
-                    continue
-                cached = self.metadata_cache.get((name, key)) if self.metadata_cache else None
-                self.rows[name][key] = cached
-                if cached is None:
-                    missing.append(key)
-            columns = list(table.primary_key.columns)
-            for start in range(0, len(missing), 500):
-                result = (await self.connection.execute(select(table).where(
-                    tuple_(*columns).in_(missing[start:start + 500])))).mappings()
-                for row in result:
-                    self.rows[name][tuple(row[c.name] for c in columns)] = dict(row)
-        table = meta.tables["node_executions"]
-        missing = []
-        for scope in scopes:
-            cached = self.metadata_cache.get(("ordinals", scope)) if self.metadata_cache else None
-            if cached is not None:
-                self.ordinals[scope] = cached
-            elif self.rows["invocations"].get((scope[0],)) is None:
-                self.ordinals[scope] = 0
-            else:
-                missing.append(scope)
-                self.ordinals[scope] = 0
-        for start in range(0, len(missing), 500):
-            statement = select(table.c.invocation_id, table.c.node_id, func.max(table.c.ordinal)).where(
-                tuple_(table.c.invocation_id, table.c.node_id).in_(missing[start:start + 500])
-            ).group_by(table.c.invocation_id, table.c.node_id)
-            for iid, node, ordinal in await self.connection.execute(statement):
-                self.ordinals[(iid, node)] = ordinal
 
     async def put(self, name, identity, values):
         table = meta.tables[name]
@@ -255,10 +134,8 @@ class ProjectionBatch:
         if name == "node_executions" and previous is None:
             scope = (identity["invocation_id"], row["node_id"])
             if scope not in self.ordinals:
-                self.ordinals[scope] = await self.connection.scalar(select(func.max(table.c.ordinal)).where(
-                    table.c.invocation_id == scope[0], table.c.node_id == scope[1])) or 0
+                self.ordinals[scope] = await self.connection.detail_ordinal(*scope)
             self.ordinals[scope] += 1
-            self.changed_ordinals.add(scope)
             row["ordinal"] = self.ordinals[scope]
         key = tuple(identity[c.name] for c in table.primary_key)
         self.rows[name][key] = row
@@ -273,23 +150,7 @@ class ProjectionBatch:
             if key in self.dirty[name] and row is not None
         ]
 
-    async def put_fact(self, name, identity, values, *, new_event):
-        """Append facts only when the caller proved their source Event is new."""
-        if not new_event:
-            return await self.put(name, identity, values)
-        table = meta.tables[name]
-        key = tuple(identity[column.name] for column in table.primary_key)
-        if self.rows[name].get(key) is not None:
-            raise ValueError("A new Event produced a duplicate projection fact.")
-        row = dict(identity, **values)
-        self.rows[name][key] = row
-        self.dirty[name].add(key)
-        self.new_facts[name].add(key)
-        return row
-
-    async def runtime(
-        self, event, order, operator_definition_id=None, *, new_event=False
-    ):
+    async def runtime(self, event, order, operator_definition_id=None):
         self.order = order
         sid, iid, seq = event["session_id"], event["invocation_id"], event["sequence"]
         payload, name, stamp = (
@@ -379,6 +240,18 @@ class ProjectionBatch:
                             position['sequence'] <= payload['source_sequence'])
                     if valid:
                         defaults['input_ref'] = input_ref
+                    else:
+                        # Source recovery may have remapped the same occurrence
+                        # after this Fork's historical cut. Locate its original
+                        # Mapping fact, rather than exposing the newer input.
+                        from sqlalchemy import JSON, cast, type_coerce
+                        body = type_coerce(events.c.payload_text,JSON) if self.connection.dialect.name=='sqlite' else cast(events.c.payload_text,JSON)
+                        identity = await self.connection.scalar(select(events.c.event_id).where(
+                            events.c.invocation_id==payload['source_invocation_id'],
+                            events.c.sequence<=payload['source_sequence'],events.c.event_name=='input.mapped',
+                            body['occurrence_id'].as_string()==oid).order_by(events.c.sequence.desc()).limit(1))
+                        if identity:
+                            defaults['input_ref']=source('runtime_event',identity,['payload','mapped_input'])
             if value.get("error"):
                 defaults.update(
                     error_type=value["error"]["type"],
@@ -679,11 +552,13 @@ class ProjectionBatch:
                         await node(
                             identity, value, ("delta", "operations", index, "value")
                         )
-                    elif path[4] == "execution" and isinstance(value, dict):
+                    elif path[4:] == ["execution", "phase"] or (
+                        path[4:] == ["execution"] and isinstance(value, dict)
+                    ):
                         previous = await self.get(
                             "node_executions", invocation_id=iid, occurrence_id=identity
                         )
-                        phase = value.get("phase", "none")
+                        phase = value if len(path) == 6 else value.get("phase", "none")
                         await self.put(
                             "node_executions",
                             {"invocation_id": iid, "occurrence_id": identity},
@@ -786,6 +661,9 @@ class ProjectionBatch:
                     "error_code": payload["error"].get("code"),
                 },
             )
+        elif name == 'command.retry_started':
+            await self.put('operator_calls', {'invocation_id': iid, 'call_id': cid},
+                {'error_ref': None, 'error_type': None, 'error_code': None, 'output_ref': None})
         elif name == "input.mapped":
             await self.put(
                 "node_executions",
@@ -837,7 +715,7 @@ class ProjectionBatch:
             await self.put(
                 "waits",
                 {"invocation_id": iid, "wait_id": wid},
-                {"request_ref": ref("payload", "request"), "deadline_at_us": payload.get("deadline_at_us")},
+                {"request_ref": ref("payload", "request")},
             )
         elif name in ("wait.resumed", "command.awakened"):
             await self.put(
@@ -851,7 +729,7 @@ class ProjectionBatch:
             )
         elif name == "routing.resolved":
             for index, condition in enumerate(payload["conditions"]):
-                await self.put_fact(
+                await self.put(
                     "edge_evaluations",
                     {"event_id": event["id"], "result_index": index},
                     {
@@ -862,12 +740,11 @@ class ProjectionBatch:
                         "condition_result": condition["selected"],
                         "duration_ns": condition["duration_ns"],
                     },
-                    new_event=new_event,
                 )
         if "duration_ns" in payload and oid:
             change("node", oid, {"stage": name})
         for index, (typ, identity, values) in enumerate(changes):
-            await self.put_fact(
+            await self.put(
                 "graph_changes",
                 {"event_id": event["id"], "change_index": index},
                 {
@@ -885,7 +762,6 @@ class ProjectionBatch:
                     "error_type": values.get("error_type"),
                     "error_code": values.get("error_code"),
                 },
-                new_event=new_event,
             )
 
     async def checkpoint(self, record, checkpoint_id, *, anchor):

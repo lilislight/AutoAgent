@@ -286,8 +286,8 @@ class RuntimeRecordingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 result = await host.join(await host.execute("host-model", providers.request()))
                 self.assertEqual(result.status, "completed", result.error)
                 row = (await read_rows(url, sqlalchemy.select(llm_calls)))[0]
-                calls = meta.tables["operator_calls"]
-                call = (await read_rows(url, sqlalchemy.select(calls).where(calls.c.call_id == row["operator_call_id"])))[0]
+                calls = await host.list_operator_calls(result.invocation_id)
+                call = next(item for item in calls.items if item['call_id']==row['operator_call_id'])
                 self.assertEqual(row["workflow_id"], "host-model")
                 self.assertEqual(row["workflow_version"], "release-2")
                 self.assertEqual(row["workflow_revision_id"], result.ref.workflow_revision_id)

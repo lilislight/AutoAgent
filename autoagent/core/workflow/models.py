@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ..operators import Operator, OperatorContract, StreamReducer, ValueContract
 from ..context import ContextPatch
+from ..usage import UsagePolicy, WorkflowResourcePolicy
 
 
 Executable: TypeAlias = Union[Callable[..., object], Operator, SystemCommand]
@@ -95,14 +96,23 @@ Aggregation = Callable[[AggregationContext], object | Awaitable[object]]
 
 @dataclass(frozen=True, slots=True)
 class UserEventContext(Context):
-    """One immutable Chunk record or committed Node output for an opt-in Mapper.
+    """Immutable data at an opt-in project observation boundary.
 
     Output is emitted once per Node occurrence, after Map aggregation and Output
     Binding. Chunk callbacks identify the individual Operator Call/Map unit.
     Values are read-only durable records, just like other Core hook views.
+    waiting/wait_resolved identify one confirmed Wait transition, independently
+    of Map aggregation. error follows final Node failure (possibly handled by
+    an Error Edge), not an intermediate Call retry. Lifecycle callbacks execute
+    outside Runtime control locks and cannot change canonical execution.
+
+    waiting carries wait_id, kind, request, and deadline_at_us. wait_resolved
+    includes those fields plus outcome (answered, awakened, timed_out, or
+    cancelled), response, and error. error carries stage, error (type/message),
+    and handled, indicating whether an Error Edge was selected.
     """
 
-    phase: Literal["chunk", "output"]
+    phase: Literal["chunk", "output", "waiting", "wait_resolved", "error"]
     value: object
     session_id: str
     invocation_id: str
@@ -114,7 +124,11 @@ class UserEventContext(Context):
 
 
 class UserEventSpec(BaseModel):
-    """User-selected event content; Core supplies delivery identities and time."""
+    """Project content and persistence intent; Core supplies identities/time.
+
+    persist=False delivers a transient observation with no history sequence.
+    Sinks choose their actual durability policy for persist=True events.
+    """
 
     model_config = ConfigDict(
         extra="forbid", frozen=True, strict=True,
@@ -123,6 +137,7 @@ class UserEventSpec(BaseModel):
 
     kind: str = Field(min_length=1, pattern=r"\S")
     payload: JsonValue
+    persist: bool = True
 
     @field_validator("payload", mode="before")
     @classmethod
@@ -154,9 +169,13 @@ class Map:
 
 @dataclass(frozen=True, slots=True)
 class Recovery:
-    """Crash recovery rule for one Node occurrence; replay is allowed by default."""
+    """Recomputation requires an explicit replay-safe declaration.
 
-    mode: Literal["never", "replay_safe"] = "replay_safe"
+    The ``never`` mode rejects uncertain crash replay and reopening an already
+    started terminal occurrence. It does not disable Retry or an unstarted Node.
+    """
+
+    mode: Literal["never", "replay_safe"] = "never"
     max_attempts: int = 1
 
     def __post_init__(self) -> None:
@@ -171,11 +190,12 @@ class Recovery:
 
 @dataclass(frozen=True, slots=True)
 class TimeoutPolicy:
-    """Execution deadline per admitted Operator Call, including its stream.
+    """Execution deadline per admitted Call, including its stream or native wait.
 
     Queueing, mappings and bindings are outside this deadline. Each Map unit
-    and each recovery attempt receives its own budget. This is not a durable
-    Wait deadline and does not forcibly stop synchronous Python code.
+    and retry receives its own budget. Native Command deadlines survive
+    suspension and recovery; Python execution does not forcibly stop synchronous
+    work. Timer uses its own deadline and rejects this policy.
     """
 
     seconds: float
@@ -256,6 +276,8 @@ class RetryPolicy:
     Only execution exceptions and deadlines are eligible; contract, reducer,
     cancellation and Runtime failures never qualify. Emitted streams and
     outstanding synchronous work also prevent automatic retry.
+    Native waiting Commands require an explicit WaitTimeoutError match to
+    retry expired waits. Other native effects retain their operation identity.
     """
 
     max_attempts: int = 1
@@ -273,14 +295,17 @@ class RetryPolicy:
 
 @dataclass(frozen=True, slots=True)
 class ResourcePolicy:
-    """Maximum starts of this Node ID in one Invocation, independent of Calls."""
+    """Node starts and accumulated token limits within one Invocation."""
 
     max_executions_per_invocation: int | None = 1000
+    usage: UsagePolicy | None = None
 
     def __post_init__(self):
         value = self.max_executions_per_invocation
         if value is not None and not _positive_int(value):
             raise ValueError("ResourcePolicy max_executions_per_invocation must be positive or None.")
+        if self.usage is not None and not isinstance(self.usage, UsagePolicy):
+            raise TypeError("ResourcePolicy usage must be UsagePolicy.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +368,7 @@ class Workflow:
     signal_limits: SignalLimits = field(default_factory=SignalLimits)
     version: str | int = "1"
     failure_mode: Literal["fail_fast", "continue_active_branches"] = "fail_fast"
+    resource: WorkflowResourcePolicy = field(default_factory=WorkflowResourcePolicy)
 
     def add_node(self, node: Node) -> Node:
         self.nodes.append(node)
@@ -426,6 +452,7 @@ class WorkflowIR:
     signal_endpoints: tuple[tuple[str, ValueContract], ...] = ()
     signal_limits: SignalLimits = field(default_factory=SignalLimits)
     groups: tuple[WorkflowGroupIR, ...] = ()
+    resource: WorkflowResourcePolicy = field(default_factory=WorkflowResourcePolicy)
     _nodes: Mapping[str, NodeIR] = field(init=False, repr=False, compare=False)
     _edges: Mapping[str, EdgeIR] = field(init=False, repr=False, compare=False)
     _incoming: Mapping[str, tuple[EdgeIR, ...]] = field(init=False, repr=False, compare=False)

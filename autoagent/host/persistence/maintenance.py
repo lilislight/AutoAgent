@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from sqlalchemy import delete, func, literal, or_, select, update
+from sqlalchemy import delete, func, select, update
 
 from .models import ConflictError
-from .projections import ProjectionBatch, light_record
+from .projections import light_record
+from .operational import OperationalBatch
 from .schema import meta
 from .storage import PROJECTION_VERSION
 
@@ -23,13 +24,24 @@ class Maintenance:
             await self.writer.flush()
             # Maintenance owns mutation; no cached metadata may outlive a
             # definition deletion or be reused by a rebuild SQL snapshot.
+            self.storage.projection_cache.clear()
             self.storage.graph_cache.clear()
             self.storage.metadata_cache.clear()
             self.storage._store_order = None
-            async with self.writer.mutation, self.storage.engine.begin() as conn:
+            async with self.writer.mutation, self.storage.transaction() as conn:
+                if not self.storage.sqlite:
+                    # Match publication's lock order before deleting any
+                    # Invocation rows referenced by detailed projection FKs.
+                    await conn.execute(select(meta.tables['persistence_meta'].c.id).with_for_update())
                 result = await operation(conn, *args)
                 if operation.__name__ in ("rebuild", "purge"):
-                    await conn.execute(update(meta.tables['persistence_meta']).values(store_id=uuid4().hex))
+                    store_id = uuid4().hex
+                    await conn.execute(update(meta.tables['persistence_meta']).values(store_id=store_id))
+                    if operation.__name__ == 'purge':
+                        await conn.execute(update(meta.tables['query_projection_state']).values(store_id=store_id))
+                    if self.writer.config.projection_mode == 'transactional':
+                        from .query_projections import catch_up
+                        await catch_up(self.storage, conn, self.writer.config)
             async with self.writer.condition:
                 self.writer.commit_revision += 1
                 self.writer.condition.notify_all()
@@ -85,14 +97,9 @@ class Maintenance:
             name, key = "workflow_revisions", "revision_id"
         else:
             events = meta.tables["runtime_events"]
-            calls = meta.tables["operator_calls"]
             if await conn.scalar(
                 select(events.c.event_id)
                 .where(events.c.operator_definition_id == identity)
-                .limit(1)
-            ) or await conn.scalar(
-                select(calls.c.call_id)
-                .where(calls.c.operator_definition_id == identity)
                 .limit(1)
             ):
                 raise ConflictError("Operator definition is referenced by history.")
@@ -119,20 +126,15 @@ class Maintenance:
                 ).limit(1)
             ):
                 return ['required_anchor']
-        # Only imported snapshots seed detail references. Their referenced
-        # objects belong to these member Invocations, all indexed by ID.
-        invocations = select(members.c.invocation_id).where(members.c.checkpoint_id == identity)
-        for name in ('invocations', 'node_executions', 'operator_calls', 'waits'):
-            table = meta.tables[name]
-            refs = [col for col in table.columns if col.name.endswith('_ref')]
-            if refs and await conn.scalar(
-                select(literal(1)).select_from(table).where(
-                    table.c.invocation_id.in_(invocations),
-                    or_(*((col['kind'].as_string() == 'checkpoint') &
-                           (col['id'].as_string() == identity) for col in refs)),
-                ).limit(1)
-            ):
-                return ['referenced_details']
+        for sid, start in covered:
+            events = meta.tables['runtime_events']
+            if not await conn.scalar(select(events.c.event_id).where(events.c.session_id==sid,events.c.sequence==1).limit(1)):
+                # The earliest imported anchor supplies detail value references;
+                # a later recovery Checkpoint need not retain those values.
+                first = await conn.scalar(select(members.c.checkpoint_id).where(members.c.session_id==sid)
+                    .order_by(members.c.sequence, members.c.checkpoint_id).limit(1))
+                if first == identity:
+                    return ['referenced_details']
         return []
 
     async def delete_checkpoint(self, conn, identity, *, collect=True):
@@ -204,9 +206,22 @@ class Maintenance:
             from .llm_calls import llm_calls
 
             await conn.execute(delete(llm_calls).where(llm_calls.c.invocation_id.in_(ids)))
-        for name in ("graph_changes", "edge_evaluations", "operator_calls", "waits"):
+        if await conn.run_sync(lambda sync: inspect(sync).has_table("agent_execution_settings")):
+            from .agent_context import execution_settings, session_settings
+            await conn.execute(delete(execution_settings).where(execution_settings.c.invocation_id.in_(ids)))
+            await conn.execute(delete(session_settings).where(session_settings.c.session_id.in_(sids)))
+        for name in ("active_nodes", "active_waits"):
             table = meta.tables[name]
             await conn.execute(delete(table).where(table.c.invocation_id.in_(ids)))
+        from .schema import DETAIL_TABLES
+        from sqlalchemy import or_, and_
+        for name in reversed(DETAIL_TABLES):
+            table = meta.tables[name]
+            await conn.execute(delete(table).where(table.c.invocation_id.in_(ids)))
+        entities = meta.tables['query_projection_entities']
+        await conn.execute(delete(entities).where(or_(
+            and_(entities.c.kind == 'invocations', entities.c.identity.in_(ids)),
+            and_(entities.c.kind == 'sessions', entities.c.identity.in_(sids)))))
         # Break only projection ownership links, then remove the dependent rows.
         await conn.execute(
             update(inv)
@@ -218,11 +233,6 @@ class Maintenance:
                 unit_index=None,
                 ownership_phase=None,
                 root_invocation_id=inv.c.invocation_id,
-            )
-        )
-        await conn.execute(
-            delete(meta.tables["node_executions"]).where(
-                meta.tables["node_executions"].c.invocation_id.in_(ids)
             )
         )
         await conn.execute(delete(inv).where(inv.c.invocation_id.in_(ids)))
@@ -237,6 +247,8 @@ class Maintenance:
         await self.gc(conn)
 
     async def rebuild(self, conn):
+        from .query_projections import reset
+        await reset(conn)
         inv = meta.tables["invocations"]
         await conn.execute(
             update(inv).values(
@@ -249,11 +261,8 @@ class Maintenance:
             )
         )
         for name in (
-            "graph_changes",
-            "edge_evaluations",
-            "operator_calls",
-            "waits",
-            "node_executions",
+            "active_nodes",
+            "active_waits",
             "invocations",
             "sessions",
         ):
@@ -282,7 +291,7 @@ class Maintenance:
             light = await self.writer.cpu(
                 lambda record=record: light_record(record, availability=True)
             )
-            batch = ProjectionBatch(conn, self.storage.source)
+            batch = OperationalBatch(conn)
             await batch.checkpoint(light, checkpoint_id, anchor=True)
             await self.storage.projections(conn, batch)
         after = 0
@@ -301,7 +310,7 @@ class Maintenance:
             )
             if not rows:
                 break
-            batch = ProjectionBatch(conn, self.storage.source)
+            batch = OperationalBatch(conn)
             for row in rows:
                 record = await self.storage.source(
                     conn, "runtime_event", row["event_id"]
@@ -313,9 +322,7 @@ class Maintenance:
                 expected = (session or {}).get("durable_sequence", 0) + 1
                 if row["sequence"] != expected:
                     raise ConflictError("Rebuild encounters a missing history prefix.")
-                await batch.runtime(
-                    light, row["store_order"], row["operator_definition_id"]
-                )
+                await batch.runtime(light, row["store_order"])
             await self.storage.projections(conn, batch)
             after = rows[-1]["store_order"]
         await conn.execute(

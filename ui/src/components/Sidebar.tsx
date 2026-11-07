@@ -13,12 +13,13 @@ export function SearchIcon() {
 }
 
 
-export function Sidebar({ view, onChange, children }: { view: "workflows" | "executions"; onChange: (view: "workflows" | "executions") => void; children: ReactNode }) {
+export function Sidebar({ view, onChange, children }: { view: "workflows" | "executions" | "agents"; onChange: (view: "workflows" | "executions" | "agents") => void; children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
-  const label = view === "workflows" ? "workflows" : "executions";
+  const label = view;
   return <><nav className="activity-bar" aria-label="Main navigation">
     <button className={`activity-button ${view === "workflows" ? "active" : ""}`} aria-label="View workflows" aria-current={view === "workflows" ? "page" : undefined} title="Workflows" onClick={() => { setCollapsed(false); onChange("workflows"); }}><WorkflowIcon /></button>
     <button className={`activity-button ${view === "executions" ? "active" : ""}`} aria-label="View executions" aria-current={view === "executions" ? "page" : undefined} title="Executions" onClick={() => { setCollapsed(false); onChange("executions"); }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7m2-5v6l4 2" /></svg></button>
+    <button className={`activity-button ${view === "agents" ? "active" : ""}`} aria-label="View agents" aria-current={view === "agents" ? "page" : undefined} title="Agents" onClick={() => { setCollapsed(false); onChange("agents"); }}><SessionIcon /></button>
     <button className="directory-toggle" onClick={() => setCollapsed(current => !current)} aria-label={`${collapsed ? "Expand" : "Collapse"} ${label} sidebar`} title={`${collapsed ? "Expand" : "Collapse"} ${label} sidebar`} aria-expanded={!collapsed} aria-controls={`directory-panel-${view}`}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="m16 9-3 3 3 3" className={`collapse-chevron ${collapsed ? "collapsed" : ""}`} /></svg></button>
   </nav><nav id={`directory-panel-${view}`} className={`directory ${collapsed ? "collapsed" : ""}`} aria-label={`${label} directory`} aria-hidden={collapsed} inert={collapsed}>{children}</nav></>;
 }

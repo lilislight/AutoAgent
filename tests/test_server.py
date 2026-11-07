@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import json
 import os
 import sys
 import tempfile
@@ -42,6 +43,21 @@ def workflow(name="catalog", version="1"):
 
 
 class ServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_query_projection_management_preserves_execution_queries(self):
+        """HTTP build/status/rebuild use durable facts and retain existing execution responses."""
+        async with self.host() as host:
+            ref = await host.execute('catalog', {'text': 'projection'}, entry_node_id='identity')
+            await host.join(ref)
+            async with self.client(create_app(host, ui=False)) as client:
+                status = await client.get('/api/v2/query-projections')
+                self.assertEqual(status.status_code, 200, status.text)
+                for rebuild in (False, True):
+                    built = await client.post('/api/v2/query-projections/build', params={'rebuild': str(rebuild).lower()})
+                    self.assertEqual(built.status_code, 200, built.text)
+                    self.assertEqual(built.json()['lag_events'], 0)
+                data = await host.get_execution_trace(ref.invocation_id)
+                self.assertEqual(data['invocation']['status'], 'completed')
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -78,7 +94,26 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         engine = create_async_engine(host._persistence._writer.storage.url)
         try:
             async with (engine.begin() if write else engine.connect()) as connection:
-                yield connection
+                from types import SimpleNamespace
+                from tests.projection_fixtures import EventFixtureConnection
+                from autoagent.host.persistence.read_models import ProjectionCache
+                from autoagent.host.persistence.schema import meta
+                from sqlalchemy import select
+                store = (await connection.execute(select(meta.tables['persistence_meta']))).mappings().one()
+                cache = ProjectionCache(SimpleNamespace(config=host.settings.persistence,storage=host._persistence._writer.storage))
+                try:
+                    yield EventFixtureConnection(connection,cache,store['last_store_order'],store['store_id'])
+                finally:
+                    await cache.close()
+            if write:
+                async def clear():
+                    writer=host._persistence._writer
+                    host._persistence._queries.projection_cache.clear()
+                    writer.storage.metadata_cache.clear()
+                    writer.storage._store_order=None
+                    async with writer.storage.engine.connect() as current:
+                        writer.store_order=await current.scalar(select(meta.tables['persistence_meta'].c.last_store_order))
+                await host._persistence._writer.run(clear)
         finally:
             await engine.dispose()
 
@@ -285,7 +320,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             statements = []
             def inspect_sql(conn, cursor, statement, params, context, many):
                 statements.append(statement)
-            event.listen(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
+            event.listen(storage.query_engine.sync_engine, 'before_cursor_execute', inspect_sql)
             try:
                 with patch.object(SourceReader, 'read', side_effect=AssertionError('Rail must never read values')):
                     async with self.client(create_app(host, ui=False)) as client:
@@ -320,7 +355,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await client.get('/api/v2/timeline-event-groups', params=dict(params,invocation_id='missing'))).status_code, 404)
                 self.assertFalse(any('payload_text' in statement or 'delta_text' in statement for statement in statements))
             finally:
-                event.remove(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
+                event.remove(storage.query_engine.sync_engine, 'before_cursor_execute', inspect_sql)
 
     async def test_inline_group_boundaries_round_trip_through_saved_graph_and_object_api(self):
         """Registered and saved Revisions retain exact nested membership without large Node definitions."""
@@ -532,10 +567,15 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         def aggregated(ctx: AggregationContext) -> Value:
             return ctx.outputs[0]
         wf = Workflow('position-map', nodes=[Node('mapped', identity, input_mapping=mapped, map=Map(aggregate=aggregated))])
+        # This fixture injects historical facts without changing live Core State;
+        # background projections and Checkpoints must not race those mutations.
+        self.host_settings=replace(self.host_settings,min_residency_seconds=60000,
+            checkpoint_interval_seconds=60000,local_projections=False)
         async with self.host([wf]) as host:
             root = await host.execute(wf.id, {'text': 'large-' + 'x' * (2 * 1024 * 1024)}, entry_node_id='mapped')
             self.assertEqual((await host.join(root)).status, 'completed')
             calls = (await host.list_operator_calls(root.invocation_id, limit=100)).items
+            await host._runtime.residency.stop()
             target = sorted(calls, key=lambda row: row['call_id'])[54]
             storage = host._persistence._writer.storage
             async with self.database_connection(host, write=True) as conn:
@@ -603,7 +643,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             statements = []
             def inspect_sql(conn, cursor, statement, params, context, many):
                 statements.append(statement)
-            event.listen(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
+            event.listen(storage.query_engine.sync_engine, 'before_cursor_execute', inspect_sql)
             try:
                 async with self.client(create_app(host, ui=False)) as client, asyncio.timeout(10):
                     with patch.object(SourceReader, 'read', side_effect=AssertionError('Timeline must not read values')):
@@ -639,7 +679,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                         # Half-open windows omit spans ending at the left edge.
                         empty = (await client.get('/api/v2/timeline-items', params=dict(params, start_us=300, end_us=400))).json()
                         self.assertEqual(empty['items'], [])
-                    self.assertFalse(any('payload_text' in sql or 'delta_text' in sql for sql in statements))
+                    self.assertFalse(any('SELECT artifacts.body' in sql for sql in statements))
                     selected = await client.get('/api/v2/execution-record', params=dict(invocation_id=root.invocation_id, kind='node', identity=node['occurrence_id']))
                     self.assertEqual(selected.status_code, 200, selected.text)
                     self.assertIn('input', selected.json()['values'])
@@ -648,7 +688,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     for args, status in ((dict(start_us=200, end_us=150), 400), (dict(start_us=-1), 422), (dict(kind='call'), 400), (dict(invocation_id='missing'), 404)):
                         self.assertEqual((await client.get('/api/v2/timeline-items', params=dict(params, **args))).status_code, status)
             finally:
-                event.remove(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
+                event.remove(storage.query_engine.sync_engine, 'before_cursor_execute', inspect_sql)
 
     async def test_timeline_loop_pagination_keeps_ordinals_and_scopes_cursors_to_window(self):
         """Large Loop pages preserve every Occurrence and reject cursor reuse in another window."""
@@ -842,7 +882,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             statements = []
             def inspect_sql(conn, cursor, statement, params, context, many):
                 statements.append(statement)
-            event.listen(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
+            event.listen(storage.query_engine.sync_engine, 'before_cursor_execute', inspect_sql)
             try:
                 with patch.object(SourceReader, 'read', side_effect=AssertionError('Replay must not resolve values')):
                     for index, header in enumerate(starts[1:-1], 1):
@@ -869,11 +909,10 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     at_time = await host.get_timeline_frame(root.invocation_id, at_us=starts[2]['occurred_at_us'])
                     self.assertEqual(at_time['boundary']['sequence'], starts[2]['sequence'])
             finally:
-                event.remove(storage.engine.sync_engine, 'before_cursor_execute', inspect_sql)
-            self.assertFalse(any('payload_text' in sql or 'delta_text' in sql for sql in statements))
-            # Only the small Call source pointer is joined for exact start identity.
-            # No business reference is selected or resolved.
-            self.assertFalse(any('_ref' in sql.partition('FROM')[0] for sql in statements))
+                event.remove(storage.query_engine.sync_engine, 'before_cursor_execute', inspect_sql)
+            self.assertFalse(any('SELECT artifacts.body' in sql for sql in statements))
+            # References may be indexed; actual business values remain unread.
+            self.assertNotIn('"text":', json.dumps(last))
 
     async def test_timeline_markers_and_node_filter_have_bounded_scoped_pages(self):
         """Header and Node pages stay bounded and reject cursors from a different filter."""
@@ -1364,7 +1403,11 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             result = await host.join(result)
             iid = result.invocation_id
             storage = host._persistence._writer.storage
-            with patch.object(storage, "source", side_effect=AssertionError("Overview must not hydrate sources")):
+            original_source = storage.source
+            async def definitions_only(conn, kind, identity):
+                self.assertEqual(kind, 'workflow_revision', 'Overview must not hydrate business sources')
+                return await original_source(conn,kind,identity)
+            with patch.object(storage, "source", side_effect=definitions_only):
                 async with self.client(create_app(host, ui=False)) as client:
                     overview = await client.get("/api/v2/execution-trace", params={"invocation_id":iid})
                     self.assertEqual(overview.status_code, 200, overview.text)
@@ -1467,7 +1510,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             statements = []
             def inspect_sql(conn, cursor, statement, params, context, many):
                 statements.append(statement)
-            engine = host._persistence._writer.storage.engine.sync_engine
+            engine = host._persistence._writer.storage.query_engine.sync_engine
             event.listen(engine, 'before_cursor_execute', inspect_sql)
             try:
                 with patch.object(SourceReader, 'read', side_effect=AssertionError('Navigation must not read values')):

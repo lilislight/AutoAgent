@@ -7,9 +7,11 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from functools import lru_cache
 from uuid import uuid4
 
-from sqlalchemy import event, func, insert, inspect, select, text, tuple_, update
+from sqlalchemy import event, insert, inspect, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import make_url
@@ -20,11 +22,13 @@ from .models import ConflictError, FormatError
 from .metadata import MetadataCache
 from .identities import SourceIdentities
 from .graph_metadata import WorkflowGraphCache, outgoing_edges
-from .projections import ProjectionBatch, light_record
-from .schema import meta
+from .projections import light_record
+from .operational import OperationalBatch
+from .schema import DETAIL_TABLES, meta, PERSISTED_TABLES
+from autoagent.core.runtime.values import record_values
 
-FORMAT_VERSION = 5
-PROJECTION_VERSION = 4
+FORMAT_VERSION = 7
+PROJECTION_VERSION = 5
 SOURCES = {
     "workflow_revision": ("workflow_revisions", "revision_id", "snapshot_text"),
     "operator_definition": ("operator_definitions", "definition_id", "definition_text"),
@@ -32,6 +36,18 @@ SOURCES = {
     "user_event": ("user_events", "event_id", None),
     "checkpoint": ("checkpoints", "checkpoint_id", "checkpoint_text"),
 }
+
+REFERENCE_COLUMNS = ('owner_kind', 'owner_id', 'slot', 'path', 'artifact_hash')
+
+
+@lru_cache(maxsize=16)
+def _reference_insert(sqlite, count):
+    """Cache placeholder text only; values never enter a statement cache."""
+    groups = []
+    for row in range(count):
+        groups.append('(' + ','.join('?' if sqlite else f'${row * 5 + column + 1}'
+                                     for column in range(5)) + ')')
+    return 'INSERT INTO artifact_refs (' + ','.join(REFERENCE_COLUMNS) + ') VALUES ' + ','.join(groups)
 
 
 @dataclass(slots=True)
@@ -43,7 +59,6 @@ class Prepared:
     binding: str | None = None
     anchor: bool = False
     texts: dict | None = None
-    admitted: bool = False
 
 
 def source_texts(encoded, kind):
@@ -66,7 +81,8 @@ def prepare(entries, config):
     result = []
     size, seen = 0, set()
     for entry in entries:
-        record = entry.value.to_record()
+        with record_values(memo.record_value):
+            record = entry.value.to_record()
         encoded = encode(record, entry.kind, config.artifact_threshold_bytes, memo)
         addition = encoded.encoded_bytes - sum(
             len(a["body"]) for h, a in encoded.artifacts.items() if h in seen
@@ -85,7 +101,6 @@ def prepare(entries, config):
                 entry.binding,
                 entry.anchor,
                 source_texts(encoded, entry.kind),
-                getattr(entry, 'admitted', False),
             )
         )
         size += addition
@@ -95,15 +110,21 @@ def prepare(entries, config):
 
 class Storage:
     def __init__(self, url, *, read_only=False, graph_cache_bytes=4 * 1024 * 1024,
-                 metadata_cache_bytes=4 * 1024 * 1024):
+                 metadata_cache_bytes=4 * 1024 * 1024, config=None):
         parsed = make_url(url)
         if parsed.drivername not in ("sqlite+aiosqlite", "postgresql+asyncpg"):
             raise ValueError("Use sqlite+aiosqlite or postgresql+asyncpg.")
         self.sqlite = parsed.drivername == "sqlite+aiosqlite"
         self.memory = self.sqlite and parsed.database in (None, "", ":memory:")
+        if self.memory:
+            parsed = parsed.set(database='file:autoagent-' + uuid4().hex,
+                                query={'mode': 'memory', 'cache': 'shared', 'uri': 'true'})
         self.url = parsed
+        self.config = config
+        self.last_write = time.monotonic()
         self.read_only = read_only
         self.engine = None
+        self.query_engine = None
         self._lock_file = None
         self._pg_lock = None
         self.graph_cache = WorkflowGraphCache(graph_cache_bytes)
@@ -111,6 +132,7 @@ class Storage:
         self.metadata_cache = MetadataCache(metadata_cache_bytes - len(self.identities.bits))
         self._store_order = None
         self._committing_batch = None
+        self._committing_artifacts = set()
         self.committed_invocations = set()
 
     async def open(self):
@@ -163,7 +185,7 @@ class Storage:
 
             @event.listens_for(self.engine.sync_engine, "begin")
             def begin(conn):
-                conn.exec_driver_sql("BEGIN")
+                conn.exec_driver_sql('BEGIN IMMEDIATE' if conn.get_execution_options().get('persistence_write') else 'BEGIN')
 
         async with self.engine.begin() as conn:
             await self._validate_schema(conn, create=True)
@@ -175,11 +197,14 @@ class Storage:
                         async for identity in rows.scalars():
                             self.identities.add(kind, identity)
             self.identities.ready = True
+        self.query_engine = self.engine if self.memory else self._create_reader_engine()
+        if self.config and self.config.projection_mode == 'transactional':
+            from .query_projections import catch_up
+            async with self.engine.begin() as conn:
+                await catch_up(self, conn, self.config)
 
-    async def _open_reader(self):
-        """Open an existing database without writer ownership, DDL or registration."""
-        if self.memory:
-            raise ValueError("Read-only inspection requires an existing database.")
+    def _create_reader_engine(self):
+        """UI reconstruction cannot exhaust the Writer/control connection pool."""
         url, arguments = self.url, {}
         if self.sqlite:
             from pathlib import Path
@@ -192,25 +217,32 @@ class Storage:
             arguments = {"cached_statements": 0}
         else:
             arguments = {"server_settings": {"default_transaction_read_only": "on"}}
-        self.engine = create_async_engine(url, connect_args=arguments)
+        engine = create_async_engine(url, connect_args=arguments, pool_size=4, max_overflow=0)
         if self.sqlite:
-            @event.listens_for(self.engine.sync_engine, "connect")
+            @event.listens_for(engine.sync_engine, "connect")
             def configure_reader(dbapi_connection, _):
                 cursor = dbapi_connection.cursor()
                 cursor.execute("PRAGMA query_only=ON")
                 cursor.close()
                 dbapi_connection.isolation_level = None
 
-            @event.listens_for(self.engine.sync_engine, "begin")
+            @event.listens_for(engine.sync_engine, "begin")
             def begin_reader(conn):
                 conn.exec_driver_sql("BEGIN")
+        return engine
+
+    async def _open_reader(self):
+        """Open an existing database without writer ownership, DDL or registration."""
+        if self.memory:
+            raise ValueError("Read-only inspection requires an existing database.")
+        self.engine = self.query_engine = self._create_reader_engine()
         async with self.engine.connect() as conn:
             await self._validate_schema(conn, create=False)
 
     async def _validate_schema(self, conn, *, create):
         names = await conn.run_sync(lambda c: inspect(c).get_table_names())
         if names:
-            if not set(meta.tables).issubset(names):
+            if not {t.name for t in PERSISTED_TABLES}.issubset(names):
                 raise FormatError("Database is not a complete Persistence schema.")
             info = (
                 (await conn.execute(select(meta.tables["persistence_meta"].c.format_version,
@@ -226,7 +258,7 @@ class Storage:
                 raise FormatError(
                     "Unsupported Persistence format/projection version."
                 )
-            expected = {t.name: set(t.columns.keys()) for t in meta.tables.values()}
+            expected = {t.name: set(t.columns.keys()) for t in PERSISTED_TABLES}
             actual = await conn.run_sync(
                 lambda c: {
                     name: {col["name"] for col in inspect(c).get_columns(name)}
@@ -237,17 +269,10 @@ class Storage:
                 raise FormatError(
                     "Persistence columns do not match the format version."
                 )
-            if create:
-                # This non-unique access path does not change the stored format.
-                # Ensure existing writer databases receive the current index;
-                # read-only opens perform no DDL.
-                index = next(i for i in meta.tables['edge_evaluations'].indexes
-                             if i.name == 'edge_source_lookup')
-                await conn.run_sync(lambda c: index.create(c, checkfirst=True))
         else:
             if not create:
                 raise FormatError("Database is not a complete Persistence schema.")
-            await conn.run_sync(meta.create_all)
+            await conn.run_sync(lambda c: meta.create_all(c, tables=list(PERSISTED_TABLES)))
             await conn.execute(
                 insert(meta.tables["persistence_meta"]).values(
                     id=1,
@@ -268,6 +293,9 @@ class Storage:
         if self._pg_lock is not None:
             await self._pg_lock.close()
             self._pg_lock = None
+        if self.query_engine is not None and self.query_engine is not self.engine:
+            await self.query_engine.dispose()
+        self.query_engine = None
         if self.engine is not None:
             await self.engine.dispose()
             self.engine = None
@@ -275,7 +303,23 @@ class Storage:
             self._lock_file.close()
             self._lock_file = None
 
+    @asynccontextmanager
+    async def transaction(self):
+        """Reserve SQLite's write slot before reads establish a WAL snapshot.
+
+        Readers keep deferred transactions. An idle projector yields to this
+        reservation instead of making a foreground read-to-write upgrade fail.
+        """
+        async with self.engine.connect() as conn:
+            if self.sqlite:
+                conn = await conn.execution_options(persistence_write=True)
+            async with conn.begin():
+                yield conn
+
     async def row(self, conn, name, *, columns=None, **identity):
+        if name in DETAIL_TABLES:
+            row=await conn.detail_get(name,identity)
+            return {key:row[key] for key in columns} if row and columns else row
         table = meta.tables[name]
         statement = select(*(table.c[k] for k in columns)) if columns else select(table)
         row = (
@@ -326,7 +370,16 @@ class Storage:
     async def workflow_graph(self, conn, revision):
         graph = self.graph_cache.get(revision)
         if graph is None:
-            graph = outgoing_edges(await self.source(conn, "workflow_revision", revision))
+            from .reading import MetadataReader
+            reader = await MetadataReader.open(self,conn,'workflow_revision',revision)
+            packed = await reader.read(('definition','edges'),deep=False)
+            edges=[]
+            for index in range(len(packed)):
+                path=('definition','edges',index)
+                edge={key:await reader.read((*path,key),deep=False) for key in ('id','source','target','on')}
+                edge['condition']={} if await reader.present((*path,'condition')) else None
+                edges.append(edge)
+            graph = outgoing_edges({'definition':{'edges':edges}})
             self.graph_cache.put(revision, graph)
         return graph
 
@@ -370,7 +423,7 @@ class Storage:
                     "occurred_at_us",
                 )
             }
-            record.update(id=row["event_id"], payload=json.loads(row["payload_text"]))
+            record.update(id=row["event_id"], payload=json.loads(row["payload_text"]), persist=True)
         refs = meta.tables["artifact_refs"]
         deps = meta.tables["artifact_dependencies"]
         cache, loading = {}, set()
@@ -435,64 +488,25 @@ class Storage:
                 await conn.execute(statement, group[start:start + 500])
 
     async def projections(self, conn, batch):
-        await self.upsert(conn, "sessions", batch.changed("sessions"))
-        invs = batch.changed("invocations")
-        nodes = batch.changed("node_executions")
-        # The Parent occurrence FK introduces a dependency across these tables.
-        pending = list(invs)
-        parent_keys = list({(row["parent_invocation_id"], row["parent_occurrence_id"])
-                            for row in pending if row.get("parent_invocation_id") is not None})
-        available = set()
-        table = meta.tables["node_executions"]
-        for start in range(0, len(parent_keys), 500):
-            available.update(await conn.execute(select(table.c.invocation_id, table.c.occurrence_id).where(
-                tuple_(table.c.invocation_id, table.c.occurrence_id).in_(parent_keys[start:start + 500]))))
-        pending_ids = {row["invocation_id"] for row in pending}
-        existing_nodes = [row for row in nodes if row["invocation_id"] not in pending_ids]
-        await self.upsert(conn, "node_executions", existing_nodes)
-        available.update((row["invocation_id"], row["occurrence_id"]) for row in existing_nodes)
-        nodes = [row for row in nodes if row["invocation_id"] in pending_ids]
-        while pending:
-            ready = []
-            for row in pending:
-                parent = row.get("parent_invocation_id")
-                if parent is None or (parent, row["parent_occurrence_id"]) in available:
-                    ready.append(row)
-            if not ready:
-                raise ConflictError(
-                    "Child projection references an absent Parent occurrence."
-                )
-            await self.upsert(conn, "invocations", ready)
-            ids = {r["invocation_id"] for r in ready}
-            await self.upsert(
-                conn, "node_executions", [r for r in nodes if r["invocation_id"] in ids]
-            )
-            available.update((row["invocation_id"], row["occurrence_id"])
-                             for row in nodes if row["invocation_id"] in ids)
-            nodes = [r for r in nodes if r["invocation_id"] not in ids]
-            pending = [r for r in pending if r["invocation_id"] not in ids]
-        await self.upsert(conn, "node_executions", nodes)
-        for name in ("operator_calls", "waits"):
-            await self.upsert(conn, name, batch.changed(name))
-        for name in ("edge_evaluations", "graph_changes"):
-            keys = meta.tables[name].primary_key.columns.keys()
-            fresh, existing = [], []
-            for row in batch.changed(name):
-                target = (
-                    fresh
-                    if tuple(row[k] for k in keys) in batch.new_facts[name]
-                    else existing
-                )
-                target.append(row)
-            if fresh:
-                await self.insert_rows(conn, name, fresh)
-            await self.upsert(conn, name, existing)
+        """Commit only operational metadata; detailed read models are optional."""
+        from sqlalchemy import delete
+        for name in ('sessions', 'invocations', 'active_nodes', 'active_waits'):
+            rows = batch.changed(name)
+            if name == "invocations":
+                rows.sort(key=lambda r:r["root_invocation_id"] != r["invocation_id"])
+            await self.upsert(conn, name, rows)
+        for name in ('active_nodes', 'active_waits'):
+            table = meta.tables[name]
+            removed = [key for key in batch.dirty[name] if batch.rows[name][key] is None]
+            for start in range(0, len(removed), 500):
+                await conn.execute(delete(table).where(tuple_(*table.primary_key.columns).in_(removed[start:start+500])))
 
     async def write_artifacts(self, conn, entries):
         """Prefetch each batch's hashes once; write bodies before dependencies."""
         artifacts = {digest: value for entry in entries
                      for digest, value in entry.encoded.artifacts.items()}
-        hashes, existing = list(artifacts), set()
+        existing={digest for digest in artifacts if self.metadata_cache.get(('artifact',(digest,))) is True}
+        hashes=list(artifacts.keys()-existing)
         table = meta.tables["artifacts"]
         for start in range(0, len(hashes), 500):
             existing.update((await conn.execute(select(table.c.hash).where(
@@ -504,18 +518,30 @@ class Storage:
         await self.insert_rows(conn, "artifact_dependencies", [
             {"parent_hash": value["hash"], "slot": index, "path": path, "child_hash": digest}
             for value in missing for index, (path, digest) in enumerate(value["deps"])])
+        self._committing_artifacts.update(hashes)
 
     async def insert_rows(self, conn, name, rows):
         """Bound parameter groups while preserving input and dependency order."""
+        if name == 'artifact_refs':
+            # References contain only text/integer columns. A bound multi-row
+            # INSERT avoids one driver execution per reference while keeping
+            # the conservative 999-parameter SQLite limit and current SQL tx.
+            for start in range(0, len(rows), 128):
+                chunk = rows[start:start + 128]
+                parameters = tuple(row[key] for row in chunk for key in REFERENCE_COLUMNS)
+                await conn.exec_driver_sql(_reference_insert(self.sqlite, len(chunk)), parameters)
+            return
         for start in range(0, len(rows), 500):
             await conn.execute(insert(meta.tables[name]), rows[start:start + 500])
 
     async def write(self, entries):
         try:
-            async with self.engine.begin() as conn:
+            async with self.transaction() as conn:
                 order = await self.write_transaction(conn, entries)
             # The context manager has completed COMMIT before publication.
             self._store_order = order
+            for digest in self._committing_artifacts:
+                self.metadata_cache.put(('artifact',(digest,)),True)
             if self._committing_batch is not None:
                 self._committing_batch.publish()
                 self.committed_invocations = {
@@ -535,14 +561,15 @@ class Storage:
             raise
         finally:
             self._committing_batch = None
+            self._committing_artifacts.clear()
 
     async def write_transaction(self, conn, entries):
-        batch = ProjectionBatch(conn, self.source, graph_loader=self.workflow_graph,
-                                metadata_cache=self.metadata_cache)
+        batch = OperationalBatch(conn, metadata_cache=self.metadata_cache)
         self._committing_batch = batch
         order = self._store_order
         if order is None:
             order = await conn.scalar(select(meta.tables['persistence_meta'].c.last_store_order))
+        initial_order = order
         identities = {}
         for entry in entries:
             identities.setdefault(entry.kind, set()).add(entry.identity)
@@ -560,17 +587,10 @@ class Storage:
             for start in range(0, len(values), 500):
                 found.update((await conn.execute(select(table.c[key]).where(
                     table.c[key].in_(values[start:start + 500])))).scalars())
-        user_tails = {}
-        users = list({entry.light["invocation_id"] for entry in entries
-                      if entry.kind == "user_event" and not entry.admitted})
-        table = meta.tables["user_events"]
-        for start in range(0, len(users), 500):
-            for iid, sequence in await conn.execute(select(table.c.invocation_id, func.max(table.c.sequence)).where(
-                table.c.invocation_id.in_(users[start:start + 500])).group_by(table.c.invocation_id)):
-                user_tails[iid] = sequence
         await batch.prefetch([entry.light for entry in entries if entry.kind == "runtime_event"])
         await self.write_artifacts(conn, entries)
         sources, references, members = {}, [], []
+        imported = False
 
         async def flush_sources():
             for name, rows in sources.items():
@@ -595,8 +615,6 @@ class Storage:
                 await flush_sources()
                 await self.projections(conn, batch)
                 for values in batch.dirty.values():
-                    values.clear()
-                for values in batch.new_facts.values():
                     values.clear()
             record = entry.encoded.record
             if entry.kind == "workflow_revision":
@@ -641,13 +659,8 @@ class Storage:
                     payload_text=entry.texts["payload_text"],
                     delta_text=entry.texts["delta_text"],
                 )
-                await batch.runtime(logical, order, entry.binding, new_event=True)
+                await batch.runtime(logical, order)
             elif entry.kind == "user_event":
-                if not entry.admitted:
-                    latest = user_tails.get(logical["invocation_id"], 0)
-                    if logical["sequence"] != (latest or 0) + 1:
-                        raise ConflictError("User Event sequence is not contiguous.")
-                    user_tails[logical["invocation_id"]] = logical["sequence"]
                 data = {
                     k: record[k]
                     for k in (
@@ -689,6 +702,7 @@ class Storage:
                             "Checkpoint import requires fresh Session histories."
                         )
                 await batch.checkpoint(logical, entry.identity, anchor=entry.anchor)
+                imported |= entry.anchor
             sources.setdefault(name, []).append(data)
             refs = [
                 {
@@ -721,9 +735,15 @@ class Storage:
                 await flush_sources()
         await flush_sources()
         await self.projections(conn, batch)
-        if any(entry.kind == 'checkpoint' and entry.anchor for entry in entries):
+        if imported:
+            from .query_projections import reset
+            await reset(conn)
             await conn.execute(update(meta.tables['persistence_meta']).values(store_id=uuid4().hex))
         await conn.execute(
             update(meta.tables["persistence_meta"]).values(last_store_order=order)
         )
+        if self.config and self.config.projection_mode == 'transactional' and (order > initial_order or imported):
+            from .query_projections import catch_up
+            await catch_up(self, conn, self.config)
+        self.last_write = time.monotonic()
         return order

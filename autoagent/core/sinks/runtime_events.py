@@ -29,10 +29,15 @@ class RuntimeEventSink(Protocol):
 class UserEventSink(Protocol):
     """Persist or forward a User Event outside canonical Runtime State.
 
-    User Events have their own Invocation-local sequence and idempotency key.
+    Persistent User Events have their own Invocation-local sequence and idempotency key.
     A delivery failure must never roll back or rewrite canonical Workflow
     progress; the App records the first failure and stops that sink stream so a
     later Event cannot hide a persistence gap.
+
+    Transient Events have persist=False and sequence=None. Deliver them to live
+    consumers without storing them. A transient delivery failure cannot poison
+    the persistent stream. Persistent acceptance precedes live publication under
+    the sink's durability policy; slow live consumers must remain bounded.
     """
 
     async def append_user_event(self, event: UserEvent) -> None:

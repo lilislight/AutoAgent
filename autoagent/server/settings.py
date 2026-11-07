@@ -31,6 +31,9 @@ class ServerSettings:
     trace_max_subscribers: int = 128
     trace_coalesce_ms: float = 100
     trace_heartbeat_seconds: float = 10
+    user_event_max_subscribers: int = 128
+    user_event_buffer: int = 256
+    user_event_heartbeat_seconds: float = 10
     access_log: bool = True
 
     def __post_init__(self):
@@ -50,6 +53,12 @@ class ServerSettings:
             raise ValueError("Default page size cannot exceed the maximum.")
         if type(self.trace_max_subscribers) is not int or self.trace_max_subscribers < 1:
             raise ValueError('trace_max_subscribers must be a positive integer.')
+        if type(self.user_event_max_subscribers) is not int or self.user_event_max_subscribers < 1:
+            raise ValueError('user_event_max_subscribers must be positive.')
+        if type(self.user_event_buffer) is not int or not 1 <= self.user_event_buffer <= 10000:
+            raise ValueError('user_event_buffer must be between 1 and 10000.')
+        if isinstance(self.user_event_heartbeat_seconds, bool) or not isinstance(self.user_event_heartbeat_seconds, (int, float)) or not math.isfinite(self.user_event_heartbeat_seconds) or not 0 < self.user_event_heartbeat_seconds <= 30:
+            raise ValueError('user_event_heartbeat_seconds must be between 0 and 30.')
         for name in ('trace_coalesce_ms', 'trace_heartbeat_seconds'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or name == 'trace_heartbeat_seconds' and not 0 < value <= 30:
@@ -81,5 +90,8 @@ class ServerSettings:
             trace_max_subscribers=int(env.get('AUTOAGENT_SERVER_TRACE_MAX_SUBSCRIBERS', '128')),
             trace_coalesce_ms=float(env.get('AUTOAGENT_SERVER_TRACE_COALESCE_MS', '100')),
             trace_heartbeat_seconds=float(env.get('AUTOAGENT_SERVER_TRACE_HEARTBEAT_SECONDS', '10')),
+            user_event_max_subscribers=int(env.get('AUTOAGENT_SERVER_USER_EVENT_MAX_SUBSCRIBERS', '128')),
+            user_event_buffer=int(env.get('AUTOAGENT_SERVER_USER_EVENT_BUFFER', '256')),
+            user_event_heartbeat_seconds=float(env.get('AUTOAGENT_SERVER_USER_EVENT_HEARTBEAT_SECONDS', '10')),
             access_log=access in {"true", "1"},
         )

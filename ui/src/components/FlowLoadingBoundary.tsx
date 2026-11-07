@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useExecutionSnapshot } from './ExecutionSnapshot';
 import { retainedViews } from '../workspaceRetention';
+import { LoadingIndicator } from './LoadingState';
 
 const FlowLoadingContext = createContext({ loading: false, markReady: () => {} });
 export function useFlowReady() {
@@ -37,7 +38,7 @@ export function FlowLoadingBoundary<T extends { key: string }>({ flowKey, candid
   }, [candidate, pending, failed, readyKey, flowKey, retainLimit, retainGroup, pinnedKey, complete, presented]);
   useEffect(() => onPresented(presented), [presented, onPresented]);
 
-  const loading = Boolean(flowKey && !failed && (!complete || pending || presented?.key !== flowKey));
+  const loading = Boolean(flowKey && !failed && (!complete || presented?.key !== flowKey));
   const current = flowKey ? presented : null;
   const layersByKey = new Map<string, T>();
   for (const value of [current, ...retained]) if (value) layersByKey.set(value.key, value);
@@ -56,13 +57,14 @@ export function FlowLoadingBoundary<T extends { key: string }>({ flowKey, candid
 }
 
 /** Place inside the graph workspace, leaving its toolbar outside the loading area. */
-export function FlowLoadingSurface({ children, loadingLabel }: { children: ReactNode; loadingLabel?: string }) {
+export function FlowLoadingSurface({ children, loadingLabel, pending = false }: { children: ReactNode; loadingLabel?: string; pending?: boolean }) {
   const { loading: preparing } = useContext(FlowLoadingContext);
-  const loading = preparing || useExecutionSnapshot().refreshing;
-  return <div className="definition-workspace flow-loading-surface" aria-busy={loading}>
+  const refreshing = useExecutionSnapshot().refreshing;
+  const loading = preparing || pending;
+  return <div className="definition-workspace flow-loading-surface" aria-busy={loading || refreshing}>
     <div className={`flow-loading-content ${loading ? "is-loading" : ""}`} inert={loading}>{children}</div>
-    {loading ? <div className="flow-loading-overlay" data-flow-loading role="status" aria-label="Loading flow" aria-live="polite">
-      <span className="flow-loading-spinner" aria-hidden="true" />
+    {loading ? <div className="flow-loading-overlay" data-flow-loading>
+      <LoadingIndicator label="Loading flow" />
       {loadingLabel?<span className="flow-loading-label">{loadingLabel}</span>:null}
     </div> : null}
   </div>;

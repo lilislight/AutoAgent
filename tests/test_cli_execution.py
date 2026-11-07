@@ -34,7 +34,7 @@ import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing_extensions import TypedDict
-from autoagent import Node, Spawn, Wait, Workflow
+from autoagent import Node, Recovery, Spawn, Wait, Workflow
 from autoagent.host import workflow
 class Value(TypedDict):
     text: str
@@ -56,13 +56,13 @@ def simple():
     return Workflow("cli-echo", nodes=[Node("entry", echo)])
 @workflow
 def approval():
-    return Workflow("cli-approval", nodes=[Node("ask", Wait(Value, Value))])
+    return Workflow("cli-approval", nodes=[Node("ask", Wait(Value, Value), recovery_mode=Recovery("replay_safe"))])
 @workflow
 def delayed():
     return Workflow("cli-slow", nodes=[Node("entry", slow)])
 @workflow
 def recoverable():
-    return Workflow("cli-recoverable", nodes=[Node("entry", fail_once)])
+    return Workflow("cli-recoverable", nodes=[Node("entry", fail_once, recovery_mode=Recovery("replay_safe"))])
 @workflow
 def parent():
     child = Workflow("cli-child", nodes=[Node("ask", Wait(Value, Value))])
@@ -269,13 +269,16 @@ class CliExecutionTests(ProjectFixture, unittest.TestCase):
                 "--entry-node", "entry", "--input-json", '{"text":"hello"}', "--wait", "terminal", "--format", "json"],
                 env=self.environment(), stdout=subprocess.PIPE, stderr=log, text=True)
             try:
-                for _ in range(300):
+                # Wait for actual Operator entry; SDK Agent registration is
+                # part of project startup, and this is not a startup benchmark.
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
                     if self.started.exists():
                         break
                     if process.poll() is not None:
                         self.fail("CLI exited before starting work")
                     time.sleep(0.01)
-                self.assertTrue(self.started.exists())
+                self.assertTrue(self.started.exists(), "CLI did not enter the Operator within 15 seconds")
                 process.send_signal(signal.SIGINT)
                 stdout, _ = process.communicate(timeout=10)
                 self.assertEqual(process.returncode, 130, stdout)
@@ -459,7 +462,8 @@ class CliServerProcessTests(ProjectFixture, unittest.TestCase):
                 env=self.environment(), stdout=stdout, stderr=stderr)
             try:
                 url = f"http://127.0.0.1:{port}/cli/api"
-                for _ in range(300):
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
                     if process.poll() is not None:
                         stderr.seek(0)
                         self.fail(stderr.read())
@@ -525,7 +529,8 @@ class CliServerProcessTests(ProjectFixture, unittest.TestCase):
                     "--port", str(port), "--no-ui", *arguments], env=environment, stdout=stdout, stderr=stderr)
                 try:
                     with httpx.Client(timeout=2) as client:
-                        for _ in range(200):
+                        deadline = time.monotonic() + 20
+                        while time.monotonic() < deadline:
                             try:
                                 response = client.get(f"http://127.0.0.1:{port}/api/v2/workflows")
                                 if response.status_code == 200:

@@ -17,6 +17,7 @@ class OpenAIProtocolAdapter(ABC):
     """
 
     protocol: str
+    tool_media: bool = False
 
     def stream_parameters(self, params: dict) -> dict:
         return {**params, "stream": True}

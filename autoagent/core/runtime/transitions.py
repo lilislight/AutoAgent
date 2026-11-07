@@ -1,12 +1,13 @@
 """Live transition planning. Replay never invokes user code or this planner."""
 from __future__ import annotations
 
-from ..commands.models import SYSTEM_COMMAND_IDS
+from ..commands.models import SYSTEM_COMMAND_IDS, INLINE_COMMAND_IDS
 from .events import ResumeReceiptReleased, CancellationRequested
 from .events import GraphPauseRequested, GraphPaused, GraphResumed
 from .signals import SignalAccepted, SignalsReceived, SignalReceiptReleased, signal_delta
 
 from collections import ChainMap
+from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
 
@@ -14,7 +15,7 @@ from ..errors import RuntimeTransitionError
 from ..context import ContextOperation
 from .events import (
     SessionOpened, InvocationStarted, NodeStarted, NodeCompleted, NodeFailed,
-    InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved,
+    InputMapped, CapabilityResolved, CommandRetryStarted, CommandsPending, CommandInvoked, CommandReturned, Aggregated, OutputBound, RoutingResolved,
     NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed,
     RecoveryPrepared, InvocationReopened,
     CommandAwakened, WaitRequested, WaitResumed, RecoveryApplied, InvocationCompleted, InvocationSettling,
@@ -39,6 +40,14 @@ from ._retention import released_outputs
 SCHED = ("invocation", "scheduler")
 
 
+def _retire_execution(execution):
+    # Ownership and cross-Session receipts still reference accepted Command
+    # identities after the enclosing Node releases its payload history.
+    commands = {key: {**call, "input": None, "output": None}
+        for key, call in execution.inline_commands.items()}
+    return NodeExecutionState(inline_commands=freeze(commands))
+
+
 class TransitionPlanner:
     """Generate explicit mutations for a semantic boundary against current State."""
 
@@ -51,6 +60,10 @@ class TransitionPlanner:
             operations.append(StateOperation._from_owned(op, path, value))
         def occurrence_put(item):
             put((*SCHED, "occurrences", item.id), item)
+        def release_call_values(call):
+            for field in ('input', 'output'):
+                if getattr(call, field) is not None:
+                    put((*SCHED, 'operator_calls', call.id, field), None)
         def workspace(item, **changes):
             phase = changes.get("phase")
             if phase in {"input_mapped", "capability_resolved", "aggregated", "output_bound", "routing_resolved"}:
@@ -60,13 +73,14 @@ class TransitionPlanner:
                 ):
                     raise RuntimeTransitionError("EXECUTION_STAGE_DUPLICATE", "Execution stage already committed.")
                 changes["completed_stages"] = tuple(dict.fromkeys((*item.execution.completed_stages, phase)))
-            put((*SCHED, "occurrences", item.id, "execution"),
-                replace(item.execution, **changes))
+            for name, value in changes.items():
+                if value is not getattr(item.execution, name) and value != getattr(item.execution, name):
+                    put((*SCHED, "occurrences", item.id, "execution", name), value)
         session = state.session
         if isinstance(payload, SessionOpened):
             if session is not None:
                 raise RuntimeTransitionError("SESSION_ALREADY_OPEN", "Session already exists.")
-            if not isinstance(payload.context, MappingProxyType) and not hasattr(payload.context, "items"):
+            if not isinstance(payload.context, Mapping):
                 raise TypeError("Session Context must be a mapping.")
             put(("session",), SessionState(session_id, payload.context, occurred_at_us, occurred_at_us))
             return StateDelta(tuple(operations))
@@ -166,8 +180,10 @@ class TransitionPlanner:
         oid = getattr(payload, "occurrence_id", None)
         occ = sched.occurrences.get(oid)
         def require_occ(status="running"):
-            if occ is None or occ.status != status:
-                raise RuntimeTransitionError("NODE_OCCURRENCE_NOT_" + status.upper(), "Occurrence has an invalid lifecycle.")
+            allowed = {status} if isinstance(status, str) else status
+            if occ is None or occ.status not in allowed:
+                label = status if isinstance(status, str) else "_OR_".join(sorted(status))
+                raise RuntimeTransitionError("NODE_OCCURRENCE_NOT_" + label.upper(), "Occurrence has an invalid lifecycle.")
             return occ
         def graph(delta, scheduler=None):
             before = scheduler or sched
@@ -204,8 +220,30 @@ class TransitionPlanner:
         elif isinstance(payload, InputMapped):
             require_occ(); workspace(occ, phase="input_mapped", mapped_input=payload.mapped_input)
         elif isinstance(payload, CapabilityResolved):
-            require_occ(); workspace(occ, phase="capability_resolved",
-                resolved_capability_id=payload.capability_id, resolved_operator_id=payload.operator_id)
+            require_occ()
+            if type(payload.unit_index) is not int or payload.unit_index < 0:
+                raise ValueError("Capability unit index must be nonnegative.")
+            bindings = dict(occ.execution.capability_bindings)
+            if str(payload.unit_index) in bindings:
+                raise RuntimeTransitionError("CAPABILITY_ALREADY_RESOLVED", "Capability unit is already bound.")
+            bindings[str(payload.unit_index)] = {"capability_id": payload.capability_id, "operator_id": payload.operator_id}
+            if 'capability_resolved' in occ.execution.completed_stages:
+                occurrence_put(replace(occ, execution=replace(occ.execution, capability_bindings=freeze(bindings))))
+            else:
+                workspace(occ, phase="capability_resolved", capability_bindings=freeze(bindings))
+        elif isinstance(payload, CommandsPending):
+            require_occ({'running', 'waiting'})
+            ids = (_execution_index.calls_by_occurrence.get(oid, ()) if _execution_index is not None
+                   else tuple(c.id for c in sched.operator_calls.values() if c.occurrence_id == oid))
+            latest = {sched.operator_calls[key].unit_index: sched.operator_calls[key] for key in ids}
+            unfinished = [call for call in latest.values() if call.status != 'completed']
+            wait_ids = (_execution_index.waits_by_occurrence.get(oid, ()) if _execution_index is not None
+                        else tuple(w.id for w in sched.waits.values() if w.occurrence_id == oid))
+            if (any(sched.waits[key].status == 'waiting' for key in wait_ids)
+                    and all((wait := sched.waits.get(call.id)) is not None and wait.status == 'waiting' for call in unfinished)):
+                occurrence_put(replace(occ, status='waiting'))
+                if not _other_active(sched, oid, _execution_index):
+                    put(('invocation', 'status'), 'waiting')
         elif isinstance(payload, Aggregated):
             require_occ()
             call_ids = (_execution_index.calls_by_occurrence.get(oid, ()) if _execution_index is not None
@@ -214,9 +252,7 @@ class TransitionPlanner:
                 raise RuntimeTransitionError("AGGREGATION_CALLS_ACTIVE", "Aggregation requires settled Operator Calls.")
             workspace(occ, phase="aggregated", aggregate_output=payload.output, mapped_input=None)
             for key in call_ids:
-                call = sched.operator_calls[key]
-                if call.input is not None or call.output is not None:
-                    put((*SCHED, "operator_calls", key), replace(call, input=None, output=None))
+                release_call_values(sched.operator_calls[key])
         elif isinstance(payload, OutputBound):
             require_occ(); workspace(occ, phase="output_bound", pending_context_patch=payload.patch)
         elif isinstance(payload, RoutingResolved):
@@ -224,21 +260,53 @@ class TransitionPlanner:
                 routing_source_status=payload.source_status)
         elif isinstance(payload, NodeFaulted):
             require_occ(); workspace(occ, phase="faulted", fault=payload.error)
+        elif isinstance(payload, CommandInvoked):
+            require_occ({"running"})
+            parent = sched.operator_calls.get(payload.parent_call_id)
+            if (parent is None or parent.status != "running" or parent.occurrence_id != oid
+                    or parent.unit_index != payload.unit_index or parent.operator_id in SYSTEM_COMMAND_IDS
+                    or payload.operator_id not in INLINE_COMMAND_IDS):
+                raise RuntimeTransitionError("COMMAND_PARENT_INVALID", "Nested Command requires its active Operator unit.")
+            if payload.call_id in occ.execution.inline_commands:
+                raise RuntimeTransitionError("COMMAND_DUPLICATE", "Nested Command already exists.")
+            if any(call["unit_index"] == payload.unit_index and call["key"] == payload.key
+                   for call in occ.execution.inline_commands.values()):
+                raise RuntimeTransitionError("COMMAND_KEY_CONFLICT", "Nested Command key is already assigned in this unit.")
+            record = {"id": payload.call_id, "parent_call_id": payload.parent_call_id,
+                "operator_id": payload.operator_id, "unit_index": payload.unit_index, "key": payload.key,
+                "status": "running", "input": payload.input, "output": None,
+                "deadline_at_us": payload.deadline_at_us}
+            workspace(occ, inline_commands=freeze({**occ.execution.inline_commands, payload.call_id: record}))
+        elif isinstance(payload, CommandReturned):
+            require_occ({"running"})
+            record = occ.execution.inline_commands.get(payload.call_id)
+            if record is None or record["status"] != "running":
+                raise RuntimeTransitionError("COMMAND_NOT_RUNNING", "Nested Command is not running.")
+            workspace(occ, inline_commands=freeze({**occ.execution.inline_commands,
+                payload.call_id: {**record, "status": "completed", "output": payload.output}}))
         elif isinstance(payload, OperatorCallStarted):
-            require_occ()
+            require_occ({"running", "waiting"})
             if payload.call_id in sched.operator_calls:
                 raise RuntimeTransitionError("OPERATOR_CALL_DUPLICATE", "Operator Call already exists.")
             put((*SCHED, "operator_calls", payload.call_id), OperatorCallState(
                 payload.call_id, oid, payload.operator_id, payload.unit_index, "running", payload.input,
                 started_at_us=occurred_at_us, queue_duration_ns=payload.queue_duration_ns,
-                retry_attempt=payload.retry_attempt), "add")
+                retry_attempt=payload.retry_attempt, deadline_at_us=payload.deadline_at_us), "add")
             workspace(occ, phase="executing")
+        elif isinstance(payload, CommandRetryStarted):
+            call = sched.operator_calls.get(payload.call_id)
+            if call is None or call.status != 'failed' or call.retry_at_us is None or call.operator_id not in SYSTEM_COMMAND_IDS:
+                raise RuntimeTransitionError('COMMAND_RETRY_INVALID', 'Command retry requires its scheduled failed Call.')
+            put((*SCHED, 'operator_calls', call.id), replace(call, status='running', error=None,
+                retry_attempt=call.retry_attempt + 1, retry_at_us=None, deadline_at_us=payload.deadline_at_us,
+                completed_at_us=None, execution_duration_ns=None))
+            occurrence_put(replace(sched.occurrences[call.occurrence_id], status='running', ready_at_us=occurred_at_us))
         elif isinstance(payload, (OperatorCallCompleted, OperatorCallFailed)):
             call = sched.operator_calls.get(payload.call_id)
             if call is None or call.status != "running":
                 raise RuntimeTransitionError("OPERATOR_CALL_NOT_RUNNING", "Operator Call is not running.")
             success = isinstance(payload, OperatorCallCompleted)
-            if not success:
+            if not success and payload.retry_at_us != call.retry_at_us:
                 put((*SCHED, "operator_calls", call.id, "retry_at_us"), payload.retry_at_us)
             for name, value in (
                 ("status", "completed" if success else "failed"),
@@ -247,14 +315,19 @@ class TransitionPlanner:
                 ("completed_at_us", occurred_at_us),
                 ("execution_duration_ns", payload.execution_duration_ns),
             ):
-                put((*SCHED, "operator_calls", call.id, name), value)
+                if value is not getattr(call, name):
+                    put((*SCHED, "operator_calls", call.id, name), value)
+            if not success and (wait := sched.waits.get(call.id)) is not None and wait.status == 'waiting':
+                put((*SCHED, 'waits', wait.id), replace(wait, status='cancelled'))
+                occurrence_put(replace(sched.occurrences[call.occurrence_id], status='running', ready_at_us=occurred_at_us))
+                put(('invocation', 'status'), 'running')
         elif isinstance(payload, (NodeCompleted, NodeFailed)):
             require_occ()
             success = isinstance(payload, NodeCompleted)
             terminal = replace(occ, status="completed" if success else "failed",
                 output=payload.output if success else None, error=None if success else payload.error,
                 completed_at_us=occurred_at_us, metrics=payload.metrics if success else occ.metrics,
-                execution=NodeExecutionState(), raw_input=None if success else occ.raw_input)
+                execution=_retire_execution(occ.execution), raw_input=None if success else occ.raw_input)
             occurrence_put(terminal)
             if success:
                 patch = occ.execution.pending_context_patch
@@ -266,9 +339,7 @@ class TransitionPlanner:
             planned = graph(scheduler_delta, replace(sched, occurrences=ChainMap({oid: terminal}, sched.occurrences)))
             retention_index = _execution_index or ExecutionIndex(state)
             for key in retention_index.calls_by_occurrence.get(oid, ()):
-                call = sched.operator_calls[key]
-                if call.input is not None or call.output is not None:
-                    put((*SCHED, "operator_calls", key), replace(call, input=None, output=None))
+                release_call_values(sched.operator_calls[key])
             for key in retention_index.waits_by_occurrence.get(oid, ()):
                 wait = sched.waits[key]
                 if wait.request is not None or wait.response is not None:
@@ -299,7 +370,7 @@ class TransitionPlanner:
             delta = awakening_delta(self, state, payload, occurred_at_us, session_id, invocation_id, _execution_index)
             return StateDelta((*operations, *delta.operations))
         elif isinstance(payload, WaitRequested):
-            require_occ()
+            require_occ({"running", "waiting"})
             if payload.wait_id in sched.waits:
                 raise RuntimeTransitionError("WAIT_DUPLICATE", "Wait already exists.")
             if payload.wait_kind not in {'external', 'signal', 'timer', 'child', 'any'}:
@@ -307,11 +378,11 @@ class TransitionPlanner:
             if payload.wait_kind != 'external':
                 from .waits import validate_condition
                 validate_condition(payload.wait_kind, payload.request)
-            occurrence_put(replace(occ, status="waiting"))
+            # Keep dispatch runnable until CommandsPending closes this pass.
+            # A crash between Map registrations must still admit the rest.
             put((*SCHED, "waits", payload.wait_id), WaitState(payload.wait_id, oid, "waiting", payload.request,
-                created_at_us=occurred_at_us, kind=payload.wait_kind, registered_sequence=state.sequence + 1), "add")
-            if not _other_active(sched, oid, _execution_index):
-                put(("invocation", "status"), "waiting")
+                created_at_us=occurred_at_us, kind=payload.wait_kind, registered_sequence=state.sequence + 1,
+                deadline_at_us=getattr(sched.operator_calls.get(payload.wait_id), 'deadline_at_us', None)), "add")
         elif isinstance(payload, WaitResumed):
             if payload.origin is not None:
                 call_id = payload.origin['call_id']
@@ -322,6 +393,9 @@ class TransitionPlanner:
             wait = sched.waits.get(payload.wait_id)
             if wait is None or wait.status != "waiting" or wait.kind != "external":
                 raise RuntimeTransitionError("WAIT_NOT_WAITING", "Wait is not waiting.")
+            call = sched.operator_calls.get(wait.id)
+            if call is not None and call.deadline_at_us is not None and occurred_at_us >= call.deadline_at_us:
+                raise RuntimeTransitionError("WAIT_EXPIRED", "Wait has reached its deadline.")
             put((*SCHED, "waits", wait.id), replace(wait, status="resumed", response=payload.response, resumed_at_us=occurred_at_us))
             occurrence_put(replace(sched.occurrences[wait.occurrence_id], status="running", ready_at_us=occurred_at_us))
 
@@ -416,8 +490,9 @@ class TransitionPlanner:
             for item in sched.occurrences.values():
                 if item.output is not None:
                     put((*SCHED, "occurrences", item.id, "output"), None)
-                if item.execution != NodeExecutionState():
-                    put((*SCHED, "occurrences", item.id, "execution"), NodeExecutionState())
+                retired = _retire_execution(item.execution)
+                if item.execution != retired:
+                    put((*SCHED, "occurrences", item.id, "execution"), retired)
             for item in sched.operator_calls.values():
                 if item.input is not None:
                     put((*SCHED, "operator_calls", item.id, "input"), None)

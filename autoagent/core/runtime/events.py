@@ -14,7 +14,7 @@ from .values import DurableValue, freeze, thaw
 from ..context import ContextOperation, ContextPatch
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 17
+RUNTIME_EVENT_SCHEMA_VERSION = 19
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,13 +197,74 @@ class OperatorCallStarted:
     input: DurableValue
     queue_duration_ns: int = 0
     retry_attempt: int = 0
+    deadline_at_us: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.retry_attempt) is not int or self.retry_attempt < 0:
             raise ValueError("retry_attempt must be nonnegative.")
         if self.unit_index < 0:
             raise ValueError("Operator Call unit_index cannot be negative.")
+        if self.deadline_at_us is not None and (type(self.deadline_at_us) is not int or self.deadline_at_us < 0):
+            raise ValueError("deadline_at_us must be a nonnegative integer or None.")
         object.__setattr__(self, "input", freeze(self.input))
+
+
+@dataclass(frozen=True, slots=True)
+class CommandInvoked:
+    """A durable non-suspending Command nested under an Operator unit."""
+    kind: ClassVar[str] = "command.invoked"
+    occurrence_id: str
+    call_id: str
+    parent_call_id: str
+    unit_index: int
+    key: str
+    operator_id: str
+    input: DurableValue
+    deadline_at_us: int | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "input", freeze(self.input))
+        if not all(isinstance(value, str) and value.strip() for value in
+                   (self.occurrence_id, self.call_id, self.parent_call_id, self.key, self.operator_id)):
+            raise ValueError("Nested Command identities must be nonempty.")
+        if not self.call_id.startswith("inline:"):
+            raise ValueError("Nested Command call_id requires the inline namespace.")
+        if type(self.unit_index) is not int or self.unit_index < 0:
+            raise ValueError("Nested Command unit_index must be nonnegative.")
+        if self.deadline_at_us is not None and (type(self.deadline_at_us) is not int or self.deadline_at_us < 0):
+            raise ValueError("Nested Command deadline must be nonnegative.")
+
+
+@dataclass(frozen=True, slots=True)
+class CommandReturned:
+    kind: ClassVar[str] = "command.returned"
+    occurrence_id: str
+    call_id: str
+    output: DurableValue
+
+    def __post_init__(self):
+        if not all(isinstance(value, str) and value.strip() for value in (self.occurrence_id, self.call_id)):
+            raise ValueError("Nested Command identities must be nonempty.")
+        object.__setattr__(self, "output", freeze(self.output))
+
+
+@dataclass(frozen=True, slots=True)
+class CommandsPending:
+    """Finish a dispatch pass; suspend only if every unfinished unit is waiting."""
+    kind: ClassVar[str] = 'command.pending'
+    occurrence_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommandRetryStarted:
+    """Retry one effect under its original operation identity and receipt."""
+    kind: ClassVar[str] = 'command.retry_started'
+    call_id: str
+    deadline_at_us: int | None = None
+
+    def __post_init__(self):
+        if self.deadline_at_us is not None and (type(self.deadline_at_us) is not int or self.deadline_at_us < 0):
+            raise ValueError("deadline_at_us must be a nonnegative integer or None.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +499,7 @@ class CapabilityResolved:
     capability_id: str
     operator_id: str
     duration_ns: int
+    unit_index: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,6 +565,10 @@ RuntimeEventPayload: TypeAlias = (
     | GraphResumed
     | InputMapped
     | CapabilityResolved
+    | CommandRetryStarted
+    | CommandsPending
+    | CommandInvoked
+    | CommandReturned
     | Aggregated
     | OutputBound
     | RoutingResolved
@@ -539,7 +605,7 @@ _PAYLOAD_TYPES = (
     ForkStateImported, ForkInitialized, SignalInherited,
     InvocationForked,
     GraphPauseRequested, GraphPaused, GraphResumed,
-    InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
+    InputMapped, CapabilityResolved, CommandRetryStarted, CommandsPending, CommandInvoked, CommandReturned, Aggregated, OutputBound, RoutingResolved, NodeFaulted,
     SessionOpened,
     InvocationStarted,
     InvocationSettling,
@@ -641,7 +707,7 @@ def _payload_to_record(payload: RuntimeEventPayload) -> dict[str, object]:
         return {item.name:_encode_payload_value(getattr(payload,item.name)) for item in fields(payload)}
     if isinstance(payload, (ForkInitialized, SignalInherited, RecoveryPrepared, InvocationReopened, ChildCompacted)):
         return {item.name: getattr(payload, item.name) for item in fields(payload)}
-    if isinstance(payload, (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
+    if isinstance(payload, (InputMapped, CapabilityResolved, CommandRetryStarted, CommandsPending, CommandInvoked, CommandReturned, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied)):
         return {item.name: _encode_payload_value(getattr(payload, item.name)) for item in fields(payload)}
     if isinstance(payload, SessionOpened):
         return {
@@ -719,7 +785,7 @@ def _payload_from_record(
             if record:
                 raise TypeError("Graph control payload must be empty.")
             return cls()
-    for cls in (InputMapped, CapabilityResolved, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied):
+    for cls in (InputMapped, CapabilityResolved, CommandRetryStarted, CommandsPending, CommandInvoked, CommandReturned, Aggregated, OutputBound, RoutingResolved, NodeFaulted, OperatorCallStarted, OperatorCallCompleted, OperatorCallFailed, InvocationStarted, NodeCompleted, NodeFailed, RecoveryApplied):
         if event_name == cls.kind:
             values = dict(record)
             if "error" in values:

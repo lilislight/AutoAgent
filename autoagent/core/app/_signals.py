@@ -1,7 +1,9 @@
 """Signal delivery through the existing graph and Session commit lanes."""
+
+from ..runtime.inline import runtime_call
 import json
 from ..commands import SignalReceipt, SignalBatch
-from ..commands.signals import SendSignalRequest, ReceiveSignalRequest
+from ..commands.signals import SendSignalRequest, ReceiveSignalRequest, HasSignalRequest, HasSignalResult
 from ..errors import RuntimeTransitionError
 from ..runtime.signals import (SignalAccepted, SignalsReceived, SignalReceiptReleased,
     payload_size, nonempty, positive)
@@ -14,13 +16,31 @@ def fail(code, message):
 
 
 class SignalRuntime:
+    async def _has_signal_runtime(self, sid, iid, call_id, request):
+        """Observe on the Runtime loop; do not lock, consume or reserve delivery."""
+        request = HasSignalRequest.model_validate(request)
+        state = self._repository.state(sid)
+        inv = state.invocation
+        call = runtime_call(inv, call_id) if inv else None
+        if (inv is None or inv.id != iid or call is None or call.status != 'running'
+                or call.operator_id != 'system_command:has_signal'
+                or thaw(call.input) != request.model_dump(mode='python')):
+            fail('SIGNAL_INSPECTION_CALL_INVALID', 'HasSignal requires its active recorded Call.')
+        self._check_command_deadline(sid, call_id)
+        if self._branch_stopping(sid):
+            fail('INVOCATION_STOPPING', 'Cannot inspect a stopping Invocation.')
+        if set(request.endpoints) - dict(self._workflow_for_state(state).signal_endpoints).keys():
+            fail('SIGNAL_ENDPOINT_UNKNOWN', 'Workflow does not declare a selected Signal Endpoint.')
+        selected = set(request.endpoints)
+        return HasSignalResult(has_messages=any(entry['message']['endpoint'] in selected for entry in inv.signals['messages'].values()))
+
     async def _send_signal_runtime(self, caller_sid, caller_iid, call_id, request):
         request = SendSignalRequest.model_validate(request)
         target = request.handle.session_id
         root = self._root_session_id(caller_sid)
         async with self._graph_gate(root).shared(), self._session_transition_lock(target):
             caller = self._repository.state(caller_sid).invocation
-            call = caller.scheduler.operator_calls.get(call_id) if caller else None
+            call = runtime_call(caller, call_id) if caller else None
             if (caller is None or caller.id != caller_iid or call is None or call.status != 'running'
                     or call.operator_id != 'system_command:send_signal'
                     or thaw(call.input) != request.model_dump(mode='python')):
@@ -41,9 +61,14 @@ class SignalRuntime:
             raise ValueError('Signal source_id cannot exceed 128 characters.')
         positive(sequence)
         root = ref.session_id
-        async with self._graph_gate(root).shared(), self._session_transition_lock(root):
+        target = request.handle.session_id
+        async with self._graph_gate(root).shared(), self._session_transition_lock(target):
             self._state_for_ref(ref)
-            await self._settle_runtime_commits((root,))
+            invocation = self._repository.state(target).invocation
+            if (invocation is None or self._root_session_id(target) != root
+                    or self._runtime_identity(target)[0] != request.handle):
+                fail('RUNTIME_HANDLE_MISMATCH', 'External Signal target must be an exact Handle in the controlled Root graph.')
+            await self._settle_runtime_commits((target,))
             external = {'source_id': source_id, 'sequence': sequence,
                 'digest': child_input_digest({'endpoint': request.endpoint, 'payload': request.payload})}
             return await self._accept_signal(request, external=external)
@@ -61,6 +86,7 @@ class SignalRuntime:
                     fail('SIGNAL_CALL_MISMATCH', 'Signal Call was reused with different content.')
                 return SignalReceipt(handle=request.handle, **thaw(existing['receipt']))
             message_id = 'internal:' + origin['call_id']
+            self._check_command_deadline(origin['session_id'], origin['call_id'])
         else:
             existing = signals['sources'].get(external['source_id'])
             if existing:
@@ -105,12 +131,13 @@ class SignalRuntime:
             await self._settle_runtime_commits((sid,))
             state = self._repository.state(sid)
             inv = state.invocation
-            call = inv.scheduler.operator_calls.get(call_id) if inv else None
+            call = runtime_call(inv, call_id) if inv else None
             if (inv is None or inv.id != iid or call is None or call.operator_id != 'system_command:receive_signal'
                     or thaw(call.input) != request.model_dump(mode='python')):
                 fail('SIGNAL_RECEIVE_CALL_INVALID', 'ReceiveSignal requires its recorded Call.')
             if call.status == 'completed':
                 return SignalBatch.model_validate(thaw(call.output))
+            self._check_command_deadline(sid, call_id)
             if self._branch_stopping(sid):
                 fail('INVOCATION_STOPPING', 'Cannot receive from a stopping Invocation.')
             if request.endpoint not in dict(self._workflow_for_state(state).signal_endpoints):
@@ -121,7 +148,7 @@ class SignalRuntime:
             selected = tuple(mid for mid, entry in sorted(inv.signals['messages'].items(), key=lambda item: item[1]['message']['accepted_sequence'])
                 if entry['message']['endpoint'] == request.endpoint)[:request.limit]
             await self._emit_locked(sid, iid, SignalsReceived(call_id, selected))
-            return SignalBatch.model_validate(thaw(self._repository.state(sid).invocation.scheduler.operator_calls[call_id].output))
+            return SignalBatch.model_validate(thaw(runtime_call(self._repository.state(sid).invocation, call_id).output))
 
     async def _release_signal(self, caller_sid, caller_iid, call_id, target):
         async with self._graph_gate(self._root_session_id(caller_sid)).shared(), self._session_transition_lock(target):
@@ -132,10 +159,11 @@ class SignalRuntime:
                 return
             state = self._repository.state(caller_sid)
             caller = state.invocation
-            call = caller.scheduler.operator_calls.get(call_id) if caller else None
+            call = runtime_call(caller, call_id) if caller else None
             if (caller is None or caller.id != caller_iid or proof['origin']['session_id'] != caller_sid
                     or proof['origin']['invocation_id'] != caller_iid
-                    or not (caller.terminal or (call and call.status in {'completed', 'failed', 'cancelled'}))):
+                    or not (caller.terminal or (call and (call.status in {'completed', 'cancelled'}
+                        or call.status == 'failed' and call.retry_at_us is None)))):
                 fail('SIGNAL_RECEIPT_ACTIVE', 'Signal caller has not settled.')
             await self._emit_locked(target, inv.id, SignalReceiptReleased(call_id, state.sequence))
 
@@ -147,6 +175,7 @@ class SignalRuntime:
             for call_id, proof in tuple(inv.signals['receipts'].items()):
                 origin = proof['origin']
                 caller = self._repository.state(origin['session_id']).invocation
-                call = caller.scheduler.operator_calls.get(call_id) if caller else None
-                if caller and (caller.terminal or (call and call.status in {'completed', 'failed', 'cancelled'})):
+                call = runtime_call(caller, call_id) if caller else None
+                if caller and (caller.terminal or (call and (call.status in {'completed', 'cancelled'}
+                        or call.status == 'failed' and call.retry_at_us is None))):
                     await self._release_signal(origin['session_id'], origin['invocation_id'], call_id, target)

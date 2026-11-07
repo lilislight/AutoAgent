@@ -7,6 +7,45 @@ from autoagent.host.persistence.metadata import MetadataCache
 
 
 class WriterMetadataTests(unittest.TestCase):
+    def test_queue_and_host_measurement_share_exact_object_ownership(self):
+        """Shared containers, backing dictionaries and cycles receive one byte charge."""
+        from types import MappingProxyType
+        from autoagent.core.app._residency import retained_size
+        from autoagent.core.runtime import RuntimeEvent
+        from autoagent.core.runtime.events import SessionOpened
+        from autoagent.host.persistence.codec import retained_objects
+
+        shared = {'values': list(range(100))}
+        cycle = []
+        cycle.append(cycle)
+        values = [RuntimeEvent('memory', 1, SessionOpened({'shared': shared})),
+                  MappingProxyType(shared), shared, cycle]
+        objects = retained_objects(values)
+        self.assertEqual(sum(size for _, size in objects.values()), retained_size((values,)))
+        self.assertIn(id(shared), objects)
+        self.assertIn(id(cycle), objects)
+    def test_projection_metadata_retains_control_flags_without_business_values(self):
+        """State changes expose availability and error summaries without retaining bodies."""
+        from autoagent.core.runtime.events import RuntimeErrorInfo
+        from autoagent.host.persistence.projections import light_record
+
+        operations = [
+            dict(op='replace', path=['invocation', 'input'], value={'secret': 'prompt'}),
+            dict(op='replace', path=['invocation', 'pending_recovery'], value={'secret': 'plan'}),
+            dict(op='replace', path=['invocation', 'error'], value=RuntimeErrorInfo(
+                'Failure', 'private message', code='TEST', phase='operator')),
+            dict(op='remove', path=['invocation', 'output']),
+        ]
+        for availability in (False, True):
+            with self.subTest(availability=availability):
+                result = light_record({'operations': operations}, availability=availability)['operations']
+                self.assertIs(result[0]['value'], True if availability else None)
+                self.assertIs(result[1]['value'], True)
+                self.assertEqual(result[2]['value'], dict(type='Failure', code='TEST', phase='operator'))
+                self.assertNotIn('value', result[3])
+                self.assertNotIn('secret', repr(result))
+                self.assertNotIn('private message', repr(result))
+
     def test_cache_detaches_values_and_enforces_budget(self):
         """Isolate nested metadata and evict old keys within the byte budget."""
         cache = MetadataCache(100_000)
@@ -38,5 +77,8 @@ class WriterMetadataTests(unittest.TestCase):
         """Parse and validate the deployment budget through Host settings."""
         settings = HostSettings.from_environment({"AUTOAGENT_WRITER_METADATA_CACHE_BYTES": "1024"})
         self.assertEqual(settings.persistence.writer_metadata_cache_bytes, 1024)
+        self.assertEqual(settings.persistence.artifact_threshold_bytes,8192)
+        self.assertEqual(HostSettings().persistence.artifact_threshold_bytes,8192)
+        self.assertEqual(HostSettings.from_environment({'AUTOAGENT_ARTIFACT_THRESHOLD_BYTES':'16384'}).persistence.artifact_threshold_bytes,16384)
         with self.assertRaises(ValueError):
             HostSettings.from_environment({"AUTOAGENT_WRITER_METADATA_CACHE_BYTES": "0"})

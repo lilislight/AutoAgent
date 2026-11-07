@@ -1,9 +1,11 @@
 import type { GraphDefinition } from './types.js';
 import type { Layout, Point } from './layout.js';
-import { routePortPair, type GraphRect, GRAPH_NODE_WIDTH, GRAPH_NODE_HEIGHT } from './graphRouting.js';
+import { routePortPairs, type PortPair, type GraphRect, GRAPH_NODE_WIDTH, GRAPH_NODE_HEIGHT } from './graphRouting.js';
+import { definitionPorts, edgePortId } from './graphPorts.js';
 import { groupNodeId, workflowGroups } from './workflowGroups.js';
 export function rerouteGroups(definition: GraphDefinition, folded: ReadonlySet<string>, layout: Layout): Layout['routes'] {
-  const visible = workflowGroups(definition,folded), routes: Layout['routes'] = {};
+  const visible = workflowGroups(definition,folded), pairs:PortPair[]=[];
+  const ports=layout.ports??definitionPorts(visible);
   const ancestors=(id:string)=>{const result=new Set<string>();let p=layout.parents?.[id];while(p){result.add(p);p=layout.parents?.[p];}return result;};
   const rectangle=(id:string):GraphRect=>{const p=layout.positions[id],s=layout.sizes?.[id]??{width:GRAPH_NODE_WIDTH,height:GRAPH_NODE_HEIGHT};return {left:p.x-10,top:p.y-10,right:p.x+s.width+10,bottom:p.y+s.height+10};};
   for(const edge of visible.edges){
@@ -11,8 +13,8 @@ export function rerouteGroups(definition: GraphDefinition, folded: ReadonlySet<s
     const sourceSize=layout.sizes?.[edge.source]??{width:GRAPH_NODE_WIDTH,height:GRAPH_NODE_HEIGHT};
     const targetSize=layout.sizes?.[edge.target]??{width:GRAPH_NODE_WIDTH,height:GRAPH_NODE_HEIGHT};
     const sourcePorts=visible.ports.get(edge.source.slice('@group:'.length)),targetPorts=visible.ports.get(edge.target.slice('@group:'.length));
-    const from={x:source.x+sourceSize.width,y:source.y+(sourcePorts?.find(p=>p.id===edge.sourceHandle)?.y??sourceSize.height/2)};
-    const to={x:target.x,y:target.y+(targetPorts?.find(p=>p.id===edge.targetHandle)?.y??targetSize.height/2)};
+    const from={x:source.x+sourceSize.width,y:source.y+(sourcePorts?.find(p=>p.id===edge.sourceHandle)?.y??ports[edge.source]?.find(p=>p.id===edgePortId(edge.id,'out'))?.y??sourceSize.height/2)};
+    const to={x:target.x,y:target.y+(targetPorts?.find(p=>p.id===edge.targetHandle)?.y??ports[edge.target]?.find(p=>p.id===edgePortId(edge.id,'in'))?.y??targetSize.height/2)};
     const sourceAncestors=ancestors(edge.source),targetAncestors=ancestors(edge.target);
     const own=new Set([...sourceAncestors,...targetAncestors]);
     const common=[...sourceAncestors].find(id=>targetAncestors.has(id));
@@ -20,9 +22,9 @@ export function rerouteGroups(definition: GraphDefinition, folded: ReadonlySet<s
     const bounds=owner?{left:owner.left+14,top:owner.top+54,right:owner.right-14,bottom:owner.bottom-14}:undefined;
     const obstacles=Object.keys(layout.positions).filter(id=>!own.has(id)).map(rectangle);
     for(const id of own){const r=rectangle(id);obstacles.push({...r,bottom:r.top+48});}
-    routes[edge.id]=routePortPair(from,to,obstacles,bounds);
+    pairs.push({id:edge.id,source:from,target:to,obstacles,bounds});
   }
-  return routes;
+  return routePortPairs(pairs);
 }
 /** Fallback preserves ownership even when the layout worker is unavailable. */
 export function fallbackGroups(definition: GraphDefinition, folded: ReadonlySet<string>): Layout {
@@ -38,5 +40,5 @@ export function fallbackGroups(definition: GraphDefinition, folded: ReadonlySet<
     }
     return {width:Math.max(GRAPH_NODE_WIDTH,x-at.x-80+28),height:height+82};
   }
-  place(null,{x:0,y:0});const layout={positions,sizes,parents,routes:{}};layout.routes=rerouteGroups(definition,folded,layout);return layout;
+  place(null,{x:0,y:0});const layout={positions,sizes,parents,ports:definitionPorts(visible),routes:{}};layout.routes=rerouteGroups(definition,folded,layout);return layout;
 }

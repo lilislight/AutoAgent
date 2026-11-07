@@ -1,3 +1,4 @@
+import { BusyLabel, InlineLoading } from './LoadingState';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, getExecutionControls, getExecutionOperation, submitExecutionAction } from '../api';
@@ -98,10 +99,10 @@ export function useExecutionActions(trace: ExecutionTrace, active: boolean, repl
     paused: controls.data?.control_state === 'paused', canRespond: Boolean(!replaying && controls.data?.actions.respond.available), pendingResponses, send, busy, error: actionError, fieldErrors, clearError,
     toolbar: <div className="execution-actions" aria-label="Execution controls">
       <button type="button" disabled={disabled || !controls.data?.actions.run_again.available} title={reason(controls.data?.actions.run_again) ?? 'Open a prefilled Run form; execution starts when you submit it.'} onClick={() => { clearError(); onRunAgain(); }}>Run again</button>
-      <button type="button" disabled={disabled || !availability?.available} title={reason(availability) ?? (child ? 'Controls the Root and all its owned children.' : stateAction === 'pause' ? 'Pause at a resumable Node boundary.' : 'Recover this Root and its children in the same Invocations. Successful work is preserved.')} onClick={() => void send(stateAction)}>{pendingAction === stateAction ? progressLabels[stateAction] : `${continuing ? 'Recover' : 'Pause'}${child ? ' root' : ''}`}</button>
-      <button ref={cancelButton} type="button" className="execution-action-cancel" aria-haspopup="dialog" aria-expanded={cancelOpen} disabled={disabled || !controls.data?.actions.cancel.available} title={reason(controls.data?.actions.cancel) ?? 'Cancel this Root and its owned child executions.'} onClick={() => { clearError(); setCancelOpen(true); }}>{pendingAction === 'cancel' ? progressLabels.cancel : child ? 'Cancel root' : 'Cancel'}</button>
+      <button type="button" disabled={disabled || !availability?.available} title={reason(availability) ?? (child ? 'Controls the Root and all its owned children.' : stateAction === 'pause' ? 'Pause at a resumable Node boundary.' : 'Recover this Root and its children in the same Invocations. Successful work is preserved.')} onClick={() => void send(stateAction)}><BusyLabel busy={pendingAction === stateAction} label={progressLabels[stateAction]}>{`${continuing ? 'Recover' : 'Pause'}${child ? ' root' : ''}`}</BusyLabel></button>
+      <button ref={cancelButton} type="button" className="execution-action-cancel" aria-haspopup="dialog" aria-expanded={cancelOpen} disabled={disabled || !controls.data?.actions.cancel.available} title={reason(controls.data?.actions.cancel) ?? 'Cancel this Root and its owned child executions.'} onClick={() => { clearError(); setCancelOpen(true); }}><BusyLabel busy={pendingAction === 'cancel'} label={progressLabels.cancel}>{child ? 'Cancel root' : 'Cancel'}</BusyLabel></button>
       {pendingAction === 'respond' ? <span className="execution-operation-state" role="status">Responding…</span> : null}
-      {unresolved ? <span className="execution-operation-state" role="status">Checking operation…</span> : null}
+      {unresolved && !operation.error ? <InlineLoading label="Checking operation" /> : null}
       {controls.error || actionError ? <div className="execution-control-error" role="alert"><span title={controls.error?.message ?? actionError ?? ''}>{controls.error?.message ?? actionError}</span><button type="button" onClick={() => { if (operation.error) void operation.refetch(); else if (controls.error) void controls.refetch(); else clearError(); }}>{operation.error ? 'Retry status' : controls.error ? 'Retry controls' : 'Dismiss'}</button></div> : null}
     </div>,
     confirmation: cancelOpen && active && !replaying && controls.data ? <CancelConfirmation anchor={cancelButton} rootId={controls.data.root_invocation_id} busy={busy} disabled={!controls.data.actions.cancel.available} error={actionError} onClose={() => setCancelOpen(false)} onConfirm={reason => send('cancel', { reason: reason || undefined })} /> : null,
@@ -128,7 +129,7 @@ function CancelConfirmation({ anchor, rootId, busy, disabled, error, onClose, on
       <h3>Cancel Root execution?</h3><p>This cancels the Root and all its owned child executions.</p><code className="cancel-root-id">{rootId}</code>
       <label className="run-field" htmlFor={reasonId}>Reason <small>Optional</small><textarea id={reasonId} value={reason} onChange={event => setReason(event.target.value)} maxLength={4096} rows={2} disabled={busy} /></label>
       {error ? <p className="run-error" role="alert">{error}</p> : null}
-      <footer><button type="button" onClick={onClose} disabled={busy}>Go back</button><button type="submit" className="confirm-cancel" disabled={busy || disabled}>{busy ? 'Cancelling…' : 'Cancel execution'}</button></footer>
+      <footer><button type="button" onClick={onClose} disabled={busy}>Go back</button><button type="submit" className="confirm-cancel" disabled={busy || disabled}><BusyLabel busy={busy} label="Cancelling">Cancel execution</BusyLabel></button></footer>
     </form>
   </dialog>;
 }

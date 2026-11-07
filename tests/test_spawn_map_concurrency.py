@@ -96,6 +96,8 @@ class SpawnMapConcurrencyTests(unittest.TestCase):
             roots = [app.submit_invoke(parent, {'value': 3}).ref for _ in range(2)]
             wait_until(lambda: len([e for e in sink.events if e.event_name == 'operator_call.completed'
                 and e.session_id in {root.session_id for root in roots}]) == 6)
+            wait_until(lambda: len([e for e in sink.events if e.event_name == 'node_occurrence.started'
+                and e.session_id not in {root.session_id for root in roots}]) == 6)
             self.assertEqual(len(entered), 2)
             self.assertEqual(peak, 2)
             events = list(sink.events)

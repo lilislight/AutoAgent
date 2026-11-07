@@ -1,43 +1,13 @@
 """Consistent graph capture and bounded-lifetime memory estimates."""
 
-import sys
-import gc
-from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
-from types import MappingProxyType
-
 from .models import GraphResidencyInfo
 from ..errors import RuntimeTransitionError
-from ..runtime.values import _FrozenMap
+from ..runtime._memory import retained_entries
 
 
 def retained_size(values):
     """Count shared State objects once without serializing business values."""
-    pending, seen, size = list(values), set(), 0
-    while pending:
-        item = pending.pop()
-        key = id(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        size += sys.getsizeof(item)
-        if is_dataclass(item) and not isinstance(item, type):
-            pending.extend(getattr(item, f.name) for f in fields(item))
-            if hasattr(item, '__dict__'):
-                pending.append(vars(item))
-        elif type(item) is _FrozenMap:
-            pending.append(item._data)
-        elif isinstance(item, MappingProxyType):
-            # Include the privately owned backing dict without copying it.
-            pending.extend(gc.get_referents(item))
-        elif isinstance(item, Mapping):
-            pending.extend(item.keys())
-            pending.extend(item.values())
-        elif isinstance(item, (tuple, list, set, frozenset)):
-            pending.extend(item)
-        elif hasattr(item, '__dict__'):
-            pending.append(vars(item))
-    return size
+    return sum(size for _, _, size in retained_entries(values))
 
 
 class ResidencyRuntime:

@@ -566,7 +566,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
                     RuntimeState.from_record(record)
 
     def test_wait_status_and_occurrence_matrix_is_enforced(self) -> None:
-        """Verify Wait resume fields, owner status and active uniqueness agree."""
+        """Wait fields and identities remain valid across partial Map completion and retry."""
 
         wait_status_path = (
             "invocation",
@@ -603,8 +603,7 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 (wait_status_path, "cancelled"),
                 (resumed_path, 5),
             ),
-            "waiting owner is running": ((owner_status_path, "running"),),
-            "cancelled owner is waiting": ((wait_status_path, "cancelled"),),
+            "deadline lacks matching Call": ((("invocation", "scheduler", "waits", "wait", "deadline_at_us"), 123),),
             "resumed owner is skipped": (
                 (wait_status_path, "resumed"),
                 (resumed_path, 5),
@@ -621,12 +620,19 @@ class RuntimeStateValidationTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     RuntimeState.from_record(record)
 
-        duplicate = copy.deepcopy(original)
-        waits = duplicate["invocation"]["scheduler"]["waits"]  # type: ignore[index]
+        for path, value in ((owner_status_path, 'running'), (wait_status_path, 'cancelled')):
+            record = copy.deepcopy(original)
+            _set_path(record, path, value)
+            RuntimeState.from_record(record)
+
+        batch = copy.deepcopy(original)
+        waits = batch["invocation"]["scheduler"]["waits"]  # type: ignore[index]
         waits["second"] = copy.deepcopy(waits["wait"])  # type: ignore[index]
         waits["second"]["id"] = "second"  # type: ignore[index]
-        with self.assertRaisesRegex(ValueError, "multiple waiting Waits"):
-            RuntimeState.from_record(duplicate)
+        self.assertEqual(len(RuntimeState.from_record(batch).invocation.scheduler.waits), 2)
+        waits['second']['id'] = 'wait'
+        with self.assertRaisesRegex(ValueError, 'Wait key must equal its id'):
+            RuntimeState.from_record(batch)
 
     def test_invocation_status_and_timestamp_matrix_is_enforced(self) -> None:
         """Verify Invocation lifecycle fields agree without forbidding early failure."""

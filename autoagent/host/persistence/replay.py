@@ -10,8 +10,8 @@ async def replay_window(timeline, iid, *, sequence=None, at_us=None, through_seq
     if any(v is not None and (type(v) is not int or not 0 <= v <= 9007199254740991)
            for v in (sequence, at_us, through_sequence)) or sequence is not None and at_us is not None:
         raise ValueError('Expected one valid Replay position.')
-    e, g, n, evaluations = (meta.tables[k] for k in ('runtime_events', 'graph_changes', 'node_executions', 'edge_evaluations'))
-    async with timeline.queries.view() as (conn, _, _, frontier):
+    e, g, n = (meta.tables[k] for k in ('runtime_events', 'graph_changes', 'node_executions'))
+    async with timeline.queries.view(invocation_id=iid) as (conn, _, _, frontier):
         if await timeline.storage.row(conn, 'invocations', invocation_id=iid) is None:
             return None
         headers = select(e.c.event_id, e.c.event_name, e.c.sequence, e.c.occurred_at_us).where(e.c.invocation_id == iid)
@@ -75,7 +75,7 @@ async def replay_window(timeline, iid, *, sequence=None, at_us=None, through_seq
 
 async def replay_events(conn, iid, page, storage):
     """Export only the changes needed to render Graph history."""
-    e, g, n, evaluations = (meta.tables[k] for k in ('runtime_events', 'graph_changes', 'node_executions', 'edge_evaluations'))
+    g, n, evaluations = (meta.tables[k] for k in ('graph_changes', 'node_executions', 'edge_evaluations'))
     ids = [r['event_id'] for r in page]
     changes = (await conn.execute(select(g.c.event_id, g.c.entity_type, g.c.entity_id, g.c.change).where(g.c.invocation_id == iid,
         g.c.event_id.in_(ids)).order_by(g.c.sequence, g.c.change_index))).mappings().all()

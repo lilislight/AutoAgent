@@ -27,7 +27,7 @@ class ExecutionControls:
         recovering=root['invocation_id'] in self._runtime.recovery_tasks
         control=root.get('control_state') or 'active'
         stopping=root.get('pending_outcome') in ('failed','cancelled')
-        ir=self._runtime.workflow_irs.get(root['workflow_revision_id'])
+        ir=self._runtime.workflow_irs.get(selected['workflow_revision_id'])
         endpoints=[name for name,_ in ir.signal_endpoints] if ir else []
         def action(available,message):
             return dict(available=bool(base and available),reason=reason or (None if available else message))
@@ -36,7 +36,7 @@ class ExecutionControls:
             recover=action(not recovering and not stopping and (control=='paused' or interrupted or root['status'] in ('failed','cancelled') or root.get('recovery_pending')),'Execution is already active or has completed successfully.'),
             cancel=action(active,'Execution has already finished.'),
             respond=action(active and not stopping and bool(data['waits']),'There are no pending external responses.'),
-            signal=action(root['status'] in ('running','waiting') and not stopping and bool(endpoints),'No declared Signal Endpoint is currently available.'),
+            signal=action(selected['status'] in ('running','waiting') and not stopping and bool(endpoints),'No declared Signal Endpoint is currently available.'),
             run_again=dict(available=selected['workflow_revision_id'] in self._runtime.revisions,reason=None if selected['workflow_revision_id'] in self._runtime.revisions else 'This exact Revision is not registered in this Host.'))
         return data,dict(invocation_id=iid,root_invocation_id=root['invocation_id'],root_session_id=root['session_id'],
             status=root['status'],control_state=control,recovery_reason='paused' if control=='paused' else 'interrupted' if interrupted else root['status'] if root['status'] in ('failed','cancelled') else None,
@@ -72,7 +72,7 @@ class ExecutionControls:
                 raise HostRunConflict('workflow_unregistered','The Wait Revision is not registered in this Host.')
             contract=ir.node(node['node_id']).executable.output_contract
         elif action=='signal':
-            ir=self._runtime.workflow_irs[data['root']['workflow_revision_id']]
+            ir=self._runtime.workflow_irs[data['selected']['workflow_revision_id']]
             if endpoint:
                 contract=dict(ir.signal_endpoints).get(endpoint)
                 if contract is None:
@@ -82,9 +82,13 @@ class ExecutionControls:
     async def get_execution_action_spec(self, invocation_id, action, **options):
         async def query():
             data,controls,contract=await self._action_spec(invocation_id,action,**options)
+            view = dict(request=None, response_example=None)
+            if action == 'respond':
+                async with self._execution(controls['root_invocation_id'], load=True) as ref:
+                    view = await self.agent_context.approvals.action_view(ref, data['wait']['wait_id'])
             return dict(root_invocation_id=controls['root_invocation_id'],action=action,
                 input_schema=json.loads(contract.schema) if contract else None,
-                endpoints=controls['endpoints'],next_sequence=data['source_sequence']+1)
+                endpoints=controls['endpoints'],next_sequence=data['source_sequence']+1, **view)
         return await self._perform(query)
 
     async def validate_execution_action(self, invocation_id, action, *, payload=None, target_invocation_id=None,
@@ -121,14 +125,19 @@ class ExecutionControls:
                 elif action=='respond':
                     value=decode_input(contract,payload)
                     await self._runtime.activate(ref)
-                    await self._runtime.app.asubmit_resume(ref,wait_id,value)
+                    await self.agent_context.approvals.respond(ref,wait_id,value)
                     return dict(root_invocation_id=root_id,accepted=True)
                 elif action=='signal':
                     if contract is None or not source_id or type(sequence) is not int:
                         raise ValueError('Signal requires an Endpoint, source_id and sequence.')
                     value=contract.to_record(decode_input(contract,payload))
                     await self._runtime.activate(ref)
-                    receipt=await self._runtime.app.asignal(ref,endpoint,value,source_id=source_id,sequence=sequence)
+                    from autoagent.core.commands import RuntimeHandle
+                    target = data['selected']
+                    handle = RuntimeHandle(session_id=target['session_id'], invocation_id=target['invocation_id'],
+                        workflow_id=self._runtime.workflow_irs[target['workflow_revision_id']].workflow_id,
+                        workflow_revision_id=target['workflow_revision_id'])
+                    receipt=await self._runtime.app.asignal(ref,endpoint,value,source_id=source_id,sequence=sequence, target=handle)
                     return dict(root_invocation_id=root_id,accepted=True,message_id=receipt.message_id,accepted_sequence=receipt.accepted_sequence)
                 else:
                     raise ValueError('Unknown execution action.')

@@ -37,10 +37,13 @@ class WorkflowUI(StaticFiles):
             parent_root = mounted_root
             if ui_path != "/" and mounted_root.endswith(ui_path):
                 parent_root = mounted_root[:-len(ui_path)]
+            host = getattr(getattr(scope.get("app"), "state", None), "autoagent_host", None)
+            standalone = (await host.agent_context.workspace_catalog())["standalone"] if host is not None else False
             config = json.dumps({
                 "apiPrefix": parent_root + self.settings.api_prefix,
                 "uiBase": mounted_root + "/",
                 "pageSize": self.settings.page_size,
+                "defaultView": "agents" if standalone else "workflows",
             }).replace("<", "\\u003c")
             injection = (
                 f'<base href="{escape(mounted_root, quote=True)}/">'

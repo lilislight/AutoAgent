@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -15,6 +16,9 @@ class ToolContext:
 
     Dependencies are borrowed from the application. allowed_tools restricts
     advertised names; it never expands an existing application's permissions.
+    approval_scope optionally supplies a stable application execution identity
+    for approval checks outside an Operator; otherwise the current Core call
+    identity is used. Never populate either field from model arguments.
     """
 
     services: Mapping[str, Any] = field(default_factory=dict, repr=False)
@@ -23,16 +27,25 @@ class ToolContext:
     allowed_tools: frozenset[str] | None = None
     call_id: str | None = None
     tool_name: str | None = None
+    authorization: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    approval_scope: Mapping[str, Any] | None = field(default=None, repr=False)
+    arguments: Mapping[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
+        object.__setattr__(self, "arguments", MappingProxyType({}))
+        object.__setattr__(self, "authorization", _freeze(self.authorization))
+        if self.approval_scope is not None:
+            object.__setattr__(self, "approval_scope", _freeze(self.approval_scope))
         if self.allowed_tools is not None:
             if isinstance(self.allowed_tools, str) or any(not isinstance(name, str) or not name for name in self.allowed_tools):
                 raise TypeError("allowed_tools must be a collection of nonempty names.")
             object.__setattr__(self, "allowed_tools", frozenset(self.allowed_tools))
 
-    def for_call(self, call) -> ToolContext:
-        return replace(self, call_id=call.call_id, tool_name=call.name)
+    def for_call(self, call, arguments=None) -> ToolContext:
+        current = replace(self, call_id=call.call_id, tool_name=call.name)
+        object.__setattr__(current, "arguments", _freeze(arguments or {}))
+        return current
 
     def restrict(self, names: Collection[str]) -> ToolContext:
         """Intersect a Skill/application restriction with the current boundary."""
@@ -61,6 +74,24 @@ def resolve_context(call, context=None, configured=None):
 
 
 _current_context: ContextVar[ToolContext | None] = ContextVar("autoagent_tool_context", default=None)
+
+
+@contextmanager
+def tool_context(context: ToolContext | None):
+    """Establish an application execution boundary, restoring it on exit."""
+    token = _current_context.set(context)
+    try:
+        yield
+    finally:
+        _current_context.reset(token)
+
+
+def _freeze(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)

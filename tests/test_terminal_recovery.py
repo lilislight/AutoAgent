@@ -34,7 +34,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         def last(value: Value) -> Value:
             calls['last'] += 1
             return value
-        wf = Workflow('recover-terminal', nodes=[Node('a',first),Node('b',flaky),Node('c',last)],edges=[Edge('a','b'),Edge('b','c')])
+        wf = Workflow('recover-terminal', nodes=[Node('a',first),Node('b',flaky, recovery_mode=Recovery("replay_safe")),Node('c',last)],edges=[Edge('a','b'),Edge('b','c')])
         sink = Events()
         app = AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close, timeout=2)
@@ -66,7 +66,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             return value
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        failed=app.invoke(Workflow('recover-map',nodes=[Node('map',unit,input_mapping=mapped,map=Map(max_parallelism=1))]),{'value':0})
+        failed=app.invoke(Workflow('recover-map',nodes=[Node('map',unit,input_mapping=mapped,map=Map(max_parallelism=1), recovery_mode=Recovery("replay_safe"))]),{'value':0})
         self.assertEqual(failed.status,'failed')
         recovered=app.recover(failed.ref,source=RecoverySource.from_events(tuple(sink.events)))
         self.assertEqual(recovered.status,'completed')
@@ -78,7 +78,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         from autoagent import Wait
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        waiting=app.invoke(Workflow('recover-wait',nodes=[Node('approval',Wait(Value,Value))]),{'value':3})
+        waiting=app.invoke(Workflow('recover-wait',nodes=[Node('approval',Wait(Value,Value), recovery_mode=Recovery("replay_safe"))]),{'value':3})
         old=waiting.waits[0].id
         app.cancel(waiting.ref,'stop')
         restored=app.recover(waiting.ref,source=RecoverySource.from_events(tuple(sink.events)))
@@ -96,13 +96,13 @@ class TerminalRecoveryTests(unittest.TestCase):
             calls['child']+=1
             if calls['child']==1:raise ValueError('child failed')
             return value
-        child=Workflow('recover-child',nodes=[Node('work',flaky)])
+        child=Workflow('recover-child',nodes=[Node('work',flaky, recovery_mode=Recovery("replay_safe"))])
         from autoagent.core.commands.models import RuntimeObservation
         def check(value:RuntimeObservation)->Value:
             if value.status != 'completed':
                 raise ValueError('child unavailable')
             return value.output
-        parent=Workflow('recover-parent',nodes=[Node('child',Await(child,'work')),Node('check',check)],edges=[Edge('child','check')])
+        parent=Workflow('recover-parent',nodes=[Node('child',Await(child,'work'), recovery_mode=Recovery("replay_safe")),Node('check',check, recovery_mode=Recovery("replay_safe"))],edges=[Edge('child','check')])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
         failed=app.invoke(parent,{'value':7})
@@ -116,13 +116,13 @@ class TerminalRecoveryTests(unittest.TestCase):
         self.assertEqual(ids,[u.invocation_id for p in after.child_plans.values() for u in p.units])
         self.assertEqual(calls['child'],2)
 
-    def test_never_policy_and_stale_version_reject_before_any_new_work(self):
-        """Policy and compare-and-set failures leave terminal state and side effects untouched."""
+    def test_default_never_and_stale_version_reject_before_any_new_work(self):
+        """Default replay rejection and version failures leave terminal state untouched."""
         def bad(value:Value)->Value:
             raise ValueError('failure')
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        failed=app.invoke(Workflow('recover-never',nodes=[Node('bad',bad,recovery_mode=Recovery('never'))]),{'value':0})
+        failed=app.invoke(Workflow('recover-never',nodes=[Node('bad',bad)]),{'value':0})
         source=RecoverySource.from_events(tuple(sink.events))
         before=len(sink.events)
         from autoagent import RuntimeTransitionError
@@ -137,7 +137,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         from autoagent import Spawn, Wait
         def units(ctx:InputMappingContext)->list[Value]:
             return [{'value':i} for i in range(20)]
-        child=Workflow('recover-parallel-child',nodes=[Node('ask',Wait(Value,Value))])
+        child=Workflow('recover-parallel-child',nodes=[Node('ask',Wait(Value,Value), recovery_mode=Recovery("replay_safe"))])
         parent=Workflow('recover-parallel-root',nodes=[Node('children',Spawn(child,'ask'),input_mapping=units,map=Map())])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
@@ -165,7 +165,7 @@ class TerminalRecoveryTests(unittest.TestCase):
                 await super().append(event)
                 if self.broken and event.event_name=='invocation.reopened':
                     raise RuntimeError('lost recovery ACK')
-        child=Workflow('recover-crash-child',nodes=[Node('ask',Wait(Value,Value))])
+        child=Workflow('recover-crash-child',nodes=[Node('ask',Wait(Value,Value), recovery_mode=Recovery("replay_safe"))])
         parent=Workflow('recover-crash-parent',nodes=[Node('spawn',Spawn(child,'ask'))])
         sink=Broken(); app=AutoAgentApp(runtime_event_sink=sink)
         waiting=app.invoke(parent,{'value':1})
@@ -202,7 +202,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             return ctx.output['value']<3
         def done(ctx:ConditionContext)->bool:
             return ctx.output['value']>=3
-        wf=Workflow('recover-loop',nodes=[Node('start',identity),Node('step',step),Node('finish',identity)],edges=[Edge('start','step'),Edge('step','step',more),Edge('step','finish',done)])
+        wf=Workflow('recover-loop',nodes=[Node('start',identity),Node('step',step, recovery_mode=Recovery("replay_safe")),Node('finish',identity)],edges=[Edge('start','step'),Edge('step','step',more),Edge('step','finish',done)])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
         failed=app.invoke(wf,{'value':0},entry_node_id='start')
@@ -223,7 +223,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             if calls['flaky']<3:
                 raise ValueError('again')
             return value
-        wf=Workflow('recover-twice',nodes=[Node('first',first),Node('flaky',flaky)],edges=[Edge('first','flaky')])
+        wf=Workflow('recover-twice',nodes=[Node('first',first),Node('flaky',flaky, recovery_mode=Recovery("replay_safe"))],edges=[Edge('first','flaky')])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
         failed=app.invoke(wf,{'value':1},entry_node_id='first')
@@ -251,8 +251,8 @@ class TerminalRecoveryTests(unittest.TestCase):
             if any(item.status!='completed' for item in ctx.outputs):
                 raise ValueError('one child failed')
             return {'value':sum(item.output['value'] for item in ctx.outputs)}
-        child=Workflow('recover-map-child',nodes=[Node('work',work)])
-        parent=Workflow('recover-map-parent',nodes=[Node('children',Await(child,'work'),input_mapping=units,map=Map(aggregate=aggregate,max_parallelism=1))])
+        child=Workflow('recover-map-child',nodes=[Node('work',work, recovery_mode=Recovery("replay_safe"))])
+        parent=Workflow('recover-map-parent',nodes=[Node('children',Await(child,'work'),input_mapping=units,map=Map(aggregate=aggregate,max_parallelism=1), recovery_mode=Recovery("replay_safe"))])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
         failed=app.invoke(parent,{'value':0})
@@ -281,8 +281,8 @@ class TerminalRecoveryTests(unittest.TestCase):
             if value.status!='completed':
                 raise ValueError('child failed')
             return value.output
-        child=Workflow('recover-branch-child',nodes=[Node('work',work)])
-        parent=Workflow('recover-branch-parent',nodes=[Node('child',Await(child,'work')),Node('log',log),Node('check',check)],edges=[Edge('child','log'),Edge('child','check')])
+        child=Workflow('recover-branch-child',nodes=[Node('work',work, recovery_mode=Recovery("replay_safe"))])
+        parent=Workflow('recover-branch-parent',nodes=[Node('child',Await(child,'work'), recovery_mode=Recovery("replay_safe")),Node('log',log),Node('check',check, recovery_mode=Recovery("replay_safe"))],edges=[Edge('child','log'),Edge('child','check')])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
         failed=app.invoke(parent,{'value':2},entry_node_id='child')
@@ -308,9 +308,9 @@ class TerminalRecoveryTests(unittest.TestCase):
             if value.status!='completed':
                 raise ValueError('child failed')
             return value.output
-        leaf=Workflow('recover-grandchild',nodes=[Node('work',work)])
-        middle=Workflow('recover-middle',nodes=[Node('leaf',Await(leaf,'work')),Node('check',output)],edges=[Edge('leaf','check')])
-        root=Workflow('recover-tree',nodes=[Node('middle',Await(middle,'leaf')),Node('check',output)],edges=[Edge('middle','check')])
+        leaf=Workflow('recover-grandchild',nodes=[Node('work',work, recovery_mode=Recovery("replay_safe"))])
+        middle=Workflow('recover-middle',nodes=[Node('leaf',Await(leaf,'work'), recovery_mode=Recovery("replay_safe")),Node('check',output, recovery_mode=Recovery("replay_safe"))],edges=[Edge('leaf','check')])
+        root=Workflow('recover-tree',nodes=[Node('middle',Await(middle,'leaf'), recovery_mode=Recovery("replay_safe")),Node('check',output, recovery_mode=Recovery("replay_safe"))],edges=[Edge('middle','check')])
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
         failed=app.invoke(root,{'value':9},entry_node_id='middle')
@@ -328,7 +328,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         now=[100]
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink,clock_us=lambda:now[0])
         self.addCleanup(app.close,timeout=2)
-        waiting=app.invoke(Workflow('recover-timer',nodes=[Node('timer',Timer())]),TimerRequest(delay_us=1_000_000).model_dump())
+        waiting=app.invoke(Workflow('recover-timer',nodes=[Node('timer',Timer(), recovery_mode=Recovery("replay_safe"))]),TimerRequest(delay_us=1_000_000).model_dump())
         deadline=app.suspension_info(waiting.ref).next_deadline_at_us
         app.cancel(waiting.ref,'stop')
         now[0]=200
@@ -342,7 +342,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         import time
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        wf=Workflow('recover-signal',nodes=[Node('message',AwaitSignal('feedback'))],signal_endpoints=[SignalEndpoint('feedback',Value)])
+        wf=Workflow('recover-signal',nodes=[Node('message',AwaitSignal('feedback'), recovery_mode=Recovery("replay_safe"))],signal_endpoints=[SignalEndpoint('feedback',Value)])
         waiting=app.invoke(wf,{})
         app.cancel(waiting.ref,'stop')
         restored=app.recover(waiting.ref,source=RecoverySource.from_events(tuple(sink.events)))
@@ -362,7 +362,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             return value
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        wf=Workflow('recover-parallel-waits',nodes=[Node('start',start),*[Node(f'ask{i}',Wait(Value,Value)) for i in range(3)]],edges=[Edge('start',f'ask{i}') for i in range(3)])
+        wf=Workflow('recover-parallel-waits',nodes=[Node('start',start),*[Node(f'ask{i}',Wait(Value,Value), recovery_mode=Recovery("replay_safe")) for i in range(3)]],edges=[Edge('start',f'ask{i}') for i in range(3)])
         initial=app.invoke(wf,{'value':0},entry_node_id='start')
         first=app.resume(initial.ref,initial.waits[0].id,{'value':10})
         old_ids={w.id for w in first.waits}
@@ -409,7 +409,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             return value
         sink=Broken(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        initial=app.invoke(Workflow('recover-root-ack',nodes=[Node('work',work)]),{'value':3})
+        initial=app.invoke(Workflow('recover-root-ack',nodes=[Node('work',work, recovery_mode=Recovery("replay_safe"))]),{'value':3})
         source=RecoverySource.from_events(tuple(sink.events))
         sink.broken=True
         with self.assertRaises(RuntimeInfrastructureError):
@@ -437,7 +437,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             return value
         sink=Broken(); app=AutoAgentApp(runtime_event_sink=sink)
         self.addCleanup(app.close,timeout=2)
-        failed=app.invoke(Workflow('recover-dispatched-request',nodes=[Node('work',work)]),{'value':3})
+        failed=app.invoke(Workflow('recover-dispatched-request',nodes=[Node('work',work, recovery_mode=Recovery("replay_safe"))]),{'value':3})
         source=RecoverySource.from_events(tuple(sink.events)); sink.broken=True
         with self.assertRaises(RuntimeInfrastructureError):
             app.recover(failed.ref,source=source,request_id='accepted-request')

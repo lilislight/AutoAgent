@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import Counter, defaultdict
 
 from sqlalchemy import JSON, Text, and_, case, cast, func, literal, or_, select, tuple_, type_coerce
 
@@ -282,7 +283,7 @@ class TraceQueries:
         limit_value(limit)
         trace_cursor(cursor)
         events, changes = (meta.tables[n] for n in ('runtime_events', 'graph_changes'))
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             if await self.storage.row(conn, 'node_executions', invocation_id=iid, occurrence_id=oid) is None:
                 return None
             # Referenced ancestor stages remain exact original records. The
@@ -339,7 +340,7 @@ class TraceQueries:
         """Read one stage value only after verifying its exact Occurrence scope."""
         pointer_tokens(pointer)
         events, changes = (meta.tables[n] for n in ('runtime_events', 'graph_changes'))
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, _):
             name = await conn.scalar(select(events.c.event_name).where(
                 events.c.event_id == event_id, events.c.invocation_id == iid,
                 events.c.event_id.in_(select(changes.c.event_id).where(
@@ -388,6 +389,34 @@ class TraceQueries:
         position = (chosen[-1]['updated_at_us'], chosen[-1]['session_id']) if len(rows) > limit else None
         return Page(tuple(dict(r) for r in chosen), position, frontier, total_count=total)
 
+    async def _detail_page(self, conn, frontier, kind, iid, *, node_id, occurrence_id, status, order, limit, cursor):
+        """Page cached display metadata without round-tripping JSON through SQL."""
+        trace_cursor(cursor)
+        name={'node':'node_executions','call':'operator_calls','wait':'waits'}[kind]
+        filters={'invocation_id':iid}
+        if status is not None:filters['status']=status
+        if kind=='node' and node_id is not None:filters['node_id']=node_id
+        if kind!='node' and occurrence_id is not None:filters['occurrence_id']=occurrence_id
+        rows=await conn.detail_rows(name,filters)
+        time_field={'node':'ready_at_us','call':'started_at_us','wait':'created_at_us'}[kind]
+        identity={'node':'occurrence_id','call':'call_id','wait':'wait_id'}[kind]
+        position=lambda row:(row[time_field] or 0,row[identity])
+        if cursor is not None:
+            rows=[row for row in rows if (position(row)>tuple(cursor) if order=='asc' else position(row)<tuple(cursor))]
+        rows.sort(key=position,reverse=order=='desc')
+        chosen=rows[:limit]
+        next_cursor=position(chosen[-1]) if len(rows)>limit else None
+        items=await self._node_summaries(conn,chosen) if kind=='node' else tuple(summary(row) for row in chosen)
+        if kind=='node':
+            counts=Counter(row['occurrence_id'] for row in await conn.detail_rows('operator_calls',{'invocation_id':iid}))
+            for item in items:item['call_count']=counts[item['occurrence_id']]
+        origin=await fork_metadata(self.storage,conn,iid)
+        if origin:
+            for item,row in zip(items,chosen):
+                inherited=await inherited_metadata(self.storage,conn,iid,kind,row,origin)
+                if inherited:item['inherited_from']=inherited
+        return Page(items,next_cursor,frontier)
+
     async def page(self, kind, iid=None, *, node_id=None, occurrence_id=None, call_id=None, edge_id=None, session_id=None, workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, search='', status=None, order='desc', limit=50, cursor=None):
         limit_value(limit)
         if order not in ('asc', 'desc'):
@@ -399,12 +428,15 @@ class TraceQueries:
                    'wait': ('waiting', 'resumed', 'cancelled')}
         if status is not None and kind in allowed and status not in allowed[kind]:
             raise ValueError('Unknown collection status filter.')
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             if iid is not None and await self.storage.row(conn, 'invocations', invocation_id=iid) is None:
                 return None
             if kind == 'session' and await self.storage.row(conn, 'sessions', session_id=session_id) is None:
                 return None
-            name = {'root':'invocations', 'child':'invocations', 'session':'invocations', 'node':'node_executions', 'call':'operator_calls', 'edge':'edge_evaluations', 'wait':'waits'}[kind]
+            if kind in ('node','call','wait'):
+                return await self._detail_page(conn,frontier,kind,iid,node_id=node_id,occurrence_id=occurrence_id,
+                    status=status,order=order,limit=limit,cursor=cursor)
+            name = {'root':'invocations', 'child':'invocations', 'session':'invocations', 'edge':'edge_evaluations'}[kind]
             table = meta.tables[name]
             where = []
             if kind in ('root', 'child', 'session'):
@@ -464,19 +496,6 @@ class TraceQueries:
                 if occurrence_id is not None:
                     where.append(table.c.source_occurrence_id == occurrence_id)
                 identity = table.c.event_id + literal(':') + cast(table.c.result_index, Text)
-            else:
-                source, columns = table, list(table.c)
-                where = [table.c.invocation_id == iid]
-                if kind == 'node':
-                    if node_id is not None:
-                        where.append(table.c.node_id == node_id)
-                    time, identity = func.coalesce(table.c.ready_at_us, 0), table.c.occurrence_id
-                else:
-                    if occurrence_id is not None:
-                        where.append(table.c.occurrence_id == occurrence_id)
-                    time, identity = (table.c.created_at_us, table.c.wait_id) if kind == 'wait' else (table.c.started_at_us, table.c.call_id)
-                if status is not None:
-                    where.append(table.c.status == status)
             if cursor is not None:
                 trace_cursor(cursor)
                 position = tuple_(time, identity)
@@ -484,22 +503,11 @@ class TraceQueries:
             rows = (await conn.execute(select(*columns, time.label('_time'), identity.label('_id')).select_from(source).where(*where).order_by(*(c.asc() if order == 'asc' else c.desc() for c in (time, identity))).limit(limit + 1))).mappings().all()
             page = rows[:limit]
             position = (page[-1]['_time'], page[-1]['_id']) if len(rows) > limit else None
-            items = await self._node_summaries(conn, page) if kind == 'node' else tuple(summary(r) for r in page)
-            if kind == 'node':
-                counts = await node_call_counts(conn, iid, occurrence_ids=[r['occurrence_id'] for r in page])
-                for item in items:
-                    item['call_count'] = counts.get(item['occurrence_id'], 0)
+            items = tuple(summary(r) for r in page)
             if kind == 'edge':
                 for item,row in zip(items,page):
                     item['inherited'] = row['invocation_id'] != iid
                     item['invocation_id'] = iid
-            if kind in ('node','call','wait'):
-                origin = await fork_metadata(self.storage,conn,iid)
-                if origin:
-                    for item,row in zip(items,page):
-                        source = await inherited_metadata(self.storage,conn,iid,kind,row,origin)
-                        if source:
-                            item['inherited_from'] = source
             return Page(items, position, frontier)
 
     async def family(self, iid):
@@ -510,7 +518,7 @@ class TraceQueries:
                   'status', 'control_state', 'started_at_us', 'completed_at_us')
         statement = select(*(table.c[k] for k in fields), defs.c.workflow_id, defs.c.workflow_version).select_from(
             table.join(defs, table.c.workflow_revision_id == defs.c.revision_id))
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             current = (await conn.execute(statement.where(table.c.invocation_id == iid))).mappings().first()
             if current is None:
                 return None
@@ -558,34 +566,38 @@ class TraceQueries:
         return [dict(row) for row in rows]
 
     async def execution(self, iid):
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             return await self._execution(conn, frontier, iid)
 
     async def _execution(self, conn, frontier, iid):
         inv = await self.storage.row(conn, 'invocations', invocation_id=iid)
         if inv is None:
             return None
-        nodes, edges, events = (meta.tables[n] for n in ('node_executions', 'edge_evaluations', 'runtime_events'))
-        ranked = select(nodes.c.node_id, nodes.c.status, nodes.c.occurrence_id,
-            func.count().over(partition_by=nodes.c.node_id).label('occurrences'),
-            func.row_number().over(partition_by=nodes.c.node_id, order_by=(case((nodes.c.status == 'running', 0), (nodes.c.status == 'waiting', 1), (nodes.c.status == 'ready', 2), else_=3), nodes.c.ordinal.desc(), nodes.c.occurrence_id.desc())).label('_rank')).where(nodes.c.invocation_id == iid).subquery()
-        node_states = [dict(r) for r in (await conn.execute(select(*(c for c in ranked.c if c.name != '_rank')).where(ranked.c._rank == 1))).mappings()]
-        call_counts = await node_call_counts(conn, iid, occurrence_ids=select(ranked.c.occurrence_id).where(ranked.c._rank == 1))
-        for row in node_states:
-            row['call_count'] = call_counts.get(row['occurrence_id'], 0)
+        events=meta.tables['runtime_events']
+        by_node=defaultdict(list)
+        for row in await conn.detail_rows('node_executions',{'invocation_id':iid}):
+            by_node[row['node_id']].append(row)
+        call_counts=Counter(row['occurrence_id'] for row in await conn.detail_rows('operator_calls',{'invocation_id':iid}))
+        node_states=[]
+        priority={'running':0,'waiting':1,'ready':2}
+        for node_id,rows in sorted(by_node.items()):
+            rows.sort(key=lambda row:(row['ordinal'],row['occurrence_id']),reverse=True)
+            row=min(rows,key=lambda row:priority.get(row['status'],3))
+            node_states.append(dict(node_id=node_id,status=row['status'],occurrence_id=row['occurrence_id'],
+                occurrences=len(rows),call_count=call_counts[row['occurrence_id']]))
         current_edges = await edge_states(self.storage,conn,iid)
         # Routing decisions include unconditional and source-status mismatches;
         # condition evaluations alone do not describe whether every Edge ran.
-        changes = meta.tables['graph_changes']
-        edge_id = changes.c.change['edge_id'].as_string()
-        decisions = select(edge_id.label('edge_id'),
-            changes.c.change['selected'].as_boolean().label('condition_result'),
-            func.row_number().over(partition_by=edge_id, order_by=(changes.c.sequence.desc(), changes.c.change_index.desc())).label('_rank'),
-        ).where(changes.c.invocation_id == iid, changes.c.entity_type == 'edge',
-            edge_id.is_not(None), changes.c.change['selected'].as_boolean().is_not(None)).subquery()
+        decisions={}
+        for row in await conn.detail_rows('graph_changes',{'invocation_id':iid,'entity_type':'edge'}):
+            change=row['change'];edge_id=change.get('edge_id')
+            if edge_id is None or change.get('selected') is None:continue
+            previous=decisions.get(edge_id)
+            if previous is None or (row['sequence'],row['change_index'])>(previous['sequence'],previous['change_index']):
+                decisions[edge_id]=row
         by_edge = {row['edge_id']: row for row in current_edges}
-        for row in (await conn.execute(select(decisions.c.edge_id, decisions.c.condition_result).where(decisions.c._rank == 1))).mappings():
-            by_edge.setdefault(row['edge_id'], {'edge_id': row['edge_id'], 'evaluations': 0}).update(condition_result=row['condition_result'])
+        for edge_id,row in sorted(decisions.items()):
+            by_edge.setdefault(edge_id,{'edge_id':edge_id,'evaluations':0}).update(condition_result=row['change']['selected'])
         current_edges = list(by_edge.values())
         children = await conn.scalar(select(func.count()).select_from(meta.tables['invocations']).where(meta.tables['invocations'].c.parent_invocation_id == iid))
         definitions = meta.tables['workflow_revisions']
@@ -594,7 +606,7 @@ class TraceQueries:
         last_event = (await conn.execute(select(events.c.event_id, events.c.event_name,
             events.c.sequence, events.c.occurred_at_us).where(events.c.invocation_id == iid)
             .order_by(events.c.sequence.desc()).limit(1))).mappings().first()
-        store_id = await conn.scalar(select(meta.tables['persistence_meta'].c.store_id))
+        store_id = conn.store_id
         fork = await fork_metadata(self.storage,conn,iid,occurrences=True)
         return {'source_id': store_id, 'invocation': summary(inv) | {k:revision[k] for k in ('workflow_id', 'workflow_version')}, 'nodes': node_states, 'edges': current_edges, 'active_routes': active_routes, 'child_count': children, 'frontier': frontier, 'view': 'durable',
                 'last_event': dict(last_event) if last_event else None, 'observed_at_us': time.time_ns() // 1000, 'fork':fork}
@@ -606,7 +618,7 @@ class TraceQueries:
             raise ValueError('Unknown trace value.')
         if field == 'cancel_reason' and kind != 'invocation':
             raise ValueError('Cancellation reasons belong to Invocations.')
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, _):
             inv = await self.storage.row(conn, 'invocations', invocation_id=iid)
             if inv is None:
                 return None

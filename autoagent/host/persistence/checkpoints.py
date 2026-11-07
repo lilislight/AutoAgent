@@ -38,7 +38,7 @@ class Checkpoints:
 
     async def exists(self, identity):
         table = meta.tables['checkpoints']
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(control=True) as (conn, _, _, _):
             return await conn.scalar(select(table.c.checkpoint_id).where(table.c.checkpoint_id == identity)) is not None
 
     async def _members(self, conn, ids):
@@ -54,7 +54,7 @@ class Checkpoints:
     async def page(self, sid, limit, cursor):
         limit_value(limit)
         cp, members = (meta.tables[k] for k in ('checkpoints', 'checkpoint_sessions'))
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(control=True) as (conn, _, _, frontier):
             matching = select(members.c.checkpoint_id).where(members.c.session_id == sid)
             where = [cp.c.checkpoint_id.in_(matching)]
             total = await conn.scalar(select(func.count()).select_from(cp).where(*where))
@@ -76,7 +76,7 @@ class Checkpoints:
 
     async def info(self, identity):
         cp = meta.tables['checkpoints']
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(control=True) as (conn, _, _, _):
             columns = [col for col in cp.columns if col.name != 'checkpoint_text']
             row = (await conn.execute(select(*columns).where(cp.c.checkpoint_id == identity))).mappings().first()
             if row is None:
@@ -91,7 +91,7 @@ class Checkpoints:
         """Read one causal Event prefix, without installing or executing its state."""
         events, invs, sessions, cp = (meta.tables[k] for k in
             ('runtime_events', 'invocations', 'sessions', 'checkpoints'))
-        async with self.queries.view() as (conn, _, _, _):
+        async with self.queries.view(control=True) as (conn, _, _, _):
             target = (await conn.execute(select(events.c.invocation_id, events.c.store_order).where(
                 events.c.session_id == sid, events.c.sequence == sequence))).first()
             if target is None:

@@ -80,6 +80,27 @@ class ManagementFixture(HistoryFixture):
 
 
 class CliManagementTests(ManagementFixture, unittest.TestCase):
+    def test_projection_status_build_rebuild_share_history_reads(self):
+        """CLI builds durable projections and historical reads use them without reconstruction."""
+        for command in ('status', 'build', 'rebuild'):
+            status, stdout, stderr = self.cli('projection', command, '--format', 'json')
+            self.assertEqual(status, 0, (stdout, stderr))
+            data = json.loads(stdout)['data']
+            self.assertIn('processed_order', data)
+            if command != 'status':
+                self.assertEqual(data['lag_events'], 0)
+        from autoagent.host.persistence.read_models import ProjectionCache
+        with patch.object(ProjectionCache, 'build', side_effect=AssertionError('CLI ignored database projection')):
+            status, stdout, stderr = self.cli('invocation', 'show', self.current.invocation_id, '--format', 'json')
+        self.assertEqual(status, 0, (stdout, stderr))
+
+    def test_projection_commands_do_not_import_project_code(self):
+        """Offline status/build/rebuild need database facts, without Workflow imports or lifespan."""
+        (self.root / (self.module + '.py')).write_text('raise AssertionError("Projection must not import project code")')
+        for command in ('status', 'build', 'rebuild'):
+            status, stdout, stderr = self.cli('projection', command, '--format', 'json')
+            self.assertEqual(status, 0, (stdout, stderr))
+
     def setUp(self):
         self.prepare_project()
         self.environ_patch = patch.dict(os.environ, self.environment(), clear=True)
@@ -257,6 +278,15 @@ class CliManagementTests(ManagementFixture, unittest.TestCase):
 
 
 class RemoteManagementTests(ManagementFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_remote_projection_commands_use_server_database(self):
+        """Remote maintenance uses the Server projection route without loading a local project."""
+        with patch.object(AutoAgentHost, 'from_project', side_effect=AssertionError('No local Host')):
+            for command in ('status', 'build', 'rebuild'):
+                _, report, code = await self.query('projection', command)
+                self.assertEqual(code, 0, report)
+                if command != 'status':
+                    self.assertEqual(report['data']['lag_events'], 0)
+
     async def asyncSetUp(self):
         self.prepare_project()
         self.environ_patch = patch.dict(os.environ, self.environment(), clear=True)
@@ -336,8 +366,11 @@ class RemoteManagementTests(ManagementFixture, unittest.IsolatedAsyncioTestCase)
         from autoagent.host.persistence.schema import meta
         async def skew_old_row():
             calls, store = meta.tables['operator_calls'], meta.tables['persistence_meta']
-            async with self.host._persistence._writer.storage.engine.begin() as conn:
-                order = await conn.scalar(select(store.c.last_store_order))
+            async with self.host._persistence._writer.storage.engine.begin() as raw:
+                from tests.projection_fixtures import EventFixtureConnection
+                order = await raw.scalar(select(store.c.last_store_order))
+                identity = await raw.scalar(select(store.c.store_id))
+                conn = EventFixtureConnection(raw,self.host._persistence._queries.projection_cache,order,identity,scope=ref.invocation_id)
                 # Row refresh order and wall-clock adjustments must not turn
                 # an old failed attempt into the latest Call for this Unit.
                 await conn.execute(update(calls).where(calls.c.invocation_id == ref.invocation_id,

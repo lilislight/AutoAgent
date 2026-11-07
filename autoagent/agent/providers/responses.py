@@ -21,6 +21,7 @@ from .protocol import OpenAIProtocolAdapter
 
 class ResponsesAdapter(OpenAIProtocolAdapter):
     protocol = "openai.responses"
+    tool_media = True
 
     def _part(self, part, provider_id: str, *, output: bool = False) -> dict:
         check_native(part.native, provider_id, self.protocol)

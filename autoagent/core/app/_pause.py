@@ -83,7 +83,7 @@ class PauseRuntime:
                 for sid in (root, *self._descendant_sessions(root)):
                     if self._task_runtime.is_live(sid):
                         self._task_runtime.wake(sid)
-            event = self._boundary_events.setdefault(root, asyncio.Event())
+            event = self._boundary_events[root]
             while True:
                 event.clear()
                 async with self._graph_gate(root):

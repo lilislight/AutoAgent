@@ -255,7 +255,8 @@ class UserEventTests(unittest.IsolatedAsyncioTestCase):
                     output_binding=binding, user_events=events))
                 self.assertEqual(result.status, "failed")
                 self.assertTrue(observed)
-                self.assertTrue(all(event.kind == "numbers.chunk" for event in observed))
+                self.assertTrue(all(event.kind == "numbers.chunk" for event in observed[:-1]))
+                self.assertEqual(observed[-1].kind, "numbers.error")
 
 
 class UserEventContractTests(unittest.TestCase):

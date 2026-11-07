@@ -2,11 +2,11 @@ import { useEffect, useLayoutEffect, useId, useMemo, useRef, useState, type CSSP
 import {
   ReactFlow, Background, Controls, ControlButton, MiniMap, Handle, Position, BaseEdge,
   MarkerType, useNodesState, getSmoothStepPath,
-  applyNodeChanges,
+  applyNodeChanges, useUpdateNodeInternals,
   type Node, type NodeProps, type EdgeProps, type ReactFlowInstance,
 } from "@xyflow/react";
 import { fallbackLayout, routeDefinition, NODE_HEIGHT, NODE_WIDTH, type Layout, type Point } from "../layout";
-import { roundedRoutePath, routeMidpoint } from "../graphRouting";
+import { roundedRoutePath, routeMidpoint, routeInteractionWidths } from "../graphRouting";
 import { useFlowReady } from "./FlowLoadingBoundary";
 import { layoutWorkflow } from "../layoutWorker";
 import type { ExecutionTrace, Selection, TraceRow, WorkflowGraphData } from "../types";
@@ -18,6 +18,7 @@ import { cameraFromViewport, sameGraphCamera, viewportFromCamera, type GraphCame
 import { groupNodeId, workflowGroups, localNodeLabel, constrainGroupMove, type GroupPort } from '../workflowGroups';
 import { rerouteGroups } from '../groupGeometry';
 import { foldKey, readGraphPreferences, writeGraphPreferences } from '../graphPreferences';
+import { edgePortId, type GraphPort } from '../graphPorts';
 
 export interface LinkedGraphView {
   layout: Layout; camera: GraphCamera; onCamera: (camera: GraphCamera) => void;
@@ -25,7 +26,7 @@ export interface LinkedGraphView {
 }
 
 type DefinitionNode = Node<{
-  inherited?: boolean; change?: string; label: string; fullId?: string; kind: string; executable: string; entry: boolean; exit: boolean; mapped: boolean; callCount?: number; status?: string; occurrences?: number; recordBadge?: string; recordTitle?: string; related?: boolean;
+  ports?:GraphPort[]; inherited?: boolean; change?: string; label: string; fullId?: string; kind: string; executable: string; entry: boolean; exit: boolean; mapped: boolean; callCount?: number; status?: string; occurrences?: number; recordBadge?: string; recordTitle?: string; related?: boolean;
 }, "definition">;
 type GroupNode = Node<{ id: string; label: string; count: number; members:string[]; folded: boolean; ports: GroupPort[]; activity?: string; boundaryActive?: boolean; canFold: boolean; onToggle: () => void; onInspect: () => void }, 'workflowGroup'>;
 type CanvasNode = DefinitionNode | GroupNode;
@@ -56,12 +57,14 @@ function NodeStateIcon({ state }: { state: string }) {
   return <svg className="node-state-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{state === 'ready' ? <circle cx="8" cy="8" r="6" /> : null}<path d={paths[state] ?? paths['not-started']} /></svg>;
 }
 
-function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
+function WorkflowNode({ id, data, selected }: NodeProps<DefinitionNode>) {
+  const updateInternals=useUpdateNodeInternals();
+  useLayoutEffect(()=>updateInternals(id),[id,data.ports,updateInternals]);
   return <div data-family-node={data.fullId??data.label} className={`workflow-node ${data.kind} ${data.change ? `comparison-${data.change}` : ""} ${selected ? "selected" : ""} ${data.related ? "record-related" : ""} ${data.status ? `execution-${data.status}` : ""}`}>
     {data.change ? <span className={`graph-change-badge change-${data.change}`} title={data.change}>{data.change === "added" ? "+" : data.change === "removed" ? "−" : "~"}</span> : null}
     {data.status ? <span className="node-state-overlay" aria-hidden="true" /> : null}
     {data.recordBadge ? <span className="graph-record-badge" title={data.recordTitle}>{data.recordBadge}</span> : null}
-    <Handle type="target" position={Position.Left} />
+    {data.ports?.map(port=><Handle key={port.id} id={port.id} type={port.side==='in'?'target':'source'} position={port.side==='in'?Position.Left:Position.Right} style={{top:port.y}} />)}
     <div className="node-type"><svg className="node-kind-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
       {data.kind === "operator" ? <path d="m5 4-4 4 4 4m6-8 4 4-4 4M9 2 7 14" />
         : data.kind === "capability" ? <path d="m8 1 7 7-7 7-7-7Z M8 5v6M5 8h6" />
@@ -73,7 +76,6 @@ function WorkflowNode({ data, selected }: NodeProps<DefinitionNode>) {
     <div className="node-bottom"><span title={data.executable}>{data.executable}</span>
       {data.inherited ? <span className="inherited-tag" title="Completed work inherited from the source execution">Inherited</span> : null}{data.entry ? <span className="entry-tag">Entry</span> : null}
       {data.exit ? <span className="exit-tag">Exit</span> : null}</div>
-    <Handle type="source" position={Position.Right} />
   </div>;
 }
 
@@ -95,7 +97,7 @@ function RoutedEdge(props: EdgeProps) {
   const edgeState = props.data?.executionState as string | undefined;
   return <g className={`routed-edge ${props.data?.failure ? "fail-edge" : ""}`} style={{ '--edge-color': props.data?.color } as CSSProperties}>
     <path className="edge-hover-halo" d={path} fill="none" />
-    <BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={props.style} interactionWidth={48} />
+    <BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={props.style} interactionWidth={Number(props.data?.interactionWidth??48)} />
     {edgeState === 'active' ? <><path className="edge-flow-trail" d={path} fill="none" /><path className="edge-flow-overlay" d={path} fill="none" /></> : null}
     {edgeState === 'not-taken' ? <g className="edge-not-taken" transform={`translate(${label.x + crossOffset}, ${label.y})`}><title>Not taken</title><circle r="6.5" /><path d="M-2 -2 2 2M2 -2-2 2" /></g> : null}
     {props.data?.conditional ? <g className="condition-marker" transform={`translate(${label.x}, ${label.y})`}>
@@ -293,7 +295,7 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
       id: node.id, type: "definition", position: relative(node.id),parentId:parentOf(node.id),zIndex:20,
       width: NODE_WIDTH, height: NODE_HEIGHT,
       ariaLabel: `${node.executable.kind} node: ${node.id}`,
-      data: { label: localNodeLabel(workflow.definition,node.id),fullId:node.id, kind: node.executable.kind,
+      data: { ports:layout.ports?.[node.id],label: localNodeLabel(workflow.definition,node.id),fullId:node.id, kind: node.executable.kind,
         executable: node.executable.id.startsWith(`${node.executable.kind}:`)
           ? node.executable.id : `${node.executable.kind}:${node.executable.id}`,
         entry: entries.has(node.id), exit: exits.has(node.id), mapped: node.mapped },
@@ -344,23 +346,24 @@ export default function WorkflowGraph({ workflow, selection, onSelect, theme, tr
   }));}, [nodes, selection, executionStates, nodeStates, selectedRecord, trace, comparison, presentation]);
   const routes = useMemo(() => moved
     ? workflow.definition.groups?.length ? rerouteGroups(workflow.definition,folded,{...layout!,positions:nodePositions(nodes)})
-      : routeDefinition(workflow.definition, nodePositions(nodes))
+      : routeDefinition(workflow.definition, nodePositions(nodes),undefined,layout?.ports)
     : layout?.routes, [moved, nodes, workflow.definition, layout, folded]);
   const originalEdges = useMemo(()=>new Map(workflow.definition.edges.map(edge=>[edge.id,edge])),[workflow.definition.edges]);
+  const hitWidths=useMemo(()=>routeInteractionWidths(routes??{}),[routes]);
   const edges = useMemo(() => presentation.edges.map(edge => {
     const original = originalEdges.get(edge.id)!;
     const state = executionStates ? executionStates.edges.get(edge.id) ?? 'not-evaluated' : undefined;
     const color = state ? executionEdgeColors[theme][state] : edgeColors[theme][edge.on === 'error' ? 'fail' : 'complete'];
     return {
-    id: edge.id, source: edge.source, target: edge.target,sourceHandle:edge.sourceHandle,targetHandle:edge.targetHandle,type: "routed",
+    id: edge.id, source: edge.source, target: edge.target,sourceHandle:edge.sourceHandle??edgePortId(edge.id,'out'),targetHandle:edge.targetHandle??edgePortId(edge.id,'in'),type: "routed",
     selected: selection?.kind === "edge" && selection.id === (comparison?.aliases[edge.id] ?? edge.id),
     ariaLabel: `${edge.id}: ${edge.on === "error" ? "Fail" : "Complete"} edge${edge.conditional ? ", conditional" : ""}, ${original.source} to ${original.target}${state ? ', ' + executionStateLabel(state) : ''}`,
     className: state ? `execution-edge-${state}` : undefined,
-    data: { comparison: comparison?.edges[edge.id], points: routes?.[edge.id], conditional: Boolean(edge.conditional), failure: edge.on === "error", evaluations: edgeStates.get(edge.id)?.evaluations, executionState: state, color },
+    data: { interactionWidth:hitWidths[edge.id],comparison: comparison?.edges[edge.id], points: routes?.[edge.id], conditional: Boolean(edge.conditional), failure: edge.on === "error", evaluations: edgeStates.get(edge.id)?.evaluations, executionState: state, color },
     markerEnd: { type: MarkerType.ArrowClosed, color },
     style: { stroke: 'var(--edge-color)',
       strokeDasharray: edge.on === "error" ? "5 4" : undefined },
-  }; }), [presentation.edges, routes, selection, theme, executionStates, edgeStates, comparison,originalEdges]);
+  }; }), [presentation.edges, routes, selection, theme, executionStates, edgeStates, comparison,originalEdges,hitWidths]);
 
   const revealedFocus = useRef(0);
   useEffect(()=>{

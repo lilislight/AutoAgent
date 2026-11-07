@@ -1,3 +1,4 @@
+import { CardsSkeleton } from './LoadingState';
 import { useEffect, useId, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getExecutionFamily, getExecutionItems } from '../api';
@@ -88,7 +89,7 @@ export function ExecutionFamilyBar({ trace, visibleTrace, replaySequence, active
   const open = (row: TraceRow) => { if (row.invocation_id !== current.invocation_id) onOpen(row); };
   return <div className={`execution-family-bar ${openPanel ? 'is-expanded' : ''}`} aria-label="Execution family" onPointerEnter={()=>presence.pointer(true)} onPointerLeave={()=>presence.pointer(false)} onFocusCapture={()=>presence.focus(true)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) presence.focus(false); }} onKeyDown={event => { if (event.key === 'Escape') { dismiss(); event.stopPropagation(); } }}>
     <div id={panelId} className="family-panel-content" aria-hidden={!openPanel} inert={!openPanel}>
-      {familyQuery.isPending || children.isPending ? <div className="family-message" role="status">Loading execution family…</div> : null}
+      {familyQuery.isLoading || children.isLoading ? <CardsSkeleton label="Loading execution family" /> : null}
       {family.error || children.error ? <div className="family-message sidebar-error">{(family.error ?? children.error)?.message}<button onClick={() => { void family.refetch(); void children.refetch(); }}>Retry</button></div> : null}
       {family.data?.ancestry_complete === false ? <p className="family-message">Part of the parent history is unavailable.</p> : null}
       {parent && trace.child_count > 0 ? <div className="family-scope"><button aria-pressed={!showChildren} onClick={() => setScopeChoice({ iid: current.invocation_id, children: false })}>Siblings</button><button aria-pressed={showChildren} onClick={() => setScopeChoice({ iid: current.invocation_id, children: true })}>Children</button></div> : null}

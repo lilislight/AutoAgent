@@ -209,8 +209,9 @@ assert 'litellm' not in sys.modules and 'openai' not in sys.modules
                     port = sock.getsockname()[1]
                 env = self.environment(directory, backend, url, streaming)
                 with (Path(directory) / "stdout").open("w+") as stdout, (Path(directory) / "stderr").open("w+") as stderr:
-                    server = subprocess.Popen([sys.executable, "-m", "examples.deepseek_weather_assistant", "--no-env-file",
-                        "--port", str(port), "--format", "json"], cwd=ROOT, env=env, stdout=stdout, stderr=stderr, text=True)
+                    server = subprocess.Popen([sys.executable, "-m", "autoagent", "--project", str(PROJECT),
+                        "--no-env-file", "server", "--port", str(port), "--format", "json"],
+                        cwd=ROOT, env=env, stdout=stdout, stderr=stderr, text=True)
                     try:
                         deadline = time.monotonic() + 45
                         ready = None
@@ -224,7 +225,7 @@ assert 'litellm' not in sys.modules and 'openai' not in sys.modules
                         stderr.seek(0)
                         self.assertIsNotNone(ready, stderr.read())
                         self.assertTrue(ready["ok"], ready)
-                        self.assertEqual(ready["data"]["registered_workflows"], 1)
+                        self.assertEqual(ready["data"]["registered_workflows"], 2)
                         api = ready["data"]["api_url"]
                         with httpx.Client(timeout=30) as client:
                             self.assertEqual(client.get(ready["data"]["ui_url"]).status_code, 200)
@@ -251,7 +252,7 @@ assert 'litellm' not in sys.modules and 'openai' not in sys.modules
                         for path, body in requests:
                             self.assertTrue(path.endswith("/chat/completions"))
                             self.assertEqual(body["model"], "deepseek-flash")
-                            self.assertEqual(body["thinking"], {"type": "disabled"})
+                            self.assertNotIn("thinking", body)
                             self.assertNotIn("api_key", body)
                         assistants = [m for m in requests[-1][1]["messages"] if m["role"] == "assistant"]
                         self.assertEqual(len(assistants), 2)

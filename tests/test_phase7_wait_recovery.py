@@ -18,6 +18,7 @@ from autoagent.core import (
 )
 
 from tests.test_phase3_scheduler import Harness
+from autoagent.core.runtime import CommandsPending
 
 
 class Request(TypedDict):
@@ -50,6 +51,7 @@ class WaitRecoveryTests(unittest.TestCase):
         wait = harness.workflow.node("approval").executable
         request = wait.input_contract.validate({"question": "continue?"})
         harness.emit(WaitRequested("approval@root", "wait-1", request))
+        harness.emit(CommandsPending('approval@root'))
         state = harness.state
         self.assertEqual(state.invocation.scheduler.occurrences["approval@root"].status, "waiting")
         self.assertEqual(state.invocation.scheduler.waits["wait-1"].request, request)
@@ -74,6 +76,7 @@ class WaitRecoveryTests(unittest.TestCase):
                 "approval@root", "wait-1", {"question": "continue?"}
             )
         )
+        harness.emit(CommandsPending('approval@root'))
         wait = harness.workflow.node("approval").executable
         with self.assertRaises(TypeError):
             wait.output_contract.validate({"answer": 1})
@@ -115,6 +118,7 @@ class WaitRecoveryTests(unittest.TestCase):
                 "approval@root", "wait-1", {"question": "continue?"}
             )
         )
+        harness.emit(CommandsPending('approval@root'))
         harness.emit(RecoveryApplied())
         self.assertEqual(
             harness.state.invocation.scheduler.waits["wait-1"].status, "waiting"

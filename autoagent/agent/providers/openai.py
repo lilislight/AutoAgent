@@ -61,7 +61,6 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
         return self.adapter.protocol
 
     async def _prepare_request(self, request: LLMRequest) -> LLMRequest:
-        request = LLMRequest.model_validate(request)
         profile = self._profiles.get(request.model)
         if profile is not None:
             profile.check(request, provider_id=self.provider_id, protocol=self.protocol)
@@ -82,12 +81,17 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
                             value = await self._media_resolver(source)
                             if not isinstance(value, (URLSource, DataSource, ProviderSource)):
                                 raise TypeError("Media resolver must return a resolved media source.")
-                            resolved[key] = value
-                        part = type(part).model_validate({**part.model_dump(mode="python"), "source": resolved[key]})
+                            resolved[key] = type(value).model_validate(value)
+                        # Only the validated source changes; the call boundary
+                        # already validated and detached the complete request.
+                        part = part.model_copy(update={"source": resolved[key]})
                     content.append(part)
-                item = type(item).model_validate({**item.model_dump(mode="python"), "content": tuple(content)})
+                if any(before is not after for before, after in zip(item.content, content)):
+                    item = item.model_copy(update={"content": tuple(content)})
             inputs.append(item)
-        return LLMRequest.model_validate({**request.model_dump(mode="python"), "input": tuple(inputs)})
+        if any(before is not after for before, after in zip(request.input, inputs)):
+            return request.model_copy(update={"input": tuple(inputs)})
+        return request
 
     def _endpoint(self, client):
         return client.responses if self.protocol == "openai.responses" else client.chat.completions

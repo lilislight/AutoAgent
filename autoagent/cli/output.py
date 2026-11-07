@@ -90,7 +90,7 @@ def render(document, format):
             estimates = host.get('residency', {})
             lines.append(f"CACHED STATE ESTIMATE {mib(estimates.get('estimated_bytes'))} (not an RSS breakdown)")
             if data.get('history'):
-                lines.append(f"HISTORY {len(data['history'])}/{data['history_capacity']} samples (use --format json for values)")
+                lines.append(f"HISTORY {len(data['history'])} points / {data['history_count']} selected samples; {data['history_retained_samples']}/{data['history_capacity']} retained (use --format json for values)")
         return '\n'.join(lines) + '\n'
     if command == "invoke" or command.startswith("invocation."):
         for key in ("workflow_id", "revision_id", "session_id", "invocation_id", "operation_id", "request_id", "status", "control_state", "observation", "host_state"):

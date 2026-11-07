@@ -17,6 +17,7 @@ class OpenAIProviderConfig(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+    pricing_provider: NonEmpty | None = None
     provider_id: NonEmpty = "openai"
     api_key: SecretStr | None = Field(default=None, repr=False)
     base_url: str = "https://api.openai.com/v1"

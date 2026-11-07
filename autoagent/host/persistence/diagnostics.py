@@ -30,7 +30,7 @@ class Diagnostics:
         family = family.union(select(invs.c.invocation_id).join(family,
             invs.c.parent_invocation_id == family.c.invocation_id))
         ids = select(family.c.invocation_id)
-        async with self.queries.view() as (conn, _, _, frontier):
+        async with self.queries.view(invocation_id=iid) as (conn, _, _, frontier):
             selected = (await conn.execute(select(*columns(invs), definitions.c.workflow_id, definitions.c.workflow_version).select_from(invs)
                 .join(definitions, invs.c.workflow_revision_id == definitions.c.revision_id)
                 .where(invs.c.invocation_id == iid))).mappings().first()

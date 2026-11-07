@@ -76,7 +76,9 @@ def build_parser():
     memory = groups.add_parser('memory', parents=[common], allow_abbrev=False,
         help='Read bounded process memory telemetry from a running Server.')
     memory.set_defaults(memory_query=True)
-    memory.add_argument('--history', type=int, default=0, help='Include up to the configured number of recent samples (0–3600).')
+    memory.add_argument('--history', type=int, default=0, help='Select recent samples within configured capacity (0–604800).')
+    memory.add_argument('--window-seconds', type=float, help='Select a recent time window, up to 604800 seconds (7 days).')
+    memory.add_argument('--points', type=int, default=600, help='Maximum returned history points, preserving RSS extrema (2–2000).')
     invoke = groups.add_parser("invoke", parents=[common], allow_abbrev=False, help="Start a registered Workflow in a new or existing Session.")
     invoke.add_argument("workflow_id")
     invoke.add_argument("--revision-id")

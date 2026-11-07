@@ -110,7 +110,7 @@ class StateInspection:
         budget = ReadBudget(self.config)
         q = self.queries
         events, invs, members = (meta.tables[n] for n in ("runtime_events", "invocations", "checkpoint_sessions"))
-        async with q.view() as (conn, _, _, frontier):
+        async with q.view(invocation_id=iid) as (conn, _, _, frontier):
             inv = (await conn.execute(select(invs.c.session_id, invs.c.root_invocation_id,
                 invs.c.parent_invocation_id).where(invs.c.invocation_id == iid))).first()
             if inv is None:

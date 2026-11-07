@@ -435,23 +435,13 @@ class CompilerTests(unittest.TestCase):
         )
         self.assertIs(aggregated.node("map").output_contract.annotation, Value)
 
-    def test_map_wait_combination_is_rejected(self) -> None:
-        """Verify one Wait occurrence cannot suspend multiple mapped items."""
+    def test_map_wait_combination_is_supported(self) -> None:
+        """A mapped Wait compiles with one typed request and response per unit."""
 
-        with self.assertRaisesRegex(WorkflowCompileError, "MAP_WAIT_UNSUPPORTED"):
-            self.compiler.compile_or_raise(
-                Workflow(
-                    "map-wait",
-                    nodes=[
-                        Node(
-                            "approval",
-                            Wait(Value, OtherValue),
-                            input_mapping=map_inputs,
-                            map=Map(max_parallelism=2),
-                        )
-                    ],
-                )
-            )
+        compiled = self.compiler.compile_or_raise(Workflow("map-wait", nodes=[Node(
+            "approval", Wait(Value, OtherValue), input_mapping=map_inputs,
+            map=Map(max_parallelism=2))]))
+        self.assertEqual(compiled.node('approval').map.max_parallelism, 2)
 
     def test_hook_contracts_are_checked(self) -> None:
         """Verify hook contracts are checked."""

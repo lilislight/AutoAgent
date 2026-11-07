@@ -6,6 +6,8 @@ progress is exposed only as semantic OperatorCall payloads.
 
 from __future__ import annotations
 
+from ..usage import UsageAccountingError
+
 import asyncio
 import inspect
 import threading
@@ -124,7 +126,7 @@ class NodeExecutor:
         invocation_context: object,
         session_context: object,
     ) -> object:
-        if getattr(node.executable, 'id', None) in {'system_command:receive_signal', 'system_command:await_signal', 'system_command:select'}:
+        if node.executable.id in {'system_command:receive_signal', 'system_command:await_signal', 'system_command:select'} and node.input_contract is None:
             return None
         if node.input_mapping is None:
             if not incoming:
@@ -192,16 +194,17 @@ class NodeExecutor:
         previous_calls=None,
         aggregate: bool = True,
         _retain_outputs: bool = True,
+        resolve_unit=None,
     ) -> NodeExecutionResult:
         if not _retain_outputs and aggregate:
             raise ValueError("Discarding transient outputs requires external aggregation.")
         if self._closed:
             raise RuntimeError("NodeExecutor is closed.")
-        if isinstance(node.executable, (Capability, CommandIR, Wait)):
+        if isinstance(node.executable, (CommandIR, Wait)) or (isinstance(node.executable, Capability) and resolve_unit is None):
             raise TypeError(
                 f"Node {node.id!r} requires a dispatcher owned by AutoAgentApp."
             )
-        if not isinstance(node.executable, Operator):
+        if not isinstance(node.executable, (Operator, Capability)):
             raise TypeError(f"Node {node.id!r} is not directly executable.")
 
         started = time.perf_counter_ns()
@@ -221,8 +224,9 @@ class NodeExecutor:
                 active += 1
                 peak = max(peak, active)
             try:
+                executable_node = await resolve_unit(index, item) if resolve_unit is not None else node
                 output, count = await self._call(
-                    node,
+                    executable_node,
                     occurrence_id,
                     index,
                     item,
@@ -516,7 +520,7 @@ class NodeExecutor:
             error = RuntimeErrorInfo(type(exc).__name__, str(exc) or type(exc).__name__)
             policy = node.retry
             eligible = (isinstance(exc, Exception)
-                and not isinstance(exc, (UserCallableCancelledError, RuntimeInfrastructureError, RuntimeTransitionError))
+                and not isinstance(exc, (UserCallableCancelledError, RuntimeInfrastructureError, RuntimeTransitionError, UsageAccountingError))
                 and (stage == "handler" or source_failed or isinstance(exc, NodeTimeoutError))
                 and not emitted and not lease.has_deferred_work)
             matches = policy is not None and any(base.__name__ in policy.retry_on for base in type(exc).__mro__)

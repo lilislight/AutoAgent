@@ -10,7 +10,7 @@ from uuid import uuid4
 from unittest.mock import patch
 import httpx
 from pydantic import BaseModel,ConfigDict
-from autoagent import Edge,Node,ReceiveSignal,SignalEndpoint,Spawn,Wait,Workflow,Map,InputMappingContext
+from autoagent import Edge,Node,ReceiveSignal,Recovery,SignalEndpoint,Spawn,Wait,Workflow,Map,InputMappingContext
 from autoagent.host import AutoAgentHost,HostSettings,HostCapacityError
 from autoagent.host.persistence.reading import SourceReader
 from autoagent.server import create_app,ServerSettings
@@ -289,7 +289,7 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
             if calls['flaky']==1:
                 raise ValueError('temporary')
             return value
-        wf=Workflow('recover-http-failed',nodes=[Node('first',first),Node('flaky',flaky)],edges=[Edge('first','flaky')])
+        wf=Workflow('recover-http-failed',nodes=[Node('first',first),Node('flaky',flaky,recovery_mode=Recovery('replay_safe'))],edges=[Edge('first','flaky')])
         async with self.host([wf]) as host:
             root=await host.execute(wf.id,{'text':'persist'},entry_node_id='first')
             self.assertEqual((await host.join(root)).status,'failed')
@@ -363,7 +363,7 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelled_wait_recovers_through_http_in_the_original_invocation(self):
         """Cancel and Recover create a new actionable Wait without replacing the Session or Invocation."""
-        wf=Workflow('recover-http-wait',nodes=[Node('ask',Wait(Value,Value))])
+        wf=Workflow('recover-http-wait',nodes=[Node('ask',Wait(Value,Value),recovery_mode=Recovery('replay_safe'))])
         async with self.host([wf]) as host:
             root=await host.execute(wf.id,{'text':'ask'},entry_node_id='ask')
             old=(await host.join(root)).waits[0].id
@@ -390,7 +390,7 @@ class ExecutionActionTests(unittest.IsolatedAsyncioTestCase):
             if count==1:
                 raise ValueError('transient')
             return value
-        wf=Workflow('recover-admission-race',nodes=[Node('work',work)])
+        wf=Workflow('recover-admission-race',nodes=[Node('work',work,recovery_mode=Recovery('replay_safe'))])
         async with self.host([wf]) as host:
             root=await host.execute(wf.id,{'text':'race'},entry_node_id='work')
             await host.join(root)

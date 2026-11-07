@@ -108,7 +108,7 @@ class Tool:
     def is_async(self) -> bool:
         return self.metadata.is_async
 
-    def _arguments(self, call: LLMToolCall) -> dict | LLMToolResult:
+    def _prepare(self, call: LLMToolCall) -> tuple[dict, dict] | LLMToolResult:
         if call.name != self.metadata.name:
             return error_result(call, "unknown_tool", f"This Tool is named {self.metadata.name!r}, not {call.name!r}.")
         try:
@@ -126,10 +126,11 @@ class Tool:
             return error_result(call, "invalid_arguments", message)
         except (TypeError, ValueError) as error:
             return error_result(call, "invalid_arguments", str(error))
-        return {
+        arguments = {
             parameter: getattr(value, internal)
             for internal, parameter in self.metadata._bindings
         }
+        return arguments, value.model_dump(mode="json", by_alias=True, warnings="error")
 
     def _result(self, call: LLMToolCall, value: object) -> LLMToolResult:
         try:
@@ -175,12 +176,17 @@ class Tool:
         if self.is_async:
             raise TypeError("Use ainvoke for an asynchronous Tool.")
         call = LLMToolCall.model_validate(call)
-        arguments = self._arguments(call)
-        if isinstance(arguments, LLMToolResult):
-            return arguments
+        prepared = self._prepare(call)
+        if isinstance(prepared, LLMToolResult):
+            return prepared
+        arguments, record = prepared
         context = resolve_context(call, context)
         if context.allowed_tools is not None and call.name not in context.allowed_tools:
             return error_result(call, "tool_access_denied", "Tool execution is not permitted.")
+        return self._execute(call, arguments, context.for_call(call, record))
+
+    def _execute(self, call, arguments, context):
+        arguments = dict(arguments)
         if self.metadata.context_parameter is not None:
             arguments[self.metadata.context_parameter] = context
         token = _current_context.set(context)
@@ -200,12 +206,19 @@ class Tool:
         if not self.is_async:
             return await run_sync(self.invoke, call, context=context)
         call = LLMToolCall.model_validate(call)
-        arguments = self._arguments(call)
-        if isinstance(arguments, LLMToolResult):
-            return arguments
+        prepared = self._prepare(call)
+        if isinstance(prepared, LLMToolResult):
+            return prepared
+        arguments, record = prepared
         context = resolve_context(call, context)
         if context.allowed_tools is not None and call.name not in context.allowed_tools:
             return error_result(call, "tool_access_denied", "Tool execution is not permitted.")
+        return await self._aexecute(call, arguments, context.for_call(call, record))
+
+    async def _aexecute(self, call, arguments, context):
+        if not self.is_async:
+            return await run_sync(self._execute, call, arguments, context)
+        arguments = dict(arguments)
         if self.metadata.context_parameter is not None:
             arguments[self.metadata.context_parameter] = context
         token = _current_context.set(context)

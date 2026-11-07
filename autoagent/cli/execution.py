@@ -28,8 +28,13 @@ def validate_options(options):
         raise CliError("USAGE_ERROR", "--server is supported by execution and persisted-history commands.")
     if options.group == "server" and hasattr(options, "output"):
         raise CliError("USAGE_ERROR", "server writes its ready report to stdout; --output is not supported.")
-    if options.group == 'memory' and not 0 <= options.history <= 3600:
-        raise CliError('USAGE_ERROR', '--history must be between 0 and 3600.')
+    if options.group == 'memory':
+        if not 0 <= options.history <= 604800:
+            raise CliError('USAGE_ERROR', '--history must be between 0 and 604800.')
+        if not 2 <= options.points <= 2000:
+            raise CliError('USAGE_ERROR', '--points must be between 2 and 2000.')
+        if options.window_seconds is not None and (not math.isfinite(options.window_seconds) or not 0 < options.window_seconds <= 604800):
+            raise CliError('USAGE_ERROR', '--window-seconds must be positive and at most 604800.')
     for key in ("request_timeout", "wait_timeout"):
         value = getattr(options, key, None)
         if value is not None and (not math.isfinite(value) or value < 0 or key == "request_timeout" and value == 0):

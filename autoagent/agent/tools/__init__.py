@@ -8,9 +8,11 @@ from .execution import (
 )
 from .toolset import ToolSet
 from .context import ToolContext, ToolHooks
+from .permissions import ToolDecision, ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolPreflight
 
 __all__ = [
-    "ToolContext", "ToolHooks",
+    "ToolContext", "ToolHooks", "ToolDecision", "ToolApproval", "ToolApprovalRequest", "ToolApprovalRequired",
+    "ToolPreflight",
     "ExecutableTool", "Tool", "ToolBusinessError", "ToolDefinition", "ToolError",
     "ToolExecutionError", "ToolOutputError", "ToolSet", "get_tool_definition", "tool",
 ]

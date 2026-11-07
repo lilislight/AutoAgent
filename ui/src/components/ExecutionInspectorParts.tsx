@@ -1,3 +1,4 @@
+import { FactsSkeleton, RecordsSkeleton } from './LoadingState';
 import { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, getExecutionItems, getExecutionRecord, getExecutionStages } from '../api';
@@ -26,7 +27,7 @@ export function useInspectorPage(iid: string, kind: string, filters: Record<stri
     next: () => { if (query.data?.next_cursor) setPosition({ scope, cursors: [...current.cursors.slice(0, current.index + 1), query.data.next_cursor], index: current.index + 1 }); } };
 }
 export function PageFeedback({ page, empty }: { page: ReturnType<typeof useInspectorPage>; empty?: string }) {
-  return page.query.isPending ? <p className="inspector-empty" role="status">Loading records…</p> : page.query.error ? <div className="sidebar-error"><p>{page.query.error.message}</p><button onClick={() => void page.query.refetch()}>Retry</button></div> : !page.rows.length && empty ? <p className="inspector-empty">{empty}</p> : null;
+  return page.query.isPending ? (page.query.isFetching ? <RecordsSkeleton label="Loading records" /> : null) : page.query.error ? <div className="sidebar-error"><p>{page.query.error.message}</p><button onClick={() => void page.query.refetch()}>Retry</button></div> : !page.rows.length && empty ? <p className="inspector-empty">{empty}</p> : null;
 }
 export function InspectorPages({ page, label }: { page: ReturnType<typeof useInspectorPage>; label: string }) {
   return !page.index && !page.query.data?.next_cursor ? null : <nav className="inspector-pagination" aria-label={`${label} pages`}><button disabled={!page.index || page.query.isFetching} onClick={page.previous}>Previous</button><span>Page {page.index + 1}</span><button disabled={!page.query.data?.next_cursor || page.query.isFetching} onClick={page.next}>Next</button></nav>;
@@ -72,8 +73,8 @@ export function CallInspector({ row, workflow, frontier, onBack, onClose, backLa
     {tab => {
       switch (tab) {
         case 'Summary': return <>
-          {detail.isPending ? <p className="inspector-empty" role="status">Loading Call metadata…</p> : detail.error ? <div className="sidebar-error"><p>{detail.error.message}</p><button onClick={() => void detail.refetch()}>Retry</button></div> : null}
-          <RowDetails row={status} />
+          {detail.isLoading ? <FactsSkeleton label="Loading Call metadata" /> : detail.error ? <div className="sidebar-error"><p>{detail.error.message}</p><button onClick={() => void detail.refetch()}>Retry</button></div> : null}
+          {!detail.isPending ? <RowDetails row={status} /> : null}
           {command && !spawning && wait.error ? <div className="sidebar-error"><p>{wait.error.message}</p><button onClick={() => void wait.refetch()}>Retry Wait metadata</button></div> : null}
           {command && executionTiming(record) == null ? <p className="inspector-empty">Elapsed time includes command waits; no separate processing duration was recorded.</p> : null}
           {record.values.includes('error') ? <LazyValue invocationId={iid} kind="call" identity={record.call_id!} field="error" valueKey={record.value_keys?.error} label="Error" /> : null}
@@ -101,7 +102,7 @@ export function CommandWaitDetails({ row }: { row: TraceRow }) {
   const wait = useQuery({ queryKey: ['execution-record', row.invocation_id, 'wait', row.call_id, snapshot.epoch], meta: snapshot.meta,
     queryFn: ({ signal }) => getExecutionRecord(row.invocation_id, 'wait', row.call_id!, signal), enabled: navigation.active,
     staleTime: Infinity, gcTime: 30_000, refetchOnWindowFocus: false });
-  return wait.isPending ? <p className="inspector-empty" role="status">Loading Wait…</p> : wait.error ? <div className="sidebar-error"><p>{wait.error.message}</p><button onClick={() => void wait.refetch()}>Retry</button></div> : <WaitFacts row={wait.data} />;
+  return wait.isPending ? (wait.isFetching ? <FactsSkeleton label="Loading Wait" /> : null) : wait.error ? <div className="sidebar-error"><p>{wait.error.message}</p><button onClick={() => void wait.refetch()}>Retry</button></div> : <WaitFacts row={wait.data} />;
 }
 function WaitFacts({ row }: { row: TraceRow }) {
   return <dl className="trace-facts"><dt>Wait ID</dt><dd><CopyId value={String(row.wait_id)} /></dd><dt>Status</dt><dd><StatusBadge row={row} /></dd><dt>Kind</dt><dd>{String(row.kind)}</dd><dt>Started</dt><dd>{formatTime(row.created_at_us as number, true)}</dd><dt>{row.status === 'cancelled' ? 'Cancelled' : 'Resolved'}</dt><dd>{formatTime((row.end_at_us ?? row.resumed_at_us) as number, true)}</dd>{row.deadline_at_us != null ? <><dt>Deadline</dt><dd>{formatTime(row.deadline_at_us as number, true)}</dd></> : null}</dl>;

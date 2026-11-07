@@ -61,6 +61,26 @@ class ProviderRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.total_tokens, 5)
         self.assertEqual(row.provider_request_id, "request_1")
 
+    async def test_billing_details_preserve_inclusive_cache_counts_without_payloads(self):
+        """OpenAI-shaped cache extensions never add cached tokens to input a second time."""
+        from autoagent.agent import LocalTokenPricing, TokenPrice, OpenAIProviderConfig
+        recorder = Recorder()
+        reply = providers.chat_body()
+        reply["usage"] = {"prompt_tokens": 100, "completion_tokens": 2, "total_tokens": 102,
+                          "cache_read_input_tokens": 60, "cache_creation_input_tokens": 10,
+                          "prompt_tokens_details": {"cached_tokens": 60},
+                          "unexpected_private_field": "not stored"}
+        provider, _, captured = self.provider("chat", recorder=recorder, reply=reply)
+        provider.config = OpenAIProviderConfig(provider_id="test", pricing_provider="vendor")
+        await provider.ainvoke(providers.request())
+        record = recorder.records[-1]
+        pricing = LocalTokenPricing(overrides={"vendor/model": TokenPrice("1", "3", "0.2", "2")},
+                                    use_litellm_catalog=False)
+        self.assertEqual(pricing.calculate(record).units, 68_000_000)
+        self.assertEqual(record.billing_details["pricing_provider"], "vendor")
+        self.assertNotIn("unexpected_private_field", record.billing_details["usage"])
+        self.assertNotIn("pricing_provider", captured[0][1])
+
     async def test_decode_failures_keep_the_known_remote_request_id(self):
         """A malformed response still records the request ID received in HTTP headers."""
         recorder = Recorder()

@@ -449,8 +449,8 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
         finally:
             app.close()
 
-    def test_child_map_keeps_parallel_limit_after_wait_resume(self) -> None:
-        """Verify resumed Child Map units still obey Node Map parallelism."""
+    def test_child_map_uses_global_operator_limit_after_wait_resume(self) -> None:
+        """Resumed Children share global Operator capacity independently of Map admission."""
 
         active = 0
         peak = 0
@@ -484,7 +484,7 @@ class RuntimeBoundaryRegressionTests(unittest.TestCase):
                 )
             ],
         )
-        app = AutoAgentApp()
+        app = AutoAgentApp(max_operator_concurrency=1)
         try:
             root = app.invoke(
                 parent,

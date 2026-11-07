@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Literal, TypeAlias
 
 from ..errors import RuntimeTransitionError
-from .values import freeze
+from .values import freeze, thaw, _FrozenMap, _FrozenTuple
 from ._chunked import ChunkedUnits, ChunkedMap, MapEdit, runtime_mapping
 
 
@@ -124,6 +124,8 @@ def _runtime_mapping(value: Mapping[object, object]) -> dict[str, object]:
 def _encode_runtime(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if type(value) in (_FrozenMap, _FrozenTuple):
+        return thaw(value)
     if isinstance(value, Mapping):
         return {
             key: _encode_runtime(item)

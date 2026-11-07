@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from ..usage import UsagePolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,9 @@ class OperatorCallContext:
     unit_index: int | None = None
     attempt: int = 1
     retry_attempt: int = 0
+    node_usage: UsagePolicy | None = None
+    invocation_usage: UsagePolicy | None = None
+    session_usage: UsagePolicy | None = None
 
     @classmethod
     def current(cls) -> OperatorCallContext | None:

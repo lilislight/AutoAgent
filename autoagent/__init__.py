@@ -1,11 +1,12 @@
 """Stable authoring and invocation API for AutoAgent V2."""
 
-from .core.commands import Wait
+from .core.commands import Wait, CommandInvoker
 from .core.app import (
     AppCheckpoint,
     AutoAgentApp,
     CheckpointLoadResult,
     GraphResidencyInfo,
+    InvocationControlSnapshot,
     InvocationRef,
     InvocationResult,
     InvocationStatus,
@@ -21,6 +22,7 @@ from .core.compiler import (
 from .core.context import ContextOperation, ContextPatch
 from .core.errors import (
     NodeTimeoutError,
+    WaitTimeoutError,
     AutoAgentError,
     RuntimeInfrastructureError,
     RuntimeTransitionError,
@@ -55,7 +57,7 @@ from .core.workflow import (
 
 __all__ = [
     "RetryPolicy", "BackoffPolicy", "ResourcePolicy",
-    "TimeoutPolicy", "NodeTimeoutError", "run_sync",
+    "TimeoutPolicy", "NodeTimeoutError", "WaitTimeoutError", "run_sync",
     "AggregationContext",
     "AppCheckpoint",
     "AutoAgentApp",
@@ -63,6 +65,7 @@ __all__ = [
     "Capability",
     "CheckpointLoadResult",
     "GraphResidencyInfo",
+    "InvocationControlSnapshot",
     "CompileResult",
     "ConditionContext",
     "Context",
@@ -95,6 +98,7 @@ __all__ = [
     "UserEventSpec",
     "ValueContract",
     "Wait",
+    "CommandInvoker",
     "Workflow",
     "WorkflowCompileError",
     "WorkflowCompiler",
@@ -122,9 +126,17 @@ __all__ += ["SelfHandle", "OwnerHandle"]
 
 from .core.commands import AwaitSignal, SignalCase, TimerCase, ChildCase, Select, SelectResult, SuspensionInfo
 __all__ += ["AwaitSignal", "SignalCase", "TimerCase", "ChildCase", "Select", "SelectResult", "SuspensionInfo"]
+from .core.commands import SelectRequest, SignalRequestCase, TimerRequestCase, ChildRequestCase, SendSignalRequest, ReceiveSignalRequest
+__all__ += ["SelectRequest", "SignalRequestCase", "TimerRequestCase", "ChildRequestCase", "SendSignalRequest", "ReceiveSignalRequest"]
 
 from .core.runtime.recovery import RecoverySource
 __all__ += ["RecoverySource"]
 
 from .core.runtime.fork import ForkPlan
 __all__ += ['ForkPlan']
+
+from .core.usage import UsagePolicy, WorkflowResourcePolicy, ResourceBudgetExceeded, UsageAccountingError
+__all__ += ["UsagePolicy", "WorkflowResourcePolicy", "ResourceBudgetExceeded", "UsageAccountingError"]
+
+from .core.commands import HasSignal, HasSignalRequest, HasSignalResult
+__all__ += ["HasSignal", "HasSignalRequest", "HasSignalResult"]

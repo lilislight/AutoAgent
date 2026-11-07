@@ -1,4 +1,6 @@
-interface Config { apiPrefix: string; uiBase: string; pageSize: number }
+import { temporaryReadDelay } from './temporaryReadDelay.js';
+
+interface Config { apiPrefix: string; uiBase: string; pageSize: number; defaultView?: 'agents' | 'workflows' }
 const element = document.getElementById("autoagent-config");
 export const config: Config = element?.textContent
   ? JSON.parse(element.textContent) as Config
@@ -8,6 +10,8 @@ export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly fields: import("./jsonSchema.js").FieldError[] = []) { super(message); }
 }
 export async function request<T>(path: string, signal: AbortSignal, init?: RequestInit): Promise<T> {
+  // TEMPORARY visual check; remove with temporaryReadDelay.ts after review.
+  if ((init?.method ?? 'GET').toUpperCase() === 'GET') await temporaryReadDelay(signal);
   const headers = new Headers(init?.headers);
   headers.set('Accept', 'application/json');
   const response = await fetch(config.apiPrefix + path, {
@@ -27,4 +31,3 @@ export async function request<T>(path: string, signal: AbortSignal, init?: Reque
   if (response.status === 204) return undefined as T;
   return await response.json() as T;
 }
-

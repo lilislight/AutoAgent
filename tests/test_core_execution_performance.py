@@ -47,6 +47,85 @@ class CheckingRepository(RuntimeRepository):
 
 
 class ExecutionPerformanceTests(unittest.TestCase):
+    def test_sparse_call_cleanup_replays_like_whole_call_replacement(self):
+        """Releasing values preserves Call metadata and matches dense replay at every boundary."""
+        from dataclasses import replace
+        from autoagent.core.runtime import RuntimeState, StateReducer, StateDelta, StateOperation
+        events = []
+        class Sink:
+            async def append(self, event):
+                events.append(event)
+        def inputs(context: InputMappingContext) -> list[Value]:
+            return [{'value': index} for index in range(30)]
+        app = AutoAgentApp(runtime_event_sink=Sink())
+        try:
+            result = app.invoke(Workflow('compact-calls', nodes=[Node('map', identity,
+                input_mapping=inputs, map=Map(max_parallelism=8))]), {})
+            self.assertEqual(result.status, 'completed')
+            state, reducer, cleared = RuntimeState(), StateReducer(), 0
+            for event in events:
+                replacements, operations = {}, []
+                for operation in event.delta.operations:
+                    path = operation.path
+                    if (event.event_name in ('node.aggregated', 'node_occurrence.completed', 'node_occurrence.failed')
+                            and len(path) == 5 and path[:3] == ('invocation', 'scheduler', 'operator_calls')
+                            and path[-1] in ('input', 'output') and operation.value is None):
+                        call = replacements.get(path[3], state.invocation.scheduler.operator_calls[path[3]])
+                        replacements[path[3]] = replace(call, **{path[-1]: None})
+                        cleared += 1
+                    else:
+                        operations.append(operation)
+                    if event.event_name == 'operator_call.completed':
+                        self.assertNotEqual(path[-1], 'error')
+                operations.extend(StateOperation._from_owned('replace',
+                    ('invocation', 'scheduler', 'operator_calls', key), value)
+                    for key, value in replacements.items())
+                sparse = reducer.apply(state, event)
+                dense = reducer.apply(state, replace(event, delta=StateDelta(tuple(operations))))
+                self.assertEqual(sparse, dense)
+                state = sparse
+            self.assertGreater(cleared, 0)
+            for call in state.invocation.scheduler.operator_calls.values():
+                self.assertEqual(call.status, 'completed')
+                self.assertIsNone(call.input)
+                self.assertIsNone(call.output)
+                self.assertIsNotNone(call.completed_at_us)
+            self.assertEqual(state, app._repository.state(result.session_id))
+        finally:
+            app.close()
+
+    def test_map_call_starts_do_not_repeat_workspace_and_events_replay_exactly(self):
+        """Map starts change phase once and preserve the acknowledged State on replay."""
+        from autoagent.core.runtime import RuntimeState, StateReducer
+        events = []
+
+        class Sink:
+            async def append(self, event):
+                events.append(event)
+
+        def inputs(context: InputMappingContext) -> list[Value]:
+            return [{'value': index} for index in range(30)]
+
+        app = AutoAgentApp(runtime_event_sink=Sink())
+        try:
+            result = app.invoke(Workflow('sparse-workspace', nodes=[Node('map', identity,
+                input_mapping=inputs, map=Map(max_parallelism=8))]), {})
+            self.assertEqual(result.status, 'completed')
+            starts = [event for event in events if event.event_name == 'operator_call.started']
+            self.assertEqual(len(starts), 30)
+            phases = []
+            for event in starts:
+                for operation in event.delta.operations:
+                    self.assertNotEqual(operation.path[-1], 'execution')
+                    if operation.path[-2:] == ('execution', 'phase'):
+                        phases.append(operation.value)
+            self.assertEqual(phases, ['executing'])
+            state = RuntimeState()
+            for event in events:
+                state = StateReducer().apply(state, event)
+            self.assertEqual(state, app._repository.state(result.session_id))
+        finally:
+            app.close()
     def test_loop_and_map_indexes_match_state_at_every_ack(self):
         """Incremental lookups match full State scans across loops and parallel calls."""
         def inputs(context: InputMappingContext) -> list[Value]:

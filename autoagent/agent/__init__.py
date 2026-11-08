@@ -75,6 +75,8 @@ from .context import (
     apply_approval_mode, agent_runtime_context, current_agent_context,
 )
 from .resources import AgentResource, AgentResourceRegistry
+from .workspace import *
+from .workspace import __all__ as _workspace_exports
 from .resource_sources import MCPResourceSource, SkillDirectorySource
 from .workflow.events import *
 from .workflow.events import __all__ as _event_exports
@@ -120,5 +122,6 @@ __all__ = [
     "LLMStreamReducer", "LLMStreamState", "tool_operator",
     "MCPToolStreamReducer", "MCPToolStreamState",
     *_skill_exports,
+    *_workspace_exports,
     *_event_exports,
 ]

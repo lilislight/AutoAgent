@@ -138,8 +138,8 @@ class SkillSnapshotAsyncTests(unittest.IsolatedAsyncioTestCase):
         frozen = SkillSet([live]).freeze()
         live.source._files["refs/rules.txt"] = b"changed"
         tools = ToolSet(frozen.as_tools())
-        result = await tools.ainvoke(LLMToolCall(name="skill_read_text", call_id="1", arguments='{"name":"report","path":"refs/rules.txt"}'))
-        self.assertEqual(result.structured_content["text"], "original")
+        result = await tools.ainvoke(LLMToolCall(name="skill_read_resource", call_id="1", arguments='{"name":"report","path":"refs/rules.txt"}'))
+        self.assertEqual(result.content[0].text, "original")
         self.assertEqual(result.structured_content["snapshot_revision"], frozen["report"].snapshot_revision)
 
     async def test_script_and_companion_resource_execute_from_the_frozen_version(self):

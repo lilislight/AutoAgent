@@ -175,7 +175,7 @@ class HistoryProjectionTests(unittest.TestCase):
             model=AgentModelSettings(provider="a", model="m")))
         routes = []
         for endpoint in ("http://one.example/v1", "http://two.example/v1"):
-            context = HostAgentContext(SimpleNamespace(environment={}))
+            context = HostAgentContext(SimpleNamespace(environment={}, root=Path("/project")))
             provider = OpenAIResponsesProvider(OpenAIProviderConfig(provider_id="connection-a", base_url=endpoint,
                 api_key="DO_NOT_STORE", headers={"Authorization": "SECRET_HEADER"}))
             context.resources.register_provider("a", provider)

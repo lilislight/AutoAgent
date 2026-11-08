@@ -28,7 +28,16 @@ class WorkflowUI(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except HTTPException as exc:
-            if exc.status_code != 404 or not (path == "workflows" or path.startswith("workflows/")):
+            # Inspect the encoded segment so arbitrary Session IDs (including
+            # encoded slashes) remain one route segment. Unknown asset paths
+            # must still return 404 instead of the application's HTML.
+            raw_path = scope.get("raw_path", b"").split(b"?", 1)[0]
+            segment = (raw_path.rsplit(b"/agent/c/", 1)[-1] if b"/agent/c/" in raw_path
+                else path[len("agent/c/"):].encode()).rstrip(b"/")
+            agent_page = path in ("agent", "agent/") or (
+                path.startswith("agent/c/") and bool(segment) and b"/" not in segment
+            )
+            if exc.status_code != 404 or not (path == "workflows" or path.startswith("workflows/") or agent_page):
                 raise
             response = None
         if path in (".", "", "index.html", "workflows") or response is None:

@@ -36,6 +36,8 @@ def binding_error(service, snapshot, task, *, catalog=None):
 async def branch_tools(value):
     service = current_agent_context()
     snapshot = await service.snapshot()
+    if snapshot.settings.workspace is not None:
+        await service.prepare_workspace(snapshot)
     calls = value.response.tool_calls
     if len({call.call_id for call in calls}) != len(calls):
         raise ValueError("Model response contains duplicate Tool call IDs.")
@@ -99,6 +101,8 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
         return error_result(task.call, "tool_approval_denied", "Tool approval was denied.")
     service = current_agent_context()
     snapshot = await service.snapshot()
+    if snapshot.settings.workspace is not None:
+        await service.prepare_workspace(snapshot)
     catalog, _ = workflow_catalog(service, snapshot)
     error = binding_error(service, snapshot, task, catalog=catalog)
     if error is not None:
@@ -112,6 +116,8 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
         def __init__(self, result):
             self.result = result
     async def verify_binding(call, context):
+        if snapshot.settings.workspace is not None:
+            await service.prepare_workspace(snapshot)
         error = binding_error(service, snapshot, task)
         if error is not None:
             raise BindingChanged(error)

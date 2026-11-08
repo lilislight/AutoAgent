@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from ..models import LLMToolDefinition, ToolOutput
+from ..models import LLMToolDefinition, TextContent, ToolOutput
 from ..tools import Tool, ToolBusinessError
-from .errors import SkillError, SkillScriptError
+from .errors import SkillError, SkillResourceError, SkillScriptError
 from .files import resource_path
+from .sources import is_text
 from .models import SkillScriptResult
 from .rendering import document_message
 
@@ -53,10 +54,19 @@ def skill_tools(skills: SkillSet, *, prefix: str, runner: SkillScriptRunner | No
         except SkillError as error:
             raise ToolBusinessError(str(error), code=type(error).__name__) from error
 
-    def read_resource(name: str, path: str) -> ToolOutput:
-        """Read one bounded resource; script source is returned without execution."""
+    def read_resource(name: str, path: str, start_line: int = 1, max_lines: int | None = None,
+                      max_bytes: int | None = None) -> ToolOutput:
+        """Read a Skill resource. Text is paged by lines with next_line for continuation; other resources retain their media type. Script source is never executed."""
         try:
             skill = skills.require_model_access(name)
+            info = skill.source.resource_info(resource_path(path))
+            if is_text(info.mime_type):
+                value = skill.read_text(path, start_line=start_line, max_lines=max_lines, max_bytes=max_bytes)
+                return ToolOutput(content=(TextContent(text=value.text),), structured_content=value.model_dump(mode="json", exclude={"text"}),
+                    tool_metadata={"skill": {"name": name, "path": path, "revision": value.revision, "mime_type": value.resource.mime_type,
+                        "snapshot_revision": value.snapshot_revision, "operation": "read_resource"}})
+            if start_line != 1 or max_lines is not None or max_bytes is not None:
+                raise SkillResourceError("Line and text byte limits apply only to text resources.")
             value = skill.read_resource(path)
             return ToolOutput(content=value.content, tool_metadata={"skill": {
                 "name": name, "path": value.resource.path,
@@ -67,17 +77,8 @@ def skill_tools(skills: SkillSet, *, prefix: str, runner: SkillScriptRunner | No
         except SkillError as error:
             raise ToolBusinessError(str(error), code=type(error).__name__) from error
 
-    def read_text(name: str, path: str, start_line: int = 1, max_lines: int | None = None, max_bytes: int | None = None) -> ToolOutput:
-        """Read complete UTF-8 lines; next_line continues with bounded scan/output sizes."""
-        try:
-            skill = skills.require_model_access(name)
-            value = skill.read_text(path, start_line=start_line, max_lines=max_lines, max_bytes=max_bytes)
-            return ToolOutput(structured_content=value.model_dump(mode="json"))
-        except SkillError as error:
-            raise ToolBusinessError(str(error), code=type(error).__name__) from error
-
     handlers = [("load", load), ("list_resources", list_resources),
-                ("read_resource", read_resource), ("read_text", read_text)]
+                ("read_resource", read_resource)]
     if runner is not None:
         from .runner import SkillScriptRunner
         if not isinstance(runner, SkillScriptRunner):

@@ -12,6 +12,17 @@ from autoagent.host.persistence.schema import DETAIL_TABLES, meta
 
 
 class EventFixtureConnection(ProjectionConnection):
+    async def _invalidate_projections(self):
+        from autoagent.host.persistence.query_projections import reset
+        await reset(self.raw)
+        self.persisted_order = None
+        self.cache.clear()
+        self.loaded.clear()
+        self.relations.clear()
+        self.sql_scopes.clear()
+        self.merged = None
+        self.working_bytes = self.relation_bytes = 0
+
     async def execute(self, statement, *args, **kwargs):
         if isinstance(statement,Insert) and statement.table.name=='node_executions':
             from uuid import uuid4
@@ -30,12 +41,12 @@ class EventFixtureConnection(ProjectionConnection):
                 payload_text='{}',delta_text=json.dumps(delta)))
             await self.raw.execute(update(metadata).values(last_store_order=order+1))
             self.frontier=order+1
-            self.cache.clear();self.loaded.clear()
+            await self._invalidate_projections()
             return None
         if isinstance(statement,(Update,Delete)) and statement.table.name in DETAIL_TABLES:
             if isinstance(statement,Delete):
                 # Deleting optional cached projection rows cannot delete facts.
-                self.cache.clear(); self.loaded.clear()
+                await self._invalidate_projections()
                 return None
             table=statement.table
             records=(await super().execute(select(table).where(*statement._where_criteria))).mappings().all()
@@ -60,6 +71,10 @@ class EventFixtureConnection(ProjectionConnection):
                         elif len(path)==5 and path[4] in changes:op['value']=changes[path[4]];touched=True
                 if touched:
                     await self.raw.execute(update(events).where(events.c.event_id==row['event_id']).values(delta_text=json.dumps(delta)))
-            self.cache.clear();self.loaded.clear()
+            await self._invalidate_projections()
             return None
+        if isinstance(statement, Delete) and statement.table.name == 'runtime_events':
+            # Optional SQL projections can reference the deliberately truncated
+            # Event. Invalidate them before removing its canonical test fact.
+            await self._invalidate_projections()
         return await super().execute(statement,*args,**kwargs)

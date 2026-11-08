@@ -1,122 +1,168 @@
-"""Scenario controls and a separate read-only Evaluator context."""
+"""Workflow scenarios and business rules consume only Host ExecutionView."""
 
 import asyncio
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
-from .evidence import Evidence
+from autoagent.host.execution_view import ExecutionView, Interaction
+
 from .models import CheckResult, EvalCase, EvaluationError, json_copy
 
 
 @dataclass(frozen=True)
 class EvaluatorContext:
     case: EvalCase
-    evidence: Evidence | None
-    observations: tuple[Evidence, ...]
+    execution: ExecutionView | None
+    observations: tuple[ExecutionView, ...]
     resources: Mapping[str, Any]
 
 
 class ScenarioContext:
     def __init__(self, environment, options):
-        self.environment = environment
-        self.case = environment.case
-        self.resources = environment.resources
-        self._options = options
-        self._host = None
-        self._sessions = {}
-        self._roots = {}
-        self._submissions = set()
-        self._observations = []
-        self._checks = []
+        self.environment, self.resources = environment, environment.resources
+        self._options, self._host = options, None
+        self._sessions, self._roots = {}, {}
+        self._submissions, self._observations, self._checks = set(), [], []
+        self._read_scope = None
 
     @property
-    def observations(self):
-        return tuple(self._observations)
+    def observations(self): return tuple(self._observations)
+
+    @property
+    def case(self): return self.environment.case
+
+    def _iid(self, execution):
+        if isinstance(execution, Interaction): execution = execution.execution
+        return execution.invocation_id if isinstance(execution, ExecutionView) else execution
+
+    async def _owned(self, execution):
+        iid = self._iid(execution)
+        state = await self._host.get_execution_state(iid)
+        if state['invocation_id'] not in self._roots:
+            raise ValueError('Scenario controls are limited to this Trial\'s executions.')
+        return iid, state
+
+    async def _capture(self, execution):
+        iid, _ = await self._owned(execution)
+        return await self._host.get_execution_view(iid, read_limit=self._options.read_limit)
 
     async def invoke(self, workflow_id, value, *, entry_node_id, revision_id=None,
                      session='default', until='terminal', timeout=None):
-        """Session aliases belong to this Trial, never to another Case or Run."""
-        if not isinstance(session, str) or not session:
-            raise ValueError('Session alias must be a nonempty string.')
+        if not isinstance(session, str) or not session: raise ValueError('Session alias must be nonempty.')
         sid = self._sessions.setdefault(session, str(uuid4()))
-
         async def submit():
-            ref = await self._host.execute(workflow_id, json_copy(value), revision_id=revision_id,
+            ref = await self._host.execute_json(workflow_id, json_copy(value), revision_id=revision_id,
                 entry_node_id=entry_node_id, session_id=sid)
             self._roots[ref.invocation_id] = ref
             return ref
-
-        task = asyncio.create_task(submit())
-        self._submissions.add(task)
-        task.add_done_callback(self._submissions.discard)
-        ref = await asyncio.shield(task)
-        return await self.observe(ref, until=until, timeout=timeout)
-
-    def _iid(self, execution):
-        return execution.invocation_id if hasattr(execution, 'invocation_id') else execution
+        async with asyncio.timeout(timeout):
+            task = asyncio.create_task(submit())
+            self._submissions.add(task)
+            task.add_done_callback(self._submissions.discard)
+            ref = await asyncio.shield(task)
+            return await self.observe(ref.invocation_id, until=until)
 
     async def observe(self, execution, *, until='terminal', timeout=None):
-        iid = self._iid(execution)
-        if until not in ('none', 'boundary', 'terminal'):
-            raise ValueError('until must be none, boundary or terminal.')
+        if until not in ('none', 'boundary', 'terminal'): raise ValueError('until must be none, boundary or terminal.')
+        iid, _ = await self._owned(execution)
         async with asyncio.timeout(timeout):
             while True:
                 state = await self._host.wait_execution(iid, until=until)
                 if state['observation'] == 'interrupted':
                     raise EvaluationError('Execution was interrupted; recover explicitly in the Scenario.')
-                snapshot = await self._host.capture_execution_evidence(iid)
-                if until == 'none' or snapshot['settled'] or until == 'boundary' and snapshot['at_boundary']:
-                    evidence = Evidence(self._host, snapshot, self._options.evidence_event_limit)
-                    self._observations.append(evidence)
-                    return evidence
-                # A Timer may awaken between observation and durable capture.
+                view = await self._capture(iid)
+                if until == 'none' or view.settled or until == 'boundary' and view.to_record()['at_boundary']:
+                    self._observations.append(view)
+                    return view
                 await asyncio.sleep(.01)
 
+    async def wait_for(self, execution, *, node_id=None, state=None, interaction_node=None,
+                       child_workflow_id=None, message_kind=None, timeout=None):
+        """Await one business condition; polling never retains intermediate observations."""
+        if sum((node_id is not None, interaction_node is not None, child_workflow_id is not None, message_kind is not None)) != 1:
+            raise ValueError('Choose one Node state, pending approval, Child Workflow or message condition.')
+        if node_id is not None and state is None: raise ValueError('Node condition requires state.')
+        if node_id is not None and state not in ('ready','running','waiting','completed','failed','skipped','cancelled'):
+            raise ValueError('Unknown business Node state.')
+        async with asyncio.timeout(timeout):
+            while True:
+                view = await self._capture(execution)
+                match = False
+                if node_id is not None:
+                    match = any(item.status == state for item in await view.node(node_id).all())
+                elif interaction_node is not None:
+                    pending = [item for item in await view.interactions(node_id=interaction_node, family=True) if item.kind == 'external']
+                    if len(pending) > 1: raise EvaluationError('Approval is ambiguous; select a specific interaction in the business view.')
+                    match = bool(pending)
+                elif child_workflow_id is not None:
+                    children = view.children(workflow_id=child_workflow_id, recursive=True)
+                    match = bool(children) and all(item.status in ('completed', 'failed', 'cancelled') for item in children)
+                else:
+                    match = bool(await view.messages(kind=message_kind))
+                if match:
+                    self._observations.append(view)
+                    return view
+                if view.settled: raise EvaluationError('Execution finished without satisfying the requested business condition.')
+                await asyncio.sleep(.05)
+
     async def respond(self, execution, response, *, wait_id=None, node_id=None, until='terminal', timeout=None):
-        """Select exactly one external Wait, including one owned by a child."""
-        observation = await self.observe(execution, until='boundary', timeout=timeout)
-        candidates = [wait for member in observation.snapshot['members'] for wait in member['waits']
-            if wait['kind'] == 'external' and (wait_id is None or wait['wait_id'] == wait_id)
-            and (node_id is None or wait.get('node_id') == node_id)]
-        if len(candidates) != 1:
-            raise EvaluationError(f'Expected one matching external Wait; found {len(candidates)}. Select wait_id or node_id.')
-        wait = candidates[0]
-        await self._host.perform_execution_action(observation.snapshot['root_invocation_id'], 'respond',
-            target_invocation_id=wait['invocation_id'], wait_id=wait['wait_id'], payload=json_copy(response))
-        return await self.observe(execution, until=until, timeout=timeout)
+        async with asyncio.timeout(timeout):
+            while True:
+                view = await self._capture(execution)
+                candidates = [item for item in await view.interactions(node_id=node_id, family=True)
+                    if item.kind == 'external' and (wait_id is None or item.id == wait_id)]
+                if len(candidates) > 1: raise EvaluationError('Approval is ambiguous; select wait_id or node_id.')
+                if candidates: break
+                if view.settled: raise EvaluationError('Execution has no matching pending approval.')
+                await asyncio.sleep(.05)
+            target = candidates[0]
+            await self._host.perform_execution_action(view.root_invocation_id, 'respond',
+                target_invocation_id=target.execution.invocation_id, wait_id=target.id, payload=json_copy(response))
+            return await self.observe(execution, until=until)
 
     async def signal(self, execution, endpoint, payload, *, source_id, sequence, until='terminal', timeout=None):
-        await self._host.signal(self._iid(execution), endpoint, json_copy(payload), source_id=source_id, sequence=sequence)
-        return await self.observe(execution, until=until, timeout=timeout)
+        async with asyncio.timeout(timeout):
+            _, state = await self._owned(execution)
+            await self._host.perform_execution_action(state['invocation_id'], 'signal', endpoint=endpoint,
+                payload=json_copy(payload), source_id=source_id, sequence=sequence)
+            return await self.observe(execution, until=until)
 
     async def pause(self, execution, *, timeout=None):
-        await self._host.pause(self._iid(execution), timeout=timeout)
+        _, state = await self._owned(execution)
+        await self._host.pause(state['invocation_id'], timeout=timeout)
         return await self.observe(execution, until='boundary', timeout=timeout)
 
     async def recover(self, execution, *, until='terminal', timeout=None):
-        await self._host.recover(self._iid(execution))
-        return await self.observe(execution, until=until, timeout=timeout)
+        async with asyncio.timeout(timeout):
+            _, state = await self._owned(execution)
+            await self._host.recover(state['invocation_id'])
+            return await self.observe(execution, until=until)
 
     async def cancel(self, execution, *, reason='Evaluation Scenario cancellation', timeout=None):
-        await self._host.cancel(self._iid(execution), reason=reason)
-        return await self.observe(execution, timeout=timeout)
+        async with asyncio.timeout(timeout):
+            _, state = await self._owned(execution)
+            await self._host.cancel(state['invocation_id'], reason=reason)
+            return await self.observe(execution)
 
     def check(self, result):
-        """Retain a phase-specific business check without hiding independent failures."""
-        if not isinstance(result, CheckResult):
-            raise TypeError('check requires CheckResult.')
-        self._checks.append(result.to_record())
+        if not isinstance(result, CheckResult): raise TypeError('Business rules must return CheckResult.')
+        if any(item['name'] == result.name for item in self._checks):
+            raise EvaluationError(f'Duplicate business rule name: {result.name}. Use stable, distinct phase names.')
+        record = result.to_record()
+        if self._read_scope is not None:
+            record['evidence'] += json_copy(self._read_scope)
+            self._read_scope.clear()
+        self._checks.append(record)
         return result.passed
 
-    def evaluator_context(self, evidence):
-        return EvaluatorContext(self.case, evidence, self.observations, MappingProxyType(self.resources))
+    def evaluator_context(self, execution):
+        return EvaluatorContext(self.case, execution, self.observations, MappingProxyType(self.resources))
 
     async def _cleanup(self):
-        if self._submissions:
-            await asyncio.gather(*tuple(self._submissions), return_exceptions=True)
+        if self._submissions: await asyncio.gather(*tuple(self._submissions), return_exceptions=True)
         errors = []
         for ref in tuple(self._roots.values()):
             try:

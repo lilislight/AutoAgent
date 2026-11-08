@@ -46,7 +46,7 @@ class InspectionError(PersistenceError):
 @dataclass(frozen=True, slots=True)
 class PersistenceConfig:
     mode: WriteMode = "durable"
-    projection_mode: Literal['transactional', 'background'] = 'background'
+    projection_mode: Literal['transactional', 'background'] = 'transactional'
     projection_worker_enabled: bool = True
     projection_cache_enabled: bool = True
     projection_batch_count: int = 256

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, config, getExecutionTrace, getWorkflowGraph } from "./api";
-import { readLocation, writeLocation } from "./navigation";
+import { readPageLocation, writePageLocation } from "./navigation";
 import { FlowLoadingBoundary, FlowLoadingSurface } from "./components/FlowLoadingBoundary";
 import { Inspector } from "./components/Inspector";
 import { InspectorPresence } from './components/InspectorFrame';
@@ -16,6 +16,7 @@ import { useTheme, type Theme } from "./theme";
 import { getExecutionLayout, setExecutionLayout } from './components/useExecutionLayout';
 import brandIcon from "./autoagent.svg";
 import { MemoryMonitorButton } from './components/MemoryMonitor';
+import { ApplicationSwitch } from './components/ApplicationSwitch';
 import AgentWorkspace from "./agent/AgentWorkspace";
 import type { AcceptedExecution, ExecutionTrace, LocationState, Selection, TraceRow, WorkflowGraphData } from "./types";
 
@@ -26,13 +27,18 @@ type FlowSnapshot = { key: string; workflow: WorkflowGraphData; trace: Execution
 const familyGroup = (value: FlowSnapshot) => value.trace?.invocation.root_invocation_id ?? null;
 
 function restoreLocation() {
-  const state = readLocation(window.location.search || (config.defaultView === 'agents' ? '?view=agents' : ''));
+  const state = readPageLocation(window.location.pathname, window.location.search, config.uiBase, config.defaultView);
   return state.view === 'executions' ? { ...state, executionView: state.executionView ?? getExecutionLayout().view } : state;
 }
 function useLocation() {
   const [location, setLocation] = useState(restoreLocation);
   const [views, setViews] = useState<Partial<Record<View, LocationState>>>(() => ({ [location.view]: location }));
   const activeView = useRef(location.view);
+  useLayoutEffect(() => {
+    if (location.view !== 'agents') return;
+    const canonical = writePageLocation(location, config.uiBase, config.defaultView);
+    if (window.location.pathname + window.location.search !== canonical) window.history.replaceState(null, '', canonical);
+  }, [location]);
   useEffect(() => {
     const update = () => {
       const value = restoreLocation();
@@ -53,9 +59,9 @@ function useLocation() {
     if (!activate && value.view !== activeView.current) return;
     if (value.view !== activeView.current && document.activeElement instanceof HTMLElement && document.activeElement.closest('.workspace-tab')) document.activeElement.blur();
     activeView.current = value.view;
-    const url = new URL(window.location.href);
-    url.search = writeLocation(value);
-    window.history[replace ? "replaceState" : "pushState"](null, "", url);
+    const target = writePageLocation(value, config.uiBase, config.defaultView);
+    const unchanged = window.location.pathname + window.location.search === target;
+    window.history[replace || unchanged ? "replaceState" : "pushState"](null, "", target);
     setLocation(value);
   }, []);
   useEffect(() => { if (location.executionView && getExecutionLayout().view !== location.executionView) setExecutionLayout({ view: location.executionView }); }, [location.executionView]);
@@ -176,6 +182,8 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
 export default function App() {
   const [location, navigate, views] = useLocation();
   const [theme, toggleTheme] = useTheme();
+  const lastDeveloperView = useRef<'workflows' | 'executions'>(location.view === 'executions' ? 'executions' : 'workflows');
+  useEffect(() => { if (location.view !== 'agents') lastDeveloperView.current = location.view; }, [location.view]);
   const previousView = useRef(location.view);
   useEffect(() => {
     if (previousView.current === location.view) return;
@@ -200,8 +208,10 @@ export default function App() {
   const changeView = useCallback((view: View) => {
     if (view !== location.view) navigate(views[view] ?? { view, execution: null, workflow: null, revision: null, session: null, selection: null });
   }, [location.view, navigate, views]);
-  return <div className="app-shell">
+  const developerView = location.view === 'agents' ? lastDeveloperView.current : location.view;
+  return <div className={`app-shell ${location.view === 'agents' ? 'agent-mode' : ''}`}>
     <header className="topbar"><a className="brand" href={config.uiBase} aria-label="AutoAgent Tracing"><img className="brand-symbol" src={brandIcon} width="36" height="36" alt="" />AutoAgent Tracing</a>
+      <ApplicationSwitch agent={location.view === 'agents'} agentHref={writePageLocation(views.agents ?? { view: 'agents', session: null, execution: null, workflow: null, revision: null, selection: null }, config.uiBase, config.defaultView)} workflowHref={writePageLocation(views[developerView] ?? { view: developerView, session: null, execution: null, workflow: null, revision: null, selection: null }, config.uiBase, config.defaultView)} onChange={agent => changeView(agent ? 'agents' : developerView)} />
       <div className="topbar-actions"><MemoryMonitorButton /><span className="local-badge"><span />Local</span>
       <button className="theme-switch" role="switch" aria-checked={theme === "dark"} aria-label="Dark theme" onClick={toggleTheme} title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>
         <svg className="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" /></svg>
@@ -209,7 +219,7 @@ export default function App() {
         <span className="theme-switch-thumb" aria-hidden="true" />
       </button></div></header>
     <div className="workspace-tabs">
-      {Object.values(views).map(value => value.view === 'agents' ? <AgentWorkspace key="agents" location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} onTrace={(iid, sid) => navigate({ view: 'executions', execution: iid, session: sid, workflow: null, revision: null, selection: null })} /> : <BrowserWorkspace key={value.view} location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} theme={theme} accepted={accepted} onRunAccepted={runAccepted} onTraceSaved={traceSaved} onOpenWorkflow={openWorkflow} />)}
+      {Object.values(views).map(value => value.view === 'agents' ? <AgentWorkspace key="agents" session={value.session} invocation={value.execution} workspace={value.agentWorkspace ?? null} active={value.view === location.view} onNavigate={(session, execution, replace, workspace) => updateWorkspace({ view: 'agents', session, execution, workflow: null, revision: null, selection: null, ...(workspace ? { agentWorkspace: workspace } : {}) }, replace)} onTrace={(iid, sid) => navigate({ view: 'executions', execution: iid, session: sid, workflow: null, revision: null, selection: null })} /> : <BrowserWorkspace key={value.view} location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} theme={theme} accepted={accepted} onRunAccepted={runAccepted} onTraceSaved={traceSaved} onOpenWorkflow={openWorkflow} />)}
     </div>
   </div>;
 }

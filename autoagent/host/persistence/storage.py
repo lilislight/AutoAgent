@@ -132,6 +132,7 @@ class Storage:
         self.metadata_cache = MetadataCache(metadata_cache_bytes - len(self.identities.bits))
         self._store_order = None
         self._committing_batch = None
+        self._committing_projection = None
         self._committing_artifacts = set()
         self.committed_invocations = set()
 
@@ -202,6 +203,7 @@ class Storage:
             from .query_projections import catch_up
             async with self.engine.begin() as conn:
                 await catch_up(self, conn, self.config)
+            self.publish_projection_cache()
 
     def _create_reader_engine(self):
         """UI reconstruction cannot exhaust the Writer/control connection pool."""
@@ -284,6 +286,7 @@ class Storage:
             )
 
     async def close(self):
+        self._committing_projection = None
         self.identities.clear()
         self._store_order = None
         self.metadata_cache.clear()
@@ -535,11 +538,13 @@ class Storage:
             await conn.execute(insert(meta.tables[name]), rows[start:start + 500])
 
     async def write(self, entries):
+        self._committing_projection = None
         try:
             async with self.transaction() as conn:
                 order = await self.write_transaction(conn, entries)
             # The context manager has completed COMMIT before publication.
             self._store_order = order
+            self.publish_projection_cache()
             for digest in self._committing_artifacts:
                 self.metadata_cache.put(('artifact',(digest,)),True)
             if self._committing_batch is not None:
@@ -561,7 +566,13 @@ class Storage:
             raise
         finally:
             self._committing_batch = None
+            self._committing_projection = None
             self._committing_artifacts.clear()
+
+    def publish_projection_cache(self):
+        prepared, self._committing_projection = self._committing_projection, None
+        if prepared is not None:
+            prepared.publish_cache(self.metadata_cache)
 
     async def write_transaction(self, conn, entries):
         batch = OperationalBatch(conn, metadata_cache=self.metadata_cache)
@@ -591,6 +602,7 @@ class Storage:
         await self.write_artifacts(conn, entries)
         sources, references, members = {}, [], []
         imported = False
+        projected_events = []
 
         async def flush_sources():
             for name, rows in sources.items():
@@ -660,6 +672,8 @@ class Storage:
                     delta_text=entry.texts["delta_text"],
                 )
                 await batch.runtime(logical, order)
+                if self.config and self.config.projection_mode == 'transactional':
+                    projected_events.append((logical, order, entry.binding))
             elif entry.kind == "user_event":
                 data = {
                     k: record[k]
@@ -743,7 +757,10 @@ class Storage:
             update(meta.tables["persistence_meta"]).values(last_store_order=order)
         )
         if self.config and self.config.projection_mode == 'transactional' and (order > initial_order or imported):
-            from .query_projections import catch_up
-            await catch_up(self, conn, self.config)
+            from .query_projections import catch_up, transactional
+            if imported:
+                await catch_up(self, conn, self.config)
+            else:
+                await transactional(self, conn, self.config, projected_events, initial_order)
         self.last_write = time.monotonic()
         return order

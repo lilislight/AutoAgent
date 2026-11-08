@@ -26,11 +26,6 @@ BUSINESS_FIELDS = frozenset({
     "resume_receipts", "resume_receipt_frontiers", "cancel_origin", "pending_recovery",
     "reused_calls", "command_inputs", "reason", "cancel_reason",
 })
-_OPERATION_VALUE_FIELDS = frozenset({
-    "input", "output", "context", "mapped_input", "aggregate_output", "request",
-    "response", "metrics", "origin", "patch", "pending_context_patch", "reason",
-    "cancel_reason", "error", "fault", "pending_recovery", "reused_calls", "command_inputs",
-})
 
 
 def _error_metadata(value):
@@ -79,8 +74,7 @@ def light_record(item, *, availability=False):
             key = '/' + '/'.join(part.replace('~', '~0').replace('/', '~1') for part in key)
         field = key
         if (key == "value" and isinstance(item.get("op"), str)
-                and isinstance(item.get("path"), list) and item["path"]
-                and item["path"][-1] in _OPERATION_VALUE_FIELDS):
+                and isinstance(item.get("path"), list) and item["path"]):
             field = item["path"][-1]
         if field == "pending_recovery":
             result[key] = value is not None

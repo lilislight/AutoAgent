@@ -416,7 +416,14 @@ class ProjectionConnection:
                 items=func.jsonb_array_elements(cast(bindparam(None,payload,type_=Text),JSONB)).table_valued('value').alias()
                 cols=[]
                 for col in table.c:
-                    value=items.c.value.op('->')(col.name) if isinstance(col.type,JSON) else cast(items.c.value.op('->>')(col.name),col.type)
+                    if isinstance(col.type, JSON):
+                        value = items.c.value.op('->')(col.name)
+                        # Match JSON(none_as_null=True) in the persisted table:
+                        # an absent optional reference is SQL NULL, not JSON null.
+                        if col.type.none_as_null:
+                            value = func.nullif(value, cast(bindparam(None, 'null', type_=Text), JSONB))
+                    else:
+                        value = cast(items.c.value.op('->>')(col.name),col.type)
                     cols.append(type_coerce(value,col.type).label(col.name))
             else:
                 items=func.json_each(bindparam(None,payload)).table_valued('value').alias()

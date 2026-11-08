@@ -5,13 +5,13 @@ retain references to the normal Host history, rather than duplicating it.
 """
 
 from .context import EvaluatorContext, ScenarioContext
-from .evaluators import EventCount, OutputEquals, StatusIs
-from .evidence import Evidence
+from .evaluators import NodeExecuted, RouteTaken, OutputEquals, StatusIs
+from autoagent.host.execution_view import ExecutionView, ViewUnavailable
 from .models import (CheckResult, EvalCase, EvalSuite, EvaluationEnvironment,
-                     EvaluationError, EvidenceIncomplete, RunOptions)
+                     EvaluationError, RunOptions)
 from .report import compare_runs, load_report
 from .runner import run_suite
 
 __all__ = ['CheckResult', 'EvalCase', 'EvalSuite', 'EvaluationEnvironment', 'EvaluationError',
-    'EvidenceIncomplete', 'RunOptions', 'EvaluatorContext', 'ScenarioContext', 'Evidence',
-    'EventCount', 'OutputEquals', 'StatusIs', 'compare_runs', 'load_report', 'run_suite']
+    'RunOptions', 'EvaluatorContext', 'ScenarioContext', 'ExecutionView', 'ViewUnavailable',
+    'NodeExecuted', 'RouteTaken', 'OutputEquals', 'StatusIs', 'compare_runs', 'load_report', 'run_suite']

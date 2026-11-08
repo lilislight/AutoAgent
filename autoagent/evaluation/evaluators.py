@@ -48,9 +48,9 @@ class StatusIs:
             raise ValueError('Unknown expected Invocation status.')
 
     async def __call__(self, context):
-        actual = context.evidence.member()['status']
+        actual = context.execution.status
         return CheckResult('status', actual == self.expected, f'Expected {self.expected}; observed {actual}.',
-            (context.evidence.reference(),))
+            ({'invocation_id': context.execution.invocation_id},))
 
 
 @dataclass(frozen=True)
@@ -59,33 +59,40 @@ class OutputEquals:
     pointer: str | None = None
 
     async def __call__(self, context):
-        actual = await context.evidence.value(pointer=self.pointer)
+        actual = await context.execution.output(pointer=self.pointer)
         difference = _difference(actual, context.case.expected)
         reason = 'Output matches expected.' if difference is None else (
             f'Output differs at {difference[0] or "/"}: expected {_preview(difference[2])}; observed {_preview(difference[1])}.')
         return CheckResult('output', difference is None, reason,
-            (dict(context.evidence.reference(), field='output', pointer=self.pointer or ''),))
+            (dict({'invocation_id': context.execution.invocation_id}, field='output', pointer=self.pointer or ''),))
 
 
 @dataclass(frozen=True)
-class EventCount:
-    name: str
-    minimum: int = 0
-    maximum: int | None = None
-    family: bool = False
+class NodeExecuted:
+    """Check a required or prohibited business phase in the complete Workflow observation."""
+    node_id: str
+    expected: bool = True
 
     def __post_init__(self):
-        if not isinstance(self.name, str) or not self.name or type(self.minimum) is not int or self.minimum < 0:
-            raise ValueError('EventCount requires an Event name and nonnegative minimum.')
-        if self.maximum is not None and (type(self.maximum) is not int or self.maximum < self.minimum):
-            raise ValueError('maximum cannot be smaller than minimum.')
+        if not isinstance(self.node_id, str) or not self.node_id.strip() or type(self.expected) is not bool:
+            raise ValueError('NodeExecuted requires a Node id and a boolean expected value.')
 
     async def __call__(self, context):
-        ids = [member['invocation_id'] for member in context.evidence.snapshot['members']] if self.family else [context.evidence.invocation_id]
-        count = 0
-        for iid in ids:
-            async for _ in context.evidence.events(names=(self.name,), invocation_id=iid):
-                count += 1
-        passed = count >= self.minimum and (self.maximum is None or count <= self.maximum)
-        return CheckResult(f'events:{self.name}', passed, f'Observed {count} matching Events.',
-            tuple(context.evidence.reference(iid) for iid in ids))
+        actual = await context.execution.node(self.node_id).was_executed()
+        return CheckResult('node:' + self.node_id, actual == self.expected,
+            f'Business phase {self.node_id}: expected executed={self.expected}, observed {actual}.')
+
+
+@dataclass(frozen=True)
+class RouteTaken:
+    route_id: str
+    expected: bool = True
+
+    def __post_init__(self):
+        if not isinstance(self.route_id, str) or not self.route_id.strip() or type(self.expected) is not bool:
+            raise ValueError('RouteTaken requires a route id and a boolean expected value.')
+
+    async def __call__(self, context):
+        actual = await context.execution.route(self.route_id).was_taken()
+        return CheckResult('route:' + self.route_id, actual == self.expected,
+            f'Business route {self.route_id}: expected taken={self.expected}, observed {actual}.')

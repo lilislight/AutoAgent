@@ -1,6 +1,6 @@
 # AutoAgent V2 后续事项
 
-更新日期：2026-10-24。
+更新日期：2026-11-07。
 
 本文记录当前确认的推进顺序、阶段边界和验收目标，不代表下面的 API 已经实现。
 当前源码和测试是具体行为的依据；V1 只用于参考，不保留旧 API 或数据模型兼容层。
@@ -15,9 +15,9 @@ SQLite/PostgreSQL 持久化、驻留策略、Checkpoint 管理和历史状态检
 `autoagent.agent` 已提供 LLM Provider、结构化输出、流式输出、Tool、MCP、Skill、
 Embedding、媒体处理和调用记录基础。后续重点是补齐组合能力，不是重新实现这些组件。
 
-`autoagent.evaluation` 已交付业务评测基础 SDK、Host 执行、固定历史证据、报告和 CLI。
-该阶段尚未完成验收：代码审查已复现评测依据、比较条件、JSON 调用、并行审批和报告导出
-问题，业务场景覆盖仍需补齐。已实现的基础能力与待修复项分别记录如下。
+`autoagent.evaluation` 已接入 Host 的 `ExecutionView`，统一读取中间结果、路径、状态变化、
+历史 Context 和业务消息；业务规则不解析 Runtime Event。输入/预期只读、规则和条件身份、
+JSON 调用、并行审批及可移植报告已实现。专项业务验收与后续事项见下方清单。
 
 ## 推进顺序
 
@@ -35,6 +35,11 @@ Embedding、媒体处理和调用记录基础。后续重点是补齐组合能�
 
 目标：自动验证业务正确性和改动效果，为 LLM 优化 Workflow 提供明确证据。
 模块为 `autoagent.evaluation`，通过 Host 执行，不创建第二套 Runtime 或执行历史存储。
+唯一评测对象是业务 Workflow；通用 Agent 作为普通 Workflow 参与评测。
+独立 Operator/函数单元测试交给 unittest，不新增 Node Eval、Operator Eval 或 Agent 专用
+评测体系。Node、Map item、Child 等仅作为完整业务过程中的观测对象。
+业务 Scenario、Evaluator 和 Evaluation 模块不直接解析 Runtime Event、delta、投影表或
+Artifact 引用；这些由 Host 的统一历史查询封装。用户只读取业务执行事实并编写业务规则。
 当前范围是业务正确性及版本比较；耗时、内存衡量暂缓，后续评估复用已有测量设施。
 Agent 调用效率、Token 和费用不属于通用 Eval 的内置范围。
 
@@ -43,57 +48,145 @@ Agent 调用效率、Token 和费用不属于通用 Eval 的内置范围。
 - [x] Suite、Case、异步 Python Scenario、CheckResult 和可调用 Evaluator 公共契约。
 - [x] 单次调用、Session 别名复用、多个 Workflow、基本 Wait 回复和单层父子审批。
 - [x] Runner 管理独立 Session/数据库、Case 选择、并发、重复运行、超时及清理。
-- [x] 提供 StatusIs、OutputEquals、EventCount 和同步/异步自定义 Evaluator。
+- [x] 提供 StatusIs、OutputEquals、NodeExecuted、RouteTaken 和同步/异步自定义 Evaluator。
+  已删除 Eval 的原始 Event 读取和 EventCount；底层历史解释统一由 Host 负责。
 - [x] 区分业务检查失败、执行异常、评估器错误、未评估和中断；预期的 Workflow 失败
   可以满足业务检查，无有效判断或存在未评估检查时不自动通过。
 - [x] 通过 Host 固定持久化证据位置；各 Child 使用自己的 Session Event sequence，
   大值按需读取，支持 Context JSON Pointer，报告不复制整份执行历史。
 - [x] 原子 JSON 报告、逐 Trial 保存、Invocation/Event 引用和基本代码/环境身份记录。
-- [x] 按 Case ID、输入/预期指纹及 Scenario/Evaluator 标识进行基础版本比较。
-  该比较功能已有，但条件识别和结论可靠性仍有下述缺口，不能视为本阶段验收通过。
+- [x] 按 Case ID、输入/预期指纹、规则身份和明确声明的业务条件比较；同时显示规则级变化。
+  未声明条件或存在不透明规则依赖时，比较为 inconclusive，不认定代码改进。
 - [x] TOML Evaluation entrypoint 惰性发现，以及 `eval list/check/run/show/compare`、
   结构化输出、输出文件和进程退出码；提供离线示例。
 
-本次核对依据为当前 SDK、CLI、示例及测试源码。最近一次审查重跑 40 项 Eval/CLI 测试，
-SQLite/PostgreSQL 均通过；额外临时复现确认以下问题，不能只凭现有测试通过就标记完成。
+核对依据为当前 SDK、CLI、示例及 SQLite/PostgreSQL 集成测试。可靠性复现已转为回归测试；
+验收同时检查中间过程、实际夹具状态和合法内部重构，不能只凭最终结果相同认定业务正确。
 
-### 必须修复的可靠性缺口
+### 业务功能目标
 
-- [ ] 固定每个 Trial 的输入、预期和评估参数，防止 Scenario/Evaluator 改写嵌套 JSON
+以下能力通过同一个业务视图提供，不为每项功能另建模块或 Service。
+
+| 业务需要 | 统一视图提供的能力 |
+| --- | --- |
+| 最终状态和结果 | Invocation 结果、错误及业务字段读取；执行状态与暂停控制状态分开表达。 |
+| 中间业务结果 | 按 Node 选择发生，读取映射后输入、提交输出、Map 各项及聚合结果。 |
+| 业务路径 | 查询指定路由是否真正被采用、必要阶段是否执行、禁止阶段是否发生。 |
+| 状态变化 | 查询 Workflow/Node 的状态变化，定位完成、等待、恢复等业务位置。 |
+| 历史 Context | 在选定节点完成、等待请求等位置读取 Session/Invocation Context 的指定路径。 |
+| 业务交互 | 等待目标审批可回复、节点达到某状态、Child 完成或业务消息出现，再执行操作。 |
+| 组合业务 | 在同一个 Case 中组织多轮 Session、多个 Workflow 和父子业务过程。 |
+| 对外业务结果 | 读取持久化业务消息，以及夹具提供的外部业务状态。 |
+| 回归比较 | 按 Case ID 和稳定业务规则名比较，展示已修复、新增失败及可定位的证据。 |
+
+### 统一执行视图的实现方案
+
+以一个 `ExecutionView` 作为公共读取入口：业务规则通过它查询节点执行、路由、状态变化、
+Context、子任务和业务消息。节点与路由对象是查询结果，不是新的测试入口。
+Scenario 负责执行和交互；Evaluator 只接收固定位置的只读视图、预期和业务夹具。
+
+职责链为：业务 Scenario/Evaluator -> ExecutionView -> Host 历史查询 -> 已有持久化事实。
+统一解释、关联和历史边界处理位于 Host，不放入每个 Evaluator，不修改 Core 调度语义。
+已有 Node/Call/Edge 投影、graph_changes、历史 Context 读取和 Artifact 按需读取继续复用。
+最新投影只能回答对应最新位置的问题；旧位置通过有界历史查询恢复事实，不能过滤当前
+行的 last_sequence 来冒充历史状态。必要索引按实际查询补充，不复制完整 Input/Output。
+
+视图契约必须明确以下语义：
+
+- 以 Workflow Revision 校验 Node/路由选择器；不存在的 ID 报错，不能被解释成“从未执行”。
+- 默认只查询所选 Invocation；同名 Child 节点不混入结果。跨 Workflow、Child 或多轮调用
+  必须显式选择作用范围，确保断言对象明确。
+- 重复发生必须显式选择单次、首末次或全部；期望唯一却匹配多次时报错。
+  Node 发生、恢复尝试和 Map item 分开标识，不能把跳过的节点算作实际执行。
+- 节点输入表示完成 Input Mapping 后的业务输入；节点输出表示成功完成并提交的输出。
+  Map item 结果、聚合结果及尚未提交的阶段结果明确区分；无法读取与合法 JSON null 分开。
+- 路由采用以实际分支激活为依据，不以 condition=true 代替；区分已采用、未采用、
+  未到达和尚未决定，不把未到达分支直接标记为失败或跳过。
+- 用户用节点完成、状态变化或交互请求等位置对象选择历史点，不输入 Runtime Event 序号。
+  内部仍保留精确来源和读取上界，用于稳定重读、错误定位及已有调试入口跳转。
+- 同一 Session 内按确定的持久化顺序判断；跨 Session 只使用已记录的父子、消息等因果
+  关系。没有依据时返回无法判定，不用时间戳或不同 Session 的序号推测先后。
+- 视图是不可变观察结果；等待新业务条件返回一个新视图，不改变之前已捕获的状态和结果。
+  “截至当前位置未发生”与“整个业务流程从未发生”使用不同的明确检查范围。
+- 所有分页、读取预算和缺失证据由框架处理；部分读取不能证明不存在，不能悄悄通过。
+  查询结果默认只有必要元数据，大值通过 JSON Pointer 和来源引用按需读取。
+- 外部扣款、文件等实际副作用以业务夹具状态为依据；执行记录只证明框架观察到的调用。
+
+保留少量通用业务判定能力和自定义 Python 规则，不引入复杂规则 DSL。
+规则可以要求必要阶段、禁止行为、数据关系及因果顺序；不将全部节点或 Event 的精确序列
+作为默认正确轨迹。每条规则使用稳定名称，报告自动关联本规则读取的业务对象和历史位置，
+给出简短的预期/实际差异，无须用户拼装 Event ID。
+
+### 已修复的可靠性缺口
+
+- [x] 实现上述 Host 统一历史视图和 Eval 业务查询入口，覆盖中间结果、路由、状态及 Context。
+  从 Eval 公共接口移除原始 events/event_value/EventCount 依赖；Host 的底层调试接口保留。
+- [x] 固定每个 Trial 的输入、预期和评估参数，防止 Scenario/Evaluator 改写嵌套 JSON
   后仍沿用原来的报告指纹；改变评测依据必须显式报错，不能产生通过结论。
-- [ ] 补齐评估规则身份：全局 JSON 参数、项目内辅助函数及显式依赖版本变化不能漏判；
-  不透明或动态依赖无法可靠确认时标记条件未知，不把自动指纹当作完整证明。
-- [ ] 区分被测代码版本与评测条件，记录可确认的 Model/Tool/fixture/dataset 配置身份；
+- [x] 明确业务规则版本、参数及依赖身份；自动指纹只作辅助，全局参数和辅助函数变化
+  不能漏判，不透明或动态依赖无法可靠确认时标记条件未知，不承诺解析任意 Python 依赖。
+- [x] 区分被测代码版本与评测条件，记录可确认的外部服务、fixture 和 dataset 配置身份；
   业务标准变化判为不可比较，条件变化或缺失时不给出可接受的改进结论。
-- [ ] invoke/Signal 等 JSON 操作复用 Host 的合同解码边界，覆盖 Enum 等合法值合同，
+- [x] invoke/Signal 等 JSON 操作复用 Host 的合同解码边界，覆盖 Enum 等合法值合同，
   保证同一输入在 Eval、Server 和 CLI 下的执行语义一致。
-- [ ] 回复审批只等待目标 Wait 可回复，不要求整个 Root 到达 boundary；
-  支持并行 Node/Child 仍运行时回复，并保持歧义报错、超时和 Root 所有权校验。
-- [ ] 统一内部报告与 CLI 导出文档的读取，支持导出文件直接 show/compare；
+- [x] 统一业务条件等待与交互：回复审批只等待目标 Wait 可回复，不要求整个 Root 到达
+  boundary；支持并行 Node/Child 仍运行时回复，保留歧义报错、超时和 Root 所有权校验。
+- [x] 报告和比较落实到稳定业务规则名，包含违例对象、观察位置、预期/实际小片段和
+  可供既有调试入口使用的来源；同为失败的 Case 也要显示新增失败与已修复规则。
+- [x] 统一内部报告与 CLI 导出文档的读取，支持导出文件直接 show/compare；
   明确报告移动后执行历史的定位与不可用提示。
 
 ### 证据和业务场景验收
 
-- [ ] 通过 Host 补齐 User Event 的有界只读证据；按各 Invocation 的 User Event sequence
-  固定上界，与 Runtime Event sequence 分开记录，不用时间戳猜测两者的精确对应关系。
-- [ ] 验证审批前不执行副作用、拒绝审批后不执行副作用、重复提交不重复执行；
+- [x] 通过统一视图提供持久化业务消息；Host 内部按各 Invocation 的 User Event sequence
+  独立固定读取上界，与 Runtime Event sequence 分开，不向业务规则暴露二者的底层计数器。
+- [x] 验证中间金额与审批输入一致、Context 只在约定阶段更新、失败路径与禁止阶段正确；
+  故意制造“最终结果相同但中间流程违例”的版本，必须被业务规则检出。
+- [x] 验证审批前不执行副作用、拒绝审批后不执行副作用、重复提交不重复执行；
   使用业务夹具核对实际状态，不能只检查 Agent 的文字或最终输出。
-- [ ] 验证多轮 Session Context 继承、跨 Workflow 共享及跨 Session/Trial 隔离，
+- [x] 验证多轮 Session Context 继承、跨 Workflow 共享及跨 Session/Trial 隔离，
   包含历史位置读取和大 Context 的指定路径读取。
-- [ ] 使用脚本化 Model 和真实 ToolSet 执行路径验证工具选择、参数、失败处理与公开消息；
-  支持显式选择的真实集成评测，但基础验收不依赖模型凭据或付费服务。
-- [ ] 验证 Map/循环、多 Child、父子 Signal、并行审批及取消/恢复后的业务结果，
+- [x] 用可控外部依赖和真实业务调用路径验证完整 Workflow；通用 Agent 可作为其中一个
+  Workflow 用例，检查业务过程与结果，不建立独立的 Agent/Operator 评测目标或专用指标。
+  支持显式选择的真实集成评测，基础验收不依赖凭据或付费服务。
+- [x] 验证 Map/循环、多 Child、父子 Signal、并行审批及取消/恢复后的业务结果，
   不要求并行分支具有固定的全局完成顺序。
-- [ ] 验证多页 Event、大 Artifact、读取预算不足及缺失证据；不完整证据不能通过
-  “从未发生某动作”一类否定判断。
+- [x] 验证多页 Event、大 Artifact、读取预算不足及缺失证据；不完整证据不能通过
+  “从未发生某动作”一类否定判断；所有业务规则均通过统一视图，无须解析 Event。
+- [x] 验证多次 Node/Map 发生不会隐式只检查末次、错误选择器不会被当作未执行、条件成立
+  但路由未实际激活不会被当作已采用；历史视图不受后续回复或恢复影响。
+- [x] 合法地调整内部并行或实现细节但保留业务约束的候选版本，应保持通过；
+  不要求新旧 Workflow 具有相同的完整节点序列或内部调用实现。
 
-### 实施顺序
+### 已落实的实现顺序
 
-1. 固定评测依据，修复评估规则和比较条件；将审查复现用例转成回归测试。
-2. 对齐 JSON 调用与目标 Wait 交互，先验证并行执行中的业务操作。
-3. 补齐 User Event 证据，统一报告导出/读取，保证查询边界和来源可追溯。
-4. 扩展现有离线示例为完整业务 Suite，验证真实业务状态、Context、Tool 和父子交互。
-5. 验证 SDK/CLI、SQLite/PostgreSQL、报告比较及异常清理；通过后再进入开发 Skill 阶段。
+1. 定稿业务查询契约；固定评测依据、规则/条件身份，修复 JSON 调用，将已有复现转成测试。
+2. 实现 Host ExecutionView：固定观察范围，统一 Node/Map 结果、路由、状态、历史 Context
+   和值引用读取；用历史/当前结果一致性测试验证，不新增 Runtime 或完整数据副本。
+3. 实现业务条件等待、父子交互及持久化业务消息；保证历史视图不可变且并行审批可操作。
+4. Scenario/Evaluator 全部接到统一视图，移除公共原始 Event 依赖；补业务规则级报告、
+   比较和可交换导出，保持 CLI 简洁。
+5. 扩展现有示例为完整业务 Suite，覆盖中间结果、路径/状态、Context、副作用和组合流程；
+   验证 SDK/CLI、SQLite/PostgreSQL、读取边界和异常清理，完成业务验收。
+
+实现入口为 `Host.get_execution_view()`。业务规则通过 `execution.node(id).one()/all()`、
+`input()/output()/items()`、`route(id)`、`transitions()`、`children()`、`interactions()`、
+`messages()` 查询；通过 `execution.at(node.completed)` 和 `context(pointer=...)` 读历史 Context。
+Scenario 使用 `wait_for()` 等待业务条件，`respond()` 回复指定审批。离线完整业务示例位于
+`examples/evaluation_demo/orders.py`，涵盖批准、拒绝、实际扣款和持久化业务回执。
+
+边界：任意历史业务位置没有可靠的 User Event 边界时，`messages()` 明确不可用，不按时间戳
+猜测。固定观察中的业务消息使用独立持久化上界。缺失历史和读取预算不足不能被解释成
+业务动作未发生。跨 Session 仅通过已记录的创建、结算、Signal/回复关系判断因果顺序。
+导出 JSON 包含比较所需的结果和来源位置，不打包数据库；移动报告仍可 show/compare，
+深入读取执行历史需要保留报告中标识的数据库。外部服务/dataset 条件通过 `Suite.conditions`
+显式声明，自动采集仅包含可确认且不泄露凭据的配置身份。
+
+本轮专项验收：89 项 Eval/ExecutionView/CLI 测试和 28 项历史状态检查测试通过，包含实际
+SQLite/PostgreSQL；订单示例通过真实 CLI，wheel 已核对新查询模块及旧接口移除。
+整个 V2 的通用回归尚未通过：另有 Server/Fork Timeline 用例失败和 CLI 执行模块超时，
+已停止该轮通用回归，不能把本轮专项通过解释为整个仓库全绿。上述问题需要单独处理。
+当前 Eval 报告为 schema_version=2；不保留旧 Evidence/EventCount 接口及旧报告模型兼容。
 
 ### 后续事项
 
@@ -104,6 +197,8 @@ SQLite/PostgreSQL 均通过；额外临时复现确认以下问题，不能只�
 验收：同一组 Case 能对原版本和候选版本给出可解释的差异，并定位失败证据。
 放宽评估标准、替换测试夹具或丢失证据不能被误判为代码改进；JSON 调用与并行交互
 不得因经过 Eval 包装而改变原业务语义。
+全部业务评测通过统一执行视图完成；评测代码不需要知道 Runtime Event 名称、序号、
+payload/delta 结构和数据库表结构。中间业务违规不能被正确的最终结果掩盖。
 参考 V1 多步 Case、Evaluator、惰性证据和报告，不照搬单 Workflow 绑定限制及旧 Host API。
 
 ## 2. AutoAgent 开发 Skill

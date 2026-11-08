@@ -1,8 +1,10 @@
 """Business Evaluation through real Hosts, fixed evidence and independent Trial history."""
 
 import asyncio
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from enum import Enum
 import json
 from pathlib import Path
 import tempfile
@@ -11,7 +13,7 @@ import unittest
 from typing_extensions import TypedDict
 
 from autoagent import AwaitSignal, Edge, Node, Recovery, SignalEndpoint, Spawn, Wait, Workflow
-from autoagent.evaluation import (CheckResult, EvalCase, EvalSuite, EventCount, OutputEquals,
+from autoagent.evaluation import (CheckResult, EvalCase, EvalSuite, NodeExecuted, OutputEquals,
     RunOptions, StatusIs, compare_runs, load_report, run_suite)
 from autoagent.host import AutoAgentHost, HostSettings
 from autoagent.host.persistence import PersistenceConfig
@@ -38,7 +40,8 @@ async def no_op(context):
     return None
 
 
-class EvaluationTests(unittest.IsolatedAsyncioTestCase):
+class EvaluationHarness(unittest.IsolatedAsyncioTestCase):
+    postgres = False
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -55,7 +58,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def create(environment):
             url = environment.database_url
-            if isinstance(self, PostgreSQLEvaluationTests):
+            if self.postgres:
                 database = PostgreSQLDatabase()
                 url = await database.create()
                 self.databases.append(database)
@@ -72,8 +75,9 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
     def suite(self, *, scenario=echo_scenario, evaluators=(StatusIs(), OutputEquals()), cases=None):
         return EvalSuite('business', cases or (EvalCase('one', {'text': 'a'}, {'text': 'a'}),),
-            scenario, evaluators)
+            scenario, evaluators, conditions={})
 
+class EvaluationTests(EvaluationHarness):
     async def test_buffered_history_is_durable_before_checks_and_report_round_trips(self):
         """Buffered execution evidence is flushed, graded and retained without copying output into reports."""
         result = await self.run_eval(self.suite())
@@ -90,13 +94,14 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         """Waiting and completed observations preserve their own status, Context and output cuts."""
         async def scenario(context):
             waiting = await context.invoke('approval', context.case.input, entry_node_id='wait', until='boundary')
-            request = await waiting.wait_request(waiting.member()['waits'][0])
+            interaction = (await waiting.interactions())[0]
+            request = await interaction.request()
             context.check(CheckResult('request', request == context.case.input))
             completed = await context.respond(waiting, context.case.expected)
             context.check(CheckResult('request-after-response',
-                await waiting.wait_request(waiting.member()['waits'][0]) == context.case.input))
-            context.check(CheckResult('before-status', waiting.member()['status'] == 'waiting'))
-            context.check(CheckResult('before-output', await waiting.value() is None))
+                await interaction.request() == context.case.input))
+            context.check(CheckResult('before-status', waiting.status == 'waiting'))
+            context.check(CheckResult('before-output', await waiting.output() is None))
             return completed
         result = await self.run_eval(self.suite(scenario=scenario),
             factory=self.factory([Workflow('approval', nodes=[Node('wait', Wait(Value, Value))])]))
@@ -112,7 +117,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             waiting = await context.invoke('parent', context.case.input, entry_node_id='spawn', until='boundary')
             completed = await context.respond(waiting, {'text': 'approved'}, node_id='approve')
             return completed
-        suite = self.suite(scenario=scenario, evaluators=(StatusIs(), EventCount('invocation.completed', minimum=2, maximum=2, family=True)))
+        suite = self.suite(scenario=scenario, evaluators=(StatusIs(), NodeExecuted('spawn')))
         result = await self.run_eval(suite, factory=self.factory([parent]))
         self.assertTrue(result['ok'], result)
         members = result['results'][0]['observations'][-1]['members']
@@ -124,8 +129,8 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         async def scenario(context):
             first = await context.invoke('echo', context.case.input, entry_node_id='echo')
             second = await context.invoke('other', context.case.input, entry_node_id='echo')
-            context.check(CheckResult('same-session', first.member()['session_id'] == second.member()['session_id']))
-            self.assertEqual(await first.value(), context.case.input)
+            context.check(CheckResult('same-session', first.session_id == second.session_id))
+            self.assertEqual(await first.output(), context.case.input)
             return second
         suite = self.suite(scenario=scenario, cases=(EvalCase('a', {'text': 'a'}, {'text': 'a'}), EvalCase('b', {'text': 'b'}, {'text': 'b'})))
         result = await self.run_eval(suite, options=RunOptions(concurrency=2, repeats=2), factory=self.factory([
@@ -151,11 +156,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             return value
         async def scenario(context):
             failed = await context.invoke('echo', context.case.input, entry_node_id='echo')
-            error = await failed.value('error')
+            error = await failed.error()
             completed = await context.recover(failed)
             context.check(CheckResult('same-invocation', failed.invocation_id == completed.invocation_id))
-            context.check(CheckResult('old-failure', failed.member()['status'] == 'failed' and
-                await failed.value('error') == error))
+            context.check(CheckResult('old-failure', failed.status == 'failed' and
+                await failed.error() == error))
             return completed
         result = await self.run_eval(self.suite(scenario=scenario), factory=self.factory([
             Workflow('echo', nodes=[Node('echo', flaky, recovery_mode=Recovery('replay_safe'))])]))
@@ -166,7 +171,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
         async def scenario(context):
             waiting = await context.invoke('echo', context.case.input, entry_node_id='receive', until='boundary')
             paused = await context.pause(waiting)
-            context.check(CheckResult('paused', paused.member()['control_state'] == 'paused'))
+            context.check(CheckResult('paused', paused.control_state == 'paused'))
             ready = await context.recover(paused, until='boundary')
             return await context.signal(ready, 'message', context.case.expected, source_id='test', sequence=1)
         result = await self.run_eval(self.suite(scenario=scenario, evaluators=(StatusIs(),)), factory=self.factory([
@@ -191,7 +196,7 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
             return await context.respond(first, context.case.expected)
         result = await self.run_eval(self.suite(scenario=scenario), factory=self.factory([workflow]))
         self.assertEqual(result['results'][0]['verdict'], 'error')
-        self.assertIn('found 2', result['results'][0]['errors'][0]['message'])
+        self.assertIn('ambiguous', result['results'][0]['errors'][0]['message'])
 
     async def test_evaluator_exception_does_not_hide_other_failures(self):
         """Independent check failures survive a broken Evaluator and are not mislabeled Workflow errors."""
@@ -219,13 +224,11 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
     async def test_event_budget_exhaustion_cannot_prove_absence(self):
         """A truncated all-Event scan raises an explicit assessment error rather than passing absence checks."""
         async def scan(context):
-            count = 0
-            async for _ in context.evidence.events():
-                count += 1
-            return CheckResult('all-events', count > 0)
-        result = await self.run_eval(self.suite(evaluators=(scan,)), options=RunOptions(evidence_event_limit=1))
+            occurrences = await context.execution.node('echo').all()
+            return CheckResult('complete-business-history', bool(occurrences))
+        result = await self.run_eval(self.suite(evaluators=(scan,)), options=RunOptions(read_limit=1))
         self.assertEqual(result['results'][0]['verdict'], 'error')
-        self.assertEqual(result['results'][0]['errors'][0]['type'], 'EvidenceIncomplete')
+        self.assertEqual(result['results'][0]['errors'][0]['type'], 'ViewUnavailable')
 
     async def test_timeout_cancels_owned_parent_and_waiting_child(self):
         """A timed-out terminal wait cancels the complete owned family and saves its failure report."""
@@ -282,10 +285,24 @@ class EvaluationTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(POSTGRES_TEST_URL, 'PostgreSQL is not configured.')
 class PostgreSQLEvaluationTests(EvaluationTests):
-    pass
+    postgres = True
 
 
 class DefinitionTests(unittest.TestCase):
+    def test_rule_helper_class_configuration_changes_are_part_of_its_identity(self):
+        """A rule helper's class attributes and method globals cannot change behind an unchanged source hash."""
+        from autoagent.evaluation.models import callable_identity
+        class Policy:
+            threshold = 1
+            def allowed(self, value):
+                return value <= self.threshold and value <= BUSINESS_LIMIT
+        def evaluate(context):
+            return CheckResult('policy', Policy().allowed(1))
+        before = callable_identity(evaluate)
+        Policy.threshold = 2
+        self.assertNotEqual(before, callable_identity(evaluate))
+        self.assertTrue(before['identity_complete'])
+
     def test_checker_closure_configuration_and_wrapped_fixture_identity(self):
         """Changed closure thresholds affect comparison identity; normal async fixtures have usable identities."""
         from autoagent.evaluation.models import callable_identity
@@ -317,7 +334,251 @@ class DefinitionTests(unittest.TestCase):
         """A report cannot load Trial files from outside its Run directory."""
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / 'report.json'
-            path.write_text(json.dumps(dict(schema_version=1, kind='autoagent.evaluation.run',
+            path.write_text(json.dumps(dict(schema_version=2, kind='autoagent.evaluation.run',
                 results=[dict(result_file='../private.json')])) )
             with self.assertRaisesRegex(Exception, 'escapes'):
                 load_report(path)
+
+
+BUSINESS_LIMIT = 1
+
+
+def business_limit(context):
+    return CheckResult('business-limit', len(context.case.input['text']) <= BUSINESS_LIMIT)
+
+
+class Mode(str, Enum):
+    read = 'read'
+
+
+class EnumRequest(TypedDict):
+    mode: Mode
+
+
+def enum_work(value: EnumRequest) -> Value:
+    return {'text': value['mode'].value}
+
+
+class BusinessRegressionTests(EvaluationHarness):
+    """Additional real business scenarios; inherited foundation contracts stay reusable."""
+
+    async def test_mutating_expected_cannot_turn_a_wrong_workflow_into_a_pass(self):
+        """Nested immutable ground truth rejects Scenario edits while working copies remain usable."""
+        async def scenario(context):
+            context.case.expected['text'] = 'wrong'
+            return await context.invoke('echo', {'text':'wrong'}, entry_node_id='echo')
+        result = await self.run_eval(self.suite(scenario=scenario))
+        self.assertEqual(result['results'][0]['verdict'],'error')
+        self.assertIn('immutable',result['results'][0]['errors'][0]['message'])
+        case = EvalCase('nested', {'items':[{'value':1}]}, {})
+        with self.assertRaises(Exception): case.input['items'][0]['value'] = 2
+        data = case.copy_input()
+        data['items'][0]['value'] = 2
+        self.assertEqual(case.input['items'][0]['value'],1)
+
+    async def test_global_business_rule_change_is_not_a_workflow_improvement(self):
+        """Relaxing a rule's global threshold changes its contract instead of crediting the target code."""
+        global BUSINESS_LIMIT
+        suite = self.suite(evaluators=(business_limit,), cases=(EvalCase('one',{'text':'long'}),))
+        try:
+            BUSINESS_LIMIT = 1
+            baseline = await self.run_eval(suite)
+            BUSINESS_LIMIT = 20
+            candidate = await self.run_eval(suite)
+        finally:
+            BUSINESS_LIMIT = 1
+        self.assertEqual(baseline['results'][0]['verdict'],'failed')
+        self.assertEqual(candidate['results'][0]['verdict'],'passed')
+        self.assertEqual(compare_runs(baseline,candidate)['cases'][0]['outcome'],'not_comparable')
+
+    async def test_rule_configuration_cannot_change_after_a_run_starts(self):
+        """Changing a global criterion during the Scenario invalidates the Trial instead of passing."""
+        global BUSINESS_LIMIT
+        async def scenario(context):
+            global BUSINESS_LIMIT
+            view = await context.invoke('echo', context.case.input, entry_node_id='echo')
+            BUSINESS_LIMIT = 100
+            return view
+        try:
+            BUSINESS_LIMIT = 1
+            result = await self.run_eval(self.suite(scenario=scenario, evaluators=(business_limit,)))
+        finally:
+            BUSINESS_LIMIT = 1
+        trial = result['results'][0]
+        self.assertEqual(trial['verdict'], 'error', result)
+        self.assertIn('changed during the Run', trial['errors'][0]['message'])
+
+    async def test_changed_or_undeclared_conditions_do_not_produce_accepted_improvement(self):
+        """External conditions and unknown identities stop accepted comparisons without blocking ordinary runs."""
+        baseline = await self.run_eval(replace(self.suite(),conditions={'ledger':'v1'}))
+        candidate = await self.run_eval(replace(self.suite(),conditions={'ledger':'v2'}))
+        comparison = compare_runs(baseline,candidate)
+        self.assertFalse(comparison['ok'])
+        self.assertEqual(comparison['cases'][0]['outcome'],'not_comparable')
+        undeclared = await self.run_eval(replace(self.suite(),conditions=None))
+        self.assertTrue(undeclared['ok'])
+        self.assertEqual(compare_runs(undeclared,undeclared)['cases'][0]['outcome'],'inconclusive')
+
+    async def test_report_comparison_rejects_inconsistent_pass_and_ungraded_rule(self):
+        """A portable report cannot claim pass with a failed rule or call an ungraded rule unchanged-passed."""
+        baseline = await self.run_eval(self.suite())
+        altered = deepcopy(baseline)
+        altered['results'][0]['checks'][0]['passed'] = False
+        with self.assertRaisesRegex(Exception, 'contradicts'):
+            compare_runs(baseline, altered)
+        altered['results'][0]['checks'][0]['passed'] = None
+        altered['results'][0]['verdict'] = 'ungraded'
+        comparison = compare_runs(baseline, altered)
+        self.assertEqual(comparison['cases'][0]['outcome'], 'inconclusive')
+        self.assertEqual(comparison['cases'][0]['rules'][1]['outcome'], 'inconclusive')
+
+    async def test_json_enum_input_uses_the_same_host_contract_as_cli(self):
+        """A JSON enum string is decoded normally before the Workflow runs."""
+        async def scenario(context):
+            return await context.invoke('enum',context.case.input,entry_node_id='entry')
+        suite = self.suite(scenario=scenario, cases=(EvalCase('enum',{'mode':'read'},{'text':'read'}),))
+        result = await self.run_eval(suite,factory=self.factory([Workflow('enum',nodes=[Node('entry',enum_work)])]))
+        self.assertTrue(result['ok'],result)
+
+    async def test_cancelled_approval_can_recover_without_repeating_completed_stage(self):
+        """Cancel/recover retains business identity and completed work while opening a fresh actionable approval."""
+        workflow = Workflow('approval', nodes=[Node('prepare', echo),
+            Node('approve', Wait(Value, Value), recovery_mode=Recovery('replay_safe'))],
+            edges=[Edge('prepare', 'approve')])
+        async def scenario(context):
+            waiting = await context.invoke('approval', context.case.input, entry_node_id='prepare', until='boundary')
+            cancelled = await context.cancel(waiting)
+            context.check(CheckResult('cancelled', cancelled.status == 'cancelled'))
+            recovered = await context.recover(cancelled, until='boundary')
+            context.check(CheckResult('same-business-execution', recovered.invocation_id == waiting.invocation_id))
+            stage = await recovered.node('prepare').one()
+            context.check(CheckResult('completed-stage-preserved', await stage.output() == context.case.input))
+            final = await context.respond(recovered, context.case.expected, node_id='approve')
+            context.check(CheckResult('past-cancellation-stays-fixed', cancelled.status == 'cancelled'))
+            return final
+        result = await self.run_eval(self.suite(scenario=scenario), factory=self.factory([workflow]))
+        self.assertTrue(result['ok'], result)
+
+    async def test_approval_can_be_answered_while_another_node_is_running(self):
+        """Target approval readiness permits reply without waiting for the complete Root to become idle."""
+        release = asyncio.Event()
+        async def background(value: Value) -> Value:
+            await release.wait()
+            return value
+        workflow = Workflow('parallel',nodes=[Node('start',echo),Node('approval',Wait(Value,Value)),Node('background',background)],
+            edges=[Edge('start','approval'),Edge('start','background')])
+        async def scenario(context):
+            running = await context.invoke('parallel',context.case.input,entry_node_id='start',until='none')
+            ready = await context.wait_for(running,interaction_node='approval',timeout=3)
+            resumed = await context.respond(ready,context.case.expected,node_id='approval',until='none',timeout=3)
+            release.set()
+            return await context.observe(resumed)
+        result = await self.run_eval(self.suite(scenario=scenario,evaluators=(StatusIs(),)),factory=self.factory([workflow]))
+        self.assertTrue(result['ok'],result)
+
+    async def test_no_workflow_or_duplicate_rule_names_never_produce_green_results(self):
+        """Business Evaluation requires a Workflow and stable distinct rule identities."""
+        async def scenario(context):
+            context.check(CheckResult('pure-assertion',True))
+        result = await self.run_eval(self.suite(scenario=scenario,evaluators=()))
+        self.assertFalse(result['ok'])
+        result = await self.run_eval(self.suite(evaluators=(StatusIs(),StatusIs())))
+        self.assertEqual(result['results'][0]['verdict'],'error')
+        self.assertIn('Duplicate business rule',result['results'][0]['errors'][0]['message'])
+
+
+@unittest.skipUnless(POSTGRES_TEST_URL,'PostgreSQL is not configured.')
+class PostgreSQLBusinessRegressionTests(BusinessRegressionTests):
+    postgres = True
+
+
+class WorkflowBusinessSuiteTests(EvaluationHarness):
+    async def test_order_rules_cover_intermediate_amounts_routing_and_actual_payments(self):
+        """Approved and denied order cases assess the whole Workflow and per-Trial external ledger state."""
+        from examples.evaluation_demo.orders import order_workflow, orders
+        def factory(environment):
+            return self.factory([order_workflow(environment.resources['ledger'])])(environment)
+        suite = replace(orders,host_factory=factory)
+        result = await self.run_eval(suite,options=RunOptions(repeats=2,concurrency=2))
+        self.assertTrue(result['ok'],result)
+        self.assertEqual(result['summary']['passed'],4)
+        self.assertTrue(all(any(check['evidence'] for check in trial['checks']) for trial in result['results']))
+
+    async def test_same_final_result_does_not_hide_an_intermediate_business_violation(self):
+        """A candidate with a correct receipt but wrong approval amount is a business regression."""
+        from examples.evaluation_demo.orders import order_workflow, orders
+        def before(environment):
+            return self.factory([order_workflow(environment.resources['ledger'])])(environment)
+        def after(environment):
+            return self.factory([order_workflow(environment.resources['ledger'],wrong_approval_total=True,normalize_receipt=True)])(environment)
+        suite = replace(orders,cases=(orders.cases[1],),host_factory=before)
+        baseline = await self.run_eval(suite)
+        candidate = await self.run_eval(replace(suite,host_factory=after))
+        self.assertTrue(baseline['ok'],baseline)
+        self.assertEqual(candidate['results'][0]['verdict'],'failed',candidate)
+        checks = {item['name']:item for item in candidate['results'][0]['checks']}
+        self.assertTrue(checks['output']['passed'])
+        self.assertFalse(checks['approval-amount']['passed'])
+        comparison = compare_runs(baseline,candidate)
+        self.assertEqual(comparison['cases'][0]['outcome'],'regressed',comparison)
+        self.assertIn('approval-amount',[rule['name'] for rule in comparison['cases'][0]['rules'] if rule['outcome']=='new_failure'])
+
+    async def test_internal_workflow_refactoring_preserves_business_acceptance(self):
+        """Adding an internal stage remains comparable when approval, routing and actual payments stay valid."""
+        from examples.evaluation_demo.orders import Total, order_workflow, orders
+        def unchanged(value: Total) -> Total:
+            return value
+        def before(environment):
+            return self.factory([order_workflow(environment.resources['ledger'])])(environment)
+        def after(environment):
+            workflow = order_workflow(environment.resources['ledger'])
+            workflow.nodes.append(Node('internal-validation', unchanged))
+            workflow.edges = [edge for edge in workflow.edges if edge.id != 'request-approval']
+            workflow.edges.extend([Edge('calculate', 'internal-validation'), Edge('internal-validation', 'approval')])
+            return self.factory([workflow])(environment)
+        suite = replace(orders, cases=(orders.cases[0],), host_factory=before)
+        baseline = await self.run_eval(suite)
+        candidate = await self.run_eval(replace(suite, host_factory=after))
+        self.assertTrue(baseline['ok'], baseline)
+        self.assertTrue(candidate['ok'], candidate)
+        self.assertEqual(compare_runs(baseline, candidate)['cases'][0]['outcome'], 'unchanged_passed')
+
+    async def test_duplicate_business_submission_reuses_the_ledger_idempotency_key(self):
+        """Two Workflow invocations repeat a business request while the ledger records only one payment."""
+        from examples.evaluation_demo.orders import order_scenario, order_workflow, orders
+        def factory(environment):
+            return self.factory([order_workflow(environment.resources['ledger'])])(environment)
+        async def scenario(context):
+            await order_scenario(context)
+            # A second complete business request uses the same Session and service key.
+            waiting = await context.invoke('order',context.case.input,entry_node_id='calculate',until='boundary')
+            request = await (await waiting.interactions(node_id='approval'))[0].request()
+            final = await context.respond(waiting,dict(request,approved=True),node_id='approval')
+            context.check(CheckResult('one-payment-for-duplicate-key',len(context.resources['ledger'].payments)==1 and len(context.resources['ledger'].requests)==2))
+            return final
+        suite = replace(orders,cases=(orders.cases[0],),scenario=scenario,host_factory=factory)
+        result = await self.run_eval(suite)
+        # The custom multi-round scenario evaluates two public receipts through its own rule.
+        self.assertTrue(any(check['name']=='one-payment-for-duplicate-key' and check['passed'] for check in result['results'][0]['checks']),result)
+        self.assertTrue(result['ok'],result)
+
+
+@unittest.skipUnless(POSTGRES_TEST_URL,'PostgreSQL is not configured.')
+class PostgreSQLWorkflowBusinessSuiteTests(WorkflowBusinessSuiteTests):
+    postgres = True
+
+
+class CaseContractTests(EvaluationHarness):
+    async def test_scenario_cannot_replace_its_case_to_change_expected_results(self):
+        """Replacing the public Case cannot silently grade changed ground truth under the original fingerprint."""
+        async def scenario(context):
+            context.case = EvalCase('one', {'text': 'wrong'}, {'text': 'wrong'})
+            return await context.invoke('echo', context.case.input, entry_node_id='echo')
+        result = await self.run_eval(self.suite(scenario=scenario))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['results'][0]['verdict'], 'error')
+
+
+@unittest.skipUnless(POSTGRES_TEST_URL, 'PostgreSQL is not configured.')
+class PostgreSQLCaseContractTests(CaseContractTests):
+    postgres = True

@@ -356,7 +356,7 @@ class TraceQueries:
             except (KeyError, IndexError, TypeError):
                 return {'available': False, 'value': None}
 
-    async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
+    async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None, session_scope=None):
         """Page Sessions containing matching Invocations, retaining whole-Session counts."""
         limit_value(limit)
         trace_cursor(cursor)
@@ -373,6 +373,8 @@ class TraceQueries:
             func.sum(case((match, 1), else_=0)).label('matching_count'),
             activity.label('updated_at_us'),
         ).select_from(source).where(inv.c.status.is_not(None)).group_by(inv.c.session_id)
+        if session_scope is not None:
+            statement = statement.where(inv.c.session_id.in_(session_scope))
         if session_id is not None:
             statement = statement.where(inv.c.session_id == session_id)
         elif search or workflow_ids or revision_ids or statuses or started_after_us is not None or started_before_us is not None:
@@ -384,6 +386,8 @@ class TraceQueries:
             rows = (await conn.execute(statement.order_by(activity.desc(), inv.c.session_id.desc()).limit(limit + 1))).mappings().all()
             count = select(func.count(func.distinct(inv.c.session_id))).select_from(inv.join(defs, inv.c.workflow_revision_id == defs.c.revision_id)).where(inv.c.status.is_not(None))
             count = count.where(inv.c.session_id == session_id) if session_id is not None else count.where(match)
+            if session_scope is not None:
+                count = count.where(inv.c.session_id.in_(session_scope))
             total = await conn.scalar(count)
         chosen = rows[:limit]
         position = (chosen[-1]['updated_at_us'], chosen[-1]['session_id']) if len(rows) > limit else None

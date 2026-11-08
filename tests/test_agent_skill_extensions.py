@@ -186,7 +186,7 @@ class SkillExpansionTests(unittest.TestCase):
         for executable in skills.as_tools():
             self.assertEqual(executable.definition.parameters["properties"]["name"]["enum"], ["enabled"])
             args = {"name": "disabled"}
-            if executable.definition.name in {"skill_read_resource", "skill_read_text"}:
+            if executable.definition.name == "skill_read_resource":
                 args["path"] = "rules.md"
             result = executable.invoke(call(executable.definition.name, args))
             self.assertTrue(result.is_error)

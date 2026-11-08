@@ -221,7 +221,9 @@ class DatabaseProjectionContracts:
 
     async def test_transactional_matches_event_reconstruction(self):
         """Transactional metadata and references match pure Event reconstruction."""
-        sink, _, _, result = await self.exercise(projection_mode='transactional', projection_cache_enabled=False)
+        sink, _, _, result = await self.exercise(projection_mode=PersistenceConfig().projection_mode, projection_cache_enabled=False)
+        self.assertEqual(sink.config.projection_mode, 'transactional')
+        self.assertIsNone(sink._projection_worker)
         for name in ('node_executions', 'operator_calls', 'graph_changes'):
             self.assertTrue(await self.raw(sink, name), name)
         status = await sink.query_projection_status()
@@ -286,6 +288,87 @@ class DatabaseProjectionContracts:
                 await app.ainvoke(wf, {'blob': 'rollback'})
         self.assertEqual(await self.raw(sink, 'runtime_events'), [])
         self.assertEqual(await self.raw(sink, 'node_executions'), [])
+
+    async def test_transactional_writes_do_not_read_new_facts_back(self):
+        """A current projection cut folds prepared metadata without Event or reference reads."""
+        from sqlalchemy import event
+        sink, app, wf, _ = await self.exercise(projection_mode='transactional')
+        statements = []
+        def collect(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith('SELECT'):
+                statements.append(statement)
+        engine = sink._writer.storage.engine.sync_engine
+        event.listen(engine, 'before_cursor_execute', collect)
+        try:
+            result = await app.ainvoke(wf, {'blob': 'prepared-second-call'})
+            await sink.flush()
+        finally:
+            event.remove(engine, 'before_cursor_execute', collect)
+        self.assertEqual(result.status, 'completed')
+        self.assertFalse([sql for sql in statements if 'FROM runtime_events' in sql or 'FROM artifact_refs' in sql])
+        self.assertEqual((await sink.query_projection_status())['lag_events'], 0)
+
+    async def test_projection_cache_is_published_only_after_commit(self):
+        """A failed COMMIT leaves no advanced cached cursor and the same facts can retry."""
+        from autoagent.core.runtime import RuntimeEvent, SessionOpened
+        from autoagent.host.persistence.query_projections import FRONTIER_KEY
+        from autoagent.host.persistence.storage import prepare
+        sink = await self.sink(projection_mode='transactional')
+        await sink.append(RuntimeEvent('projection-before-commit', 1, SessionOpened({})))
+        following = RuntimeEvent('projection-after-commit', 1, SessionOpened({}))
+        async def scenario():
+            storage = sink._writer.storage
+            encoded = await sink._writer.cpu(prepare, [SimpleNamespace(kind='runtime_event',
+                identity=following.id, value=following, binding=None, anchor=False)], sink.config)
+            old = storage.metadata_cache.get(FRONTIER_KEY)
+            original = storage.transaction
+            @asynccontextmanager
+            async def abort():
+                async with original() as conn:
+                    yield conn
+                    self.assertIsNotNone(storage._committing_projection)
+                    self.assertEqual(storage.metadata_cache.get(FRONTIER_KEY), old)
+                    raise RuntimeError('abort before COMMIT')
+            async with sink._writer.mutation:
+                with patch.object(storage, 'transaction', abort):
+                    with self.assertRaisesRegex(RuntimeError, 'abort before COMMIT'):
+                        await storage.write(encoded)
+                self.assertIsNone(storage.metadata_cache.get(FRONTIER_KEY))
+                self.assertIsNone(storage._committing_projection)
+                async with storage.engine.connect() as conn:
+                    self.assertEqual(await conn.scalar(select(meta.tables['persistence_meta'].c.last_store_order)), 1)
+                await storage.write(encoded)
+                self.assertEqual(storage.metadata_cache.get(FRONTIER_KEY)[1], 2)
+                self.assertLessEqual(storage.metadata_cache.bytes, storage.metadata_cache.budget)
+        await sink._writer.run(scenario)
+        self.assertEqual(len(await self.raw(sink, 'runtime_events')), 2)
+
+    async def test_chunked_projection_cache_eviction_preserves_loop_ordinals(self):
+        """Small projection pages and cache eviction keep repeated Node ordinals and replay identical."""
+        from autoagent import AutoAgentApp, Edge, Node, ResourcePolicy, Workflow
+        from tests.test_host_persistence import again, finished, identity, shorten
+        for budget in (4 * 1024 * 1024, 64):
+            with self.subTest(budget=budget):
+                async with await self.sink(projection_mode='transactional', mode='buffered',
+                        batch_delay_ms=60000, projection_batch_count=2, writer_metadata_cache_bytes=budget) as sink:
+                    wf = Workflow('projection-cache-loop', nodes=[Node('entry', identity), Node('step', shorten,
+                        resource=ResourcePolicy(max_executions_per_invocation=8)), Node('finish', identity)],
+                        edges=[Edge('entry', 'step'), Edge('step', 'step', condition=again), Edge('step', 'finish', condition=finished)])
+                    app = AutoAgentApp(runtime_event_sink=sink)
+                    self.apps.append(app)
+                    app.register_workflow(wf)
+                    await sink.register_workflow(app.workflow_definition_snapshot(wf.id))
+                    session = None
+                    for _ in range(2):
+                        result = await app.ainvoke(wf, {'blob': 'abc'}, entry_node_id='entry', session_id=session)
+                        session = result.ref.session_id
+                        await sink.flush()
+                        nodes = (await sink.list_nodes(result.invocation_id)).items
+                        self.assertEqual(sorted(row['ordinal'] for row in nodes if row['node_id'] == 'step'), [1, 2, 3])
+                        before = await sink.execution_trace(result.invocation_id)
+                        await sink.build_query_projections(rebuild=True)
+                        self.assert_trace_equal(await sink.execution_trace(result.invocation_id), before)
+                        self.assertLessEqual(sink._writer.storage.metadata_cache.bytes, sink._writer.storage.metadata_cache.budget)
 
     async def test_stale_publish_after_reset_is_rejected(self):
         """Maintenance epoch changes cannot resurrect a prepared stale projection."""

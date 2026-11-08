@@ -31,11 +31,17 @@ execution_settings = Table(
 execution_settings.append_constraint(UniqueConstraint("invocation_id", "epoch"))
 execution_settings.append_constraint(UniqueConstraint("invocation_id", "activation_id"))
 Index("agent_execution_settings_latest", execution_settings.c.invocation_id, execution_settings.c.epoch)
+Index("agent_execution_settings_session", execution_settings.c.session_id, execution_settings.c.created_at_us, execution_settings.c.epoch)
+workspaces = Table(
+    "agent_workspaces", context_meta,
+    c("workspace_id", nullable=False, pk=True), c("configuration", J, False), c("updated_at_us", B, False),
+)
 
 
 class AgentContextStorage:
-    def __init__(self, writer):
+    def __init__(self, writer, queries):
         self.writer = writer
+        self.queries = queries
         self._ready = False
 
     async def _prepare(self, conn):
@@ -53,14 +59,50 @@ class AgentContextStorage:
         from sqlalchemy import inspect
         return await conn.run_sync(lambda sync: inspect(sync).has_table(table.name))
 
+    async def workspace_records(self):
+        engine = self.writer.storage.query_engine or self.writer.storage.engine
+        async with engine.connect() as conn:
+            if not await self._exists(conn, workspaces):
+                return []
+            rows = (await conn.execute(select(workspaces.c.configuration))).scalars().all()
+            return list(rows)
+
+    async def register_workspace(self, configuration):
+        self.writer.check_open()
+        if self.writer.read_only:
+            raise PermissionError("A read-only Host cannot register Workspaces.")
+        async with self.writer.mutation:
+            async with self.writer.storage.transaction() as conn:
+                await self._prepare(conn)
+                wid = configuration["id"]
+                exists = await conn.scalar(select(workspaces.c.workspace_id).where(workspaces.c.workspace_id == wid))
+                values = dict(configuration=configuration, updated_at_us=time.time_ns() // 1000)
+                if exists is not None:
+                    await conn.execute(update(workspaces).where(workspaces.c.workspace_id == wid).values(**values))
+                else:
+                    await conn.execute(insert(workspaces).values(workspace_id=wid, **values))
+            self._ready = True
+
+    async def _session_workspace(self, conn, sid):
+        """Only accepted execution stages fix an otherwise unconfigured Session."""
+        events = meta.tables["runtime_events"]
+        row = (await conn.execute(select(execution_settings.c.settings).join(events,
+            events.c.event_id == execution_settings.c.activation_id).where(execution_settings.c.session_id == sid)
+            .order_by(execution_settings.c.created_at_us, execution_settings.c.epoch).limit(1))).first()
+        return (True, restore(AgentSessionSettings, row[0]).workspace) if row else (False, None)
+
     async def settings(self, sid, defaults):
         engine = self.writer.storage.query_engine or self.writer.storage.engine
         async with engine.connect() as conn:
             row = None
             if await self._exists(conn, session_settings):
                 row = (await conn.execute(select(session_settings).where(session_settings.c.session_id == sid))).mappings().first()
-            return AgentSettingsRecord(session_id=sid, version=row["version"] if row else 0,
-                settings=restore(AgentSessionSettings, row["settings"] if row else defaults))
+            settings = restore(AgentSessionSettings, row["settings"] if row else defaults)
+            if row is None and await self._exists(conn, execution_settings):
+                fixed, workspace = await self._session_workspace(conn, sid)
+                if fixed:
+                    settings = settings.model_copy(update={"workspace": workspace})
+            return AgentSettingsRecord(session_id=sid, version=row["version"] if row else 0, settings=settings)
 
     async def configure(self, sid, settings, expected_version):
         self.writer.check_open()
@@ -73,6 +115,9 @@ class AgentContextStorage:
                 version = row["version"] if row else 0
                 if expected_version is not None and expected_version != version:
                     raise ConflictError("Agent Session settings version conflict.")
+                fixed, workspace = (True, restore(AgentSessionSettings, row["settings"]).workspace) if row else await self._session_workspace(conn, sid)
+                if fixed and settings.workspace != workspace:
+                    raise ConflictError("A Session's Workspace binding cannot be changed; create a new Session.")
                 values = dict(version=version + 1, settings=settings.model_dump(mode="json"),
                               updated_at_us=time.time_ns() // 1000)
                 if row:
@@ -81,6 +126,47 @@ class AgentContextStorage:
                     await conn.execute(insert(session_settings).values(session_id=sid, **values))
             self._ready = True
         return AgentSettingsRecord(session_id=sid, version=version + 1, settings=settings)
+
+    async def initialize_settings(self, sid, settings):
+        """Pin a new conversation's Workspace while preserving concurrent model edits."""
+        self.writer.check_open()
+        if self.writer.read_only:
+            raise PermissionError("A read-only Host cannot create conversations.")
+        async with self.writer.mutation:
+            async with self.writer.storage.transaction() as conn:
+                await self._prepare(conn)
+                row = (await conn.execute(select(session_settings).where(session_settings.c.session_id == sid))).mappings().first()
+                if row:
+                    stored = restore(AgentSessionSettings, row["settings"])
+                    if stored.workspace != settings.workspace:
+                        raise ConflictError("A Session's Workspace binding cannot be changed; create a new Session.")
+                    return AgentSettingsRecord(session_id=sid, version=row["version"], settings=stored)
+                fixed, workspace = await self._session_workspace(conn, sid)
+                if fixed and workspace != settings.workspace:
+                    raise ConflictError("A Session's Workspace binding cannot be changed.")
+                await conn.execute(insert(session_settings).values(session_id=sid, version=1,
+                    settings=settings.model_dump(mode="json"), updated_at_us=time.time_ns() // 1000))
+            self._ready = True
+        return AgentSettingsRecord(session_id=sid, version=1, settings=settings)
+
+    async def conversation_sessions(self, workspace_id, *, limit=20, cursor=None):
+        from autoagent.agent import BUILTIN_AGENT_WORKFLOW_ID
+        from .tracing import TraceQueries
+        configured_workspace = session_settings.c.settings["workspace"]["workspace_id"].as_string()
+        accepted_workspace = execution_settings.c.settings["workspace"]["workspace_id"].as_string()
+        configured = select(session_settings.c.session_id).where(
+            configured_workspace.is_not(None) if workspace_id is None else configured_workspace == workspace_id)
+        # SDK-created Sessions may have accepted execution settings without a
+        # user configuration row. Admission still determines their fixed binding.
+        accepted = select(execution_settings.c.session_id).join(meta.tables["runtime_events"],
+            meta.tables["runtime_events"].c.event_id == execution_settings.c.activation_id).where(
+                execution_settings.c.session_id.not_in(select(session_settings.c.session_id)),
+                accepted_workspace.is_not(None) if workspace_id is None else accepted_workspace == workspace_id)
+        scope = configured.union(accepted)
+        if workspace_id is None:
+            scope = select(meta.tables["sessions"].c.session_id).where(meta.tables["sessions"].c.session_id.not_in(scope))
+        return await TraceQueries(self.queries).sessions(workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,),
+            session_scope=scope, limit=limit, cursor=cursor)
 
     async def activate(self, sid, iid, defaults, reason, activation_id, bind):
         """Select desired settings and insert one immutable stage before dispatch."""
@@ -95,6 +181,11 @@ class AgentContextStorage:
                     return self._snapshot(previous)
                 configured = (await conn.execute(select(session_settings).where(session_settings.c.session_id == sid))).mappings().first()
                 settings = restore(AgentSessionSettings, configured["settings"] if configured else defaults)
+                fixed, workspace = await self._session_workspace(conn, sid)
+                if fixed:
+                    if configured and settings.workspace != workspace:
+                        raise ConflictError("A Session's Workspace binding cannot be changed.")
+                    settings = settings.model_copy(update={"workspace": workspace})
                 bindings = bind(settings)
                 epoch = (await conn.scalar(select(func.max(execution_settings.c.epoch)).where(
                     execution_settings.c.invocation_id == iid)) or 0) + 1

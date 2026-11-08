@@ -28,20 +28,25 @@ class Maintenance:
             self.storage.graph_cache.clear()
             self.storage.metadata_cache.clear()
             self.storage._store_order = None
-            async with self.writer.mutation, self.storage.transaction() as conn:
-                if not self.storage.sqlite:
-                    # Match publication's lock order before deleting any
-                    # Invocation rows referenced by detailed projection FKs.
-                    await conn.execute(select(meta.tables['persistence_meta'].c.id).with_for_update())
-                result = await operation(conn, *args)
-                if operation.__name__ in ("rebuild", "purge"):
-                    store_id = uuid4().hex
-                    await conn.execute(update(meta.tables['persistence_meta']).values(store_id=store_id))
-                    if operation.__name__ == 'purge':
-                        await conn.execute(update(meta.tables['query_projection_state']).values(store_id=store_id))
-                    if self.writer.config.projection_mode == 'transactional':
-                        from .query_projections import catch_up
-                        await catch_up(self.storage, conn, self.writer.config)
+            self.storage._committing_projection = None
+            try:
+                async with self.writer.mutation, self.storage.transaction() as conn:
+                    if not self.storage.sqlite:
+                        # Match publication's lock order before deleting any
+                        # Invocation rows referenced by detailed projection FKs.
+                        await conn.execute(select(meta.tables['persistence_meta'].c.id).with_for_update())
+                    result = await operation(conn, *args)
+                    if operation.__name__ in ("rebuild", "purge"):
+                        store_id = uuid4().hex
+                        await conn.execute(update(meta.tables['persistence_meta']).values(store_id=store_id))
+                        if operation.__name__ == 'purge':
+                            await conn.execute(update(meta.tables['query_projection_state']).values(store_id=store_id))
+                        if self.writer.config.projection_mode == 'transactional':
+                            from .query_projections import catch_up
+                            await catch_up(self.storage, conn, self.writer.config)
+                self.storage.publish_projection_cache()
+            finally:
+                self.storage._committing_projection = None
             async with self.writer.condition:
                 self.writer.commit_revision += 1
                 self.writer.condition.notify_all()

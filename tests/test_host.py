@@ -727,6 +727,15 @@ class PostgreSQLHostTests(HostTests):
 
 
 class HostConfigurationTests(unittest.TestCase):
+    def test_transactional_projection_default_and_explicit_background(self):
+        """SDK and environment defaults agree, while background remains explicitly selectable."""
+        from autoagent.host.persistence import PersistenceConfig
+        self.assertEqual(PersistenceConfig().projection_mode, 'transactional')
+        self.assertEqual(HostSettings().persistence.projection_mode, 'transactional')
+        self.assertEqual(HostSettings.from_environment({}).persistence.projection_mode, 'transactional')
+        settings = HostSettings.from_environment({'AUTOAGENT_PROJECTION_MODE': 'background'})
+        self.assertEqual(settings.persistence.projection_mode, 'background')
+
     def test_env_example_covers_every_host_setting(self):
         """Document every environment setting used by the actual parser."""
         from autoagent.host.agent_context import HostAgentContext

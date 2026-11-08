@@ -26,6 +26,14 @@ class AgentMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     session_id: str = Field(min_length=1, max_length=512)
     message: str = Field(min_length=1)
+    workspace_id: str | None = Field(None, min_length=1, max_length=512)
+
+
+class CreateWorkspace(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1, max_length=4096)
+    create_directory: bool = False
 
 
 class _UserEventHub:
@@ -59,21 +67,34 @@ def agent_router(host, settings, query):
     router = APIRouter(lifespan=hub.lifespan)
     subscribers = hub.reservations
 
+    async def agent_query(operation):
+        try:
+            return await query(operation, settings)
+        except ConflictError as error:
+            raise HTTPException(409, detail=str(error)) from error
+
     @router.get('/agent/catalog')
     async def catalog():
         return await query(host.agent_context.workspace_catalog(), settings)
 
     @router.post('/agent/messages', status_code=202)
     async def send_message(body: AgentMessage):
-        ref = await query(host.agent_context.start_conversation(body.session_id, body.message), settings)
+        ref = await agent_query(host.agent_context.start_conversation(body.session_id, body.message, body.workspace_id))
         return dict(accepted=True, invocation_id=ref.invocation_id, session_id=ref.session_id)
 
     @router.get('/agent/sessions')
-    async def sessions(cursor: str | None = Query(None, max_length=4096)):
+    async def sessions(cursor: str | None = Query(None, max_length=4096),
+                       workspace_id: str | None = Query(None, min_length=1, max_length=512), unbound: bool = False,
+                       limit: int = Query(20, ge=1, le=100)):
         from autoagent.agent import BUILTIN_AGENT_WORKFLOW_ID
         scope = ["agent.sessions", BUILTIN_AGENT_WORKFLOW_ID]
+        if unbound and workspace_id is not None:
+            raise HTTPException(400, detail="Choose a Workspace or unbound conversations.")
+        if workspace_id is not None or unbound:
+            scope.append(workspace_id)
         position = _browse_cursor(cursor, scope)
-        page = await query(host.list_execution_sessions(workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,), limit=20, cursor=position), settings)
+        page = await query(host.agent_context.list_conversation_sessions(workspace_id, limit=limit, cursor=position)
+            if workspace_id is not None or unbound else host.list_execution_sessions(workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,), limit=limit, cursor=position), settings)
         async def describe(row):
             if row['workflow_count'] != 1:
                 return None
@@ -110,9 +131,9 @@ def agent_router(host, settings, query):
         return dict(items=page.items, next_cursor=next_cursor)
 
     @router.get('/agent/settings')
-    async def get_settings(session_id: str = Query(min_length=1, max_length=512)):
-        await query(host.agent_context.workspace_session(session_id, allow_new=True), settings)
-        return await query(host.agent_context.get_settings(session_id), settings)
+    async def get_settings(session_id: str = Query(min_length=1, max_length=512),
+                           workspace_id: str | None = Query(None, min_length=1, max_length=512)):
+        return await agent_query(host.agent_context.conversation_settings(session_id, workspace_id))
 
     @router.put('/agent/settings')
     async def configure(body: ConfigureAgent):
@@ -121,11 +142,24 @@ def agent_router(host, settings, query):
             return await query(host.agent_context.configure(body.session_id, body.settings,
                 expected_version=body.expected_version), settings)
         except ConflictError as error:
-            raise HTTPException(409, detail="Session settings changed; reload before saving.") from error
+            raise HTTPException(409, detail=str(error)) from error
 
     @router.get('/agent/resources')
-    async def resources(revision_id: str = Query(min_length=1, max_length=4096)):
-        return await query(host.agent_context.workspace_resources(revision_id, builtin=True), settings)
+    async def resources(revision_id: str = Query(min_length=1, max_length=4096),
+                        session_id: str | None = Query(None, min_length=1, max_length=512),
+                        workspace_id: str | None = Query(None, min_length=1, max_length=512)):
+        return await agent_query(host.agent_context.workspace_resources(revision_id, builtin=True, session_id=session_id, workspace_id=workspace_id))
+
+    @router.get('/agent/workspaces')
+    async def workspaces():
+        return dict(items=await query(host.agent_context.list_workspaces(), settings))
+
+    @router.post('/agent/workspaces', status_code=201)
+    async def create_workspace(body: CreateWorkspace):
+        try:
+            return await query(host.agent_context.create_workspace(**body.model_dump()), settings)
+        except OSError as error:
+            raise HTTPException(400, detail=f"Cannot prepare Workspace directory: {error.strerror or str(error)}") from error
 
     @router.get('/agent/execution')
     async def execution(invocation_id: str = Query(min_length=1, max_length=4096)):

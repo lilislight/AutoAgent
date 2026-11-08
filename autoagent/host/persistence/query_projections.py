@@ -1,4 +1,4 @@
-"""Optional SQL read models derived only from durable database facts.
+"""Optional SQL read models derived from canonical facts.
 
 The reducer never owns execution control. Background computation happens on a
 read snapshot; only bounded dirty rows and their frontier enter the publish
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import weakref
 
 from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.sql import visitors
@@ -20,6 +21,8 @@ from .schema import DETAIL_TABLES, meta
 
 STATE = meta.tables['query_projection_state']
 ENTITIES = meta.tables['query_projection_entities']
+FRONTIER_KEY = ('query_projection_frontier',)
+STATEFUL_TABLES = ('sessions', 'invocations', 'node_executions', 'operator_calls', 'waits')
 
 
 async def reset(conn):
@@ -52,7 +55,7 @@ async def anchor_ids(conn, invocation_ids=None):
 class BatchConnection:
     """SQL history plus uncommitted append-only Edge/Graph metadata."""
     def __init__(self, raw, batch):
-        self.raw, self.batch = raw, batch
+        self.raw, self.batch = raw, weakref.proxy(batch)
 
     def __getattr__(self, name):
         return getattr(self.raw, name)
@@ -62,6 +65,9 @@ class BatchConnection:
         return dict(row) if row else None
 
     async def detail_ordinal(self, invocation_id, node_id):
+        cached = self.batch.cached_ordinal((invocation_id, node_id))
+        if cached is not None:
+            return cached
         table = meta.tables['node_executions']
         return await self.raw.scalar(select(func.coalesce(func.max(table.c.ordinal), 0)).where(
             table.c.invocation_id == invocation_id, table.c.node_id == node_id))
@@ -93,17 +99,27 @@ class BatchConnection:
 
 
 class SQLProjector(ProjectionBatch):
-    def __init__(self, conn, storage, config):
+    def __init__(self, conn, storage, config, *, cache=None, store_id=None):
         from types import SimpleNamespace
         super().__init__(None, storage.source, graph_loader=storage.workflow_graph)
         self.connection = BatchConnection(conn, self)
         self.cache_limits = SimpleNamespace(config=config)
+        self.metadata_cache, self.store_id = cache, store_id
+
+    def cached_row(self, name, key):
+        return self.metadata_cache.get(('query_projection_row', self.store_id, name, key)) if self.metadata_cache is not None else None
+
+    def cached_ordinal(self, scope):
+        return self.metadata_cache.get(('query_projection_ordinal', self.store_id, scope)) if self.metadata_cache is not None else None
 
     async def get(self, name, **identity):
         table = meta.tables[name]
         key = tuple(identity[col.name] for col in table.primary_key)
         if key not in self.rows[name]:
-            if name in ('sessions', 'invocations'):
+            cached = self.cached_row(name, key)
+            if cached is not None:
+                self.rows[name][key] = cached
+            elif name in ('sessions', 'invocations'):
                 self.rows[name][key] = await self.connection.raw.scalar(select(ENTITIES.c.data).where(
                     ENTITIES.c.kind == name, ENTITIES.c.identity == key[0]))
             elif name in ('graph_changes', 'edge_evaluations'):
@@ -138,6 +154,14 @@ class SQLProjector(ProjectionBatch):
                                 scopes.add((iid, node_id))
         for name, identities in keys.items():
             values = list(identities - self.rows[name].keys())
+            missing = []
+            for key in values:
+                cached = self.cached_row(name, key)
+                if cached is None:
+                    missing.append(key)
+                else:
+                    self.rows[name][key] = cached
+            values = missing
             table = meta.tables[name]
             for start in range(0, len(values), 300):
                 group = values[start:start + 300]
@@ -152,7 +176,14 @@ class SQLProjector(ProjectionBatch):
                     self.rows[name].update((tuple(row[col.name] for col in table.primary_key), dict(row)) for row in rows)
         scopes.update((row['invocation_id'], row['node_id']) for row in self.rows['node_executions'].values() if row)
         table = meta.tables['node_executions']
-        scopes = list(scopes)
+        missing_scopes = []
+        for scope in scopes:
+            cached = self.cached_ordinal(scope)
+            if cached is None:
+                missing_scopes.append(scope)
+            else:
+                self.ordinals[scope] = max(self.ordinals.get(scope, 0), cached)
+        scopes = missing_scopes
         for start in range(0, len(scopes), 300):
             group = scopes[start:start + 300]
             for scope in group:
@@ -171,6 +202,65 @@ class PreparedProjection:
     order: int
     batch: SQLProjector
     count: int
+    transactional: bool = False
+
+    def publish_cache(self, cache):
+        """Only the owner of the committed SQL transaction may call this."""
+        for name in STATEFUL_TABLES:
+            for key, row in self.batch.rows[name].items():
+                if row is not None:
+                    cache.put(('query_projection_row', self.store_id, name, key), row)
+        for scope, ordinal in self.batch.ordinals.items():
+            cache.put(('query_projection_ordinal', self.store_id, scope), ordinal)
+        cache.put(FRONTIER_KEY, (self.store_id, self.order))
+
+    def invalidate_cache(self, cache):
+        # Earlier chunks of the same SQL transaction may not be retained for
+        # publication. Their old committed rows must not survive a newer cut.
+        for name in STATEFUL_TABLES:
+            for key in self.batch.dirty[name]:
+                cache.discard(('query_projection_row', self.store_id, name, key))
+        for scope in self.batch.ordinals:
+            cache.discard(('query_projection_ordinal', self.store_id, scope))
+
+
+def check_capacity(batch, config):
+    if sum(size for _, size in retained_objects(batch.rows).values()) > config.projection_build_bytes:
+        raise CapacityError('Database projection batch exceeds projection_build_bytes.')
+
+
+async def transactional(storage, conn, config, records, before):
+    """Fold this transaction's validated new facts without reading them back.
+
+    The Writer owns the fact frontier and already locks persistence_meta before
+    entering here. A cold/mismatched cursor uses SQL catch-up, including imported
+    Checkpoint anchors. Cached reducer rows belong only to a proven same epoch.
+    """
+    frontier = storage.metadata_cache.get(FRONTIER_KEY)
+    if frontier is None or frontier[1] != before:
+        store_id = await conn.scalar(select(meta.tables['persistence_meta'].c.store_id))
+        after = await progress(conn, store_id)
+        if after != before:
+            return await catch_up(storage, conn, config)
+        frontier = (store_id, after)
+        cache = None  # No proof that older cached rows describe this SQL cut.
+    else:
+        cache = storage.metadata_cache
+    for start in range(0, len(records), config.projection_batch_count):
+        group = records[start:start + config.projection_batch_count]
+        batch = SQLProjector(conn, storage, config, cache=cache, store_id=frontier[0])
+        await batch.prefetch([record for record, _, _ in group])
+        for index, (record, event_order, binding) in enumerate(group):
+            await batch.runtime(record, event_order, binding)
+            if index % 64 == 63:
+                check_capacity(batch, config)
+        check_capacity(batch, config)
+        prepared = PreparedProjection(frontier[0], before, group[-1][1], batch, len(group), transactional=True)
+        await publish(storage, conn, prepared)
+        prepared.invalidate_cache(storage.metadata_cache)
+        storage._committing_projection = prepared
+        before, cache = prepared.order, None
+    return len(records)
 
 
 async def prepare(storage, conn, config):
@@ -204,10 +294,8 @@ async def prepare(storage, conn, config):
         if not session or record['sequence'] > session['durable_sequence']:
             await batch.runtime(record, row['store_order'], row['operator_definition_id'])
         if index % 64 == 63:
-            if sum(size for _, size in retained_objects(batch.rows).values()) > config.projection_build_bytes:
-                raise CapacityError('Database projection batch exceeds projection_build_bytes.')
-    if sum(size for _, size in retained_objects(batch.rows).values()) > config.projection_build_bytes:
-        raise CapacityError('Database projection batch exceeds projection_build_bytes.')
+            check_capacity(batch, config)
+    check_capacity(batch, config)
     order = rows[-1]['store_order'] if rows else header['last_store_order']
     return PreparedProjection(header['store_id'], after, order, batch, len(rows))
 
@@ -217,11 +305,17 @@ async def publish(storage, conn, prepared):
     header = meta.tables['persistence_meta']
     # Shared lock order with maintenance. PostgreSQL's main Writer updates this
     # row only at commit; the background lock timeout keeps contention bounded.
-    current = await conn.scalar(select(header.c.store_id).with_for_update())
-    if current != prepared.store_id or await progress(conn, current) != prepared.after:
-        return False
+    current = prepared.store_id
+    if not prepared.transactional:
+        current = await conn.scalar(select(header.c.store_id).with_for_update())
+        if current != prepared.store_id or await progress(conn, current) != prepared.after:
+            return False
     for name in DETAIL_TABLES:
-        await storage.upsert(conn, name, prepared.batch.changed(name))
+        rows = prepared.batch.changed(name)
+        if name in ('graph_changes', 'edge_evaluations'):
+            await storage.insert_rows(conn, name, rows)
+        else:
+            await storage.upsert(conn, name, rows)
     entities = []
     for name in ('sessions', 'invocations'):
         for row in prepared.batch.changed(name):
@@ -242,6 +336,8 @@ async def catch_up(storage, conn, config):
                 prepared.after is None and not prepared.count and not any(prepared.batch.dirty.values())):
             return count
         await publish(storage, conn, prepared)
+        prepared.invalidate_cache(storage.metadata_cache)
+        storage._committing_projection = prepared
         count += prepared.count
         if prepared.count < config.projection_batch_count:
             return count

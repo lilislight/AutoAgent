@@ -4,7 +4,7 @@ Reports and each Trial's real execution database remain under
 .autoagent/evaluations. No model credentials or external services are needed.
 """
 
-from autoagent.evaluation import CheckResult, EvalCase, EvalSuite, EventCount, OutputEquals, StatusIs
+from autoagent.evaluation import CheckResult, EvalCase, EvalSuite, NodeExecuted, OutputEquals, StatusIs
 
 
 async def normalize(context):
@@ -13,6 +13,7 @@ async def normalize(context):
 
 normalization = EvalSuite(
     id='normalization',
+    conditions={},
     cases=(EvalCase('trim-and-lower', {'text': '  HELLO  '}, {'text': 'hello'}),
            EvalCase('empty', {'text': '   '}, {'text': ''})),
     scenario=normalize,
@@ -22,17 +23,18 @@ normalization = EvalSuite(
 
 async def approve(context):
     waiting = await context.invoke('approval', context.case.input, entry_node_id='approve', until='boundary')
-    wait = waiting.member()['waits'][0]
-    request = await waiting.wait_request(wait)
+    wait = (await waiting.interactions())[0]
+    request = await wait.request()
     context.check(CheckResult('approval-request', request == context.case.input,
-        'Approval receives the original request.', (waiting.reference(),)))
+        'Approval receives the original request.'))
     return await context.respond(waiting, context.case.expected, node_id='approve')
 
 
 approval = EvalSuite(
     id='approval',
+    conditions={},
     cases=(EvalCase('deny', {'text': 'Refund order 123'}, {'text': 'denied'}),
            EvalCase('allow', {'text': 'Refund order 456'}, {'text': 'approved'})),
     scenario=approve,
-    evaluators=(StatusIs(), OutputEquals(), EventCount('invocation.completed', minimum=1, maximum=1)),
+    evaluators=(StatusIs(), OutputEquals(), NodeExecuted('approve')),
 )

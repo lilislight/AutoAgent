@@ -19,6 +19,11 @@ from tests.test_host import Value, identity
 
 
 class LocalProjectionContracts:
+    def projected_rows(self, name, rows):
+        # SQL prefixes include nullable columns; Event-built cache rows are
+        # sparse. Compare the same column-complete shape exposed by readers.
+        return [{column.name: row.get(column.name) for column in meta.tables[name].c} for row in rows]
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.url = await self.database_url()
@@ -138,7 +143,8 @@ class LocalProjectionContracts:
                     return await q.projection_cache.build(conn, ref.invocation_id, frontier, host._local_projections.store_id)
             rebuilt = await host._persistence._writer.run(cold)
             for name in DETAIL_TABLES:
-                self.assertCountEqual(hot[name], list(rebuilt[name].values()), name)
+                self.assertCountEqual(self.projected_rows(name, hot[name]),
+                                      self.projected_rows(name, rebuilt[name].values()), name)
 
     async def test_evicted_live_root_rebuilds_its_prefix_on_the_next_event(self):
         """An active cache miss restores earlier Events before applying a resumed Wait."""
@@ -181,7 +187,8 @@ class LocalProjectionContracts:
                     return await q.projection_cache.build(conn, fork['invocation_id'], frontier, host._local_projections.store_id)
             cold = await host._persistence._writer.run(rebuild)
             for name in DETAIL_TABLES:
-                self.assertCountEqual(hot[name], list(cold[name].values()), name)
+                self.assertCountEqual(self.projected_rows(name, hot[name]),
+                                      self.projected_rows(name, cold[name].values()), name)
 
     async def test_disabled_or_failed_service_does_not_affect_controls(self):
         """Workers can omit local observation, and an observer failure never breaks Wait response or persistence."""

@@ -4,14 +4,16 @@ export interface SessionSettings {
   model: { provider: string; model: string | null; streaming: boolean; max_output_tokens: number | null; temperature: number | null };
   approval_mode: 'policy' | 'always_ask' | 'never_ask' | 'bypass';
   access: { default: AccessAction; rules: Record<string, AccessAction>; allowed_tools: string[] | null; policy: string | null };
+  workspace: { workspace_id: string; working_directory: string } | null;
 }
+export interface AgentWorkspaceInfo { id: string; name: string; backend: string; path: string | null; is_project: boolean; available: boolean | null }
 export interface SettingsRecord { session_id: string; version: number; settings: SessionSettings }
 export interface WorkspaceAgent {
   revision_id: string; user_signal_endpoint: string;
   include_ask_user: boolean; subagents: boolean;
   context_policy: { context_window: number | null; compact_at_ratio: number; compact_at_tokens: number | null; target_ratio: number; target_tokens: number | null };
 }
-export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; defaults: SessionSettings }
+export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; defaults: SessionSettings; project_workspace_id: string }
 export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number }
 export interface Page<T> { items: T[]; next_cursor: string | null }
 export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number; [key: string]: unknown }

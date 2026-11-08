@@ -1,17 +1,19 @@
 import { newId } from './ids';
 import { config, request } from '../http';
-import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentInvocation, AgentResources, AgentSession, Controls, Operation, Page, SessionSettings, SettingsRecord, Usage } from './types';
+import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentInvocation, AgentResources, AgentSession, AgentWorkspaceInfo, Controls, Operation, Page, SessionSettings, SettingsRecord, Usage } from './types';
 
 // All commands use Host operations. This module has no Graph/Trace dependencies.
 export const agentClient = {
   catalog: (signal: AbortSignal) => request<AgentCatalog>('/agent/catalog', signal),
-  sessions: (cursor: string | null, signal: AbortSignal) => request<Page<AgentSession>>(`/agent/sessions?${new URLSearchParams(cursor ? { cursor } : {})}`, signal),
+  workspaces: (signal: AbortSignal) => request<{ items: AgentWorkspaceInfo[] }>('/agent/workspaces', signal),
+  createWorkspace: (value: { name: string; path: string; create_directory: boolean }, signal: AbortSignal) => request<AgentWorkspaceInfo>('/agent/workspaces', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }),
+  sessions: (workspace: string | null, cursor: string | null, signal: AbortSignal) => request<Page<AgentSession>>(`/agent/sessions?${new URLSearchParams({ ...(workspace ? { workspace_id: workspace } : { unbound: 'true' }), ...(cursor ? { cursor } : {}) })}`, signal),
   invocations: (session: string, cursor: string | null, signal: AbortSignal) => request<Page<AgentInvocation>>(`/agent/invocations?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}) })}`, signal),
   controls: (iid: string, cursor: string, signal: AbortSignal) => request<Controls>(`/execution-controls?${new URLSearchParams({ invocation_id: iid, cursor })}`, signal),
   execution: (iid: string, signal: AbortSignal) => request<AgentExecution>(`/agent/execution?${new URLSearchParams({ invocation_id: iid })}`, signal),
-  settings: (sid: string, signal: AbortSignal) => request<SettingsRecord>(`/agent/settings?${new URLSearchParams({ session_id: sid })}`, signal),
+  settings: (sid: string, signal: AbortSignal, workspace?: string | null) => request<SettingsRecord>(`/agent/settings?${new URLSearchParams({ session_id: sid, ...(workspace ? { workspace_id: workspace } : {}) })}`, signal),
   configure: (sid: string, settings: SessionSettings, version: number, signal: AbortSignal) => request<SettingsRecord>('/agent/settings', signal, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, settings, expected_version: version }) }),
-  resources: (revision: string, signal: AbortSignal) => request<AgentResources>(`/agent/resources?${new URLSearchParams({ revision_id: revision })}`, signal),
+  resources: (revision: string, session: string, signal: AbortSignal, workspace?: string | null) => request<AgentResources>(`/agent/resources?${new URLSearchParams({ revision_id: revision, session_id: session, ...(workspace ? { workspace_id: workspace } : {}) })}`, signal),
   usage: (sid: string, iid: string | null, signal: AbortSignal) => request<{ session: Usage; invocation: Usage | null }>(`/agent/usage?${new URLSearchParams({ session_id: sid, ...(iid ? { invocation_id: iid } : {}) })}`, signal),
   async history(iid: string, signal: AbortSignal): Promise<AgentEvent[]> {
     const items: AgentEvent[] = [];
@@ -25,7 +27,7 @@ export const agentClient = {
     }
   },
   watch(sid: string) { return new EventSource(`${config.apiPrefix}/agent/events/watch?${new URLSearchParams({ session_id: sid })}`); },
-  run: (sid: string, message: string, signal: AbortSignal) => request<{ invocation_id: string; session_id: string }>('/agent/messages', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, message }) }),
+  run: (sid: string, message: string, signal: AbortSignal, workspace: string | null) => request<{ invocation_id: string; session_id: string }>('/agent/messages', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, message, workspace_id: workspace }) }),
   spec: (iid: string, action: string, options: Record<string, string>, signal: AbortSignal) => request<ActionSpec>(`/execution-action-spec?${new URLSearchParams({ invocation_id: iid, action, ...options })}`, signal),
   action: (input: ActionInput, signal: AbortSignal) => request<Operation>('/execution-actions', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }),
   operation: (id: string, signal: AbortSignal) => request<Operation>(`/execution-operations/${encodeURIComponent(id)}`, signal),

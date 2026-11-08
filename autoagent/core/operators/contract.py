@@ -24,6 +24,8 @@ from typing_extensions import is_typeddict
 
 from pydantic import BaseModel, TypeAdapter, ValidationError, JsonValue
 
+from .schema import schema_json
+
 
 def _is_model_type(value: object) -> bool:
     return isinstance(value, type) and issubclass(value, BaseModel)
@@ -48,7 +50,7 @@ def _validate_annotation(annotation: object, location: str) -> object | None:
         raise TypeError(f"{location} must be declared at module scope.")
     _validate_fields(annotation, location, set())
     try:
-        json.dumps(TypeAdapter(annotation).json_schema(), sort_keys=True)
+        schema_json(annotation)
     except Exception as error:
         raise TypeError(f"{location} cannot produce a durable schema: {error}") from error
     return annotation
@@ -146,11 +148,10 @@ class ValueContract:
         normalized = _validate_annotation(annotation, location)
         if normalized is None:
             return cls(None, "None", "null")
-        schema = TypeAdapter(normalized).json_schema()
         return cls(
             normalized,
             _type_name(normalized),
-            json.dumps(schema, sort_keys=True, separators=(",", ":")),
+            schema_json(normalized),
         )
 
     def same_as(self, other: "ValueContract") -> bool:

@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { entityKey, sortedRows, type ConversationState, type FeedRow } from './conversationState';
 import { Markdown, MessageContent } from './MessageContent';
 import type { Interaction, ToolSnapshot } from './types';
+import { AgentIcon } from './AgentIcon';
 import { ConversationSkeleton } from '../components/LoadingState';
 
 export const formatTokens = (value: number | null | undefined) => value == null ? '—' : new Intl.NumberFormat('en', { notation: value >= 10000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value);
@@ -56,7 +57,7 @@ const Row = memo(function Row({ row, state, interactionByTool }: { row: FeedRow;
   }
   return true;
 });
-export function Conversation({ state, loading, error, onRetry }: { state: ConversationState; loading: boolean; error?: Error | null; onRetry: () => void }) {
+export function Conversation({ state, loading, error, onRetry, onSuggest }: { state: ConversationState; loading: boolean; error?: Error | null; onRetry: () => void; onSuggest?: (text: string) => void }) {
   const rows = useMemo(() => sortedRows(state), [state]);
   const interactions = useMemo(() => new Map(Object.entries(state.interactions).flatMap(([key, value]) => {
     const iid = (JSON.parse(key) as string[])[0]; return value.tool_ids.map(id => [entityKey(iid, id), value] as const);
@@ -64,10 +65,10 @@ export function Conversation({ state, loading, error, onRetry }: { state: Conver
   const area = useRef<HTMLDivElement>(null), follow = useRef(true);
   const [jump, setJump] = useState(false);
   useEffect(() => { if (loading) return; if (follow.current) area.current?.scrollTo({ top: area.current.scrollHeight }); else setJump(true); }, [state, loading]);
-  return <div className="agent-feed-shell"><div ref={area} className="agent-feed" role="log" aria-label="Conversation" aria-live="off" aria-busy={loading} onScroll={() => { const el = area.current!; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; setJump(!follow.current); }}>
+  return <div className="agent-feed-shell"><div ref={area} className={`agent-feed ${!loading && !error && !rows.length ? 'is-empty' : ''}`} role="log" aria-label="Conversation" aria-live="off" aria-busy={loading} onScroll={() => { const el = area.current!; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; setJump(!follow.current); }}>
     {loading ? <ConversationSkeleton /> : null}
     {error ? <div className="agent-error-card" role="alert">Could not load saved messages: {error.message}<button onClick={onRetry}>Retry</button></div> : null}
-    {!loading && !error && !rows.length ? <div className="agent-welcome"><span className="agent-welcome-symbol">✦</span><h2>What would you like to work on?</h2><p>Start a conversation, delegate a task, or ask the Agent to use its tools.</p></div> : null}
+    {!loading && !error && !rows.length ? <div className="agent-welcome"><span className="agent-welcome-symbol"><AgentIcon name="sparkles" /></span><h2>What would you like to work on?</h2><p>Research a question, work through a plan, or create something together.</p>{onSuggest ? <div className="agent-suggestions">{[['Research a topic', 'Help me research '], ['Make a plan', 'Help me make a plan for '], ['Create something', 'Help me create ']].map(([label, text]) => <button key={label} onClick={() => onSuggest(text)}>{label}</button>)}</div> : null}</div> : null}
     {!loading ? rows.map(row => <Row key={row.id} row={row} state={state} interactionByTool={interactions} />) : null}
   </div>{jump ? <button className="agent-jump" onClick={() => { follow.current = true; area.current?.scrollTo({ top: area.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' }); setJump(false); }}>↓ Latest messages</button> : null}</div>;
 }

@@ -105,7 +105,13 @@ def render(data, command):
             [f"WORKFLOWS {'passed' if data['workflows']['ok'] else 'failed'}"])
     if command == 'eval.compare':
         lines = [f"COMPARE {data['baseline_run_id']} -> {data['candidate_run_id']}"]
-        lines.extend(f"CASE {case['case_id']}  {case['outcome']}  baseline={case['baseline']}  candidate={case['candidate']}" for case in data['cases'])
+        for case in data['cases']:
+            lines.append(f"CASE {case['case_id']}  {case['outcome']}  baseline={case['baseline']}  candidate={case['candidate']}")
+            lines.extend(f"  RULE {rule['name']}  {rule['outcome']}" for rule in case['rules'] if rule['outcome'] != 'unchanged_passed')
+        if not data['conditions_known']:
+            lines.append('INCONCLUSIVE: declare Suite.conditions ({} explicitly means no external dependencies).')
+        if data['conditions_changed']:
+            lines.append('NOT COMPARABLE: business test conditions changed.')
         if data['environment_changed'] or data['metadata_changed'] or data['host_factory_changed']:
             lines.append('CONTEXT CHANGED: inspect environment, fixture bindings and Suite metadata before attributing differences to Workflow code.')
         return '\n'.join(lines)

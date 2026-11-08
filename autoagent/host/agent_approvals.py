@@ -56,6 +56,8 @@ class AgentApprovals:
         snapshot = await self.service._get_snapshot(batch.invocation_id, cache=False)
         if snapshot is None:
             raise RuntimeError("This approval batch has no accepted Agent execution snapshot.")
+        if snapshot.settings.workspace is not None:
+            await self.service.prepare_workspace(snapshot)
         revision = self.service.resource_revision(snapshot)
         from autoagent.agent.workflow.builtins import workflow_catalog
         catalog, _ = workflow_catalog(self.service, snapshot)

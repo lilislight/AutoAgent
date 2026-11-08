@@ -14,3 +14,9 @@ entrypoint = "evals:normalization"
 
 [[evaluations]]
 entrypoint = "evals:approval"
+
+[[workflows]]
+entrypoint = "orders:order_workflow"
+
+[[evaluations]]
+entrypoint = "orders:orders"

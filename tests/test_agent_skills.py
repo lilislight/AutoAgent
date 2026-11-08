@@ -392,7 +392,7 @@ custom:
         make_skill(self.root, resources={"references/rules.md": b"rules", "assets/report.pdf": b"%PDF sample"})
         tools = SkillSet.discover([self.root]).as_tools()
         self.assertTrue(all(isinstance(value, Tool) and not value.is_async for value in tools))
-        self.assertEqual([value.definition.name for value in tools], ["skill_load", "skill_list_resources", "skill_read_resource", "skill_read_text"])
+        self.assertEqual([value.definition.name for value in tools], ["skill_load", "skill_list_resources", "skill_read_resource"])
         loaded = tools[0].invoke(call())
         self.assertFalse(loaded.is_error)
         self.assertEqual(loaded.call_id, "call-1")
@@ -533,7 +533,7 @@ class SkillIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 remote = await tools.ainvoke(call("remote_add", {"a": 2, "b": 4}))
                 self.assertFalse(loaded.is_error)
                 self.assertEqual(remote.structured_content, {"sum": 6})
-                self.assertEqual(len(tools), 5)
+                self.assertEqual(len(tools), 4)
 
     async def test_offline_example_completes_explicit_and_tool_activation(self):
         """Run both standalone application flows and retain missing-data handling."""

@@ -59,6 +59,7 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
     from ..skills import SkillSet
     service = current_agent_context()
     snapshot = await service.snapshot()
+    workspace = await service.prepare_workspace(snapshot) if snapshot.settings.workspace is not None else None
     from .builtins import workflow_catalog
     from .subagents import BUILTIN_NAMES
     catalog, skills = workflow_catalog(service, snapshot, options)
@@ -83,6 +84,10 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
     fixed = []
     if options.instructions.strip():
         fixed.append(message("system", options.instructions))
+    if workspace is not None:
+        fixed.append(message("user", json.dumps({"workspace": workspace.workspace.model_dump(mode="json"),
+            "working_directory": workspace.working_directory,
+            "instructions": [item.model_dump(mode="json") for item in workspace.instructions]}, ensure_ascii=False)))
     skill_catalog = SkillSet(skills).catalog_message()
     if skill_catalog is not None:
         fixed.append(skill_catalog)

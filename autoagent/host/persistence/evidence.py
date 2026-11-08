@@ -23,7 +23,11 @@ async def capture(queries, invocation_id, limit):
             last = (await conn.execute(select(events.c.event_id, events.c.sequence, events.c.event_name)
                 .where(events.c.invocation_id == row['invocation_id']).order_by(events.c.sequence.desc()).limit(1))).first()
             item = summary(row)
+            item['creation_id'] = row['creation_id']
             item['pending_outcome'] = row['pending_outcome']
+            users = meta.tables['user_events']
+            item['user_upper_sequence'] = await conn.scalar(select(func.coalesce(func.max(users.c.sequence), 0))
+                .where(users.c.invocation_id == row['invocation_id']))
             item['position'] = None if last is None else dict(event_id=last.event_id, sequence=last.sequence,
                 event_name=last.event_name, session_id=row['session_id'], invocation_id=row['invocation_id'],
                 sequence_scope='session', boundary='after')

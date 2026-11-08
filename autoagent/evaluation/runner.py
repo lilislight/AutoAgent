@@ -12,8 +12,8 @@ import subprocess
 from uuid import uuid4
 
 from .context import ScenarioContext
-from .evidence import Evidence
-from .models import CheckResult, EvaluationEnvironment, RunOptions, digest
+from autoagent.host.execution_view import ExecutionView, observe_reads
+from .models import CheckResult, EvaluationEnvironment, EvaluationError, RunOptions, digest, json_copy
 from .report import save_run, summary, write_json
 
 
@@ -50,7 +50,7 @@ def environment_identity(root=None):
     return result
 
 
-async def run_trial(suite, case, trial, factory, directory, options):
+async def run_trial(suite, case, trial, factory, directory, options, contract):
     directory.mkdir(parents=True, exist_ok=False)
     # Each Trial owns a fresh Host/database, even when workers run concurrently.
     environment = EvaluationEnvironment(replace(case), trial, str(directory),
@@ -62,8 +62,13 @@ async def run_trial(suite, case, trial, factory, directory, options):
     stack = AsyncExitStack()
     evidence = None
     phase = 'setup'
+    case_fingerprint = case.fingerprint
+    def verify_contract():
+        if suite.identity() != contract or context.case.fingerprint != case_fingerprint:
+            raise EvaluationError('Evaluation rules or configuration changed during the Run; create a new Suite contract.')
     try:
         async with asyncio.timeout(options.timeout_seconds):
+            verify_contract()
             if suite.fixture is not None:
                 await stack.enter_async_context(suite.fixture(context))
             context._host = await stack.enter_async_context(factory(environment))
@@ -72,26 +77,35 @@ async def run_trial(suite, case, trial, factory, directory, options):
             result['history'] = dict(database_url=url.render_as_string(hide_password=True))
             result['database'] = url.database if url.drivername == 'sqlite+aiosqlite' else None
             phase = 'scenario'
-            evidence = await suite.scenario(context)
+            with observe_reads() as reads:
+                context._read_scope = reads
+                evidence = await suite.scenario(context)
+            context._read_scope = None
+            verify_contract()
             if evidence is None and context.observations:
                 evidence = context.observations[-1]
-            if evidence is not None and (not isinstance(evidence, Evidence) or evidence not in context.observations):
-                raise TypeError('Scenario must return its Evidence observation, or None.')
+            if evidence is not None and (not isinstance(evidence, ExecutionView) or evidence not in context.observations):
+                raise TypeError('Scenario must return its ExecutionView observation, or None.')
+            if not context._roots:
+                raise ValueError('A business Scenario must execute a Workflow.')
             result['execution'] = 'completed'
             phase = 'evaluation'
             view = context.evaluator_context(evidence)
             for evaluator in suite.evaluators:
                 try:
-                    check = evaluator(view)
-                    if inspect.isawaitable(check):
-                        check = await check
-                    if not isinstance(check, CheckResult):
-                        raise TypeError('Evaluator must return CheckResult.')
-                    context.check(check)
+                    with observe_reads() as reads:
+                        context._read_scope = reads
+                        check = evaluator(view)
+                        if inspect.isawaitable(check):
+                            check = await check
+                        verify_contract()
+                        if not isinstance(check, CheckResult):
+                            raise TypeError('Evaluator must return CheckResult.')
+                        context.check(check)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    result['errors'].append(error_record(error, 'evaluation'))
+                    result['errors'].append(dict(error_record(error, 'evaluation'), evidence=json_copy(reads)))
     except TimeoutError as error:
         result['execution'] = 'timeout' if phase != 'evaluation' else 'completed'
         result['errors'].append(error_record(error, phase + '_timeout'))
@@ -117,7 +131,7 @@ async def run_trial(suite, case, trial, factory, directory, options):
             result['cleanup']['errors'].append(error_record(error, 'close'))
         result['cleanup']['ok'] = not result['cleanup']['errors']
     result['checks'] = context._checks
-    result['observations'] = [item.snapshot for item in context.observations]
+    result['observations'] = [item.to_record() for item in context.observations]
     result['roots'] = [dict(invocation_id=ref.invocation_id, session_id=ref.session_id) for ref in context._roots.values()]
     if result['verdict'] != 'interrupted':
         result['verdict'] = 'error' if result['errors'] or not result['cleanup']['ok'] else (
@@ -140,9 +154,12 @@ async def run_suite(suite, *, directory, host_factory=None, options=None, case_i
     directory = Path(directory).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=False)
     root = getattr(factory, 'project', None)
-    report = dict(schema_version=1, kind='autoagent.evaluation.run', run_id=run_id or str(uuid4()),
+    report = dict(schema_version=2, kind='autoagent.evaluation.run', run_id=run_id or str(uuid4()),
         status='running', started_at=now(), completed_at=None, suite=suite.identity(),
         environment=environment_identity(root), options=asdict(options),
+        conditions=dict(declared=json_copy(suite.conditions), metadata=json_copy(suite.metadata),
+            runtime={key: environment_identity().get(key) for key in ('python', 'autoagent')},
+            factory=json_copy(factory.evaluation_conditions()) if hasattr(factory, 'evaluation_conditions') else {}),
         cases={case.id: case.fingerprint for case in selected}, results=[])
     planned = len(selected) * options.repeats
     report['summary'] = summary([], planned)
@@ -152,7 +169,7 @@ async def run_suite(suite, *, directory, host_factory=None, options=None, case_i
     async def worker():
         for case, trial in jobs:
             path = directory / 'trials' / f'{digest(case.id)[:24]}-{trial}'
-            result = await run_trial(suite, case, trial, factory, path, options)
+            result = await run_trial(suite, case, trial, factory, path, options, report['suite'])
             report['results'].append(result)
             report['summary'] = summary(report['results'], planned)
             save_run(directory, report)

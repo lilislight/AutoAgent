@@ -111,6 +111,7 @@ export interface LocationState {
   selection: Selection;
   executionView?: ExecutionView;
   compareBase?: string;
+  agentWorkspace?: string;
 }
 
 export interface TraceRow {

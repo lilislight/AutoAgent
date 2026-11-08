@@ -5,6 +5,23 @@ from .persistence.models import InspectionError
 
 
 class HistoryQueries:
+    async def get_execution_view(self, invocation_id, *, read_limit=100000):
+        """Capture an immutable business view; history parsing remains owned by Host."""
+        if type(read_limit) is not int or read_limit < 1:
+            raise ValueError('read_limit must be a positive integer.')
+        from .execution_view import ExecutionView
+        snapshot = await self.capture_execution_evidence(invocation_id)
+        return ExecutionView(self, snapshot, read_limit=read_limit)
+
+    async def _business_query(self, method, *arguments, **options):
+        async def query():
+            try:
+                return await getattr(self._persistence, method)(*arguments, **options)
+            except InspectionError as error:
+                from .execution_view import ViewUnavailable
+                raise ViewUnavailable(error.code, str(error)) from error
+        return await self._perform(query)
+
     async def capture_execution_evidence(self, invocation_id, *, limit=1000):
         """Pin one durable Root-family cut; values remain lazy and Session-scoped."""
         if type(limit) is not int or not 1 <= limit <= 10000:

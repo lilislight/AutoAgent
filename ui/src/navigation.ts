@@ -69,3 +69,40 @@ export function writeLocation(state: LocationState): string {
   const query = params.toString();
   return query ? `?${query}` : "";
 }
+
+/** Resolve page routes relative to the mounted UI, including proxy root paths. */
+function pageBase(uiBase: string): string {
+  const path = new URL(uiBase, 'http://autoagent.invalid').pathname;
+  return path.endsWith('/') ? path : path + '/';
+}
+
+export function readPageLocation(pathname: string, search: string, uiBase = '/', defaultView: 'agents' | 'workflows' = 'workflows'): LocationState {
+  const base = pageBase(uiBase);
+  const path = pathname.startsWith(base) ? pathname.slice(base.length).replace(/\/$/, '') : '';
+  if (path === 'agent' || path.startsWith('agent/c/')) {
+    const params = new URLSearchParams(search);
+    const encoded = path.startsWith('agent/c/') ? path.slice('agent/c/'.length) : '';
+    let session: string | null = null;
+    try { session = encoded ? decodeURIComponent(encoded) : null; } catch { /* Invalid links open a fresh conversation. */ }
+    return { view: 'agents', session, execution: session ? params.get('invocation') : null, workflow: null, revision: null, selection: null,
+      ...(params.get('workspace') ? { agentWorkspace: params.get('workspace')! } : {}) };
+  }
+  const explicitDeveloper = path === 'workflows' || path.startsWith('workflows/');
+  const result = readLocation(search || (defaultView === 'agents' && !explicitDeveloper ? '?view=agents' : ''));
+  if (result.view === 'agents' && !result.session) result.execution = null;
+  return result;
+}
+
+export function writePageLocation(state: LocationState, uiBase = '/', defaultView: 'agents' | 'workflows' = 'workflows'): string {
+  const base = pageBase(uiBase);
+  if (state.view === 'agents') {
+    const path = base + 'agent' + (state.session ? '/c/' + encodeURIComponent(state.session) : '');
+    const params = new URLSearchParams();
+    if (state.session && state.execution) params.set('invocation', state.execution);
+    if (state.agentWorkspace) params.set('workspace', state.agentWorkspace);
+    return path + (params.size ? '?' + params.toString() : '');
+  }
+  const query = writeLocation(state);
+  // Preserve an explicit developer entry in an Agent-only project's default UI.
+  return base + (query || (defaultView === 'agents' ? '?view=workflows' : ''));
+}

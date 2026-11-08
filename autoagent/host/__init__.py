@@ -4,6 +4,8 @@ from importlib import import_module
 
 __all__ = [
     "AutoAgentHost",
+    "ExecutionView",
+    "ViewUnavailable",
     "HostError",
     "HostCapacityError",
     "HostNotFoundError",
@@ -27,6 +29,8 @@ def __getattr__(name):
     """Keep the existing Persistence extra independent of project dotenv imports."""
     modules = {
         "AutoAgentHost": "host",
+        "ExecutionView": "execution_view",
+        "ViewUnavailable": "execution_view",
         "HostError": "models",
         "HostCapacityError": "models",
         "HostNotFoundError": "models",

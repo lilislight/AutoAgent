@@ -281,6 +281,9 @@ class PersistenceContracts:
         pass
 
     async def sink(self, **config):
+        # These contracts cover fact ingestion and Event-backed query fallback.
+        # Transactional projection contracts select their mode explicitly.
+        config.setdefault('projection_mode', 'background')
         result = await DatabaseSink.open(self.url, config=PersistenceConfig(**config))
         self.sinks.append(result)
         return result

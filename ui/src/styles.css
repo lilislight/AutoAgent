@@ -2021,3 +2021,14 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .skeleton-record strong,.skeleton-record small { display:block; }
 .json-editor-loading { display:flex; flex-direction:column; gap:8px; font-size:12px; }
 .json-editor-loading .code-skeleton { min-height:180px; }
+
+/* Keep the existing title bar; add only a product-entry switch. */
+.product-mode-switch { display:flex; align-items:center; gap:2px; flex-shrink:0; padding:3px; border:1px solid var(--line); border-radius:7px; font-size:11px; }
+.product-mode-switch a { padding:5px 10px; border-radius:4px; color:var(--muted); white-space:nowrap; }
+.product-mode-switch a:hover { background:var(--surface-muted); color:var(--text); }
+.product-mode-switch a[aria-current=page] { background:var(--selected); color:var(--accent); }
+.app-shell.agent-mode { min-width:0; }
+@media(max-width:700px) {
+  .topbar { height:auto; min-height:64px; flex-wrap:wrap; padding:8px 12px; gap:8px; }
+  .topbar .topbar-actions { gap:10px; }
+}

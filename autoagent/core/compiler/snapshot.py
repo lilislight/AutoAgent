@@ -13,8 +13,6 @@ from ..usage import WorkflowResourcePolicy
 from types import MappingProxyType
 from typing import get_args, get_origin
 
-from pydantic import TypeAdapter
-
 from ..operators import Operator
 from ..commands import SignalCase, TimerCase
 from ..commands import CommandIR, SelfHandle, OwnerHandle, RuntimeHandle
@@ -326,7 +324,8 @@ def _annotation_definition(annotation: object) -> object:
     if annotation is inspect.Signature.empty:
         return None
     try:
-        return TypeAdapter(annotation).json_schema()
+        from ..operators.schema import schema_json
+        return json.loads(schema_json(annotation))
     except Exception:
         origin = get_origin(annotation)
         if origin is not None:

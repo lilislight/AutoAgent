@@ -59,7 +59,7 @@ class DatabaseSink:
         from .agent_context import AgentContextStorage
         async def operation():
             if self._agent_context is None:
-                self._agent_context = AgentContextStorage(self._writer)
+                self._agent_context = AgentContextStorage(self._writer, self._queries)
             return await getattr(self._agent_context, method)(*args, **kwargs)
         return await self._writer.run(operation)
 
@@ -421,6 +421,27 @@ class DatabaseSink:
         from .evidence import capture
         await self.flush()
         return await self._writer.run(capture, self._queries, invocation_id, limit)
+
+    async def business_history(self, member, kind, **options):
+        from .business import BusinessHistory
+        from .inspection import ReadBudget
+        async def read():
+            result = await BusinessHistory(self._queries, self.config).records(member, kind, **options)
+            ReadBudget(self.config).check_result(result)
+            return result
+        return await self._writer.run(read)
+
+    async def business_value(self, member, reference, *, pointer=None):
+        from .business import BusinessHistory
+        return await self._writer.run(BusinessHistory(self._queries, self.config).value, member, reference, pointer=pointer)
+
+    async def business_order(self, snapshot, earlier, later, *, limit):
+        from .business import BusinessHistory
+        return await self._writer.run(BusinessHistory(self._queries, self.config).order, snapshot, earlier, later, limit=limit)
+
+    async def business_position(self, snapshot, position):
+        from .business import BusinessHistory
+        return await self._writer.run(BusinessHistory(self._queries, self.config).at, snapshot, position)
 
     async def inspect_execution_state(self, invocation_id, *, sequence, scope=None, pointer=None, field=None):
         from .inspection import StateInspection

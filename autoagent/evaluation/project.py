@@ -13,6 +13,13 @@ class ProjectHostFactory:
     project: str
     environment: dict
 
+    def evaluation_conditions(self):
+        # Only non-secret dependency identities are automatic. Application-specific
+        # services/data remain the Suite's explicit conditions declaration.
+        keys = ('AUTOAGENT_LLM_PROVIDER', 'AUTOAGENT_LLM_MODEL', 'AUTOAGENT_LLM_BACKEND',
+                'AUTOAGENT_EMBEDDING_PROVIDER', 'AUTOAGENT_EMBEDDING_MODEL')
+        return {key: self.environment[key] for key in keys if key in self.environment}
+
     def __call__(self, environment):
         settings = replace(HostSettings.from_environment(self.environment), database_url=environment.database_url)
         return AutoAgentHost.from_project(self.project, settings=settings,

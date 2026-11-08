@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from .models._base import Model, NonEmpty
 from .tools.permissions import ToolDecision
+from .workspace import Workspace, WorkspaceBinding
 
 
 ApprovalMode = Literal["policy", "always_ask", "never_ask", "bypass"]
@@ -40,6 +41,7 @@ class AgentSessionSettings(Model):
     model: AgentModelSettings = Field(default_factory=AgentModelSettings)
     approval_mode: ApprovalMode = "policy"
     access: AgentAccess = Field(default_factory=AgentAccess)
+    workspace: WorkspaceBinding | None = None
 
 
 class AgentSettingsRecord(Model):
@@ -105,6 +107,8 @@ class AgentContextProvider(Protocol):
     def history_route(self, snapshot: AgentExecutionSnapshot, model: str | None): ...
     def catalog(self, snapshot: AgentExecutionSnapshot): ...
     def toolset(self, snapshot: AgentExecutionSnapshot, *, binding=None, catalog=None): ...
+    async def prepare_workspace(self, snapshot: AgentExecutionSnapshot): ...
+    async def resolve_workspace(self, binding: WorkspaceBinding) -> Workspace: ...
 
 
 _contexts = WeakKeyDictionary()

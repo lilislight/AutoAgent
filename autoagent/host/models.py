@@ -182,7 +182,7 @@ class HostSettings:
             max_operator_concurrency=integer("AUTOAGENT_MAX_OPERATOR_CONCURRENCY", 32),
             persistence=PersistenceConfig(
                 mode=env.get("AUTOAGENT_PERSISTENCE_MODE", "durable"),
-                projection_mode=env.get('AUTOAGENT_PROJECTION_MODE', 'background'),
+                projection_mode=env.get('AUTOAGENT_PROJECTION_MODE', 'transactional'),
                 projection_worker_enabled=boolean('AUTOAGENT_PROJECTION_WORKER_ENABLED', True),
                 projection_cache_enabled=boolean('AUTOAGENT_PROJECTION_CACHE_ENABLED', True),
                 projection_batch_count=integer('AUTOAGENT_PROJECTION_BATCH_COUNT', 256),

@@ -34,7 +34,7 @@ from autoagent.evaluation import EvalSuite, EvalCase, StatusIs, OutputEquals
 async def scenario(context):
     return await context.invoke('echo', context.case.input, entry_node_id='echo')
 suite = EvalSuite('echo-suite', (EvalCase('hello', {'text':'hello'}, {'text':'hello'}),),
-                  scenario, (StatusIs(), OutputEquals()))
+                  scenario, (StatusIs(), OutputEquals()), conditions={})
 ''')
         (self.root / 'auto-agent.toml').write_text(f'''schema_version=1
 [project]
@@ -84,6 +84,16 @@ entrypoint='{self.evals}:suite'
         output = self.root / 'export.json'
         self.assertEqual(main(['--project', str(self.root), 'eval', 'show', str(self.root / 'baseline'), '--output', str(output)]), 0)
         self.assertEqual(json.loads(output.read_text())['command'], 'eval.show')
+        # Expanded CLI exports remain usable without the source manifest or Trial files.
+        moved = self.root / 'moved' / 'portable.json'
+        moved.parent.mkdir()
+        output.replace(moved)
+        code, portable, _ = self.invoke('show', str(moved))
+        self.assertEqual(code, 0, portable)
+        self.assertEqual(portable['data']['results'], shown['data']['results'])
+        code, compared, _ = self.invoke('compare', str(moved), str(self.root / 'candidate'))
+        self.assertEqual(code, 0, compared)
+        self.assertEqual(compared['data']['cases'][0]['outcome'], 'unchanged_passed')
 
     def test_case_selection_usage_errors_and_no_directory_overwrite(self):
         """Unknown Cases, invalid concurrency and existing Run directories fail without overwriting data."""

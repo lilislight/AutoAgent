@@ -78,6 +78,7 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
     resources = AgentResources(tools, mcp, skills)
     identity = {"history_commits": 1, "final_inbox_check": 1, "tool_routing": 2, "history_projection": PROJECTION_VERSION, "options": options.model_dump(mode="json"),
         "resources": resources.manifest, "wait_collection": 1, "user_event_contract": 1,
+        "workspace_context": 1, "skill_tools": 2,
         "builtin_tools": {"ask_user": ASK_USER_RESOURCE.version} if options.include_ask_user else {},
         "context_policy": context_policy.identity(), "extensions": {
         name: {"id": operator.id, "version": operator.version}

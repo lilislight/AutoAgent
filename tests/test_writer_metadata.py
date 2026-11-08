@@ -35,6 +35,8 @@ class WriterMetadataTests(unittest.TestCase):
             dict(op='replace', path=['invocation', 'error'], value=RuntimeErrorInfo(
                 'Failure', 'private message', code='TEST', phase='operator')),
             dict(op='remove', path=['invocation', 'output']),
+            dict(op='replace', path=['session', 'signals'], value={'secret': 'signal body'}),
+            dict(op='replace', path=['invocation', 'resume_receipts'], value={'secret': 'response body'}),
         ]
         for availability in (False, True):
             with self.subTest(availability=availability):
@@ -43,6 +45,8 @@ class WriterMetadataTests(unittest.TestCase):
                 self.assertIs(result[1]['value'], True)
                 self.assertEqual(result[2]['value'], dict(type='Failure', code='TEST', phase='operator'))
                 self.assertNotIn('value', result[3])
+                self.assertIs(result[4]['value'], True if availability else None)
+                self.assertIs(result[5]['value'], True if availability else None)
                 self.assertNotIn('secret', repr(result))
                 self.assertNotIn('private message', repr(result))
 

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import JsonValue
-from pydantic import model_validator
+from pydantic import Field, JsonValue
+from pydantic import field_validator, model_validator
 
 from ..models import LLMToolCall, LLMToolResult
 from ..models._base import Model, NonEmpty
@@ -21,6 +21,7 @@ class ToolApproval(Model):
 
     request_id: NonEmpty
     approved: bool
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class ToolApprovalRequest(Model):
@@ -32,9 +33,15 @@ class ToolApprovalRequest(Model):
     user_id: str | None = None
     session_id: str | None = None
     reason: str | None = None
+    operations: tuple[dict[str, JsonValue], ...] = ()
 
-    def respond(self, *, approved: bool) -> ToolApproval:
-        return ToolApproval(request_id=self.id, approved=approved)
+    @field_validator("operations", mode="before")
+    @classmethod
+    def _operations_from_json(cls, value):
+        return tuple(value) if isinstance(value, list) else value
+
+    def respond(self, *, approved: bool, reason: str | None = None) -> ToolApproval:
+        return ToolApproval(request_id=self.id, approved=approved, reason=reason)
 
 
 class ToolDecision(Model):
@@ -59,6 +66,12 @@ class ToolPreflight(Model):
     decision: ToolDecision | None = None
     result: LLMToolResult | None = None
     policy_action: Literal["allow", "ask", "deny"] | None = None
+    operations: tuple[dict[str, JsonValue], ...] = ()
+
+    @field_validator("operations", mode="before")
+    @classmethod
+    def _operations_from_json(cls, value):
+        return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def _one_result(self):

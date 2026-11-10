@@ -1,6 +1,6 @@
 # AutoAgent V2 后续事项
 
-更新日期：2026-11-07。
+更新日期：2026-11-09。
 
 本文记录当前确认的推进顺序、阶段边界和验收目标，不代表下面的 API 已经实现。
 当前源码和测试是具体行为的依据；V1 只用于参考，不保留旧 API 或数据模型兼容层。
@@ -223,15 +223,21 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 目标：补齐现有 `autoagent.agent` 的通用组合能力，减少应用重复编写消息和控制逻辑。
 这些是模块内部的构件和策略，不分别拆成独立 Service。
 
-- [ ] 明确多轮对话、模型请求、Tool Call/Result、最终输出及 Session/Invocation Context 契约。
-- [ ] 区分完整历史和模型本次输入，支持 Context 构建、工具结果裁剪和长 Context 压缩。
-- [ ] 摘要涉及模型调用时使用显式 Workflow 步骤，记录覆盖范围，保留原始证据。
-- [ ] 复用 ToolSet、MCP 和 Skill，补齐允许、拒绝及需要审批时的组合流程。
-- [ ] 审批落在 Core Wait 等可恢复边界，不在 Operator 内部等待不可恢复的人工步骤。
-- [ ] 支持有界的参数修正和结构化输出修正，分清它们与网络重试、Node Retry、Recovery 的语义。
-- [ ] 复用已有 Node 限制，补充必要的 Agent 轮次、用量预算和明确停止原因。
-- [ ] 基于 Spawn/Signal/Wait 组织子 Agent 委派、进展、提问和结果收集，不新增 Agent Runtime。
-- [ ] 用 Evaluation 验证多轮、并行工具、审批、父子协作和恢复边界。
+- [x] 多轮对话、模型请求、Tool Call/Result、精简最终输出及 Session/Invocation Context 契约。
+- [x] 区分完整历史和模型本次输入，支持 Context Policy、输入估算和长 Context 压缩。
+- [x] 显式 `compact_context` Node，记录摘要覆盖范围，保留原始历史；支持分批摘要。
+- [x] ToolSet、MCP、Skill 的允许、拒绝、审批以及参数级操作权限组合。
+- [x] 审批和 Ask User 使用 Core Wait；Session Settings 持久化，执行快照固定设置。
+- [x] 参数验证、业务错误作为 Tool Result 返回，模型在轮次上限内自行修正；
+  与网络重试、Node Retry 和 Recovery 分开处理。
+- [ ] 结构化输出自动修正策略；目前结构校验失败显式报错，不隐式修复或重试。
+- [x] Node、Invocation、Session、Workflow（跨 Revision 和时间窗口）、Project 用量限制；
+  Token/Cost 记录复用 LLM Usage，支持本地价格数据和自定义计算。
+- [x] 基于 Spawn、Signal、Wait/Select 组织子 Agent，自动收消息和有时限等待，复用现有 Runtime。
+- [x] SQLite/PostgreSQL 集成测试覆盖多轮、并行工具、审批、父子协作和恢复边界。
+- [ ] 用 Evaluation 场景专项验证通用 Agent 的多轮、并行审批和父子业务交互；
+  通用 Workflow 的对应 Evaluation 能力已具备，Agent 集成测试不代替该专项验收。
+- [ ] 扩充真实长任务的质量与效率评测证据，不以单元测试代替实际任务验证。
 
 验收：构件可以组合为普通 Workflow，模型调用、工具执行、审批均有可观察、
 可恢复的 Node/Operator 边界，不支持函数内部任意步骤恢复。
@@ -240,32 +246,61 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 
 目标：用上述构件提供简单、可组合的通用 Agent Workflow。
 
-- [ ] 设计最小构建 API：指令、模型绑定、工具集合、输入/输出契约和有限执行策略。
-- [ ] 生成普通 Workflow，使模型、工具、结果回填、修正和退出条件在图中可见。
-- [ ] 支持多轮 Session、Tool/MCP/Skill，并能作为 Child Workflow 被调用。
-- [ ] 定义消息追加、并行工具结果关联、审批拒绝和预算耗尽行为。
-- [ ] 保持流式 User Event、Trace、Checkpoint、恢复和 Fork 语义一致。
-- [ ] 迁移已有手写 Agent 示例，减少重复的消息拼接和控制逻辑。
-- [ ] 补齐 Evaluation 和开发 Skill 中对应的编写、调试说明。
+- [x] `agent_workflow(...)` 构建 API，支持指令、模型、Tool/MCP/Skill、Workspace 和执行策略。
+- [x] 普通 Workflow 图：Context 准备、可选压缩、Request 构建、模型调用、工具分流、
+  并行执行、审批、Ask User、子任务等待和轮次完成；统一 Back Edge。
+- [x] 多轮 Session、父子调用、动态资源刷新和按 Workflow 授权的 Host 资源。
+- [x] LLM 输出和聚合 Tool Result 就近提交历史；处理审批拒绝和预算耗尽。
+- [x] User Event 区分流式临时内容和持久化完整结果，复用 Trace、Checkpoint、恢复和 Fork。
+- [x] 提供 `examples/agent_workflow`、`examples/agent_server_demo` 等示例。
+- [x] SDK 内置 Agent 可通过环境变量注册；独立 `/agent` 页面复用 Host API、User Event 和共享标题栏。
+- [x] Workspace 管理和 Session 绑定、资源侧栏、模型/审批/访问权限设置；旧聊天查询当前资源目录。
+- [ ] 补齐开发 Skill 中对应的编写、调试说明。
+- [ ] 调试产品默认 Instructions 和通用 Skills，验证真实任务质量。
 
 验收：少量配置即可创建具备工具调用和多轮能力的 Agent，继续通过现有 Host、CLI、UI
-检查执行。参考 V1 `react_workflow` 的用途，按 V2 契约重新实现。
+检查执行。内置 Agent 按产品提供默认行为，自定义 Workflow 使用 SDK 构建入口。
 
 ## 5. Coding Agent
 
 目标：组合 ReAct、AutoAgent 开发 Skill、CLI 和 Evaluation，形成可验证的本地开发闭环。
 
-- [ ] 提供 Repository 工作区和工具：搜索、读写/应用补丁、Shell、Git 和测试执行。
-- [ ] 明确工作区隔离、权限、依赖环境、进程清理、超时和输出容量；现有 Skill 子进程
-  执行器使用应用自身 OS 权限，不能当作完整沙箱。
-- [ ] 将工作区定义为可替换的执行环境适配边界，初期先完成本地最小实现。
-- [ ] 组合模型、工具、Skill、Context 管理和必要的子 Agent 协作。
-- [ ] 完成需求分析/问题定位、改代码、编译检查、评测、基线比较和修复迭代。
+- [x] 本地 Workspace 解析、项目指令发现、Skill 发现及三个按需读取工具。
+- [x] Python 文件工具：目录浏览、搜索、读取、写入、定点编辑和文件管理；
+  参数级路径策略、敏感文件审批、版本检查和文件修改并发控制。
+- [x] `execute_command` / `manage_process`：exec、Bash/Pwsh、共享命令规则、参数匹配、
+  进程超时、清理、有界输出、stdin 和游标读取；Git/测试可通过 CLI 执行。
+- [x] 可替换 Workspace/Execution 接口和本地实现；Workspace 绑定后才暴露相关内置工具。
+- [x] 组合模型、Tool、Skill、Context 管理、Ask User 和子 Agent 协作。
+- [x] 提供本地可监督使用方式及可交互测试示例。
+- [ ] 独立补丁应用/交付流程及完整 Coding Agent 任务验收。
+- [ ] 真正的文件系统/依赖环境隔离和沙箱；现有 CLI 使用应用 OS 权限，路径策略和
+  缓存/临时目录配置均不构成沙箱。PTY、远程执行适配后续按需增加。
+- [ ] 在真实项目上验证定位、修改、编译检查、评测、基线比较和修复迭代完整闭环。
 - [ ] 产出可审查的补丁、运行身份、执行/评测证据和失败说明。
-- [ ] 首先提供本地、可监督的使用方式，自动发布、部署和中心化任务分配后置。
 
-验收：在真实 AutoAgent 项目上完成从失败 Invocation 到修复和评测验证的完整任务。
-增加模型或工具适配器不能代替闭环验收。
+### 工具专项优化
+
+以下来自两次实际任务审查：`d5d858ad-a185-48e4-bd1d-282c5cc5da72` 和
+`926c4643-da46-4d6c-9c5d-4d35b6f0b4c4`。
+
+- [x] 冻结文件授权保留原有目录锚点，允许同批其他调用创建普通父目录；替换锚点或改变目标仍拒绝。
+- [x] 用户拒绝统一为 `tool_approval_denied`，保留可选原因，明确停止操作、不换包装重试；
+  UI 支持填写原因。该结果提供模型反馈，不改变用户后续主动授权的能力。
+- [x] 模型可见的等待/超时上限与配置一致；新增 `manage_process(action="wait")` 等待退出，
+  与输出读取等待、启动等待和进程运行超时分别表达。
+- [x] `log_path` 保存有上限的完整命令日志，返回短预览及真实进程退出码，禁止覆盖已有日志；
+  Shell 仍保留自身退出语义，不把最后一个命令的状态冒充内部所有命令的状态。
+- [x] 搜索结果合并相邻/重叠 Context，匹配位置与共享文本分开返回，减少重复源代码。
+- [x] 可选 Workspace 缓存/临时目录配置，重定向常用缓存及临时目录环境变量，复用文件权限校验。
+
+### 明确暂缓
+
+- [ ] 优化默认 Instructions，减少多余辅助脚本、重复环境探测和过长推理；本轮不修改。
+- [ ] 单独分析框架调度和持久化耗时，区分模型、外部等待、Map/空分支及数据库开销；
+  本轮不调整 Core 调度或持久化。实际任务的总耗时不能直接认定为工具执行性能问题。
+
+验收：增加模型或工具适配器不能代替完整业务闭环验收；工具回归与真实任务质量分别记录。
 
 ## 6. 中心化平台：后置
 

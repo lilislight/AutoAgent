@@ -32,7 +32,9 @@ class UsageTimeTests(unittest.TestCase):
         """Reject ambiguous times, backwards ranges and unscoped Node identities."""
         for build in (lambda: TimeRange(datetime(2026, 1, 1)),
                       lambda: TimeRange(datetime(2026, 2, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)),
-                      lambda: TokenUsageQuery(node_id="a"), lambda: UsagePolicy(max_total_tokens=True)):
+                      lambda: TokenUsageQuery(node_id="a"), lambda: TokenUsageQuery(include_descendants=True),
+                      lambda: TokenUsageQuery(invocation_id="i", include_descendants=1),
+                      lambda: UsagePolicy(max_total_tokens=True)):
             with self.assertRaises((TypeError, ValueError)):
                 build()
         at = TimeRange.day(at=datetime(2026, 3, 8, 12, tzinfo=UTC), timezone="America/New_York").end
@@ -88,6 +90,13 @@ class TokenUsageContracts:
         self.assertEqual(summary.missing_tokens["total_tokens"], 2)
         self.assertEqual(summary.unsettled_calls, 0)
         self.assertEqual((await self.sink.token_usage(requested_model="absent")).total_tokens, 0)
+
+    async def test_descendant_query_includes_own_calls_without_runtime_metadata(self):
+        """Standalone recorded calls remain queryable before any Invocation metadata exists."""
+        await self.sink.record_llm_call(completed(running(invocation_id="standalone")))
+        summary = await self.sink.token_usage(invocation_id="standalone", include_descendants=True)
+        self.assertEqual((summary.call_count, summary.total_tokens), (1, 5))
+        self.assertEqual((await self.sink.token_usage(invocation_id="absent", include_descendants=True)).call_count, 0)
 
     async def test_summary_read_does_not_create_optional_tables_and_supports_read_only(self):
         """Empty queries and read-only hosts work without initializing call storage."""

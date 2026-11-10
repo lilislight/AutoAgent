@@ -40,6 +40,8 @@ class HostAgentContext:
         self.approvals = AgentApprovals(self)
         from .agent_collaboration import AgentCollaboration
         self.collaboration = AgentCollaboration(self)
+        from .agent_queue import AgentMessageQueue
+        self.messages = AgentMessageQueue(self)
 
     def mcp_tools(self, client, *, name=None, reconnect_policy=None, workflows=(), policy=None, **discovery):
         """Enter this source in Host lifespan after entering the MCP client."""
@@ -55,9 +57,20 @@ class HostAgentContext:
                 await self._workspaces.restore()
                 yield
             finally:
-                self._resource_stack = None
-                self._build_resources.clear()
-                self._workspaces.clear()
+                try:
+                    await self._workspaces.close_execution()
+                finally:
+                    self._resource_stack = None
+                    self._build_resources.clear()
+                    self._workspaces.clear()
+
+    async def cancel_processes(self, invocation_ids):
+        """Cancel live OS processes on the loop that owns Agent resources."""
+        async def stop():
+            manager = self._workspaces.process_manager
+            if manager is not None:
+                await manager.terminate_invocations(set(invocation_ids))
+        await self.approvals._run(stop)
 
     async def register_workspace(self, workspace, *, replace=False):
         """Persist a local Workspace mapping without changing any Session identity."""
@@ -67,6 +80,11 @@ class HostAgentContext:
 
     async def list_workspaces(self):
         return await self.host._perform(self._workspaces.describe)
+
+    @property
+    def project_workspace_id(self):
+        """Stable directory identity of this Host's current project."""
+        return self._workspaces.project_id
 
     async def create_workspace(self, *, name, path, create_directory=False):
         async def create():
@@ -81,7 +99,7 @@ class HostAgentContext:
 
     async def conversation_settings(self, session_id, workspace_id=None):
         """Preview a new chat's binding without mutating or rebinding existing chats."""
-        from autoagent.agent import PROJECT_WORKSPACE_ID, WorkspaceBinding
+        from autoagent.agent import WorkspaceBinding
         from .persistence import ConflictError
         info = await self.workspace_session(session_id, allow_new=True)
         record = await self.get_settings(session_id)
@@ -89,7 +107,7 @@ class HostAgentContext:
             if workspace_id is not None and (record.settings.workspace is None or record.settings.workspace.workspace_id != workspace_id):
                 raise ConflictError("A Session's Workspace binding cannot be changed; create a new Session.")
             return record
-        workspace_id = workspace_id or PROJECT_WORKSPACE_ID
+        workspace_id = workspace_id or self.project_workspace_id
         await self.workspaces.aresolve(workspace_id)
         return record.model_copy(update={"settings": record.settings.model_copy(update={
             "workspace": WorkspaceBinding(workspace_id=workspace_id)})})
@@ -145,10 +163,10 @@ class HostAgentContext:
                     context_policy={key: getattr(policy, key, None) for key in
                         ("context_window", "compact_at_ratio", "compact_at_tokens", "target_ratio", "target_tokens")})
             providers = sorted({entry.name for entry in self.resources.entries("provider")} | {self.defaults.model.provider})
-            from autoagent.agent import PROJECT_WORKSPACE_ID, WorkspaceBinding
-            defaults = self.defaults.model_copy(update={"workspace": WorkspaceBinding(workspace_id=PROJECT_WORKSPACE_ID)})
+            from autoagent.agent import WorkspaceBinding
+            defaults = self.defaults.model_copy(update={"workspace": WorkspaceBinding(workspace_id=self.project_workspace_id)})
             return dict(agent=agent, standalone=bool(agent is not None and len(runtime.workflow_ids) == 1),
-                providers=providers, defaults=defaults.model_dump(mode="json"), project_workspace_id=PROJECT_WORKSPACE_ID)
+                providers=providers, defaults=defaults.model_dump(mode="json"), project_workspace_id=self.project_workspace_id)
         return await self.host._perform(read)
 
     async def workspace_session(self, session_id, *, allow_new=False):
@@ -181,11 +199,11 @@ class HostAgentContext:
         await self.workspace_session(family["current"]["session_id"])
         return family
 
-    async def start_conversation(self, session_id, message, workspace_id=None):
+    async def start_conversation(self, session_id, message, workspace_id=None, *, request_id=None):
         from autoagent.agent.workflow.application import BUILTIN_AGENT_WORKFLOW_ID
         from autoagent.agent.workflow.models import AgentInput
         from .models import HostNotFoundError
-        input_value = AgentInput(message=message)
+        input_value = AgentInput(message=message, request_id=request_id)
         catalog = await self.workspace_catalog()
         if catalog["agent"] is None:
             raise HostNotFoundError("The SDK Agent is disabled for this project.")
@@ -439,6 +457,12 @@ class HostAgentContext:
                 return ToolDecision(action="deny", reason="Tool is outside this Workflow's resource scope.")
             if entry.policy is not None:
                 decisions.append(ToolDecision.model_validate(await self._resource_policy(entry.policy, call, context)))
+            for operation in context.operations:
+                selected = ToolDecision(action="allow")
+                for rule in access.operation_rules:
+                    if rule.matches(operation):
+                        selected = rule.evaluate(operation)
+                decisions.append(selected)
             if access.policy is not None:
                 handler = self.resources.get("policy", access.policy, version=snapshot.bindings["policy"]).value
                 if inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(getattr(handler, "__call__", None)):

@@ -154,6 +154,9 @@ class SubagentContracts:
             self.assertFalse(value.is_error, value)
             self.assertEqual(value.structured_content["wake_reason"], "agent")
             self.assertEqual(value.structured_content["agents"][0]["status"], "completed")
+            child = value.structured_content["agents"][0]
+            self.assertTrue(child["agent_id"])
+            self.assertEqual(child["result"], {"content": [{"type": "text", "text": "Child complete"}]})
             return answer()
         provider = RoutedProvider([response(call("run_agent", {"type": "worker", "task": "child task", "wait_timeout_seconds": 2})), done])
         async with self.host(provider) as host:

@@ -9,10 +9,11 @@ import json
 from typing import Literal, Protocol
 from weakref import WeakKeyDictionary
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .models._base import Model, NonEmpty
 from .tools.permissions import ToolDecision
+from .tools.operations import ToolOperationRule
 from .workspace import Workspace, WorkspaceBinding
 
 
@@ -35,6 +36,12 @@ class AgentAccess(Model):
     rules: dict[NonEmpty, ToolAction] = Field(default_factory=dict)
     allowed_tools: tuple[NonEmpty, ...] | None = None
     policy: NonEmpty | None = None
+    operation_rules: tuple[ToolOperationRule, ...] = ()
+
+    @field_validator("operation_rules", mode="before")
+    @classmethod
+    def _operation_rules_from_json(cls, value):
+        return tuple(value) if isinstance(value, list) else value
 
 
 class AgentSessionSettings(Model):

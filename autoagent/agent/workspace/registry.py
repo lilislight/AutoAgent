@@ -24,6 +24,10 @@ class WorkspaceRegistry:
         with self._lock:
             return tuple(self._items.values())
 
+    def unregister(self, workspace_id: str):
+        with self._lock:
+            return self._items.pop(workspace_id, None)
+
     async def aresolve(self, workspace_id: str) -> Workspace:
         with self._lock:
             workspace = self._items.get(workspace_id)

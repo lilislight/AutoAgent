@@ -140,7 +140,8 @@ class SkillSnapshotAsyncTests(unittest.IsolatedAsyncioTestCase):
         tools = ToolSet(frozen.as_tools())
         result = await tools.ainvoke(LLMToolCall(name="skill_read_resource", call_id="1", arguments='{"name":"report","path":"refs/rules.txt"}'))
         self.assertEqual(result.content[0].text, "original")
-        self.assertEqual(result.structured_content["snapshot_revision"], frozen["report"].snapshot_revision)
+        self.assertNotIn("snapshot_revision", result.structured_content)
+        self.assertEqual(result.tool_metadata["skill"]["snapshot_revision"], frozen["report"].snapshot_revision)
 
     async def test_script_and_companion_resource_execute_from_the_frozen_version(self):
         """Script execution cannot combine new source files with a previously frozen document."""

@@ -5,11 +5,13 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { ApiError, config, forkExecution, getForkPlan, listExecutionEvents, getSessionInformation, getExecutionTrace } from '../api';
 import { replayPositions } from '../replayPosition';
 import type { AcceptedFork, ExecutionTrace } from '../types';
+import { ToolButton } from './ToolButton';
 
 export type OpenFork = (sequence:number, anchor:HTMLButtonElement, returnFocus?:HTMLElement|null) => void;
 export interface ForkTarget { sequence:number; bounds:DOMRect; returnFocus:HTMLElement|null }
 
-export function ExecutionFork({sequence,active,onFork}:{sequence:number|null;active:boolean;onFork:OpenFork}) {
+export interface OverflowAction { id:string; label:string; description?:string; disabled?:boolean; danger?:boolean; onSelect:(anchor:HTMLButtonElement)=>void }
+export function ExecutionFork({sequence,active,onFork,actions=[]}:{sequence:number|null;active:boolean;onFork:OpenFork;actions?:OverflowAction[]}) {
   const [open,setOpen]=useState(false);
   const button=useRef<HTMLButtonElement>(null),menu=useRef<HTMLDivElement>(null),item=useRef<HTMLButtonElement>(null);
   const [position,setPosition]=useState({left:0,top:0});
@@ -19,7 +21,7 @@ export function ExecutionFork({sequence,active,onFork}:{sequence:number|null;act
     if(!open || !active || !button.current || !menu.current)return;
     const trigger=button.current,panel=menu.current;
     const update=()=>{const box=trigger.getBoundingClientRect();setPosition({left:Math.max(8,Math.min(box.right-panel.offsetWidth,window.innerWidth-panel.offsetWidth-8)),top:Math.max(8,Math.min(box.bottom+5,window.innerHeight-panel.offsetHeight-8))});};
-    update();item.current?.focus({preventScroll:true});
+    update();(panel.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? item.current)?.focus({preventScroll:true});
     const observer=new ResizeObserver(update);observer.observe(trigger);observer.observe(panel);
     window.addEventListener('resize',update);window.addEventListener('scroll',update,true);
     return()=>{observer.disconnect();window.removeEventListener('resize',update);window.removeEventListener('scroll',update,true);};
@@ -30,12 +32,13 @@ export function ExecutionFork({sequence,active,onFork}:{sequence:number|null;act
     document.addEventListener('pointerdown',dismiss);return()=>document.removeEventListener('pointerdown',dismiss);
   },[open]);
   const close=()=>{setOpen(false);button.current?.focus({preventScroll:true});};
-  return <><button ref={button} type="button" className="toolbar-action execution-more-trigger" disabled={!active}
-    title="More execution actions" aria-label="More execution actions" aria-haspopup="menu" aria-controls={open?id:undefined} aria-expanded={open}
+  return <><ToolButton ref={button} label="More execution actions" className="execution-more-trigger" disabled={!active}
+    aria-haspopup="menu" aria-controls={open?id:undefined} aria-expanded={open}
     onClick={()=>setOpen(value=>!value)} onKeyDown={event=>{if(event.key==='ArrowDown'){event.preventDefault();setOpen(true);}if(event.key==='Escape')close();}}>
-    <svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="4" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/><circle cx="14" cy="9" r="1.3"/></svg></button>
+    <svg viewBox="0 0 18 18" fill="currentColor" aria-hidden="true"><circle cx="4" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/><circle cx="14" cy="9" r="1.3"/></svg></ToolButton>
     {open && active ? createPortal(<div ref={menu} id={id} className="select-menu execution-actions-menu" role="menu" aria-label="More execution actions" style={position}
-      onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close();}else if(event.key==='Tab')setOpen(false);else if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)){event.preventDefault();item.current?.focus();}}}>
+      onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();close();}else if(event.key==='Tab')setOpen(false);else if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)){event.preventDefault();const choices=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];const index=choices.indexOf(document.activeElement as HTMLButtonElement);const next=event.key==='Home'?0:event.key==='End'?choices.length-1:(index+(event.key==='ArrowUp'?-1:1)+choices.length)%choices.length;choices[next]?.focus();}}}>
+      {actions.map(action=><button key={action.id} type="button" role="menuitem" className={action.danger?'is-danger':undefined} disabled={action.disabled} onClick={()=>{if(button.current){action.onSelect(button.current);setOpen(false);}}}><span><strong>{action.label}</strong>{action.description?<small>{action.description}</small>:null}</span></button>)}
       <button ref={item} type="button" role="menuitem" disabled={sequence===null} onClick={()=>{if(sequence!==null&&button.current){onFork(sequence,button.current);setOpen(false);}}}>
         <span><strong>Fork from current position</strong><small>{sequence===null?'No saved Runtime Events':`After Event #${sequence}`}</small></span></button>
     </div>,document.body) : null}</>;

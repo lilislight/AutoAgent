@@ -14,6 +14,7 @@ from .events import AgentEventMessage
 
 class AgentInput(Model):
     message: NonEmpty
+    request_id: NonEmpty | None = None
 
 
 class AgentWorkflowOptions(Model):
@@ -104,6 +105,7 @@ class ToolTask(Model):
     approval: ToolApproval | None = None
     observation: LLMToolResult | None = None
     observed_versions: dict[str, str] = Field(default_factory=dict)
+    operations: tuple[dict[str, JsonValue], ...] = ()
 
 
 class ToolBranchInput(Model):
@@ -195,5 +197,10 @@ class RoundResult(Model):
 
 
 class AgentResult(Model):
-    response: LLMResponse
-    rounds: int
+    """Deliverable content only; execution details belong to records/events."""
+
+    content: tuple[dict[str, JsonValue], ...] = ()
+
+    @property
+    def text(self) -> str:
+        return "".join(part["text"] for part in self.content if part.get("type") in {"text", "refusal"})

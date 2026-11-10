@@ -119,9 +119,12 @@ BUILTIN_NAMES = frozenset({"spawn_agent", "run_agent", "get_agents", "send_messa
 
 def project_observation(raw, relation):
     """Project only this target's own waits, without leaking its descendants."""
-    return AgentObservation(agent_id=raw.handle.invocation_id, relation=relation,
+    result = AgentObservation(agent_id=raw.handle.invocation_id, relation=relation,
         workflow_id=raw.handle.workflow_id, status=raw.status, result=raw.output, error=raw.error,
-        waits=tuple(wait.model_dump(mode="json") for wait in raw.waits if wait.handle == raw.handle)).model_dump(mode="json")
+        waits=tuple(wait.model_dump(mode="json") for wait in raw.waits if wait.handle == raw.handle)).model_dump(mode="json", exclude_none=True)
+    if not result["waits"]:
+        result.pop("waits")
+    return result
 
 
 __all__ = ["SubagentsConfig", "SubagentTarget", "AgentSignalMessage", "AgentObservation"]

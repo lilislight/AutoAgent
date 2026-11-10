@@ -86,8 +86,7 @@ def serialize_history(items):
         elif isinstance(item, LLMToolResult):
             records.append({"tool_result": item.call_id, "is_error": item.is_error,
                 "content": [part.model_dump(mode="json", exclude={"native"}) for part in item.content],
-                **({"structured_content": item.structured_content} if item.structured_content_present else {}),
-                **({"tool_metadata": item.tool_metadata} if item.tool_metadata else {})})
+                **({"structured_content": item.structured_content} if item.structured_content_present else {})})
         elif isinstance(item, (LLMReasoning, LLMProviderItem)):
             from .projection import project_item
             records.extend({"role": message.role, "content": [part.model_dump(mode="json") for part in message.content]}

@@ -1,19 +1,21 @@
 import { BusyLabel } from '../components/LoadingState';
 import { newId } from './ids';
 import { config } from '../http';
-import { AgentIcon } from './AgentIcon';
 import { AgentComposer } from './AgentComposer';
 import { readDraft, saveDraft } from './drafts';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
-import { agentClient, performAction } from './client';
+import { agentClient } from './client';
 import { Conversation } from './Conversation';
 import { Details, type DetailsTab } from './Details';
 import { Interactions } from './Interactions';
+import { MessageQueue } from './MessageQueue';
 import { useConversation } from './useConversation';
 import { effectiveSettings } from './settingsState';
 import { executionStatus } from './executionState';
-import type { AgentCatalog, AgentInvocation, WorkspaceAgent } from './types';
+import { composerAction } from './composerActions';
+import { retryAgentRead, agentReadRetryDelay } from './readFeedback';
+import type { AgentCatalog, AgentInvocation, MessageQueue as QueueState, QueuedMessage, WorkspaceAgent } from './types';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 interface Props {
@@ -21,7 +23,7 @@ interface Props {
   workspace: string | null;
   active: boolean; invocation: string | null; sidebar: boolean; onSidebar: () => void;
   panel: DetailsTab | null; onPanel: (panel: DetailsTab | null) => void;
-  onAccepted: (iid: string) => void; onAgent: (agent: AgentInvocation) => void;
+  onAccepted: (iid: string | null) => void; onAgent: (agent: AgentInvocation) => void;
   onTrace: (iid: string, sid: string) => void; onRefreshDirectory: () => void;
 }
 
@@ -29,17 +31,18 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const tab = panel ?? 'Agents';
   const details = panel !== null;
   const client = useQueryClient();
-  const turns = useInfiniteQuery({ queryKey: ['agent-invocations', session], queryFn: ({ pageParam, signal }) => agentClient.invocations(session, pageParam, signal), initialPageParam: null as string | null, getNextPageParam: page => page.next_cursor, enabled: active && existing, retry: false, refetchInterval: active && existing ? 4000 : false });
-  const invocations = turns.data?.pages.flatMap(page => page.items) ?? [];
+  const turns = useInfiniteQuery({ queryKey: ['agent-invocations', session], queryFn: ({ pageParam, signal }) => agentClient.invocations(session, pageParam, signal), initialPageParam: null as string | null, getNextPageParam: page => page.next_cursor, enabled: active && existing, retry: retryAgentRead, retryDelay: agentReadRetryDelay, refetchInterval: active && existing ? 4000 : false });
+  const invocations = useMemo(() => turns.data?.pages.flatMap(page => page.items) ?? [], [turns.data?.pages]);
   const iid = invocation ?? invocations[0]?.invocation_id;
   const latestId = invocations[0]?.invocation_id;
   const requestedKnown = invocations.some(item => item.invocation_id === invocation);
   useEffect(() => { if (active && invocation && requestedKnown && latestId && latestId !== invocation) onAccepted(latestId); }, [active, invocation, requestedKnown, latestId, onAccepted]);
-  const execution = useQuery({ queryKey: ['agent-execution', iid], queryFn: ({ signal }) => agentClient.execution(iid!, signal), enabled: active && !!iid, refetchInterval: query => active && iid && (!query.state.data || !terminal.has(query.state.data.current.status)) ? 2000 : false, retry: false });
+  const execution = useQuery({ queryKey: ['agent-execution', iid], queryFn: ({ signal }) => agentClient.execution(iid!, signal), enabled: active && !!iid, refetchInterval: query => active && iid && (!query.state.data || !terminal.has(query.state.data.current.status)) ? 2000 : false, retry: retryAgentRead, retryDelay: agentReadRetryDelay });
   const settings = useQuery({ queryKey: ['agent-settings', session, workspace], queryFn: ({ signal }) => agentClient.settings(session, signal, workspace), enabled: active });
-  const revision = execution.data?.current.workflow_revision_id ?? agent?.revision_id;
+  // This catalog describes live capabilities; execution keeps its historical Revision.
+  const revision = agent.revision_id;
   const resources = useQuery({ queryKey: ['agent-resources', revision, session, workspace], queryFn: ({ signal }) => agentClient.resources(revision!, session, signal, workspace), enabled: active && !!revision, refetchInterval: active ? 15000 : false, retry: false });
-  const historyInvocations = iid && !invocations.some(item => item.invocation_id === iid) ? [...invocations, { invocation_id: iid } as AgentInvocation] : invocations;
+  const historyInvocations = useMemo(() => iid && !invocations.some(item => item.invocation_id === iid) ? [...invocations, { invocation_id: iid } as AgentInvocation] : invocations, [iid, invocations]);
   const conversation = useConversation(session, historyInvocations, active);
   const [historyPresented, setHistoryPresented] = useState(() => !existing);
   const loadingHistory = !historyPresented && (turns.isLoading || conversation.loading);
@@ -50,20 +53,23 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const [draft, setDraft] = useState(() => readDraft(config.apiPrefix, draftKey)), [busy, setBusy] = useState(false), [error, setError] = useState('');
   useEffect(() => saveDraft(config.apiPrefix, draftKey, draft), [draftKey, draft]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [queued, setQueued] = useState<{ id: string; text: string; invocation: string }[]>([]);
-  const operation = useRef<AbortController | null>(null);
-  useEffect(() => () => operation.current?.abort(), []);
+  const loadUsage = useCallback((invocation: string, signal: AbortSignal) => agentClient.usage(session, invocation, signal), [session]);
+  const queue = useQuery({ queryKey: ['agent-queue', session], queryFn: ({ signal }) => agentClient.queue(session, signal), enabled: active, refetchInterval: active && existing ? 1500 : false, retry: retryAgentRead, retryDelay: agentReadRetryDelay });
+  const [queuePending, setQueuePending] = useState<string | null>(null);
+  const submission = useRef<{ text: string; id: string } | null>(null);
+  const operation = useRef<AbortController | null>(null), queueRequest = useRef<AbortController | null>(null), controlRequest = useRef<AbortController | null>(null);
+  const [controlSubmitting, setControlSubmitting] = useState<'pause' | 'recover' | null>(null);
+  const [pendingControl, setPendingControl] = useState<{ id: string; action: 'pause' | 'recover' } | null>(null);
+  const controlOperation = useQuery({ queryKey: ['agent-composer-control', pendingControl?.id], queryFn: ({ signal }) => agentClient.operation(pendingControl!.id, signal), enabled: active && !!pendingControl, refetchInterval: query => active && pendingControl && query.state.data?.status !== 'succeeded' && query.state.data?.status !== 'failed' ? 500 : false, retry: false });
+  useEffect(() => () => { operation.current?.abort(); queueRequest.current?.abort(); controlRequest.current?.abort(); }, []);
   const refresh = useCallback(() => {
     void client.invalidateQueries({ queryKey: ['agent-execution'] });
     void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
     void client.invalidateQueries({ queryKey: ['agent-settings', session] });
     void client.invalidateQueries({ queryKey: ['agent-usage', session] });
+    void client.invalidateQueries({ queryKey: ['agent-queue', session] });
     onRefreshDirectory();
   }, [client, session, onRefreshDirectory]);
-  useEffect(() => {
-    const ids = new Set(Object.values(conversation.state.rows).flatMap(row => row.type === 'message' ? [row.message.message_id] : []));
-    setQueued(current => current.some(item => ids.has(item.id)) ? current.filter(item => !ids.has(item.id)) : current);
-  }, [conversation.state.rows, queued]);
   const recentUser = Object.values(conversation.state.rows).find(row => row.type === 'message' && row.message.source === 'user');
   const heading = title === 'Conversation' && recentUser?.type === 'message' ? recentUser.message.content.find(part => part.type === 'text')?.text?.slice(0, 100) || title : title;
   useEffect(() => { if (active) document.title = existing ? heading + ' · AutoAgent' : 'AutoAgent'; }, [active, existing, heading]);
@@ -74,35 +80,54 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const snapshot = execution.data?.snapshot;
   const saved = effectiveSettings(settings.data, snapshot, child);
   const changed = !!saved && !!snapshot && JSON.stringify(saved.settings) !== JSON.stringify(snapshot.settings);
-  const control = async (action: 'pause' | 'recover' | 'cancel') => {
-    if (!controls || busy) return;
-    operation.current?.abort(); operation.current = new AbortController(); setBusy(true); setError('');
+  useEffect(() => {
+    if (!pendingControl || !controlOperation.data || controlOperation.data.status === 'running') return;
+    if (controlOperation.data.status !== 'succeeded') setError(controlOperation.data.error?.message ?? 'Could not complete the execution control.');
+    setPendingControl(null); refresh(); conversation.refresh();
+  }, [pendingControl, controlOperation.data, refresh, conversation.refresh]);
+  const control = async (action: 'pause' | 'recover') => {
+    if (!controls || controlSubmitting || pendingControl) return;
+    const controller = new AbortController(); controlRequest.current = controller;
+    setControlSubmitting(action); setError('');
     try {
-      await performAction({ invocation_id: controls.root_invocation_id, action, ...(action === 'recover' ? { expected_version: controls.expected_version } : {}) }, operation.current.signal);
+      const fresh = await agentClient.controls(controls.root_invocation_id, null, controller.signal);
+      if (!fresh.actions[action].available) throw new Error(fresh.actions[action].reason ?? 'This control is unavailable.');
+      const receipt = await agentClient.action({ invocation_id: fresh.root_invocation_id, action, request_id: newId().replaceAll('-', ''), ...(action === 'recover' ? { expected_version: fresh.expected_version } : {}) }, controller.signal);
+      if (receipt.status === 'running') setPendingControl({ id: receipt.operation_id, action });
+      else if (receipt.status !== 'succeeded') throw new Error(receipt.error?.message ?? 'Could not complete the execution control.');
       refresh(); conversation.refresh();
-    } catch (reason) { if (!operation.current?.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(false); }
+    } catch (reason) { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setControlSubmitting(null); }
   };
-  const send = async () => {
+  const updateQueue = (item: QueuedMessage) => {
+    client.setQueryData<QueueState>(['agent-queue', session], previous => ({
+      invocation_id: item.state === 'started' ? item.invocation_id : previous?.invocation_id ?? iid ?? null,
+      items: [...(previous?.items ?? []).filter(value => value.id !== item.id), ...(['queued', 'blocked', 'starting', 'sending'].includes(item.state) ? [item] : [])].sort((a, b) => a.position - b.position),
+    }));
+  };
+  const send = async (immediate = false) => {
     const message = draft.trim();
     if (!message || busy) return;
     operation.current?.abort(); operation.current = new AbortController(); setBusy(true); setError('');
     try {
-      if (running && iid) {
-        const endpoint = resources.data?.user_signal_endpoint;
-        if (!endpoint) throw new Error('This Agent’s message endpoint is unavailable.');
-        const source_id = `ui_${newId().replaceAll('-', '')}`;
-        await agentClient.spec(iid, 'signal', { endpoint, source_id }, operation.current.signal);
-        const result = await performAction({ invocation_id: iid, action: 'signal', endpoint, source_id, sequence: 1, payload: { message, reply_requested: false, reply_to: null, wait_timeout_seconds: null } }, operation.current.signal);
-        if (typeof result.result?.message_id === 'string') setQueued(items => [...items, { id: result.result!.message_id as string, text: message, invocation: iid }]);
-      } else if (canStart && agent) {
-        const result = await agentClient.run(session, message, operation.current.signal, workspace);
-        saveDraft(config.apiPrefix, draftKey, '');
-        onAccepted(result.invocation_id);
-      } else throw new Error('Resume the current conversation before sending another message.');
-      setDraft(''); refresh();
+      if (!submission.current || submission.current.text !== message) submission.current = { text: message, id: newId() };
+      const item = await agentClient.enqueue(session, message, submission.current.id, workspace, operation.current.signal, immediate && iid ? iid : undefined);
+      updateQueue(item); submission.current = null;
+      saveDraft(config.apiPrefix, draftKey, '');
+      if (!existing || item.state === 'started') onAccepted(item.state === 'started' ? item.invocation_id : iid ?? null);
+      setDraft(current => current.trim() === message ? '' : current); refresh();
     } catch (reason) { if (!operation.current?.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
+  };
+  const queueAction = async (item: QueuedMessage, action: 'cancel' | 'send_now' | 'continue') => {
+    if (queuePending) return;
+    const controller = new AbortController(); queueRequest.current = controller;
+    setQueuePending(item.id); setError('');
+    try {
+      updateQueue(await agentClient.queueAction(session, item.id, action, controller.signal, iid));
+      refresh();
+    } catch (reason) { if (!controller.signal.aborted) { setError(reason instanceof Error ? reason.message : String(reason)); void queue.refetch(); } }
+    finally { setQueuePending(null); }
   };
   const [allPending, setAllPending] = useState(false);
   const moreRequests = useInfiniteQuery({ queryKey: ['agent-more-requests', controls?.root_invocation_id, controls?.expected_version, controls?.next_cursor],
@@ -111,21 +136,26 @@ export default function AgentSession({ session, existing, title, catalog, agent,
     enabled: active && allPending && !!controls?.next_cursor, retry: false });
   const waiting = [...new Map([...(controls?.pending_responses ?? []), ...(controls?.next_cursor ? moreRequests.data?.pages.flatMap(page => page.pending_responses) ?? [] : [])].map(wait => [wait.wait_id, wait])).values()];
   const status = executionStatus(current?.status ?? (iid ? 'loading' : 'ready'), controls);
-  const suggest = (text: string) => { setDraft(text); inputRef.current?.focus(); };
-  return <div className="agent-session-workspace"><main className="agent-chat" aria-label="Agent conversation"><header className="agent-chat-header">
-      <button className="agent-icon-button" onClick={onSidebar} aria-label="Toggle conversations" aria-controls="agent-conversations" aria-expanded={sidebar}><AgentIcon name="panel" /></button>
-      <div className="agent-heading"><h1 title={heading}>{heading}</h1>{['running', 'waiting', 'paused', 'interrupted', 'failed', 'cancelled'].includes(status) ? <div className="agent-header-status" role="status" aria-live="polite"><span className={`agent-status-dot is-${status}`} />{{ running: 'Working', waiting: 'Waiting for input', paused: 'Paused', interrupted: 'Interrupted', failed: 'Needs attention', cancelled: 'Stopped' }[status]}{child ? <span className="agent-pill">Subagent</span> : null}</div> : null}</div>
-      <div className="agent-header-actions">{controls ? <>{(['pause', 'recover', 'cancel'] as const).filter(action => controls.actions[action]?.available).map(action => <button key={action} disabled={busy} onClick={() => void control(action)} title={child ? 'Controls the main Agent and its execution family' : undefined}>{action === 'recover' ? 'Resume / recover' : action === 'pause' ? 'Pause' : 'Stop'}{child ? ' family' : ''}</button>)}</> : null}{iid ? <button onClick={() => onTrace(iid, session)} title="Open execution trace">Trace ↗</button> : null}<button aria-expanded={details} aria-label="Open task details" onClick={() => onPanel(details ? null : 'Agents')}><AgentIcon name="task" /><span>Task</span></button></div>
-    </header>
+  const paused = status === 'paused';
+  const canSignal = running && status !== 'interrupted' && !!resources.data?.user_signal_endpoint && !!controls?.actions.signal.available;
+  const canSend = !child && !!agent && (canStart || !!current || !!queue.data);
+  const pending = controlSubmitting ?? pendingControl?.action ?? (controls?.control_state === 'pausing' ? 'pause' : null);
+  const primary = composerAction({ draft, canSend, running, lifecycle: status, canPause: !!controls?.actions.pause.available, canResume: !!controls?.actions.recover.available, sending: busy, pending });
+  const caption = pending === 'pause' ? 'Pausing after the current step · New messages join the queue.' : pending === 'recover' ? 'Resuming task…' : paused ? 'Paused · Resume to continue the task and queue.' : status === 'interrupted' || status === 'failed' ? 'Task interrupted · Resume it or continue the queued messages.' : status === 'waiting' ? 'Waiting for input · Enter queues the next task.' : running ? 'Enter to queue the next task · Send now updates the current task.' : child ? 'Subagents are managed by their parent.' : 'Enter to send · Shift + Enter for a new line';
+  const suggest = useCallback((text: string) => { setDraft(text); inputRef.current?.focus(); }, []);
+  return <div className="agent-session-workspace"><main className="agent-chat" aria-label="Agent conversation">
+    <Conversation session={session} loadUsage={loadUsage} invocations={historyInvocations} execution={execution.data} active={active} state={conversation.state} loading={loadingHistory} error={conversation.error} onRetry={conversation.refresh} onSuggest={suggest} running={status === 'running' || status === 'pausing'} before={<>
       {changed ? <div className="agent-setting-notice">New settings saved. The active execution keeps its current settings until the next start or explicit resume.</div> : null}
       {turns.hasNextPage ? <button className="agent-load-older" disabled={turns.isFetchingNextPage} onClick={() => void turns.fetchNextPage()}><BusyLabel busy={turns.isFetchingNextPage} label="Loading older turns">Load older turns</BusyLabel></button> : null}
       {execution.error || turns.error ? <div className="agent-inline-error" role="alert">{execution.error?.message ?? turns.error?.message}<button onClick={refresh}>Refresh</button></div> : null}
-      <Conversation state={conversation.state} loading={loadingHistory} error={conversation.error} onRetry={conversation.refresh} onSuggest={suggest} />
-      {controls && waiting.length ? <Interactions rootId={controls.root_invocation_id} waits={waiting} active={active} onResolved={refresh} /> : null}
+    </>} after={<>
+      {controls ? <Interactions rootId={controls.root_invocation_id} waits={waiting} active={active} onResolved={refresh} /> : null}
       {controls?.next_cursor && (!allPending || moreRequests.hasNextPage || moreRequests.isPending) ? <button className="agent-load-older" disabled={allPending && moreRequests.isFetching} onClick={() => { if (!allPending) setAllPending(true); else void moreRequests.fetchNextPage(); }}><BusyLabel busy={allPending && moreRequests.isFetching} label="Loading requests">Load more pending requests</BusyLabel></button> : null}
       {allPending && moreRequests.error ? <p className="agent-inline-error" role="alert">{moreRequests.error.message}<button onClick={() => void moreRequests.refetch()}>Retry</button></p> : null}
-      <div className="agent-composer-area">{queued.map(item => <div className="agent-queued" key={item.id}><span>✓ {item.invocation !== iid || current && terminal.has(current.status) ? 'Accepted · execution ended before it was read' : 'Accepted · waiting to be read'}</span><p>{item.text}</p></div>)}{error ? <p className="agent-error-text" role="alert">{error}</p> : null}
-        <AgentComposer session={session} draft={draft} onDraft={setDraft} inputRef={inputRef} busy={busy} running={running} disabled={!!current && !running && !canStart} canSend={running || canStart} model={saved?.settings.model.model} approval={saved?.settings.approval_mode} onSend={() => void send()} onPanel={onPanel} caption={status === 'paused' || status === 'interrupted' ? 'Updates will be read after you resume.' : running ? 'Updates enter context at the next preparation step.' : child ? 'Subagents are managed by their parent.' : 'Enter to send · Shift + Enter for a new line'} />
-      </div>
+    </>} footer={<div className="agent-composer-area"><MessageQueue items={queue.data?.items ?? []} pending={queuePending} canSendNow={canSignal && !child} onAction={(item, action) => void queueAction(item, action)} />
+      {queue.error ? <p className="agent-error-text" role="alert">Could not refresh queued messages. <button onClick={() => void queue.refetch()}>Retry</button></p> : null}
+      {error ? <p className="agent-error-text" role="alert">{error}</p> : null}{controlOperation.error && pendingControl ? <p className="agent-error-text" role="alert">Could not refresh execution status.<button type="button" onClick={() => void controlOperation.refetch()}>Retry</button></p> : null}
+        <AgentComposer primary={primary} onControl={action => void control(action)} sidebar={sidebar} onSidebar={onSidebar} session={session} draft={draft} onDraft={setDraft} inputRef={inputRef} busy={busy} running={running || paused} disabled={busy || child} canSend={canSend} canSendNow={canSignal && !child} onSendNow={running ? () => void send(true) : undefined} model={saved?.settings.model.model} approval={saved?.settings.approval_mode} onSend={() => void send()} onPanel={onPanel} caption={caption} />
+      </div>} />
     </main>{details ? <Details tab={tab} setTab={onPanel} onClose={() => onPanel(null)} execution={execution.data} agent={agent} settings={saved} resources={resources.data} catalog={catalog} session={session} active={active} state={conversation.state} onAgent={onAgent} onSaved={refresh} executionError={execution.error} contextLoading={loadingHistory} executionLoading={execution.isLoading} resourcesLoading={resources.isLoading} settingsLoading={settings.isLoading} settingsError={settings.error} resourcesError={resources.error} onRetry={() => { void execution.refetch(); void settings.refetch(); void resources.refetch(); }} onTrace={() => iid && onTrace(iid, session)} /> : null}</div>;
 }

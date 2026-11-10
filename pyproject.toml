@@ -34,6 +34,11 @@ skills = [
   "PyYAML>=6,<7",
 ]
 agent = [
+  "tree-sitter>=0.25,<0.26",
+  "tree-sitter-bash>=0.25,<0.26",
+  "tree-sitter-powershell>=0.26,<0.27",
+  "pathspec>=0.12.1,<1",
+  "regex>=2024.11.6",
   "jsonschema>=4.23,<5",
   "openai>=2.53,<3",
 ]

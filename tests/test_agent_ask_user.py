@@ -267,7 +267,7 @@ class AskUserContracts:
             await host.respond(first.invocation_id, second.waits[0].id, reply(text="two"))
             result = await host.join(first.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
-            self.assertEqual(result.output["rounds"], 3)
+            self.assertEqual(len(provider.requests), 3)
             observed = [item for item in provider.requests[-1].input if isinstance(item, LLMToolResult)]
             self.assertEqual([item.structured_content["answers"][0]["text"] for item in observed], ["one", "two"])
 

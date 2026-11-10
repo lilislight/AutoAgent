@@ -2,16 +2,17 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useExecutionNavigation } from './ExecutionNavigation';
 import { InspectorResizeHandle } from './InspectorResizeHandle';
 import type { InspectorTab } from '../types';
+import { Tooltip, ValueTip } from './Tooltip';
 export type { InspectorTab } from '../types';
 const rememberedTabs = new Map<string, InspectorTab>();
 export function InspectorPresence({ open, hidden = false, children }: { open: boolean; hidden?: boolean; children: ReactNode }) {
   return open ? <div className={`inspector-presence ${hidden ? 'is-hidden' : ''}`} aria-hidden={hidden || undefined} inert={hidden}>{children}</div> : null;
 }
-export function CopyId({ value }: { value: string | undefined }) {
-  const [copied, setCopied] = useState(false);
+export function CopyId({ value, displayValue, label = 'Identifier' }: { value: string | undefined; displayValue?: string; label?: string }) {
+  const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <button type="button" className="copy-id" title={value ? `Copy ${value}` : undefined} disabled={!value} onClick={async () => { try { await navigator.clipboard.writeText(value!); setCopied(true); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1400); } catch { setCopied(false); } }}><code>{copied ? "Copied" : value ?? "—"}</code></button>;
+  return <Tooltip content={<><ValueTip label={label} value={value ?? 'Not recorded'} /><span>{copied==='failed'?'Could not copy. Select the value and copy it.':'Click to copy the full value.'}</span></>}><button type="button" className="copy-id" aria-label={value ? `Copy ${label}: ${value}` : label} disabled={!value} onClick={async () => { try { await navigator.clipboard.writeText(value!); setCopied('copied'); } catch { setCopied('failed'); } clearTimeout(timer.current); timer.current = setTimeout(() => setCopied('idle'), 1400); }}><code>{copied==='copied' ? 'Copied' : copied==='failed' ? 'Copy failed' : displayValue ?? value ?? '—'}</code></button></Tooltip>;
 }
 export function InspectorFrame({ kind, title, context, tabs: requestedTabs, initial, onClose, onBack, backLabel = 'Node occurrence', footer, children }: { kind: string; title: string; context: ReactNode; tabs: InspectorTab[]; initial?: InspectorTab; onClose: () => void; onBack?: () => void; backLabel?: string; footer?: ReactNode; children: (tab: InspectorTab, selectTab: (tab: InspectorTab) => void) => ReactNode }) {
   const navigation = useExecutionNavigation();

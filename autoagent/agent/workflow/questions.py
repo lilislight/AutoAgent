@@ -113,10 +113,14 @@ class AskUserResponse(Model):
         result = []
         for question in request.questions:
             answer = answers[question.id]
-            record = answer.model_dump(mode="json")
+            record = answer.model_dump(mode="json", exclude_none=True)
+            if not record["selected_option_ids"]:
+                record.pop("selected_option_ids")
             record["question"] = question.text
-            record["selected_options"] = [option.model_dump(mode="json") for option in question.options
+            selected = [option.model_dump(mode="json", exclude_none=True) for option in question.options
                 if option.id in answer.selected_option_ids]
+            if selected:
+                record["selected_options"] = selected
             result.append(record)
         return LLMToolResult(call_id=request.call_id, structured_content={"answers": result})
 

@@ -29,6 +29,19 @@ class AgentMessage(BaseModel):
     workspace_id: str | None = Field(None, min_length=1, max_length=512)
 
 
+class QueuedAgentMessage(AgentMessage):
+    request_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    send_to: str | None = Field(None, min_length=1, max_length=512)
+
+
+class QueueAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    session_id: str = Field(min_length=1, max_length=512)
+    item_id: str = Field(min_length=1, max_length=64)
+    action: str = Field(pattern="^(cancel|send_now|continue)$")
+    invocation_id: str | None = Field(None, min_length=1, max_length=512)
+
+
 class CreateWorkspace(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     name: str = Field(min_length=1, max_length=128)
@@ -81,6 +94,20 @@ def agent_router(host, settings, query):
     async def send_message(body: AgentMessage):
         ref = await agent_query(host.agent_context.start_conversation(body.session_id, body.message, body.workspace_id))
         return dict(accepted=True, invocation_id=ref.invocation_id, session_id=ref.session_id)
+
+    @router.get('/agent/queue')
+    async def message_queue(session_id: str = Query(min_length=1, max_length=512)):
+        return await agent_query(host.agent_context.messages.view(session_id))
+
+    @router.post('/agent/queue', status_code=202)
+    async def queue_message(body: QueuedAgentMessage):
+        return await agent_query(host.agent_context.messages.submit(body.session_id, body.message,
+            body.request_id, body.workspace_id, send_to=body.send_to))
+
+    @router.post('/agent/queue/actions')
+    async def queue_action(body: QueueAction):
+        return await agent_query(host.agent_context.messages.act(body.session_id, body.item_id,
+            body.action, body.invocation_id))
 
     @router.get('/agent/sessions')
     async def sessions(cursor: str | None = Query(None, max_length=4096),
@@ -183,7 +210,7 @@ def agent_router(host, settings, query):
             if family['current']['session_id'] != session_id:
                 raise HTTPException(400, detail="Execution belongs to another conversation.")
         session = await query(host.token_usage(session_id=session_id), settings)
-        invocation = await query(host.token_usage(invocation_id=invocation_id), settings) if invocation_id else None
+        invocation = await query(host.token_usage(invocation_id=invocation_id, include_descendants=True), settings) if invocation_id else None
         return dict(session=session, invocation=invocation)
 
     @router.get('/user-events')

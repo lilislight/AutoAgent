@@ -1,9 +1,13 @@
 """Application composition; Agent execution stays in the shared Workflow builder."""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
+import sys
 
 from autoagent.agent import (
-    ContextPolicy, SubagentsConfig, SubagentTarget, Tool, ToolSet, ToolDecision, SkillDirectory, agent_workflow,
+    BUILTIN_AGENT_WORKFLOW_ID, CommandRule, ContextPolicy, ExecutionToolsConfig,
+    SubagentsConfig, SubagentTarget, Tool, ToolSet, ToolDecision, SkillDirectory,
+    agent_workflow, builtin_agent_workflow,
 )
 from autoagent.host import workflow
 
@@ -13,6 +17,26 @@ from .tools import add_numbers, get_demo_weather, save_demo_note
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def demo_execution_config():
+    """Deliberately small allowlist; approval/deny probes perform no writes."""
+    rules = [CommandRule(program=name, decision="allow") for name in ("pwd", "ls", "printf")]
+    rules.extend((
+        CommandRule(program="git", args_prefix=["status"], decision="allow"),
+        CommandRule(program="git", args_prefix=["diff"], decision="allow"),
+        CommandRule(program="git", args_prefix=["push"], decision="ask"),
+        CommandRule(program="git", args_prefix=["reset", "--hard"], decision="deny"),
+    ))
+    for program in dict.fromkeys((sys.executable, "python3")):
+        prefix = ["-u", "-m", "agent_demo.cli_probe"]
+        rules.extend((
+            CommandRule(program=program, args=["--version"], decision="allow"),
+            CommandRule(program=program, args_prefix=prefix, decision="allow"),
+            CommandRule(program=program, args_prefix=[*prefix, "approval"], decision="ask"),
+            CommandRule(program=program, args_prefix=[*prefix, "deny"], decision="deny"),
+        ))
+    return ExecutionToolsConfig(default_decision="ask", rules=rules)
+
+
 def demo_tool_policy(call, context):
     return ToolDecision(action="ask" if call.name == "save_demo_note" else "allow")
 
@@ -20,6 +44,22 @@ def demo_tool_policy(call, context):
 def demo_tools():
     return ToolSet([Tool(handler) for handler in (add_numbers, get_demo_weather, save_demo_note)],
         policy=demo_tool_policy)
+
+
+@asynccontextmanager
+async def lifespan(setup):
+    """Configure this demo's SDK chat before Runtime compiles its definitions."""
+    # /agent talks only to the SDK-owned Workflow. Keep that implementation and
+    # marker, applying the same demo command policy as the execution Workflows.
+    for index, selected in enumerate(setup.workflows):
+        if selected.id == BUILTIN_AGENT_WORKFLOW_ID:
+            setup.workflows[index] = builtin_agent_workflow(execution=demo_execution_config())
+    context = setup.agent_context
+    scope = {BUILTIN_AGENT_WORKFLOW_ID}
+    for handler in (add_numbers, get_demo_weather, save_demo_note):
+        context.resources.register_tool(Tool(handler), version="1", workflows=scope, policy=demo_tool_policy)
+    async with context.skill_directories([PROJECT_ROOT / "skills"], include=("demo-guide",), workflows=scope):
+        yield
 
 
 INSTRUCTIONS = """你是 AutoAgent 的交互测试助手，默认使用中文回答。
@@ -40,6 +80,7 @@ def main_agent():
     return agent_workflow(
         user_events=True,
         tools=demo_tools(),
+        execution=demo_execution_config(),
         skills=[SkillDirectory(PROJECT_ROOT / "skills", include=("demo-guide",))],
         instructions=INSTRUCTIONS,
         include_ask_user=True,
@@ -66,6 +107,7 @@ def research_agent():
         user_events=True,
         workflow_id="researcher",
         tools=demo_tools(),
+        execution=demo_execution_config(),
         skills=[SkillDirectory(PROJECT_ROOT / "skills", include=("demo-guide",))],
         instructions=INSTRUCTIONS + "\n你是研究子 Agent。独立完成任务并清楚返回结果。"
             "需要联系其他 Agent 时先用 get_agents 查询实际 ID，不能猜测 ID。",

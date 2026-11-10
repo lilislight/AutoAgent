@@ -4,7 +4,5 @@ from .models import Workspace, WorkspaceBinding, WorkspaceDiscovery, WorkspaceEr
 from .local import LocalWorkspace
 from .registry import WorkspaceRegistry
 
-PROJECT_WORKSPACE_ID = "project"
-
 __all__ = ["Workspace", "WorkspaceBinding", "WorkspaceError", "WorkspaceInfo", "WorkspaceInstruction",
-           "WorkspaceResolver", "LocalWorkspace", "WorkspaceDiscovery", "WorkspaceRegistry", "PROJECT_WORKSPACE_ID"]
+           "WorkspaceResolver", "LocalWorkspace", "WorkspaceDiscovery", "WorkspaceRegistry"]

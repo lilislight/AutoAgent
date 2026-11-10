@@ -140,7 +140,7 @@ class AgentConfigurationContracts:
             llm_options={"model": "per-call-model", "max_output_tokens": 77}) as host:
             result = await self.run_agent(host)
             self.assertEqual(result.status, "completed", result.error)
-            self.assertEqual(result.output["rounds"], 2)
+            self.assertEqual(len(provider.requests), 2)
         self.assertEqual(seen, ["compact", "complete", "compact", "complete", "finish"])
         self.assertEqual([item.model for item in provider.requests], ["per-call-model"] * 2)
         self.assertEqual([item.max_output_tokens for item in provider.requests], [77] * 2)
@@ -201,7 +201,6 @@ class AgentConfigurationContracts:
             complete_round=Operator(complete, id="app.check.completion", version="1"))) as host:
             result = await self.run_agent(host)
             self.assertEqual(result.status, "completed", result.error)
-            self.assertEqual(result.output["rounds"], 2)
             self.assertEqual(len(provider.requests), 2)
 
     async def test_custom_continuation_cannot_bypass_the_round_limit(self):
@@ -329,6 +328,10 @@ class AgentConfigurationContracts:
             async with self.host(provider, policies=policies) as host:
                 first = await self.run_agent(host)
                 self.assertEqual(first.status, "completed", first.error)
+                self.assertEqual(set(first.output), {"content"})
+                self.assertTrue(first.output["content"])
+                usage = await host.token_usage(invocation_id=first.invocation_id)
+                self.assertEqual((usage.call_count, usage.total_tokens), (1, 5))
                 second = await self.run_agent(host, session_id=first.session_id)
                 self.assertEqual(second.status, "failed")
                 self.assertIn("ResourceBudgetExceeded", str(second.error))

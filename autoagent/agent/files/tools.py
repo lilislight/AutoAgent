@@ -1,0 +1,120 @@
+"""Six ordinary Tools; all authorization remains on the ToolSet boundary."""
+
+from typing import Annotated, Literal
+from pydantic import Field
+from ..models import ToolOutput
+from ..tools import Tool, ToolContext, ToolSet, ToolBusinessError
+from ..tools.operations import ToolOperationPolicy
+from .models import FileEdit, FileManagement
+from .service import FileService
+
+Positive = Annotated[int, Field(gt=0)]
+PageSize = Annotated[int, Field(gt=0, le=1000)]
+
+
+class _FileTool(Tool):
+    def __init__(self, handler, service, **options):
+        super().__init__(handler, **options)
+        self.service = service
+
+    @property
+    def definition(self):
+        value = super().definition
+        config = self.service.config
+        props = value.parameters["properties"]
+        descriptions = {
+            "path": "Path relative to this Workspace's working directory, or an absolute path subject to access policy. Permission previews never authorize content access.",
+            "pattern": "Case-sensitive glob matched against returned relative paths (for example '*.py' or 'src/**/*.py'), not a regex. Uses the same glob matcher as search include/exclude.",
+            "include": "Case-sensitive glob patterns for candidate relative paths, not content regexes. Uses the same matcher as list_files pattern.",
+            "exclude": "Glob patterns excluded from traversal; matching directories are pruned. Explicit path selection is better than scanning a large tree.",
+            "cursor": "Opaque continuation from this tool. Keep path, filters and search options unchanged; limit may change. On a changed query or directory, restart without cursor. Never synthesize a cursor.",
+            "limit": "Maximum result rows on this page, not total entries scanned or total matches. May change while continuing with cursor.",
+            "expected_version": "Optional version from a previous read or mutation. If omitted, use this Session's last read version. After a successful edit, pass its returned version for another edit or re-read; a stale version never authorizes overwrite.",
+            "overwrite": "False creates only and rejects an existing path. True requires a previous read or expected_version; it does not bypass conflict or permission checks.",
+            "max_bytes": "Maximum returned UTF-8 text bytes including line labels, not the maximum file size. Continue long lines using next_line and next_column.",
+            "case_sensitive": "True by default. Set false explicitly for case-insensitive content search; path glob matching stays case-sensitive.",
+            "regex": "False by default: query is literal text. Set true for a regular expression; do not escape literal searches as regexes.",
+            "mode": "matches returns matching lines; files returns matching paths; count counts matching lines. Choose the needed mode directly; count then files then matches is not required. match_count is page-local, not a total.",
+            "edits": "Exact replacements against the same original file, committed atomically. Do not include read_file line labels in old_text. Replacements must be unique unless replace_all=true, and must not overlap.",
+        }
+        for name, description in descriptions.items():
+            if name in props:
+                props[name]["description"] = description
+        if value.name in {"list_files", "search_files"}:
+            props["max_depth"]["anyOf"][0]["maximum"] = config.max_depth
+            details = (f" Scan budget: {config.max_entries} eligible entries per call; maximum depth {config.max_depth}."
+                       f" Generated directories {', '.join(config.generated_directories) or '(none)'} are listed but not descended unless include_generated=true; an explicit path into them is allowed."
+                       f" Entry/text payloads have a {config.max_output_bytes}-byte budget (pagination metadata is additional). Limits return partial success with truncated/reason and cursor; continue with unchanged filters and the returned cursor (limit may change). has_more means a continuation cursor exists, not that depth-limited or skipped paths were searched."
+                       " Depth-limited paths must be opened explicitly. Excludes and gitignore prune directories.")
+            if value.name == "search_files":
+                details += (f" Content scan: {config.max_scan_bytes} bytes and {config.search_timeout_seconds:g}s per call;"
+                            f" individual files over {config.max_file_bytes} bytes are skipped, not fatal."
+                            " match_count is for this page; total_count appears only for an exact, unpaginated search without protected/skipped files. A final page's count is not the sum of earlier pages.")
+        else:
+            details = f" Individual files/content are capped at {config.max_file_bytes} bytes; returned text at {config.max_output_bytes} bytes."
+            if value.name == "read_file":
+                props["max_bytes"]["maximum"] = config.max_output_bytes
+                details += " Long lines are paged with next_line/next_column; pass both as start_line/start_column to continue."
+            if value.name == "write_file":
+                props["content"]["maxLength"] = config.max_file_bytes
+        return value.model_copy(update={"description": value.description + details})
+
+
+def file_tools(service: FileService, *, context: ToolContext | None = None) -> ToolSet:
+    """Bind a backend explicitly for standalone Tools or a custom Workflow."""
+    if not isinstance(service, FileService):
+        raise TypeError("File Tools require a FileService.")
+
+    def execute(name):
+        current = ToolContext.current()
+        return service.execute(name, current.arguments, current)
+
+    def list_files(path: str = ".", pattern: str = "*", recursive: bool = False,
+                   include_hidden: bool = False, respect_gitignore: bool = True,
+                   exclude: list[str] = [], limit: PageSize = 100, cursor: str | None = None,
+                   include_generated: bool = False, max_depth: Annotated[int | None, Field(ge=0)] = None) -> ToolOutput:
+        """List one page of directory entries or glob paths without scanning the whole tree first. limit is a page size, not a total tree size. Omitted permission actions mean allow in this preview; Ask/Deny remain explicit. Previews do not authorize later operations. Use stat for full metadata."""
+        return execute("list_files")
+
+    def search_files(query: str, path: str = ".", include: list[str] = ["*"], exclude: list[str] = [],
+                     regex: bool = False, case_sensitive: bool = True,
+                     context_lines: Annotated[int, Field(ge=0, le=10)] = 0,
+                     include_hidden: bool = False, respect_gitignore: bool = True,
+                     mode: Literal["matches", "files", "count"] = "matches",
+                     limit: PageSize = 100, max_matches: Annotated[int, Field(gt=0, le=10000)] = 1000,
+                     cursor: str | None = None, include_generated: bool = False,
+                     max_depth: Annotated[int | None, Field(ge=0)] = None) -> ToolOutput:
+        """Search readable text, returning matches, paths or counts. With context_lines, results contain match positions and text appears once in merged contexts blocks (start_line/end_line inclusive). Long snippets are marked text_truncated with text_start_column when offset; read_file retrieves more. Protected candidates are labelled without searching their contents. Explicit protected file searches require approval."""
+        return execute("search_files")
+
+    def read_file(path: str, start_line: Positive = 1, start_column: Positive = 1,
+                  max_lines: Annotated[int, Field(gt=0, le=2000)] = 200,
+                  max_bytes: Positive = min(32768, service.config.max_output_bytes)) -> ToolOutput:
+        """Read numbered text lines and internally remember its version for safe edits. Continue with next_line/next_column as start_line/start_column (columns count Unicode characters). Supported images return image content; other binary files are rejected."""
+        return execute("read_file")
+
+    def write_file(path: str, content: str, overwrite: bool = False,
+                   expected_version: str | None = None, create_parents: bool = False) -> ToolOutput:
+        """Create a UTF-8 text file; existing files require overwrite and a prior read or expected_version. Returns confirmation and a version for subsequent operations; diff stays in execution metadata."""
+        return execute("write_file")
+
+    def edit_file(path: str, edits: Annotated[list[FileEdit], Field(min_length=1, max_length=100)],
+                  expected_version: str | None = None) -> ToolOutput:
+        """Apply unique non-overlapping exact replacements to one previously read file. All edits use the same original version and commit together. Re-read on version_conflict."""
+        return execute("edit_file")
+
+    def manage_files(request: FileManagement) -> ToolOutput:
+        """Stat, mkdir, copy/move a regular file, or delete an explicit path. Transfers never overwrite. Move/delete files require a prior read or version. Delete removes only files or empty directories."""
+        return execute("manage_files")
+
+    handlers = (list_files, search_files, read_file, write_file, edit_file, manage_files)
+    tools = []
+    for handler in handlers:
+        name = handler.__name__
+        def resolve(arguments, current, name=name):
+            try:
+                return service.operations(name, arguments, current)
+            except OSError as error:
+                raise ToolBusinessError("File target is unavailable: " + str(error), code="file_target_unavailable") from error
+        tools.append(_FileTool(handler, service, operations=resolve))
+    return ToolSet(tools, context=context, policy=ToolOperationPolicy(service.evaluate))

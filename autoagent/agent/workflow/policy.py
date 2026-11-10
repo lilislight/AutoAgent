@@ -27,7 +27,7 @@ class ContextBudget:
 
 def item_characters(item):
     """Count model content, including opaque replay text, without native duplicates."""
-    value = item.model_dump(mode="json", exclude={"native", "id"}, exclude_none=True)
+    value = item.model_dump(mode="json", exclude={"native", "id", "tool_metadata"}, exclude_none=True)
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 

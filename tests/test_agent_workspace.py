@@ -11,7 +11,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 
 from autoagent.agent import (AgentInput, LLMStreamChunk, SubagentsConfig, SubagentTarget,
-                             Tool, agent_workflow, builtin_agent_workflow, BUILTIN_AGENT_WORKFLOW_ID)
+                             Tool, agent_workflow, builtin_agent_workflow, BUILTIN_AGENT_WORKFLOW_ID,
+                             LocalTokenPricing, TokenPrice, LLMMessage)
 from autoagent.host import AutoAgentHost, HostSettings
 from autoagent.server import ServerSettings, create_app
 from autoagent.server.agent import agent_router
@@ -21,6 +22,7 @@ from tests.test_agent_workflow import ScriptedProvider, answer, settings
 from tests.test_agent_ask_user import ask_call, reply, tool_response
 from tests.test_agent_resource_bindings import skill
 from tests.test_agent_subagents import RoutedProvider, call, response, incoming
+from tests.test_llm_call_storage import running, completed
 
 
 def echo_note(text: str) -> str:
@@ -89,6 +91,64 @@ class WorkspaceContracts:
             usage = await client.get('/api/v2/agent/usage', params={'session_id': sid, 'invocation_id': iid})
             self.assertEqual(usage.status_code, 200, usage.text)
             self.assertEqual(usage.json()['session'], (await host.token_usage(session_id=sid)).model_dump(mode='json'))
+
+    async def test_turn_usage_sums_nested_agents_without_other_turns_or_siblings(self):
+        """Turn totals include cross-Session descendants once and preserve missing-price facts."""
+        steps = iter([response(call('run_agent', {'type': 'agent', 'task': 'child leaf', 'wait_timeout_seconds': 30})),
+                      answer('worker done')])
+        class Provider(RoutedProvider):
+            async def ainvoke(self, request):
+                self.requests.append(request)
+                messages = [getattr(part, 'text', '') for item in request.input
+                            if isinstance(item, LLMMessage) and item.role == 'user' for part in item.content]
+                if 'child worker' in messages:
+                    return next(steps)
+                if 'child leaf' in messages or 'child sibling' in messages:
+                    return answer('leaf done')
+                return next(self.root)
+        provider = Provider([response(
+            call('run_agent', {'type': 'agent', 'task': 'child worker', 'wait_timeout_seconds': 30}, id='worker')),
+            response(call('run_agent', {'type': 'agent', 'task': 'child sibling', 'wait_timeout_seconds': 30}, id='sibling')),
+            answer('root done'), answer('another turn')])
+        async with self.host(provider) as host, self.client(host) as client:
+            root = await host.execute(BUILTIN_AGENT_WORKFLOW_ID, AgentInput(message='root task'))
+            async with asyncio.timeout(20):
+                while (result := await host.join(root)).status == 'waiting':
+                    await asyncio.sleep(.01)
+            self.assertEqual(result.status, 'completed', result)
+            children = (await host.list_child_executions(root.invocation_id, order='asc')).items
+            self.assertEqual(len(children), 2)
+            worker, sibling = children
+            leaf = (await host.list_child_executions(worker['invocation_id'])).items[0]
+            other = await host.execute(BUILTIN_AGENT_WORKFLOW_ID, AgentInput(message='another turn'), session_id=root.session_id)
+            self.assertEqual((await host.join(other)).status, 'completed')
+            host._persistence.pricing = LocalTokenPricing(overrides={'test/model': TokenPrice('1', '3')},
+                                                         use_litellm_catalog=False)
+            for index, (iid, sid) in enumerate([(root.invocation_id, root.session_id), (root.invocation_id, root.session_id),
+                (worker['invocation_id'], worker['session_id']), (sibling['invocation_id'], sibling['session_id']),
+                (leaf['invocation_id'], leaf['session_id']), (other.invocation_id, other.session_id)]):
+                record = completed(running(llm_call_id=f'usage-{index}', invocation_id=iid, session_id=sid))
+                await host._persistence.record_llm_call(record)
+                await host._persistence.record_llm_call(record)
+            async def usage(iid, sid):
+                result = await client.get('/api/v2/agent/usage', params=dict(invocation_id=iid, session_id=sid))
+                self.assertEqual(result.status_code, 200, result.text)
+                return result.json()
+            totals = await usage(root.invocation_id, root.session_id)
+            self.assertEqual((totals['invocation']['call_count'], totals['invocation']['total_tokens']), (5, 25))
+            self.assertEqual(totals['invocation']['cost_usd'], '0.000045')
+            self.assertEqual(totals['session']['call_count'], 3)
+            own = await host.token_usage(invocation_id=root.invocation_id)
+            self.assertEqual((own.call_count, own.total_tokens), (2, 10))
+            subtree = (await usage(worker['invocation_id'], worker['session_id']))['invocation']
+            self.assertEqual((subtree['call_count'], subtree['total_tokens'], subtree['cost_usd']), (2, 10, '0.000018'))
+            await host._persistence.record_llm_call(completed(running(llm_call_id='unpriced', requested_model='unknown',
+                invocation_id=leaf['invocation_id'], session_id=leaf['session_id'])))
+            partial = (await usage(root.invocation_id, root.session_id))['invocation']
+            self.assertEqual((partial['call_count'], partial['total_tokens'], partial['missing_cost_calls']), (6, 30, 1))
+            self.assertEqual(partial['cost_usd'], '0.000045')
+            self.assertEqual((await client.get('/api/v2/agent/usage', params=dict(
+                invocation_id=worker['invocation_id'], session_id=root.session_id))).status_code, 400)
 
     async def test_history_pages_include_final_snapshots_and_stream_is_session_scoped(self):
         """Session subscribers reject unrelated traffic before buffering; reload reads complete events."""

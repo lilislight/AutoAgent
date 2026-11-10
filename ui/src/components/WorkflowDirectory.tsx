@@ -3,6 +3,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { browseWorkflows } from "../api";
 import { SearchIcon, WorkflowIcon } from "./Sidebar";
 import { DirectorySkeleton, LoadingIndicator, BusyLabel } from './LoadingState';
+import { Tooltip, ValueTip } from './Tooltip';
 export { WorkflowIcon } from "./Sidebar";
 
 type WorkflowChoice = { workflow_id: string; revision_id: string };
@@ -50,9 +51,9 @@ export function WorkflowDirectory({ workflowId, revisionId, onSelect, onLoadingC
         const previous = entries[index - 1];
         return <li className="workflow-group" key={entry.workflow_id}>
           {!previous || (previous.current_revision_id !== null) !== registered ? <div className="directory-group-label">{registered ? "Registered" : "Unregistered"}</div> : null}
-          <button className={`workflow-item ${registered ? "registered" : "unregistered"} ${entry.workflow_id === workflowId ? "active" : ""}`} onClick={() => onSelect({ workflow_id: entry.workflow_id, revision_id: targetRevision })} aria-current={entry.workflow_id === workflowId ? "true" : undefined} title={entry.workflow_id}>
-            <span className="workflow-glyph"><WorkflowIcon /></span><span className="workflow-item-text"><strong>{entry.workflow_id}</strong><span className="workflow-item-meta"><span title={versionKnown ? `v${entry.workflow_version}` : "Revision"}>{versionKnown ? `v${entry.workflow_version}` : "Revision"}</span><span aria-hidden="true">·</span><code title={targetRevision}>{targetRevision.split(":").at(-1)?.slice(0, 8)}</code></span></span>
-          </button>
+          <Tooltip content={<><ValueTip label="Workflow" value={entry.workflow_id}/>{versionKnown?<ValueTip label="Version" value={entry.workflow_version}/>:null}<ValueTip label="Revision" value={targetRevision}/></>}><button className={`workflow-item ${registered ? "registered" : "unregistered"} ${entry.workflow_id === workflowId ? "active" : ""}`} onClick={() => onSelect({ workflow_id: entry.workflow_id, revision_id: targetRevision })} aria-current={entry.workflow_id === workflowId ? "true" : undefined}>
+            <span className="workflow-glyph"><WorkflowIcon /></span><span className="workflow-item-text"><strong>{entry.workflow_id}</strong><span className="workflow-item-meta"><span>{versionKnown ? `Version ${entry.workflow_version}` : `Revision ${targetRevision.split(":").at(-1)?.slice(0, 8)}`}</span></span></span>
+          </button></Tooltip>
         </li>;
       })}</ul> : null}
       {directory.hasNextPage ? <button className="load-more" onClick={() => void directory.fetchNextPage()} disabled={directory.isFetchingNextPage}><BusyLabel busy={directory.isFetchingNextPage} label="Loading more">More workflows</BusyLabel></button> : null}

@@ -9,11 +9,12 @@ from ..models import LLMMessage, TextContent
 from .models import SkillDocument, SkillMetadata
 
 
-def document_message(document: SkillDocument, *, role: Literal["user", "developer"] = "user") -> LLMMessage:
+def document_message(document: SkillDocument, *, role: Literal["user", "developer"] = "user", include_revisions=True) -> LLMMessage:
     return LLMMessage(role=role, content=(TextContent(text=json.dumps({
-        "skill": document.metadata.model_dump(mode="json"),
-        "revision": document.revision, "instructions": document.instructions,
-        **({"snapshot_revision": document.snapshot_revision} if document.snapshot_revision is not None else {}),
+        "skill": document.metadata.model_dump(mode="json", exclude_none=True),
+        "instructions": document.instructions,
+        **({"revision": document.revision} if include_revisions else {}),
+        **({"snapshot_revision": document.snapshot_revision} if include_revisions and document.snapshot_revision is not None else {}),
     }, ensure_ascii=False)),))
 
 

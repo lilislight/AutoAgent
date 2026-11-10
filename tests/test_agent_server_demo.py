@@ -6,6 +6,7 @@ import importlib
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -13,7 +14,7 @@ from uuid import uuid4
 import httpx
 
 from autoagent.agent import (
-    AgentApprovalRequest, AgentApprovalResponse, LLM_CALL, LLMMessage, LLMToolResult, llm_call_operator,
+    AgentApprovalRequest, AgentApprovalResponse, BUILTIN_AGENT_WORKFLOW_ID, LLM_CALL, LLMMessage, LLMToolResult, llm_call_operator,
 )
 from autoagent.agent.context import restore
 from autoagent.host import AutoAgentHost, HostSettings
@@ -50,7 +51,9 @@ class ServerDemoContracts:
                     setup.agent_context.resources.register_provider("default", provider)
                     setup.register_operator(llm_call_operator(provider, id="demo.test.llm"),
                         capability_id=LLM_CALL.id, default=True)
-                    yield
+                    project = importlib.import_module("agent_demo.project")
+                    async with project.lifespan(setup):
+                        yield
 
             async with AutoAgentHost.from_project(PROJECT, use_env_file=False,
                 environment={"AUTOAGENT_LLM_MODEL": "offline"}, lifespan=lifespan,
@@ -101,8 +104,9 @@ class ServerDemoContracts:
             snapshot = await host.agent_context.get_snapshot(invocation_id)
             _, skills = host.agent_context.catalog(snapshot)
             self.assertIn("demo-guide", [skill.metadata.name for skill in skills])
-            self.assertFalse(host.agent_context.resources.entries("tool"))
-            self.assertFalse(host.agent_context.resources.entries("skill"))
+            self.assertEqual(host.agent_context.resources.catalog("agent"), ((), ()))
+            self.assertTrue(all(entry.workflows == frozenset({BUILTIN_AGENT_WORKFLOW_ID})
+                for kind in ("tool", "skill") for entry in host.agent_context.resources.entries(kind)))
             for wait in waiting.waits:
                 if wait.request["kind"] == "agent.ask_user":
                     payload = {"answers": [{"question_id": "city", "text": "北京"}]}
@@ -138,6 +142,53 @@ class ServerDemoContracts:
                     await asyncio.sleep(0.01)
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(len(provider.requests), 3)
+
+    async def test_chat_uses_demo_rules_and_200k_sdk_context(self):
+        """The actual /agent chat receives scoped demo resources and the SDK Context default."""
+        prefix = ["-u", "-m", "agent_demo.cli_probe"]
+        provider = ScriptedProvider(response(
+            call("execute_command", {"command": {"mode": "exec", "program": sys.executable,
+                "args": [*prefix, "info"]}}, "info"),
+            call("skill_list_resources", {"name": "demo-guide"}, "resources")),
+            response(call("skill_read_resource", {"name": "demo-guide", "path": "references/tool-checklist.md"}, "read")), answer())
+        async with self.client(provider) as (host, client, _):
+            catalog = (await client.get("/api/v2/agent/catalog")).json()
+            self.assertEqual(catalog["agent"]["context_policy"]["context_window"], 200_000)
+            run = await client.post("/api/v2/agent/messages", json={"session_id": uuid4().hex, "message": "Test demo tools"})
+            self.assertEqual(run.status_code, 202, run.text)
+            result = await host.join(run.json()["invocation_id"])
+            self.assertEqual(result.status, "completed", result.error)
+            names = {tool.name for tool in provider.requests[0].tools}
+            self.assertTrue({"save_demo_note", "get_demo_weather", "add_numbers", "skill_load", "skill_list_resources",
+                "skill_read_resource", "execute_command", "manage_process", "write_file", "ask_user", "spawn_agent"} <= names)
+            observations = {item.call_id: item for item in results(provider.requests[-1])}
+            self.assertFalse(observations["info"].is_error, observations["info"])
+            self.assertEqual(json.loads(observations["info"].structured_content["stdout"])["cwd"], str(PROJECT))
+            self.assertIn("references/tool-checklist.md", observations["resources"].model_dump_json())
+
+    async def test_chat_probe_approval_and_deny_are_real_boundaries(self):
+        """The chat demo asks for its harmless approval probe and blocks its deny probe."""
+        prefix = ["-u", "-m", "agent_demo.cli_probe"]
+        provider = ScriptedProvider(response(*[
+            call("execute_command", {"command": {"mode": "exec", "program": sys.executable,
+                "args": [*prefix, action]}}, action) for action in ("approval", "deny")]), answer())
+        async with self.client(provider) as (host, client, _):
+            run = await client.post("/api/v2/agent/messages", json={"session_id": uuid4().hex, "message": "Test command permissions"})
+            self.assertEqual(run.status_code, 202, run.text)
+            waiting = await host.join(run.json()["invocation_id"])
+            self.assertEqual(waiting.status, "waiting", waiting.error)
+            batch = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
+            self.assertEqual(len(batch.requests), 1)
+            self.assertFalse(host.agent_context._workspaces.process_manager.records())
+            reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in batch.requests),
+                revision=batch.revision)
+            await self.action(client, waiting.invocation_id, waiting.waits[0], reply.model_dump(mode="json"))
+            result = await host.join(waiting.invocation_id)
+            self.assertEqual(result.status, "completed", result.error)
+            observations = {item.call_id: item for item in results(provider.requests[-1])}
+            self.assertIn("APPROVAL_OK", observations["approval"].structured_content["stdout"])
+            self.assertTrue(observations["deny"].is_error)
+            self.assertNotIn("DENY_PROBE_WAS_EXECUTED", observations["deny"].model_dump_json())
 
 
 class SQLiteServerDemoTests(ServerDemoContracts, unittest.IsolatedAsyncioTestCase):

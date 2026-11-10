@@ -43,6 +43,16 @@ export function RecordsSkeleton({ label, count = 3 }: { label: string; count?: n
   </div>)}</div>;
 }
 
+export function SessionHistorySkeleton({ label = 'Loading invocations' }: { label?: string }) {
+  return <ol className="session-history-list session-history-skeleton" role="status" aria-label={label}>
+    {Array.from({ length: 5 }, (_, i) => <li key={i} aria-hidden="true">
+      <span className="session-history-order"><SkeletonText width="2ch" /></span>
+      <div className="session-history-open"><span className="session-history-title"><strong><SkeletonText width="140px" /></strong><span className="status-badge loading-placeholder skeleton-status">Completed</span></span><span className="session-history-time"><SkeletonText width="180px" /></span></div>
+      <span className="session-definition-action"><span className="loading-placeholder session-definition-placeholder" /></span>
+    </li>)}
+  </ol>;
+}
+
 export function OptionsSkeleton({ label, count = 4, variant = 'select' }: { label: string; count?: number; variant?: 'select' | 'revision' | 'filter' }) {
   return <div role="status" aria-label={label}>{Array.from({ length: count }, (_, i) => <div className={`skeleton-option ${variant === 'revision' ? 'revision-choice' : variant === 'filter' ? 'filter-option' : 'select-option'}`} key={i} aria-hidden="true">
     {variant === 'filter' ? <><span className="loading-placeholder skeleton-checkbox" /><SkeletonText width="72%" /></>
@@ -75,10 +85,12 @@ export function DirectorySkeleton({ label, count = 6, kind = 'workflow', matchin
         <span className="workflow-item-text">{kind === 'invocation' ? <>
           <span className="invocation-row-heading"><strong><SkeletonText width="70%" /></strong><span className="status-badge loading-placeholder skeleton-status">Completed</span></span>
           <span className="invocation-row-meta"><code><SkeletonText width="8ch" /></code><span><SkeletonText width="140px" /></span></span>
+        </> : kind === 'session' ? <>
+          <span className="session-row-heading"><strong><SkeletonText width="8ch" /></strong><span className="session-row-count"><SkeletonText width={matching ? '90px' : '70px'} /></span></span>
+          <span className="session-row-meta"><span className="session-row-activity"><SkeletonText width="150px" /></span></span>
         </> : <>
           <strong><SkeletonText width={index % 2 ? '60%' : '78%'} /></strong>
           <span className="workflow-item-meta"><SkeletonText width={index % 3 ? '70%' : '85%'} /></span>
-          {kind === 'session' ? <><small><SkeletonText width="94%" /></small>{matching ? <small className="session-match-note"><SkeletonText width="55%" /></small> : null}</> : null}
         </>}</span>
       </div>
     </li>)}

@@ -23,12 +23,16 @@ import { OccurrenceStack, type StackTarget } from "./OccurrenceStack";
 import { ExecutionFamilyBar } from './ExecutionFamilyBar';
 import { FamilyHandoffOverlay } from './FamilyHandoffOverlay';
 import { useFamilyHandoff } from './useFamilyHandoff';
-import { ExecutionFork, ForkDialog, ForkHistory, type ForkTarget, type OpenFork } from './ExecutionFork';
+import { ExecutionFork, ForkDialog, ForkHistory, type ForkTarget, type OpenFork, type OverflowAction } from './ExecutionFork';
 import { PendingActionCards } from './PendingActionCards';
 import { useExecutionLayout, setExecutionLayout, persistExecutionLayout } from './useExecutionLayout';
 import { graphRatioAt } from '../executionLayout';
 import { useViewMotion } from './useViewMotion';
 import type { StackAnchor } from "../stackMotion";
+import { WorkflowIdentity } from './WorkflowIdentity';
+import { useExecutionToolbar } from './useExecutionToolbar';
+import { Tooltip, ValueTip } from './Tooltip';
+import { WorkflowIcon } from './Sidebar';
 const WorkflowGraph = lazy(() => import("./WorkflowGraph"));
 const ExecutionTimeline = lazy(() => import('./ExecutionTimeline'));
 
@@ -52,6 +56,7 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
   onSelect: (value: Selection) => void; onOpenExecution: (row: TraceRow, selection?: Selection) => void; view: ExecutionView; onChangeView: (view: ExecutionView) => void; theme: Theme; active?: boolean;
 }) {
   const inv = trace.invocation;
+  const toolbar = useExecutionToolbar();
   const snapshot = useExecutionSnapshot();
   const [forkTarget,setForkTarget]=useState<ForkTarget|null>(null);
   const openFork:OpenFork=(sequence,anchor,returnFocus=anchor)=>setForkTarget({sequence,bounds:anchor.getBoundingClientRect(),returnFocus});
@@ -204,9 +209,19 @@ function ExecutionWorkspaceBody({ trace, workflow, selection, onSelect, onOpenEx
     if (target && selection && kind === inspectorKind) onSelect({ ...selection, record: { ...target, section: value } });
     else if (selection?.kind === 'invocation' && kind === 'invocation') onSelect({ ...selection, section: value });
   };
-  return <ExecutionNavigationContext.Provider value={{ active, invocationId:inv.invocation_id, replaying:replay.enabled, paused:actions.paused, onRunAccepted, sendAction:actions.send, actionBusy:actions.busy, actionError:actions.error, actionErrors:actions.fieldErrors, clearActionError:actions.clearError, clock:live.clock, respondToWait:row=>void openResponse({invocation_id:row.invocation_id,wait_id:String(row.wait_id),occurrence_id:String(row.occurrence_id),created_at_us:Number(row.created_at_us ?? 0)}), canRespond:actions.canRespond, pendingResponses:actions.pendingResponses, replaySequence: replay.enabled ? replay.marker?.sequence : undefined, openChild: onOpenExecution, pickRecord: pickedRecord, exact: Boolean(selectedRecord), inspectorKind, setSection: section, showTimeline: selectedRecord?.status !== 'skipped' ? () => revealTimeline() : undefined, showGraph: () => { if (view === 'timeline') onChangeView('graph'); setGraphFocus(current => current + 1); } }}><div className="execution-workspace"><header className="execution-header">
-    <div className="execution-heading"><button className="execution-title" title="Inspect invocation" onClick={() => choose({ kind: 'invocation', id: inv.invocation_id })}>{inv.workflow_id}</button><span className="execution-revision" title={workflow.workflow_revision_id}><span>v{workflow.workflow_version}</span><code>{workflow.definition_hash.slice(0, 8)}</code></span><StatusBadge row={inv} /><ExecutionElapsed row={inv} clock={live.clock} active={active && !replay.enabled} observed={trace.observed_at_us} /></div>
-    {!metadataReady ? <span className="trace-loading-status" role={metadataError ? 'alert' : undefined} title={metadataError}>{metadataError ? metadataStatus : <InlineLoading label={metadataStatus} />}{metadataError ? <button onClick={onRetryMetadata}>Retry</button> : null}</span> : null}{actions.toolbar}<ExecutionFork sequence={replay.enabled ? replay.marker?.sequence ?? null : trace.last_event?.sequence ?? null} active={active && metadataReady} onFork={openFork}/><LiveTraceStatus live={live} onRetryUpdate={replay.enabled?endReplay:undefined} /><ExecutionSnapshotStatus compact trace={trace} active={active && !replay.enabled && !live.updating} /><nav className="execution-view-switch" aria-label="Execution view">{(['graph', 'timeline'] as const).map(mode => <button key={mode} aria-pressed={view === mode} onClick={() => changeView(mode)}>{mode === 'graph' ? 'Graph' : 'Timeline'}</button>)}
+  const overflowActions: OverflowAction[] = [
+    ...(toolbar.compact ? [actions.runAgainAction] : []),
+    ...(toolbar.tiny ? [actions.primaryAction, ...(['graph', 'timeline', 'split'] as const).map(mode => ({
+      id: `view-${mode}`, label: `${mode === 'graph' ? 'Graph' : mode === 'timeline' ? 'Timeline' : 'Split'} view`, onSelect: () => changeView(mode),
+    }))] : []),
+    ...(toolbar.narrow ? [{
+      id: 'refresh', label: 'Refresh execution', disabled: !active || replay.enabled || live.updating || snapshot.refreshing,
+      onSelect: () => { void snapshot.refresh(); },
+    }, actions.cancelAction] : []),
+  ];
+  return <ExecutionNavigationContext.Provider value={{ active, invocationId:inv.invocation_id, replaying:replay.enabled, paused:actions.paused, onRunAccepted, sendAction:actions.send, actionBusy:actions.busy, actionError:actions.error, actionErrors:actions.fieldErrors, clearActionError:actions.clearError, clock:live.clock, respondToWait:row=>void openResponse({invocation_id:row.invocation_id,wait_id:String(row.wait_id),occurrence_id:String(row.occurrence_id),created_at_us:Number(row.created_at_us ?? 0)}), canRespond:actions.canRespond, pendingResponses:actions.pendingResponses, replaySequence: replay.enabled ? replay.marker?.sequence : undefined, openChild: onOpenExecution, pickRecord: pickedRecord, exact: Boolean(selectedRecord), inspectorKind, setSection: section, showTimeline: selectedRecord?.status !== 'skipped' ? () => revealTimeline() : undefined, showGraph: () => { if (view === 'timeline') onChangeView('graph'); setGraphFocus(current => current + 1); } }}><div className="execution-workspace"><header ref={toolbar.ref} className="execution-header" data-compact={toolbar.compact} data-narrow={toolbar.narrow} data-tiny={toolbar.tiny}>
+    <div className="execution-heading"><Tooltip content={<ValueTip label="Workflow · Inspect Invocation" value={inv.workflow_id} />}><button className="execution-title" onClick={() => choose({ kind: 'invocation', id: inv.invocation_id })}>{inv.workflow_id}</button></Tooltip><WorkflowIdentity workflow={workflow} active={active} /><StatusBadge row={inv} /><ExecutionElapsed row={inv} clock={live.clock} active={active && !replay.enabled} observed={trace.observed_at_us} /></div>
+    {!metadataReady ? <span className="trace-loading-status" role={metadataError ? 'alert' : undefined} title={metadataError}>{metadataError ? metadataStatus : <InlineLoading label={metadataStatus} />}{metadataError ? <button onClick={onRetryMetadata}>Retry</button> : null}</span> : null}{actions.toolbar}<ExecutionFork sequence={replay.enabled ? replay.marker?.sequence ?? null : trace.last_event?.sequence ?? null} active={active && metadataReady} onFork={openFork} actions={overflowActions}/><LiveTraceStatus live={live} onRetryUpdate={replay.enabled?endReplay:undefined} /><ExecutionSnapshotStatus compact trace={trace} active={active && !replay.enabled && !live.updating} /><nav className="execution-view-switch" aria-label="Execution view">{(['graph', 'timeline'] as const).map(mode => <Tooltip key={mode} content={mode==='graph'?'Graph view':'Timeline view'}><button aria-label={mode==='graph'?'Graph view':'Timeline view'} aria-pressed={view === mode} onClick={() => changeView(mode)}>{mode==='graph'?<WorkflowIcon/>:<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4v12m3-10h10M6 10h6M6 14h8" /></svg>}<span className="view-switch-label">{mode === 'graph' ? 'Graph' : 'Timeline'}</span></button></Tooltip>)}
       <div className={`split-choice ${view === 'split' ? 'is-active' : ''}`}>
         {view === 'split' ? <button className="split-orientation-switch" role="switch" aria-checked={layout.orientation === 'vertical'} aria-label="Vertical Split" title={layout.orientation === 'vertical' ? 'Top and bottom · Switch to side by side' : 'Side by side · Switch to top and bottom'} onClick={() => setExecutionLayout({ orientation: layout.orientation === 'horizontal' ? 'vertical' : 'horizontal' })}>
           <span className="split-switch-thumb" /><svg className="split-horizontal-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="2" y="3" width="14" height="12" rx="2" /><path d="M9 3v12" /></svg><svg className="split-vertical-icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="2" y="3" width="14" height="12" rx="2" /><path d="M2 9h14" /></svg>

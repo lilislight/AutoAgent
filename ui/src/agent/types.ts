@@ -1,4 +1,10 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export interface QueuedMessage {
+  id: string; session_id: string; position: number; message: string;
+  state: 'queued' | 'starting' | 'started' | 'sending' | 'sent' | 'cancelled' | 'blocked';
+  invocation_id: string | null; error: string | null;
+}
+export interface MessageQueue { items: QueuedMessage[]; invocation_id: string | null }
 export type AccessAction = 'allow' | 'ask' | 'deny';
 export interface SessionSettings {
   model: { provider: string; model: string | null; streaming: boolean; max_output_tokens: number | null; temperature: number | null };
@@ -16,7 +22,7 @@ export interface WorkspaceAgent {
 export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; defaults: SessionSettings; project_workspace_id: string }
 export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number }
 export interface Page<T> { items: T[]; next_cursor: string | null }
-export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number; [key: string]: unknown }
+export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number | null; completed_at_us?: number | null; [key: string]: unknown }
 export interface PendingWait { invocation_id: string; wait_id: string; node_id?: string; occurrence_id: string }
 export interface Controls {
   root_invocation_id: string; root_session_id: string; status: string; control_state: string; expected_version: number;
@@ -28,7 +34,7 @@ export interface AgentExecution {
   controls: Controls; snapshot: { snapshot_id: string; settings_version: number; settings: SessionSettings } | null;
 }
 export interface AgentResources { user_signal_endpoint: string; tools: { name: string; description: string | null; origin: string; version: string }[]; skills: { name: string; description: string; origin: string }[] }
-export interface Usage { input_tokens: number | null; output_tokens: number | null; total_tokens: number | null; cost_usd: string | null; call_count: number; pending_calls: number; unsettled_calls: number; missing_usage_calls: number; missing_cost_calls: number }
+export interface Usage { input_tokens: number | null; output_tokens: number | null; total_tokens: number | null; cost_usd: string | null; reasoning_tokens?: number | null; cache_read_tokens?: number | null; call_count: number; pending_calls: number; unsettled_calls: number; missing_usage_calls: number; missing_cost_calls: number }
 export interface Content { type: string; text?: string; source?: Record<string, Json>; [key: string]: unknown }
 export interface AgentMessage { message_id: string; source: 'user' | 'agent'; sender_id: string | null; content: Content[]; reply_requested: boolean; reply_to: string | null }
 export type ResponseBlock = { type: 'text' | 'refusal'; text: string } | { type: 'reasoning'; text: string | null; summary: string[] } | { type: 'tool'; tool_id: string } | { type: 'media'; content: Content };

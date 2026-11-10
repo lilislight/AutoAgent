@@ -29,11 +29,14 @@ class ToolContext:
     tool_name: str | None = None
     authorization: Mapping[str, Any] = field(default_factory=dict, repr=False)
     approval_scope: Mapping[str, Any] | None = field(default=None, repr=False)
+    operations: tuple = ()
     arguments: Mapping[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
         object.__setattr__(self, "arguments", MappingProxyType({}))
+        from .operations import ToolOperation
+        object.__setattr__(self, "operations", tuple(ToolOperation.model_validate(value) for value in self.operations))
         object.__setattr__(self, "authorization", _freeze(self.authorization))
         if self.approval_scope is not None:
             object.__setattr__(self, "approval_scope", _freeze(self.approval_scope))

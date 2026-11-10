@@ -1,4 +1,4 @@
-import { BusyLabel, FactsSkeleton, RecordsSkeleton, SkeletonText } from './LoadingState';
+import { BusyLabel, FactsSkeleton, RecordsSkeleton, SessionHistorySkeleton, SkeletonText } from './LoadingState';
 import { useId, useState } from 'react';
 import { useInfiniteQuery, useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionHistory, getSessionInformation, getSessionWorkflows } from '../api';
@@ -6,6 +6,9 @@ import type { SessionWorkflow, TraceRow } from '../types';
 import { CopyId } from './InspectorFrame';
 import { formatTime, StatusBadge } from './TraceDetails';
 import { SessionCheckpoints } from './SessionCheckpoints';
+import { WorkflowVersion } from './WorkflowIdentity';
+import { ToolButton, DefinitionIcon, RefreshIcon } from './ToolButton';
+import { Tooltip, ValueTip } from './Tooltip';
 
 const tabs = ['Invocations', 'Workflows', 'Checkpoints'] as const;
 
@@ -26,8 +29,8 @@ export function SessionInformation({ session, onInvocation, onDefinition }: {
   for (const row of workflows.data?.pages.flatMap(page=>page.items) ?? []) groups.set(row.workflow_id, [...(groups.get(row.workflow_id) ?? []),row]);
   const query = tab==='Invocations'?history:workflows;
   return <section ref={setInspectorHost} className="session-information" aria-label="Session information">
-    <header className="workflow-toolbar"><div className="workflow-toolbar-heading"><span className="session-toolbar-title">Session</span><CopyId value={session} /></div>
-      <button type="button" className="toolbar-action" disabled={info.isFetching || (tab==='Checkpoints'?checkpointFetching>0:query.isFetching)} onClick={()=>{void info.refetch();if(tab==='Checkpoints'){void client.invalidateQueries({queryKey:['session-checkpoints',session]});void client.invalidateQueries({queryKey:['checkpoint-details']});}else void query.refetch();}}>Refresh</button></header>
+    <header className="workflow-toolbar"><div className="workflow-toolbar-heading"><span className="session-toolbar-title">Session</span><CopyId label="Session ID" value={session} displayValue={session.slice(0, 8)} /></div>
+      <ToolButton label="Refresh Session" busy={Boolean(info.data) && (info.isFetching || (tab==='Checkpoints'?checkpointFetching>0:query.isFetching))} disabled={info.isFetching || (tab==='Checkpoints'?checkpointFetching>0:query.isFetching)} onClick={()=>{void info.refetch();if(tab==='Checkpoints'){void client.invalidateQueries({queryKey:['session-checkpoints',session]});void client.invalidateQueries({queryKey:['checkpoint-details']});}else void query.refetch();}}><RefreshIcon /></ToolButton></header>
     <div className="session-info-scroll">
       {info.error ? <div className="sidebar-error" role="alert"><p>{info.error.message}</p><button onClick={()=>void info.refetch()}>Retry</button></div> : null}
       {info.isLoading ? <><div className="session-facts" aria-hidden="true">{["Invocations", "Workflows", "Revisions"].map(label => <span key={label}><strong><SkeletonText width="36px" /></strong> {label}</span>)}</div><FactsSkeleton label="Loading Session information" className="session-times" labels={["Created", "Last activity"]} /></> : info.data ? <>
@@ -38,15 +41,15 @@ export function SessionInformation({ session, onInvocation, onDefinition }: {
       <div id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-${tab}-tab`}>
         {tab==='Checkpoints' ? <SessionCheckpoints session={session} inspectorHost={inspectorHost} /> : <>
         {revision && tab==='Invocations' ? <div className="session-revision-filter">Revision <code>{revision.split(':').at(-1)?.slice(0,8)}</code><button type="button" className="icon-button" aria-label="Show all Session Invocations" onClick={()=>setRevision(null)}>×</button></div> : null}
-        {query.isLoading ? <RecordsSkeleton label={`Loading ${tab.toLowerCase()}`} /> : null}
+        {query.isLoading ? tab==='Invocations' ? <SessionHistorySkeleton /> : <RecordsSkeleton label="Loading workflows" /> : null}
         {query.error ? <div className="sidebar-error" role="alert"><p>{query.error.message}</p><button onClick={()=>void query.refetch()}>Retry</button></div> : null}
-        {tab==='Invocations' ? <ol className="session-history-list">{rows.map(row=><li key={row.invocation_id}>
-          <span className="session-history-order" title={row.opening_sequence===null?'Imported history begins at a Checkpoint':`Session opening Event #${row.opening_sequence}`}>#{row.ordinal}</span>
-          <button className="session-history-open" onClick={()=>onInvocation(row)}><span className="session-history-title"><strong>{row.workflow_id}</strong><StatusBadge row={row} /></span><span><code>{row.invocation_id.slice(0,8)}</code><span>v{row.workflow_version} · {row.workflow_revision_id?.split(':').at(-1)?.slice(0,8)}</span></span><small>Started {formatTime(row.started_at_us)}{row.recovery_count?` · Recovered ${row.recovery_count}×`:''}</small></button>
-          <button className="text-action" onClick={()=>onDefinition(row.workflow_id!,row.workflow_revision_id!)}>Definition</button>
+        {tab==='Invocations' ? <ol className="session-history-list" aria-label="Invocations, oldest first">{rows.map(row=><li key={row.invocation_id}>
+          <span className="session-history-order" title={`Invocation #${row.ordinal} in this Session. ${row.opening_sequence===null?'Imported history begins at a Checkpoint':`Opening Event #${row.opening_sequence}`}`}>#{row.ordinal}</span>
+          <Tooltip content={<><ValueTip label="Invocation ID" value={row.invocation_id} /><ValueTip label="Workflow" value={row.workflow_id ?? 'Not recorded'} />{row.workflow_version?<ValueTip label="Version" value={row.workflow_version}/>:null}{row.workflow_revision_id?<ValueTip label="Revision" value={row.workflow_revision_id}/>:null}</>}><button className="session-history-open" aria-label={`Open Invocation #${row.ordinal}: ${row.workflow_id}, ${row.control_state === 'paused' ? 'paused' : row.status ?? 'planned'}, started ${formatTime(row.started_at_us)}`} onClick={()=>onInvocation(row)}><span className="session-history-title"><strong>{row.workflow_id}</strong><StatusBadge row={row} /></span><span className="session-history-time"><span>Started {formatTime(row.started_at_us)}</span>{row.recovery_count ? <small>Recovered {row.recovery_count}×</small> : null}</span></button></Tooltip>
+          <ToolButton className="session-definition-action" label={`View definition for Invocation #${row.ordinal}`} tooltip={`View ${row.workflow_id} definition${row.workflow_version ? ` · Version ${row.workflow_version}` : ''}`} onClick={()=>onDefinition(row.workflow_id!,row.workflow_revision_id!)}><DefinitionIcon /></ToolButton>
         </li>)}</ol> : <div className="session-workflow-groups">{[...groups].map(([workflow,members])=><section key={workflow}><h3>{workflow}</h3>{members.map(row=><div className="session-workflow-revision" key={row.workflow_revision_id}>
-          <div><strong>v{row.workflow_version}</strong> <code>{row.workflow_revision_id.split(':').at(-1)?.slice(0,8)}</code><span className="revision-tag">{row.runnable?'Registered':'Unregistered'}</span><small>{row.invocation_count} {row.invocation_count===1?'Invocation':'Invocations'} · {formatTime(row.first_started_at_us)}</small></div>
-          <div className="session-row-actions"><button className="text-action" onClick={()=>onDefinition(workflow,row.workflow_revision_id)}>Definition</button><button className="text-action" onClick={()=>{setRevision(row.workflow_revision_id);setTab('Invocations');}}>Invocations</button></div>
+          <div><WorkflowVersion version={row.workflow_version} /> <span className="session-workflow-revision-id" title={row.workflow_revision_id}>Revision <code>{row.workflow_revision_id.split(':').at(-1)?.slice(0,8)}</code></span><span className={`revision-tag ${row.runnable ? '' : 'saved'}`}>{row.runnable?'Registered':'Unregistered'}</span><small>{row.invocation_count} {row.invocation_count===1?'Invocation':'Invocations'} · {formatTime(row.first_started_at_us)}</small></div>
+          <div className="session-row-actions"><ToolButton label={`View ${workflow} definition`} onClick={()=>onDefinition(workflow,row.workflow_revision_id)}><DefinitionIcon /></ToolButton><button className="text-action" onClick={()=>{setRevision(row.workflow_revision_id);setTab('Invocations');}}>Invocations</button></div>
         </div>)}</section>)}</div>}
         {!query.isPending && !query.error && (tab==='Invocations'?!rows.length:!groups.size) ? <p className="muted">No saved {tab.toLowerCase()}.</p> : null}
         {query.hasNextPage ? <button className="load-more" disabled={query.isFetchingNextPage} onClick={()=>void query.fetchNextPage()}><BusyLabel busy={query.isFetchingNextPage} label="Loading more">Show more</BusyLabel></button> : null}

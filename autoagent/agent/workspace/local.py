@@ -39,6 +39,18 @@ class LocalWorkspace:
     async def avalidate(self, working_directory="."):
         await asyncio.to_thread(self.directory, working_directory)
 
+    def file_service(self, working_directory=".", *, config=None):
+        """Optional Workspace execution capability; remote backends may supply their own."""
+        from ..files import LocalFileService
+        root, _ = self.directory(working_directory)
+        return LocalFileService(root, working_directory=working_directory, config=config)
+
+    def execution_service(self, working_directory=".", *, config=None, manager=None):
+        """Resolve the local execution capability; other Workspaces may replace it."""
+        from ..execution import LocalExecutionService
+        root, _ = self.directory(working_directory)
+        return LocalExecutionService(root, working_directory=working_directory, config=config, manager=manager)
+
     def discover(self, working_directory=".") -> WorkspaceDiscovery:
         root, directory = self.directory(working_directory)
         instructions, skills = [], []

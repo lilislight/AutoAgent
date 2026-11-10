@@ -36,7 +36,8 @@ def tool_identity(tool):
             allowed=sorted(owner.context.allowed_tools) if owner.context and owner.context.allowed_tools is not None else None,
             approval_mode=owner.approval_mode)
     return dict(definition=tool.definition.model_dump(mode="json"),
-        implementation=callable_identity(getattr(tool, "_handler", tool.ainvoke)))
+        implementation=callable_identity(getattr(tool, "_handler", tool.ainvoke)),
+        operations=callable_identity(getattr(tool, "operation_resolver", None)))
 
 
 def resource_permissions(entry):
@@ -133,7 +134,15 @@ class SkillDirectory:
 class AgentResources:
     """Resource declarations retained on the Workflow's start Operator."""
 
-    def __init__(self, tools=(), mcp=(), skills=()):
+    def __init__(self, tools=(), mcp=(), skills=(), files=True, execution=True):
+        from ..files import FileToolsConfig
+        from ..execution import ExecutionToolsConfig
+        if type(files) is not bool and not isinstance(files, FileToolsConfig):
+            raise TypeError("files must be bool or FileToolsConfig.")
+        self.files = (FileToolsConfig() if files is True else None if files is False else files)
+        if type(execution) is not bool and not isinstance(execution, ExecutionToolsConfig):
+            raise TypeError("execution must be bool or ExecutionToolsConfig.")
+        self.execution = ExecutionToolsConfig() if execution is True else None if execution is False else execution
         if isinstance(tools, ToolSet):
             tools = tuple(tools[name] for name in tools._tools)
         self.tools = tuple(value if isinstance(value, ExecutableTool) else Tool(value) for value in tools)
@@ -152,6 +161,8 @@ class AgentResources:
         self.manifest = dict(tools=[tool_identity(value) for value in self.tools],
             mcp=[value.identity() for value in self.mcp], skills=[value.identity() if isinstance(value, SkillDirectory)
                 else dict(name=value.metadata.name, revision=value.freeze().snapshot_revision) for value in self.skills])
+        self.manifest["files"] = self.files.model_dump(mode="json") if self.files is not None else None
+        self.manifest["execution"] = self.execution.model_dump(mode="json") if self.execution is not None else None
 
     async def install(self, stack, registry, workflow_id):
         from ..resource_sources import SkillDirectorySource

@@ -1,6 +1,6 @@
 /* Loaded before JavaScript so cold starts use the same indicator as the app. */
-.app-boot-loading { position:fixed; inset:0; display:grid; place-items:center; background:var(--surface,#f4f6f9); }
-html[data-theme="dark"] .app-boot-loading { background:var(--surface,#292f38); }
+.app-boot-loading { position:fixed; inset:0; display:grid; place-items:center; background:var(--surface,#f5f5f5); }
+html[data-theme="dark"] .app-boot-loading { background:var(--surface,#1e1e1e); }
 .loading-indicator { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
 .loading-spinner { display:block; width:32px; height:32px; box-sizing:border-box; border:2px solid color-mix(in srgb,var(--accent,#007acc) 20%,transparent); border-top-color:var(--accent,#007acc); border-radius:50%; animation:loading-spin 750ms linear infinite; }
 html[data-theme="dark"] .app-boot-loading .loading-spinner { border-color:#3794ff33; border-top-color:#3794ff; }

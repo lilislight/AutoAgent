@@ -13,7 +13,8 @@ from .subagents import BUILTIN_NAMES, WaitPreparation, DeferredToolWait
 
 
 def authorization_binding(task):
-    return {**task.binding.model_dump(mode="json"), "request_id": task.request_id}
+    return {**task.binding.model_dump(mode="json"), "request_id": task.request_id,
+        "operations": [dict(value) for value in task.operations]}
 
 
 def binding_error(service, snapshot, task, *, catalog=None):
@@ -75,6 +76,7 @@ async def branch_tools(value):
             immediate.append(checked.result)
             continue
         decision = checked.decision
+        task = task.model_copy(update={"operations": checked.operations})
         decisions.append(AuthorizationObservation(call_id=call.call_id,
             approval_mode=snapshot.settings.approval_mode,
             policy_action=checked.policy_action, effective_action=decision.action))
@@ -98,7 +100,8 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
     if task.observation is not None:
         return task.observation
     if task.approval is not None and not task.approval.approved:
-        return error_result(task.call, "tool_approval_denied", "Tool approval was denied.")
+        from ..tools.execution import approval_denied_result
+        return approval_denied_result(task.call, task.approval)
     service = current_agent_context()
     snapshot = await service.snapshot()
     if snapshot.settings.workspace is not None:

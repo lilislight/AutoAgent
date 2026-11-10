@@ -152,7 +152,7 @@ export function ExecutionInspector({ trace, workflow, selection, record, onClose
   if (selection.kind === 'node') return <NodeInspector iid={iid} id={selection.id} record={record} trace={trace} workflow={workflow} onClose={onClose} onReselect={onReselect} initial={selection.record?.section} waitId={selection.record?.waitId} />;
   if (selection.kind === 'edge') return <EdgeInspector initial={selection.record?.section} iid={iid} id={selection.id} record={record} trace={trace} workflow={workflow} onClose={onClose} onReselect={onReselect} onBack={record ? onBack : undefined} />;
   const row = trace.invocation;
-  return <InspectorFrame kind="invocation" initial={selection.section} title={row.workflow_id ?? iid} context={<><span>v{workflow.workflow_version}</span><code>{workflow.definition_hash.slice(0, 8)}</code><StatusBadge row={row} /></>} tabs={canAct ? ['Actions', 'Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Input / Output', 'Execution', 'Definition']} onClose={onClose}>
+  return <InspectorFrame kind="invocation" initial={selection.section} title={row.workflow_id ?? iid} context={<><CopyId label="Version" value={workflow.workflow_version} displayValue={`Version ${workflow.workflow_version}`}/><CopyId label="Revision ID" value={workflow.workflow_revision_id} displayValue={`Revision ${workflow.definition_hash.slice(0,8)}`}/><StatusBadge row={row} /></>} tabs={canAct ? ['Actions', 'Summary', 'Input / Output', 'Execution', 'Definition'] : ['Summary', 'Input / Output', 'Execution', 'Definition']} onClose={onClose}>
     {tab => {
       switch (tab) {
         case 'Actions': return <InvocationActions row={row} workflow={workflow} />;

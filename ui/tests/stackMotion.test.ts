@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { advanceMotion, motionSettled, placeStack, wheelMotion, type StackMotion } from "../src/stackMotion.js";
+import { advanceMotion, motionSettled, placeStack, wheelMotion, STACK_SCENE_TOP, type StackMotion } from "../src/stackMotion.js";
 const near = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < 1e-8);
 
 test("Node and Edge stacks share a compact size in the same viewport and keep their own origins", () => {
@@ -16,7 +16,7 @@ test("Node and Edge stacks share a compact size in the same viewport and keep th
   assert.ok(large.sourceScaleX > edge.sourceScaleX);
   for (const [layout, x] of [[small, 620], [large, 820]] as const) {
     near(surface.left + layout.left + layout.width / 2 + layout.originX, x);
-    near(surface.top + layout.top + 50 + layout.frontY + layout.cardHeight / 2 + layout.originY, 550);
+    near(surface.top + layout.top + STACK_SCENE_TOP + layout.frontY + layout.cardHeight / 2 + layout.originY, 550);
   }
 });
 
@@ -32,14 +32,16 @@ test("card size responds to the canvas size and remains compact on large screens
 });
 
 test("stacks at canvas edges remain visible while their animation origin stays at the click", () => {
-  const surface = { left: 300, top: 100, width: 800, height: 600 };
-  for (const x of [305, 1095]) for (const y of [105, 695]) {
-    const layout = placeStack({ x, y, width: 25, height: 15 }, surface, 24);
-    assert.ok(layout.left >= 16 && layout.top >= 16);
-    assert.ok(layout.left + layout.width <= surface.width - 16);
-    assert.ok(layout.top + layout.height <= surface.height - 16);
-    near(surface.left + layout.left + layout.width / 2 + layout.originX, x);
-    near(surface.top + layout.top + 50 + layout.frontY + layout.cardHeight / 2 + layout.originY, y);
+  for (const height of [400, 600]) {
+    const surface = { left: 300, top: 100, width: 800, height };
+    for (const x of [305, 1095]) for (const y of [105, 100 + height - 5]) {
+      const layout = placeStack({ x, y, width: 25, height: 15 }, surface, 24);
+      assert.ok(layout.left >= 16 && layout.top >= 16);
+      assert.ok(layout.left + layout.width <= surface.width - 16);
+      assert.ok(layout.top + layout.height <= surface.height - 16);
+      near(surface.left + layout.left + layout.width / 2 + layout.originX, x);
+      near(surface.top + layout.top + STACK_SCENE_TOP + layout.frontY + layout.cardHeight / 2 + layout.originY, y);
+    }
   }
 });
 

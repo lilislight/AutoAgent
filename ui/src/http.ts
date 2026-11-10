@@ -1,5 +1,3 @@
-import { temporaryReadDelay } from './temporaryReadDelay.js';
-
 interface Config { apiPrefix: string; uiBase: string; pageSize: number; defaultView?: 'agents' | 'workflows' }
 const element = document.getElementById("autoagent-config");
 export const config: Config = element?.textContent
@@ -7,11 +5,9 @@ export const config: Config = element?.textContent
   : { apiPrefix: "/api/v2", uiBase: "/", pageSize: 50 };
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly fields: import("./jsonSchema.js").FieldError[] = []) { super(message); }
+  constructor(message: string, readonly status: number, readonly fields: import("./jsonSchema.js").FieldError[] = [], readonly code?: string) { super(message); }
 }
 export async function request<T>(path: string, signal: AbortSignal, init?: RequestInit): Promise<T> {
-  // TEMPORARY visual check; remove with temporaryReadDelay.ts after review.
-  if ((init?.method ?? 'GET').toUpperCase() === 'GET') await temporaryReadDelay(signal);
   const headers = new Headers(init?.headers);
   headers.set('Accept', 'application/json');
   const response = await fetch(config.apiPrefix + path, {
@@ -26,7 +22,8 @@ export async function request<T>(path: string, signal: AbortSignal, init?: Reque
       : detail && typeof detail === "object" && "message" in detail ? String(detail.message)
       : `Request failed (${response.status})`;
     const fields = detail && typeof detail === "object" && "errors" in detail && Array.isArray(detail.errors) ? detail.errors : [];
-    throw new ApiError(message, response.status, fields);
+    const code = detail && typeof detail === 'object' && 'code' in detail && typeof detail.code === 'string' ? detail.code : undefined;
+    throw new ApiError(message, response.status, fields, code);
   }
   if (response.status === 204) return undefined as T;
   return await response.json() as T;

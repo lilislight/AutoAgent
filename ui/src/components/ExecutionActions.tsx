@@ -5,6 +5,7 @@ import { ApiError, getExecutionControls, getExecutionOperation, submitExecutionA
 import type { ExecutionActionInput, ExecutionActionKind, ExecutionControls, ExecutionTrace } from '../types';
 import type { FieldError } from '../jsonSchema';
 import { observeOperation, pendingOperation, readPendingOperation, type PendingOperation, type OperationObservation } from '../executionOperations';
+import { Tooltip } from './Tooltip';
 
 const progressLabels: Record<ExecutionActionKind, string> = { pause: 'Pausing…', recover: 'Recovering…', cancel: 'Cancelling…', respond: 'Responding…', signal: 'Sending…' };
 function savedOperation(iid: string, value?: PendingOperation | null) {
@@ -20,7 +21,7 @@ export function useExecutionActions(trace: ExecutionTrace, active: boolean, repl
   const iid = trace.invocation.invocation_id, client = useQueryClient();
   const settledCallback = useRef(onSettled), refreshedOperation = useRef<string | null>(null);
   settledCallback.current = onSettled;
-  const [cancelOpen, setCancelOpen] = useState(false), cancelButton = useRef<HTMLButtonElement>(null);
+  const [cancelOpen, setCancelOpen] = useState(false), cancelButton = useRef<HTMLButtonElement>(null), cancelAnchor = useRef<HTMLButtonElement>(null);
   const [pendingOperationState, setPendingOperation] = useState<PendingOperation | null>(() => savedOperation(iid));
   const operationId = pendingOperationState?.operation_id ?? null;
   const [fieldErrors, setFieldErrors] = useState<FieldError[]>([]);
@@ -95,17 +96,25 @@ export function useExecutionActions(trace: ExecutionTrace, active: boolean, repl
   const disabled = replaying || !active || busy;
   const pendingAction = submitting ?? (receipt?.status === 'running' ? receipt.action : null);
   const reason = (available?: { available: boolean; reason: string | null }) => replaying ? 'Execution controls are unavailable during Replay.' : available?.reason ?? undefined;
+  const runAgain = () => { clearError(); onRunAgain(); };
+  const requestCancel = (anchor: HTMLButtonElement) => {
+    if (disabled || !controls.data?.actions.cancel.available) return;
+    cancelAnchor.current = anchor; clearError(); setCancelOpen(true);
+  };
   return {
     paused: controls.data?.control_state === 'paused', canRespond: Boolean(!replaying && controls.data?.actions.respond.available), pendingResponses, send, busy, error: actionError, fieldErrors, clearError,
     toolbar: <div className="execution-actions" aria-label="Execution controls">
-      <button type="button" disabled={disabled || !controls.data?.actions.run_again.available} title={reason(controls.data?.actions.run_again) ?? 'Open a prefilled Run form; execution starts when you submit it.'} onClick={() => { clearError(); onRunAgain(); }}>Run again</button>
-      <button type="button" disabled={disabled || !availability?.available} title={reason(availability) ?? (child ? 'Controls the Root and all its owned children.' : stateAction === 'pause' ? 'Pause at a resumable Node boundary.' : 'Recover this Root and its children in the same Invocations. Successful work is preserved.')} onClick={() => void send(stateAction)}><BusyLabel busy={pendingAction === stateAction} label={progressLabels[stateAction]}>{`${continuing ? 'Recover' : 'Pause'}${child ? ' root' : ''}`}</BusyLabel></button>
-      <button ref={cancelButton} type="button" className="execution-action-cancel" aria-haspopup="dialog" aria-expanded={cancelOpen} disabled={disabled || !controls.data?.actions.cancel.available} title={reason(controls.data?.actions.cancel) ?? 'Cancel this Root and its owned child executions.'} onClick={() => { clearError(); setCancelOpen(true); }}><BusyLabel busy={pendingAction === 'cancel'} label={progressLabels.cancel}>{child ? 'Cancel root' : 'Cancel'}</BusyLabel></button>
+      <Tooltip content={reason(controls.data?.actions.run_again) ?? 'Open a prefilled Run form; execution starts when you submit it.'}><button type="button" className="execution-action-run-again" disabled={disabled || !controls.data?.actions.run_again.available} onClick={runAgain}>Run again</button></Tooltip>
+      <Tooltip content={reason(availability) ?? (child ? 'Controls the Root and all its owned children.' : stateAction === 'pause' ? 'Pause at a resumable Node boundary.' : 'Recover this Root and its children in the same Invocations. Successful work is preserved.')}><button type="button" disabled={disabled || !availability?.available} onClick={() => void send(stateAction)}><BusyLabel busy={pendingAction === stateAction} label={progressLabels[stateAction]}>{`${continuing ? 'Recover' : 'Pause'}${child ? ' root' : ''}`}</BusyLabel></button></Tooltip>
+      <Tooltip content={reason(controls.data?.actions.cancel) ?? 'Cancel this Root and its owned child executions.'}><button ref={cancelButton} type="button" className="execution-action-cancel" aria-haspopup="dialog" aria-expanded={cancelOpen} disabled={disabled || !controls.data?.actions.cancel.available} onClick={() => { if (cancelButton.current) requestCancel(cancelButton.current); }}><BusyLabel busy={pendingAction === 'cancel'} label={progressLabels.cancel}>{child ? 'Cancel root' : 'Cancel'}</BusyLabel></button></Tooltip>
       {pendingAction === 'respond' ? <span className="execution-operation-state" role="status">Responding…</span> : null}
       {unresolved && !operation.error ? <InlineLoading label="Checking operation" /> : null}
       {controls.error || actionError ? <div className="execution-control-error" role="alert"><span title={controls.error?.message ?? actionError ?? ''}>{controls.error?.message ?? actionError}</span><button type="button" onClick={() => { if (operation.error) void operation.refetch(); else if (controls.error) void controls.refetch(); else clearError(); }}>{operation.error ? 'Retry status' : controls.error ? 'Retry controls' : 'Dismiss'}</button></div> : null}
     </div>,
-    confirmation: cancelOpen && active && !replaying && controls.data ? <CancelConfirmation anchor={cancelButton} rootId={controls.data.root_invocation_id} busy={busy} disabled={!controls.data.actions.cancel.available} error={actionError} onClose={() => setCancelOpen(false)} onConfirm={reason => send('cancel', { reason: reason || undefined })} /> : null,
+    runAgainAction: { id: 'run-again', label: 'Run again', disabled: disabled || !controls.data?.actions.run_again.available, description: reason(controls.data?.actions.run_again), onSelect: runAgain },
+    primaryAction: { id: stateAction, label: `${continuing ? 'Recover' : 'Pause'}${child ? ' root' : ''}`, disabled: disabled || !availability?.available, description: reason(availability), onSelect: () => { void send(stateAction); } },
+    cancelAction: { id: 'cancel', label: child ? 'Cancel root' : 'Cancel', danger: true, disabled: disabled || !controls.data?.actions.cancel.available, description: reason(controls.data?.actions.cancel), onSelect: requestCancel },
+    confirmation: cancelOpen && active && !replaying && controls.data ? <CancelConfirmation anchor={cancelAnchor} rootId={controls.data.root_invocation_id} busy={busy} disabled={!controls.data.actions.cancel.available} error={actionError} onClose={() => setCancelOpen(false)} onConfirm={reason => send('cancel', { reason: reason || undefined })} /> : null,
   };
 }
 
@@ -122,7 +131,7 @@ function CancelConfirmation({ anchor, rootId, busy, disabled, error, onClose, on
     const position = () => { const bounds = button.getBoundingClientRect(); popup.style.left = `${Math.max(12, Math.min(bounds.right - popup.offsetWidth, window.innerWidth - popup.offsetWidth - 12))}px`; popup.style.top = `${Math.max(12, Math.min(bounds.bottom + 8, window.innerHeight - popup.offsetHeight - 12))}px`; };
     position(); const observer = new ResizeObserver(position); observer.observe(popup); observer.observe(button);
     window.addEventListener('resize', position);
-    return () => { observer.disconnect(); window.removeEventListener('resize', position); popup.close(); if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }); };
+    return () => { observer.disconnect(); window.removeEventListener('resize', position); popup.close(); if (previous instanceof HTMLElement && previous.isConnected && previous !== document.body) previous.focus({ preventScroll: true }); else button.focus({ preventScroll: true }); };
   }, [anchor]);
   return <dialog ref={dialog} className="cancel-execution-popover" aria-label="Cancel Root execution" onCancel={event => { event.preventDefault(); if (!busy) onClose(); }} onClick={event => { if (event.target !== event.currentTarget || busy) return; const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) onClose(); }}>
     <form onSubmit={event => { event.preventDefault(); if (!busy && !disabled) void onConfirm(reason.trim()); }}>

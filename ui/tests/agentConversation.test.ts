@@ -129,3 +129,19 @@ test('execution headings distinguish paused control from Invocation lifecycle', 
   assert.equal(executionStatus('waiting', { control_state: 'active', recovery_reason: 'interrupted' }), 'waiting');
   assert.equal(executionStatus('failed', { control_state: 'active', recovery_reason: 'failed' }), 'failed');
 });
+
+
+test('approval replies carry a trimmed denial reason only for rejected calls', () => {
+  const request = { requests: [{ id: 'deny' }, { id: 'allow' }, { id: 'blank' }] };
+  const reply = approvalReply(request, { deny: false, allow: true, blank: false }, { deny: '  Keep private  ', allow: 'ignored', blank: '  ' });
+  assert.deepEqual(reply.decisions, [
+    { request_id: 'deny', approved: false, reason: 'Keep private' },
+    { request_id: 'allow', approved: true }, { request_id: 'blank', approved: false },
+  ]);
+});
+
+
+test('pause admission closure remains distinct from a fully paused execution', () => {
+  assert.equal(executionStatus('running', { control_state: 'pausing', recovery_reason: null }), 'pausing');
+  assert.equal(executionStatus('running', { control_state: 'paused', recovery_reason: 'paused' }), 'paused');
+});

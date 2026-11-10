@@ -3,6 +3,7 @@ import { useIsFetching, useQueryClient } from '@tanstack/react-query';
 import type { ExecutionTrace } from '../types';
 import { belongsToSnapshot, metadataScope, snapshotTime } from '../snapshot';
 import { formatTime } from './TraceDetails';
+import { ToolButton, RefreshIcon } from './ToolButton';
 
 const SnapshotContext = createContext({ epoch: 0, meta: {} as Record<string, unknown>, refreshing: false, error: null as string | null, refresh: async () => {} });
 export function useExecutionSnapshot() { return useContext(SnapshotContext); }
@@ -60,6 +61,6 @@ export function ExecutionSnapshotStatus({ trace, active, compact=false }: { trac
   const title = `${event ? `Last saved event: #${event.sequence} ${event.event_name}\n${formatTime(event.occurred_at_us, true)}` : 'No Runtime Events have been saved for this execution.'}\nChecked: ${formatTime(trace.observed_at_us, true)}\nGraph colours reflect committed data; elapsed times may be estimated.${error ? `\n${error}` : ''}`;
   return <div className={`execution-snapshot-status ${error ? 'has-error' : ''}`}>
     <span className="snapshot-label" title={title} role={error ? 'alert' : 'status'}>{refreshing ? 'Refreshing…' : error ? 'Refresh incomplete' : compact ? '' : 'Last saved'}{!refreshing && !error ? <time dateTime={event ? new Date(event.occurred_at_us / 1000).toISOString() : undefined}>{snapshotTime(event?.occurred_at_us)}</time> : null}</span>
-    <button className={`snapshot-refresh ${refreshing ? 'is-refreshing' : ''}`} aria-label="Refresh execution" title={error ? 'Retry execution refresh' : 'Refresh Graph, Timeline and Inspector'} disabled={!active || refreshing} onClick={() => void refresh()}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M15 6a6 6 0 1 0 1 6M15 2v4h-4" /></svg></button>
+    <ToolButton className="snapshot-refresh" label="Refresh execution" tooltip={error ? 'Retry execution refresh' : 'Refresh Graph, Timeline and Inspector'} busy={refreshing} disabled={!active || refreshing} onClick={() => void refresh()}><RefreshIcon /></ToolButton>
   </div>;
 }

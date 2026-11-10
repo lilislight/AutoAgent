@@ -3,6 +3,7 @@ schema_version = 1
 [project]
 name = "agent-server-demo"
 description = "Interactive Agent, approvals, user questions and subagents through Server and UI"
+lifespan = "agent_demo.project:lifespan"
 
 [[workflows]]
 entrypoint = "agent_demo.project:main_agent"

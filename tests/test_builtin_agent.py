@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 
-from autoagent.agent import AgentInput, BUILTIN_AGENT_WORKFLOW_ID
+from autoagent.agent import AgentInput, BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow, ExecutionToolsConfig, CommandRule
 from autoagent.host import AutoAgentHost, HostSettings, ProjectError
 from autoagent.host.project import Project
 from autoagent.server import create_app
@@ -18,6 +18,14 @@ from tests.test_agent_workflow import ScriptedProvider, answer, settings
 
 
 class BuiltinRegistrationTests(unittest.TestCase):
+    def test_sdk_context_defaults_to_200k_and_accepts_execution_policy(self):
+        """The product Agent uses a 200k Context window and explicit command configuration."""
+        config = ExecutionToolsConfig(default_decision="deny", rules=[CommandRule(program="git", decision="ask")])
+        workflow = builtin_agent_workflow(execution=config)
+        start = next(node for node in workflow.nodes if node.id == "start")
+        self.assertEqual(start.executable.handler.__autoagent_context_policy__.context_window, 200_000)
+        self.assertEqual(start.executable.handler.__autoagent_resources__.execution, config)
+
     def test_empty_directory_and_empty_manifest_register_sdk_agent(self):
         """Both discovery without factories and an explicit empty list include the SDK Agent."""
         with tempfile.TemporaryDirectory() as directory:
@@ -82,6 +90,7 @@ class BuiltinApplicationContracts:
             self.assertTrue(catalog['standalone'])
             self.assertTrue(catalog['agent']['include_ask_user'])
             self.assertTrue(catalog['agent']['subagents'])
+            self.assertEqual(catalog['agent']['context_policy']['context_window'], 200_000)
             page = (await client.get('/')).text
             config = json.loads(page.split('<script id="autoagent-config" type="application/json">')[1].split('</script>')[0])
             self.assertEqual(config['defaultView'], 'agents')

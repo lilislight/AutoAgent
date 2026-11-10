@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Collection, Iterable, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import inspect
 import json
@@ -18,7 +18,7 @@ from ..models import LLMToolCall, LLMToolDefinition, LLMToolResult
 from ..models._base import _check_finite
 from .context import ToolContext, ToolHooks, _current_context, resolve_context
 from .definition import get_tool_definition
-from .execution import ExecutableTool, Tool, ToolExecutionError, ToolOutputError, _unique_object, error_result
+from .execution import ExecutableTool, Tool, ToolBusinessError, ToolExecutionError, ToolOutputError, _unique_object, error_result
 from .permissions import ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolDecision
 
 if TYPE_CHECKING:
@@ -216,7 +216,26 @@ class ToolSet:
                     tool_name=call.name, call_id=call.call_id,
                 ) from error
             arguments = record
-        return _Prepared(selected, arguments, record, current.for_call(call, record), (self,))
+        current = current.for_call(call, record)
+        resolver = getattr(selected, "operation_resolver", None)
+        if resolver is not None:
+            try:
+                operations = resolver(record, current)
+                if inspect.isawaitable(operations):
+                    if inspect.iscoroutine(operations):
+                        operations.close()
+                    raise TypeError("Tool operation resolution must be synchronous.")
+                current = replace(current, operations=tuple(operations)).for_call(call, record)
+                pinned = current.authorization.get("tool_binding", {}).get("operations", ())
+                if pinned:
+                    from .operations import ToolOperation
+                    expected = tuple(ToolOperation.model_validate_json(json.dumps(_plain(value))) for value in pinned)
+                    if expected != current.operations:
+                        return error_result(call, "tool_target_changed", "Operation targets changed after preflight; request fresh authorization.")
+                    current = replace(current, operations=expected).for_call(call, record)
+            except ToolBusinessError as error:
+                return error_result(call, error.code, str(error))
+        return _Prepared(selected, arguments, record, current, (self,))
 
     @staticmethod
     def _sync_callback(callback, *arguments):
@@ -259,12 +278,14 @@ class ToolSet:
                             session_id=runtime.session_id, invocation_id=runtime.invocation_id),
                         allowed_tools=sorted(current.allowed_tools) if current.allowed_tools is not None else None,
                         authorization=_plain(current.authorization),
+                        operations=[value.model_dump(mode="json") for value in current.operations],
                         definitions=[scope._tools[call.name].definition.model_dump(mode="json")
                                      for scope in prepared.scopes])
         digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
                                           allow_nan=False, separators=(",", ":")).encode()).hexdigest()
         return ToolApprovalRequest(id=digest, call=call, arguments=prepared.record,
-                                   user_id=current.user_id, session_id=current.session_id, reason=reason)
+                                   user_id=current.user_id, session_id=current.session_id, reason=reason,
+                                   operations=tuple(value.model_dump(mode="json") for value in current.operations))
 
     def _bind(self, call, prepared, decisions):
         from ..context import apply_approval_mode
@@ -335,7 +356,8 @@ class ToolSet:
         token = _current_context.set(prepared.context)
         try:
             decision = await self._acheck(call, prepared)
-            return ToolPreflight(decision=decision, policy_action=prepared.policy_action)
+            return ToolPreflight(decision=decision, policy_action=prepared.policy_action,
+                operations=tuple(value.model_dump(mode="json") for value in prepared.context.operations))
         finally:
             _current_context.reset(token)
 
@@ -351,7 +373,8 @@ class ToolSet:
             if approval is None:
                 raise ToolApprovalRequired(decision.approval_request)
         if approval is not None and not approval.approved:
-            return error_result(call, "tool_access_denied", "Tool approval was denied.")
+            from .execution import approval_denied_result
+            return approval_denied_result(call, approval)
         return None
 
     def invoke(self, call: LLMToolCall, *, context: ToolContext | None = None,

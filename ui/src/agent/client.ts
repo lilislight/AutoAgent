@@ -4,12 +4,15 @@ import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution,
 
 // All commands use Host operations. This module has no Graph/Trace dependencies.
 export const agentClient = {
+  queue: (sid: string, signal: AbortSignal) => request<import('./types').MessageQueue>(`/agent/queue?${new URLSearchParams({ session_id: sid })}`, signal),
+  enqueue: (sid: string, message: string, requestId: string, workspace: string | null, signal: AbortSignal, sendTo?: string) => request<import('./types').QueuedMessage>('/agent/queue', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, message, request_id: requestId, workspace_id: workspace, ...(sendTo ? { send_to: sendTo } : {}) }) }),
+  queueAction: (sid: string, itemId: string, action: 'cancel' | 'send_now' | 'continue', signal: AbortSignal, invocationId?: string) => request<import('./types').QueuedMessage>('/agent/queue/actions', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, item_id: itemId, action, ...(invocationId ? { invocation_id: invocationId } : {}) }) }),
   catalog: (signal: AbortSignal) => request<AgentCatalog>('/agent/catalog', signal),
   workspaces: (signal: AbortSignal) => request<{ items: AgentWorkspaceInfo[] }>('/agent/workspaces', signal),
   createWorkspace: (value: { name: string; path: string; create_directory: boolean }, signal: AbortSignal) => request<AgentWorkspaceInfo>('/agent/workspaces', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }),
   sessions: (workspace: string | null, cursor: string | null, signal: AbortSignal) => request<Page<AgentSession>>(`/agent/sessions?${new URLSearchParams({ ...(workspace ? { workspace_id: workspace } : { unbound: 'true' }), ...(cursor ? { cursor } : {}) })}`, signal),
   invocations: (session: string, cursor: string | null, signal: AbortSignal) => request<Page<AgentInvocation>>(`/agent/invocations?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}) })}`, signal),
-  controls: (iid: string, cursor: string, signal: AbortSignal) => request<Controls>(`/execution-controls?${new URLSearchParams({ invocation_id: iid, cursor })}`, signal),
+  controls: (iid: string, cursor: string | null, signal: AbortSignal) => request<Controls>(`/execution-controls?${new URLSearchParams({ invocation_id: iid, ...(cursor ? { cursor } : {}) })}`, signal),
   execution: (iid: string, signal: AbortSignal) => request<AgentExecution>(`/agent/execution?${new URLSearchParams({ invocation_id: iid })}`, signal),
   settings: (sid: string, signal: AbortSignal, workspace?: string | null) => request<SettingsRecord>(`/agent/settings?${new URLSearchParams({ session_id: sid, ...(workspace ? { workspace_id: workspace } : {}) })}`, signal),
   configure: (sid: string, settings: SessionSettings, version: number, signal: AbortSignal) => request<SettingsRecord>('/agent/settings', signal, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, settings, expected_version: version }) }),
@@ -47,6 +50,6 @@ export async function performAction(input: Omit<ActionInput, 'request_id'>, sign
     });
     current = await agentClient.operation(receipt.operation_id, signal);
   }
-  if (current.status !== 'succeeded') throw new Error(current.error?.message ?? 'The operation result is unknown. Refresh before trying again.');
+  if (current.status !== 'succeeded') throw Object.assign(new Error(current.error?.message ?? 'The operation result is unknown. Refresh before trying again.'), { code: current.error?.code });
   return current;
 }

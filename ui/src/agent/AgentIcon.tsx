@@ -1,7 +1,24 @@
 import type { ReactNode } from 'react';
 
-export type AgentIconName = 'new' | 'panel' | 'task' | 'tools' | 'skills' | 'settings' | 'send' | 'shield' | 'access' | 'sparkles' | 'folder';
+export type AgentIconName = 'new' | 'panel' | 'task' | 'tools' | 'skills' | 'settings' | 'send' | 'shield' | 'access' | 'sparkles' | 'folder' | 'chevron' | 'file' | 'search' | 'terminal' | 'edit' | 'agent' | 'message' | 'wrench' | 'stop' | 'alert' | 'usage' | 'pause' | 'play' | 'check' | 'down' | 'close' | 'activity';
 const paths: Record<AgentIconName, ReactNode> = {
+  down: <path d="M12 5v14m-6-6 6 6 6-6" />,
+  close: <path d="m6 6 12 12M6 18 18 6" />,
+  activity: <><path d="M5 15V9M12 19V5M19 15V9" /></>,
+  check: <path d="m5 12 4 4L19 6" />,
+  pause: <><path d="M8 5v14M16 5v14" /></>,
+  play: <path d="m8 4 12 8-12 8Z" />,
+  usage: <><path d="M4 20V10M10 20V4M16 20v-9M22 20H2" /></>,
+  chevron: <path d="m6 9 6 6 6-6" />,
+  file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6M8 13h8M8 17h6" /></>,
+  search: <><circle cx="10.5" cy="10.5" r="7.5" /><path d="m16 16 5 5" /></>,
+  terminal: <><rect x="2" y="3" width="20" height="18" rx="2" /><path d="m6 8 4 4-4 4M13 16h5" /></>,
+  edit: <><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M16 3l5 5M10 14l2-5 7-7 5 5-7 7-5 2Z" /></>,
+  agent: <><rect x="4" y="7" width="16" height="14" rx="3" /><path d="M12 3v4M8 12h.01M16 12h.01M8 17h8M2 11v6M22 11v6" /></>,
+  message: <path d="M21 11a8 8 0 0 1-8 8H7l-5 3V7a5 5 0 0 1 5-5h6a8 8 0 0 1 8 9Z" />,
+  wrench: <path d="M14.7 6.3a5 5 0 0 0 6.5 6.5l-9.4 9.4a3 3 0 0 1-4.2-4.2L17 8.6a5 5 0 0 0-6.5-6.5l3.2 3.2-3 3-3.2-3.2a5 5 0 0 0 6.5 6.5" />,
+  stop: <><circle cx="12" cy="12" r="9" /><rect x="9" y="9" width="6" height="6" rx="1" /></>,
+  alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7v6M12 17h.01" /></>,
   folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   new: <><path d="M12 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 3l5 5M10 14l2-5 7-7 5 5-7 7-5 2Z" /></>,
   panel: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,

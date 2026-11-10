@@ -74,7 +74,7 @@ class HistoryCommitContracts:
                 release.set()
             result = await host.join(ref)
             self.assertEqual(result.status, 'completed', result.error)
-            self.assertEqual(result.output['rounds'], 2)
+            self.assertEqual(result.output['content'], [{'type': 'text', 'text': 'updated answer'}])
             self.assertEqual(len(provider.requests), 2)
             history = self.history(host, ref.session_id)
             self.assertEqual(sum(isinstance(item, LLMMessage) and item.content[0].text == 'first answer'

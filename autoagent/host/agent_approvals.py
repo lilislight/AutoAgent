@@ -63,7 +63,8 @@ class AgentApprovals:
         catalog, _ = workflow_catalog(self.service, snapshot)
         asks, bindings, automatic = [], [], []
         for original, binding in zip(batch.requests, batch.bindings):
-            task = ToolTask(request_id=batch.request_id, call=original.call, binding=binding)
+            task = ToolTask(request_id=batch.request_id, call=original.call, binding=binding,
+                operations=original.operations)
             result = binding_error(self.service, snapshot, task, catalog=catalog)
             checked = None
             if result is None:

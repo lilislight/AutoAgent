@@ -1,7 +1,7 @@
-import { mediaUrl } from './media';
-import type { Content } from './types';
-import { Markdown } from './Markdown';
-export { Markdown } from './Markdown';
+import { mediaUrl } from './media.js';
+import type { Content } from './types.js';
+import { Markdown } from './Markdown.js';
+export { Markdown } from './Markdown.js';
 
 export function MessageContent({ content }: { content: Content[] }) {
   return <>{content.map((part, index) => {

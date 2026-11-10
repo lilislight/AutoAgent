@@ -111,7 +111,10 @@ class AgentWorkflowContracts:
         async with self.host(provider, llm_options={"streaming": True, "max_output_tokens": 77}) as host:
             result = await self.run_agent(host)
             self.assertEqual(result.status, "completed", result.error)
-            self.assertEqual(result.output["rounds"], 1)
+            self.assertEqual(result.output["content"], [{"type": "text", "text": "Done"}])
+            self.assertEqual(set(result.output), {"content"})
+            response = restore(LLMResponse, host._runtime.repository.state(result.session_id).invocation.context["agent"]["response"])
+            self.assertEqual(response.usage.total_tokens, 15)
             self.assertEqual(provider.streams, 1)
             self.assertEqual(provider.requests[0].max_output_tokens, 77)
             snapshot = await host.agent_context.get_snapshot(result.invocation_id)
@@ -163,7 +166,7 @@ class AgentWorkflowContracts:
                 await host.respond(waiting.invocation_id, waiting.waits[0].id,
                     AgentApprovalResponse(decisions=()).model_dump(mode="json"))
             self.assertEqual((await host.get_execution(waiting.invocation_id)).status, "waiting")
-            reply = AgentApprovalResponse(decisions=tuple(value.respond(approved=index == 0)
+            reply = AgentApprovalResponse(decisions=tuple(value.respond(approved=index == 0, reason="Keep this private" if index else None)
                 for index, value in enumerate(request.requests)))
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
             result = await host.join(waiting.invocation_id)
@@ -172,6 +175,8 @@ class AgentWorkflowContracts:
             results = [item for item in provider.requests[-1].input if isinstance(item, LLMToolResult)]
             self.assertEqual([item.call_id for item in results], [f"call-{i}" for i in range(4)])
             self.assertEqual([item.is_error for item in results], [False, False, True, True])
+            self.assertEqual(results[2].structured_content["error"]["kind"], "tool_approval_denied")
+            self.assertEqual(results[2].structured_content["error"]["reason"], "Keep this private")
             assistant_text = [part.text for item in provider.requests[-1].input
                 if isinstance(item, LLMMessage) and item.role == "assistant"
                 for part in item.content if isinstance(part, TextContent)]

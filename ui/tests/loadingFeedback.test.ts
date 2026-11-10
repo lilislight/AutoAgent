@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { BusyLabel, CardsSkeleton, CodeSkeleton, DirectorySkeleton, FactsSkeleton, InlineLoading, OptionsSkeleton, RecordsSkeleton, TimelineSkeleton } from '../src/components/LoadingState.js';
+import { BusyLabel, CardsSkeleton, CodeSkeleton, DirectorySkeleton, FactsSkeleton, InlineLoading, OptionsSkeleton, RecordsSkeleton, SessionHistorySkeleton, TimelineSkeleton } from '../src/components/LoadingState.js';
 
 test('each directory skeleton keeps the layout of its own row type', () => {
   const render = (kind: 'workflow' | 'session' | 'invocation' | 'conversation') => renderToStaticMarkup(createElement(DirectorySkeleton, { kind, count: 2, label: 'Loading rows' }));
   assert.match(render('workflow'), /directory-group-label/);
   assert.doesNotMatch(render('conversation'), /directory-group-label/);
   assert.match(render('session'), /session-item/);
-  assert.match(render('session'), /<small>/);
+  assert.match(render('session'), /session-row-heading/);
+  assert.match(render('session'), /session-row-meta/);
   assert.match(render('invocation'), /invocation-row-heading/);
   assert.match(render('invocation'), /invocation-row-meta/);
   for (const kind of ['workflow', 'session', 'invocation', 'conversation'] as const) {
@@ -19,7 +20,7 @@ test('each directory skeleton keeps the layout of its own row type', () => {
 });
 
 test('structured loaders expose one status and hide placeholder data', () => {
-  for (const Component of [CardsSkeleton, CodeSkeleton, FactsSkeleton, OptionsSkeleton, RecordsSkeleton, TimelineSkeleton]) {
+  for (const Component of [CardsSkeleton, CodeSkeleton, FactsSkeleton, OptionsSkeleton, RecordsSkeleton, SessionHistorySkeleton, TimelineSkeleton]) {
     const html = renderToStaticMarkup(createElement(Component, { label: 'Loading content' }));
     assert.equal((html.match(/role="status"/g) ?? []).length, 1);
     assert.match(html, /aria-label="Loading content"/);

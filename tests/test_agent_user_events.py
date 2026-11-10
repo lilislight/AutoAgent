@@ -115,6 +115,7 @@ class AgentEventContracts:
             self.assertEqual([block["type"] for block in payload["blocks"]], ["reasoning", "text"])
             self.assertEqual(payload["blocks"][1]["text"], "Done")
             self.assertEqual(records[-1]["payload"]["final_response_id"], payload["response_id"])
+            self.assertEqual(records[-1]["payload"]["rounds"], 1)
             self.assertNotIn("hidden", json.dumps(records))
             self.assertNotIn("ciphertext", json.dumps(records))
 

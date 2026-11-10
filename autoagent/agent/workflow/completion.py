@@ -24,8 +24,19 @@ def complete_agent_round(value: CompleteRoundInput) -> RoundResult:
 
 
 def finish_agent_round(value: RoundResult) -> AgentResult:
-    """Expose the final model response and completed round count."""
-    return AgentResult(response=value.response, rounds=value.rounds)
+    """Return ordered answer content, retaining media/citations without replay data."""
+    content = []
+    for item in value.response.output:
+        if not isinstance(item, LLMMessage) or item.role != "assistant":
+            continue
+        for part in item.content:
+            if part.type in {"text", "refusal"} and not part.text.strip():
+                continue
+            record = part.model_dump(mode="json", exclude={"native"}, exclude_none=True)
+            if not record.get("annotations"):
+                record.pop("annotations", None)
+            content.append(record)
+    return AgentResult(content=tuple(content))
 
 
 __all__ = ["complete_agent_round", "finish_agent_round"]

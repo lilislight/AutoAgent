@@ -55,7 +55,10 @@ class ToolPermissionTests(unittest.IsolatedAsyncioTestCase):
         """Only a matching positive approval allows a policy requiring review."""
         tools, effects = self.tools()
         request = tools.check(call()).approval_request
-        rejected = await tools.ainvoke(call(), approval=request.respond(approved=False))
+        rejected = await tools.ainvoke(call(), approval=request.respond(approved=False, reason="Do not publish"))
+        self.assertEqual(rejected.structured_content["error"]["kind"], "tool_approval_denied")
+        self.assertEqual(rejected.structured_content["error"]["reason"], "Do not publish")
+        self.assertFalse(rejected.structured_content["error"]["retryable"])
         self.assertTrue(rejected.is_error)
         self.assertEqual(effects, [])
         approved = tools.invoke(call(), approval=request.respond(approved=True))

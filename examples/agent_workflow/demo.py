@@ -13,7 +13,7 @@ from pathlib import Path
 import tempfile
 
 from autoagent.agent import (
-    AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput,
+    AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput, AgentResult,
     AgentModelSettings, AgentSessionSettings, LLMMessage, LLMResponse,
     LLMStreamChunk, LLMToolCall, LLMToolResult, TextContent, Tool,
     agent_workflow,
@@ -76,8 +76,7 @@ async def main(*, approve=False):
                 result = await host.join(execution)
             if result.status != "completed":
                 raise RuntimeError(result.error or result.status)
-            response = LLMResponse.model_validate_json(json.dumps(result.output["response"]))
-            print(response.text)
+            print(AgentResult.model_validate_json(json.dumps(result.output)).text)
 
 
 if __name__ == "__main__":

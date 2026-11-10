@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentMessage, Compaction, Interaction, ResponseSnapshot, ToolSnapshot } from './types.js';
+import type { AgentEvent, AgentMessage, Compaction, Interaction, ResponseSnapshot, ToolSnapshot, Payloads } from './types.js';
 
 export const entityKey = (iid: string, id: string) => JSON.stringify([iid, id]);
 interface RowBase { id: string; invocation: string; at: number }
@@ -7,11 +7,11 @@ export interface LiveResponse { streamId: string; parts: { key: string; kind: st
 export interface ConversationState {
   rows: Record<string, FeedRow>; responses: Record<string, ResponseSnapshot>; live: Record<string, LiveResponse>;
   tools: Record<string, ToolSnapshot & { committed: boolean }>; interactions: Record<string, Interaction>;
-  compactions: Record<string, Compaction>; seen: Set<string>; completed: Set<string>;
+  compactions: Record<string, Compaction>; seen: Set<string>; completed: Record<string, Payloads['agent.completed'] & { at: number }>;
 }
-export function emptyConversation(): ConversationState { return { rows: {}, responses: {}, live: {}, tools: {}, interactions: {}, compactions: {}, seen: new Set(), completed: new Set() }; }
+export function emptyConversation(): ConversationState { return { rows: {}, responses: {}, live: {}, tools: {}, interactions: {}, compactions: {}, seen: new Set(), completed: {} }; }
 export function applyEvents(previous: ConversationState, events: AgentEvent[]): ConversationState {
-  const state: ConversationState = { rows: { ...previous.rows }, responses: { ...previous.responses }, live: { ...previous.live }, tools: { ...previous.tools }, interactions: { ...previous.interactions }, compactions: { ...previous.compactions }, seen: new Set(previous.seen), completed: new Set(previous.completed) };
+  const state: ConversationState = { rows: { ...previous.rows }, responses: { ...previous.responses }, live: { ...previous.live }, tools: { ...previous.tools }, interactions: { ...previous.interactions }, compactions: { ...previous.compactions }, seen: new Set(previous.seen), completed: { ...previous.completed } };
   for (const event of events) {
     if (!event || event.payload?.v !== 1 || (event.persist && state.seen.has(event.id))) continue;
     if (event.persist) state.seen.add(event.id);
@@ -63,7 +63,11 @@ export function applyEvents(previous: ConversationState, events: AgentEvent[]): 
       case 'agent.error': {
         const id = key(event.id); state.rows[id] = { ...row(id), type: 'error', error: event.payload.error, handled: event.payload.handled }; break;
       }
-      case 'agent.completed': state.completed.add(event.invocation_id); break;
+      case 'agent.completed':
+        if (!state.completed[event.invocation_id] || state.completed[event.invocation_id].at <= event.occurred_at_us) {
+          state.completed[event.invocation_id] = { ...event.payload, at: event.occurred_at_us };
+        }
+        break;
     }
   }
   return state;

@@ -30,8 +30,19 @@ def _tool_state(result):
 
 
 def _snapshot(response_id, call, *, state=None, result=None, progress=None):
+    visible = None if result is None else result.structured_content
+    if isinstance(visible, dict):
+        # Explicit SDK presentation fields stay available to UI/audit without
+        # entering the model's Tool result or exposing arbitrary Tool metadata.
+        details = {}
+        for namespace, keys in (("file", ("diff", "diff_truncated")),
+                ("execution", ("wall_time_seconds", "total_output_bytes", "retained_start"))):
+            metadata = result.tool_metadata.get(namespace, {})
+            if isinstance(metadata, dict):
+                details.update({key: metadata[key] for key in keys if key in metadata})
+        visible = {**details, **visible}
     view = None if result is None else AgentToolResultView(content=tuple(_content(part) for part in result.content),
-        structured_content=result.structured_content, is_error=result.is_error)
+        structured_content=visible, is_error=result.is_error)
     return AgentToolSnapshot(tool_id=tool_id(response_id, call.call_id), response_id=response_id,
         call_id=call.call_id, name=call.name, arguments=call.arguments,
         state=state or _tool_state(result), result=view, progress=progress)
@@ -131,7 +142,7 @@ def map_agent_event(context: UserEventContext) -> UserEventSpec | None:
         return emit("agent.interaction", _interaction(context, response_id), persist=phase == "wait_resolved")
 
     if node == "finish" and phase == "output":
-        return emit("agent.completed", AgentCompletedEvent(node_id=node, final_response_id=response_id, rounds=value["rounds"]))
+        return emit("agent.completed", AgentCompletedEvent(node_id=node, final_response_id=response_id, rounds=state["rounds"]))
 
     tools = []
     persist = phase == "output"

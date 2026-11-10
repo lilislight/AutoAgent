@@ -227,6 +227,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             await self._memory_monitor.ready()
             if self._state != "closing":
                 self._state = "ready"
+                await self.agent_context.messages.start()
         except BaseException:
             try:
                 if self._memory_monitor is not None:
@@ -254,6 +255,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 except BaseException:  # noqa: BLE001 -- opening already released every resource
                     return
             if self._runtime is not None:
+                await self.agent_context.messages.close()
                 await self._execution_operations.close()
                 await self._runtime.residency.stop()
                 try:

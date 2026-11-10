@@ -226,6 +226,8 @@ class Runtime:
         )
         if snapshot is not None:
             self.agent_context.adopt(snapshot)
+        if self.agent_context is not None and event.event_name == "invocation.cancelled":
+            await self.agent_context.cancel_processes({event.invocation_id})
         if self.agent_context is not None and event.event_name == "child_invocation.planned":
             for unit in event.payload.units:
                 self.agent_context._agent_parents[unit.child_invocation_id] = event.invocation_id

@@ -1,6 +1,6 @@
 """Optional model-call metadata storage, separate from recovery/event projections."""
 
-from sqlalchemy import Boolean, CheckConstraint, Index, Integer, MetaData, Table, select, case, func, and_, or_, true
+from sqlalchemy import Boolean, CheckConstraint, Index, Integer, MetaData, Table, select, case, func, and_, or_, true, literal
 
 from autoagent.agent.recording import LLMCallRecord
 from autoagent.agent.usage import TOKEN_FIELDS, TokenUsageQuery, TokenUsageSummary, timestamp_us
@@ -8,7 +8,7 @@ from autoagent.agent.cost import CostEstimate, LocalTokenPricing
 from autoagent.core.money import units_usd
 
 from .models import ConflictError, FormatError
-from .schema import B, J, c
+from .schema import B, J, c, meta
 
 
 call_meta = MetaData()
@@ -163,7 +163,16 @@ class LLMCallStorage:
         for key in ("invocation_id", "node_id", "session_id", "workflow_id", "workflow_revision_id", "kind", "provider_id", "requested_model"):
             value = getattr(query, key)
             if value is not None:
-                clauses.append(llm_calls.c[key] == value)
+                if key == "invocation_id" and query.include_descendants:
+                    # Select a subtree, including descendants in other Sessions.
+                    # UNION keeps each Invocation once even for malformed cycles.
+                    invocations = meta.tables["invocations"]
+                    family = select(literal(value).cast(invocations.c.invocation_id.type).label("invocation_id")).cte(recursive=True)
+                    family = family.union(select(invocations.c.invocation_id).join(
+                        family, invocations.c.parent_invocation_id == family.c.invocation_id))
+                    clauses.append(llm_calls.c.invocation_id.in_(select(family.c.invocation_id)))
+                else:
+                    clauses.append(llm_calls.c[key] == value)
         if query.start is not None:
             clauses.append(llm_calls.c.started_at_us >= timestamp_us(query.start))
         if query.end is not None:

@@ -397,8 +397,18 @@ custom:
         self.assertFalse(loaded.is_error)
         self.assertEqual(loaded.call_id, "call-1")
         self.assertEqual(json.loads(loaded.content[0].text)["skill"]["name"], "inventory-report")
+        self.assertNotIn("snapshot_revision", json.loads(loaded.content[0].text))
+        self.assertNotIn("revision", json.loads(loaded.content[0].text))
+        self.assertTrue(loaded.tool_metadata["skill"]["revision"])
         listing = tools[1].invoke(call("skill_list_resources", {"name": "inventory-report", "prefix": "references"}))
         self.assertEqual(listing.structured_content["resources"][0]["path"], "references/rules.md")
+        self.assertNotIn("revision", listing.structured_content)
+        self.assertNotIn("next_cursor", listing.structured_content)
+        text = tools[2].invoke(call("skill_read_resource", {"name": "inventory-report", "path": "references/rules.md"}))
+        self.assertEqual(text.content[0].text, "rules")
+        self.assertNotIn("resource", text.structured_content)
+        self.assertTrue(text.tool_metadata["skill"]["revision"])
+        self.assertIn("snapshot_revision", text.tool_metadata["skill"])
         pdf = tools[2].invoke(call("skill_read_resource", {"name": "inventory-report", "path": "assets/report.pdf"}))
         self.assertIsInstance(pdf.content[0], FileContent)
         self.assertEqual(pdf.tool_metadata["skill"]["path"], "assets/report.pdf")
@@ -420,6 +430,26 @@ custom:
                 self.assertEqual(result.call_id, incoming.call_id)
         with self.assertRaises(TypeError):
             SkillSet.discover([self.root]).as_tools(prefix="invalid prefix ")
+
+    def test_skill_tool_page_sizes_clamp_and_publish_resource_limits(self):
+        """Model page requests above configured caps return bounded resumable results."""
+        directory = make_skill(self.root, resources={"a.md": b"one\ntwo\n", "b.md": b"three"})
+        skills = SkillSet([Skill(directory, limits=SkillLimits(max_resources=1, max_text_lines=1, max_text_bytes=32))])
+        tools = {value.definition.name: value for value in skills.as_tools()}
+        listing = tools["skill_list_resources"].invoke(call("skill_list_resources", {"name": "inventory-report", "limit": 1000}))
+        self.assertFalse(listing.is_error)
+        self.assertEqual(len(listing.structured_content["resources"]), 1)
+        self.assertIn("next_cursor", listing.structured_content)
+        text = tools["skill_read_resource"].invoke(call("skill_read_resource", {
+            "name": "inventory-report", "path": "a.md", "max_lines": 200, "max_bytes": 10000}))
+        self.assertFalse(text.is_error)
+        self.assertEqual(text.content[0].text, "one\n")
+        self.assertEqual(text.structured_content["next_line"], 2)
+        props = tools["skill_read_resource"].definition.parameters["properties"]
+        self.assertEqual(props["max_lines"]["anyOf"][0]["maximum"], 1)
+        self.assertEqual(props["max_bytes"]["anyOf"][0]["maximum"], 32)
+        invalid = tools["skill_list_resources"].invoke(call("skill_list_resources", {"name": "inventory-report", "limit": 0}))
+        self.assertTrue(invalid.is_error)
 
 
 @unittest.skipUnless(yaml is not None, "Install autoagent[skills] for integration tests")

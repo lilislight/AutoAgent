@@ -4,6 +4,8 @@ Importing this module does not require a provider SDK or create clients,
 connections or Runtime resources. Providers load the optional SDK lazily.
 """
 
+from .execution import *
+from .execution import __all__ as _execution_exports
 from .models import (
     EmbeddingProviderOptions,
     EmbeddingInput, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage,
@@ -34,11 +36,14 @@ from .providers import (
 )
 from .providers import __all__ as _provider_exports
 from .tools import (
+    ToolOperation, ToolOperationRule, ToolOperationPolicy, combine_decisions,
     ToolContext, ToolHooks, ToolDecision, ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolPreflight,
     ExecutableTool, Tool, ToolBusinessError, ToolDefinition, ToolError,
     ToolExecutionError, ToolOutputError, ToolSet, get_tool_definition, tool,
 )
 from .tools import __all__ as _tool_exports
+from .files import *
+from .files import __all__ as _file_exports
 from .mcp import (
     MCPReadResourceRequest, MCPGetPromptRequest, MCPOperations,
     MCPReconnectPolicy, MCPSubscriptionUpdate, MCPChangeEvent,
@@ -97,6 +102,7 @@ from .workflow import (
 )
 
 __all__ = [
+    *_execution_exports,
     "BUILTIN_AGENT_WORKFLOW_ID", "builtin_agent_workflow",
     "SubagentsConfig", "SubagentTarget", "AgentSignalMessage", "AgentObservation",
     "AskUserOption", "AskUserQuestion", "AskUserArguments", "AskUserRequest", "AskUserAnswer", "AskUserResponse",
@@ -123,5 +129,6 @@ __all__ = [
     "MCPToolStreamReducer", "MCPToolStreamState",
     *_skill_exports,
     *_workspace_exports,
+    *_file_exports,
     *_event_exports,
 ]

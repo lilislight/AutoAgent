@@ -92,6 +92,9 @@ class LocalWorkspaceTests(unittest.TestCase):
         self.assertIsNone(selected.agent_context.defaults.workspace)
         self.assertEqual(selected.agent_context.workspaces.entries()[0].root, self.root / "other-project")
         self.assertEqual(unbound.agent_context.workspaces.entries()[0].root, self.root)
+        self.assertNotEqual(unbound.agent_context.project_workspace_id, selected.agent_context.project_workspace_id)
+        self.assertEqual(AutoAgentHost(root=self.root / '.', environment={}).agent_context.project_workspace_id,
+                         unbound.agent_context.project_workspace_id)
 
 
 class WorkspaceResolverTests(unittest.IsolatedAsyncioTestCase):
@@ -129,7 +132,7 @@ class WorkspaceContracts:
         return "sqlite+aiosqlite:///" + str(self.root / "runtime.db")
 
     @asynccontextmanager
-    async def host(self, provider, *, workspaces=(), defaults=None, environment=None, workflows=None):
+    async def host(self, provider, *, workspaces=(), defaults=None, environment=None, workflows=None, root=None):
         @asynccontextmanager
         async def lifespan(setup):
             service = setup.agent_context
@@ -139,7 +142,7 @@ class WorkspaceContracts:
                 service.workspaces.register(workspace)
             yield
         async with AutoAgentHost(workflows=workflows or [agent_workflow()], lifespan=lifespan,
-            root=self.root, environment=environment or {}, settings=HostSettings(database_url=self.url)) as host:
+            root=root or self.root, environment=environment or {}, settings=HostSettings(database_url=self.url)) as host:
             yield host
 
     async def run_agent(self, host, sid):
@@ -237,6 +240,42 @@ class WorkspaceContracts:
             self.assertEqual(sum(isinstance(item, ConflictError) for item in results), 1)
             self.assertEqual((await host.agent_context.get_settings("new")).version, 1)
 
+    async def test_different_project_roots_share_database_without_rebinding_sessions(self):
+        """Each startup directory retains its own default identity, path, and conversations."""
+        from autoagent.agent import builtin_agent_workflow
+        async with self.host(ScriptedProvider(answer()), root=self.first, workflows=[builtin_agent_workflow()]) as host:
+            first_id = (await host.agent_context.workspace_catalog())["project_workspace_id"]
+            ref = await host.agent_context.start_conversation("first-project-chat", "First project")
+            self.assertEqual((await host.join(ref)).status, "completed")
+        async with self.host(ScriptedProvider(answer()), root=self.second, workflows=[builtin_agent_workflow()]) as host:
+            second_id = (await host.agent_context.workspace_catalog())["project_workspace_id"]
+            self.assertNotEqual(first_id, second_id)
+            ref = await host.agent_context.start_conversation("second-project-chat", "Second project")
+            self.assertEqual((await host.join(ref)).status, "completed")
+            items = {row["id"]: row for row in await host.agent_context.list_workspaces()}
+            self.assertEqual(items[first_id]["path"], str(self.first))
+            self.assertEqual(items[second_id]["path"], str(self.second))
+            self.assertFalse(items[first_id]["is_project"])
+            self.assertTrue(items[second_id]["is_project"])
+            self.assertEqual((await host.agent_context.get_settings("first-project-chat")).settings.workspace.workspace_id, first_id)
+            for wid, sid in ((first_id, "first-project-chat"), (second_id, "second-project-chat")):
+                rows = (await host.agent_context.list_conversation_sessions(wid)).items
+                self.assertEqual([row["session_id"] for row in rows], [sid])
+        async with self.host(ScriptedProvider(), root=self.first, workflows=[builtin_agent_workflow()]) as host:
+            self.assertEqual((await host.agent_context.workspace_catalog())["project_workspace_id"], first_id)
+            self.assertEqual(len(await host.agent_context.list_workspaces()), 2)
+
+    async def test_default_workspace_reuses_persisted_directory_identity(self):
+        """Opening an already registered directory preserves its ID and existing Session bindings."""
+        async with self.host(ScriptedProvider(), workspaces=[LocalWorkspace("saved-directory", self.first)]) as host:
+            await host.agent_context.configure("saved-chat", settings().model_copy(update={
+                "workspace": WorkspaceBinding(workspace_id="saved-directory")}))
+        async with self.host(ScriptedProvider(), root=self.first) as host:
+            self.assertEqual(host.agent_context.project_workspace_id, "saved-directory")
+            items = await host.agent_context.list_workspaces()
+            self.assertEqual(sum(row["path"] == str(self.first) for row in items), 1)
+            self.assertEqual((await host.agent_context.get_settings("saved-chat")).settings.workspace.workspace_id, "saved-directory")
+
     async def test_server_settings_and_resources_use_the_session_workspace(self):
         """The Agent API exposes Workspace identities and selects Skills by Session binding."""
         import httpx
@@ -249,7 +288,7 @@ class WorkspaceContracts:
                                          base_url="http://test") as client:
                 listed = await client.get("/api/v2/agent/workspaces")
                 self.assertEqual(listed.status_code, 200, listed.text)
-                self.assertEqual([item["id"] for item in listed.json()["items"]], ["project", "first"])
+                self.assertEqual([item["id"] for item in listed.json()["items"]], [host.agent_context.project_workspace_id, "first"])
                 self.assertEqual(listed.json()["items"][0]["path"], str(self.root))
                 self.assertTrue(listed.json()["items"][0]["is_project"])
                 payload = settings().model_copy(update={"workspace": WorkspaceBinding(workspace_id="first")}).model_dump(mode="json")
@@ -319,7 +358,7 @@ class WorkspaceContracts:
             self.assertEqual(marker.read_text(), "preserve")
         async with self.workspace_client(ScriptedProvider()) as (host, client):
             items = (await client.get("/api/v2/agent/workspaces")).json()["items"]
-            self.assertEqual({item["id"] for item in items}, {"project", existing.json()["id"], created.json()["id"]})
+            self.assertEqual({item["id"] for item in items}, {host.agent_context.project_workspace_id, existing.json()["id"], created.json()["id"]})
 
     async def test_new_chat_pins_project_workspace_before_execution(self):
         """A product conversation explicitly saves the current project binding before starting Core."""
@@ -331,14 +370,14 @@ class WorkspaceContracts:
             self.assertEqual((await host.agent_context.get_settings("invalid")).version, 0)
             preview = (await client.get("/api/v2/agent/settings", params={"session_id": "chat"})).json()
             self.assertEqual(preview["version"], 0)
-            self.assertEqual(preview["settings"]["workspace"]["workspace_id"], "project")
+            self.assertEqual(preview["settings"]["workspace"]["workspace_id"], host.agent_context.project_workspace_id)
             receipt = await client.post("/api/v2/agent/messages", json={"session_id": "chat", "message": "Help"})
             self.assertEqual(receipt.status_code, 202, receipt.text)
             result = await host.join(receipt.json()["invocation_id"])
             self.assertEqual(result.status, "completed", result.error)
             saved = await host.agent_context.get_settings("chat")
             self.assertEqual(saved.version, 1)
-            self.assertEqual(saved.settings.workspace, WorkspaceBinding(workspace_id="project"))
+            self.assertEqual(saved.settings.workspace, WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
             self.assertIn("PROJECT_WORKSPACE_GUIDANCE", provider.requests[0].model_dump_json())
             snapshot = await host.agent_context.get_snapshot(result.invocation_id)
             self.assertEqual(snapshot.settings_version, 1)
@@ -347,15 +386,15 @@ class WorkspaceContracts:
         """Workspace pages exclude newer unrelated chats before limiting and reject foreign cursors."""
         async with self.workspace_client(ScriptedProvider(answer(), answer(), answer())) as (host, client):
             item = (await client.post("/api/v2/agent/workspaces", json={"name": "Other", "path": str(self.first)})).json()
-            for sid, wid in (("project-old", "project"), ("project-new", "project"), ("other", item["id"])):
+            for sid, wid in (("project-old", host.agent_context.project_workspace_id), ("project-new", host.agent_context.project_workspace_id), ("other", item["id"])):
                 receipt = await client.post("/api/v2/agent/messages", json={"session_id": sid, "message": sid, "workspace_id": wid})
                 self.assertEqual(receipt.status_code, 202, receipt.text)
                 self.assertEqual((await host.join(receipt.json()["invocation_id"])).status, "completed")
-            first = await client.get("/api/v2/agent/sessions", params={"workspace_id": "project", "limit": 1})
+            first = await client.get("/api/v2/agent/sessions", params={"workspace_id": host.agent_context.project_workspace_id, "limit": 1})
             self.assertEqual(first.status_code, 200, first.text)
             self.assertEqual([row["session_id"] for row in first.json()["items"]], ["project-new"])
             cursor = first.json()["next_cursor"]
-            second = await client.get("/api/v2/agent/sessions", params={"workspace_id": "project", "limit": 1, "cursor": cursor})
+            second = await client.get("/api/v2/agent/sessions", params={"workspace_id": host.agent_context.project_workspace_id, "limit": 1, "cursor": cursor})
             self.assertEqual([row["session_id"] for row in second.json()["items"]], ["project-old"])
             mismatch = await client.get("/api/v2/agent/sessions", params={"workspace_id": item["id"], "cursor": cursor})
             self.assertEqual(mismatch.status_code, 400)
@@ -375,11 +414,11 @@ class WorkspaceContracts:
         """Accepted SDK bindings participate in Workspace filtering without freezing model defaults."""
         from autoagent.agent import BUILTIN_AGENT_WORKFLOW_ID
         async with self.workspace_client(ScriptedProvider(answer())) as (host, client):
-            host.agent_context.set_defaults(settings().model_copy(update={"workspace": WorkspaceBinding(workspace_id="project")}))
+            host.agent_context.set_defaults(settings().model_copy(update={"workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
             result = await host.join(await host.execute(BUILTIN_AGENT_WORKFLOW_ID, AgentInput(message="SDK chat"), session_id="sdk"))
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual((await host.agent_context.get_settings("sdk")).version, 0)
-            selected = await client.get("/api/v2/agent/sessions", params={"workspace_id": "project"})
+            selected = await client.get("/api/v2/agent/sessions", params={"workspace_id": host.agent_context.project_workspace_id})
             self.assertEqual(selected.status_code, 200, selected.text)
             self.assertEqual([item["session_id"] for item in selected.json()["items"]], ["sdk"])
             unbound = await client.get("/api/v2/agent/sessions", params={"unbound": "true"})

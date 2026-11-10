@@ -53,6 +53,15 @@ class DatabaseSink:
         self._datasets = TraceDatasets(self._queries, self.config, url)
         self._llm_calls = None
         self._agent_context = None
+        self._agent_queue = None
+
+    async def agent_queue_operation(self, method, *args, **kwargs):
+        from .agent_queue import AgentQueueStorage
+        async def operation():
+            if self._agent_queue is None:
+                self._agent_queue = AgentQueueStorage(self._writer, self._queries)
+            return await getattr(self._agent_queue, method)(*args, **kwargs)
+        return await self._writer.run(operation)
 
     async def agent_context_operation(self, method, *args, **kwargs):
         """Serialize Host settings operations on the owned database loop."""

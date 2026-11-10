@@ -68,6 +68,15 @@ def error_result(call: LLMToolCall, kind: str, message: str) -> LLMToolResult:
     )
 
 
+def approval_denied_result(call: LLMToolCall, approval) -> LLMToolResult:
+    """A user's refusal is an outcome, not a command or policy parsing failure."""
+    return LLMToolResult(call_id=call.call_id, is_error=True, structured_content={"error": {
+        "kind": "tool_approval_denied", "source": "user", "retryable": False,
+        "message": "The user denied this operation. Stop it; do not probe permissions or repackage it as another command. Ask the user before proposing it again.",
+        **({"reason": approval.reason} if approval.reason else {}),
+    }})
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     result = {}
     for name, value in pairs:
@@ -89,6 +98,7 @@ class Tool:
     def __init__(
         self, handler: Callable[..., object], *, name: str | None = None,
         description: str | None = None, strict: bool | None = None,
+        operations: Callable | None = None,
     ) -> None:
         if hasattr(handler, TOOL_DEFINITION_ATTRIBUTE):
             if name is not None or description is not None or strict is not None:
@@ -99,6 +109,9 @@ class Tool:
                 handler, name=name, description=description, strict=strict,
             )
         self._handler = handler
+        if operations is not None and not callable(operations):
+            raise TypeError("Tool operations must be a synchronous resolver.")
+        self.operation_resolver = operations
 
     @property
     def definition(self) -> LLMToolDefinition:

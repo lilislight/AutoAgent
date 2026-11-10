@@ -109,9 +109,14 @@ class TokenUsageQuery:
     requested_model: str | None = None
     start: datetime | None = None
     end: datetime | None = None
+    include_descendants: bool = False
 
     def __post_init__(self):
         TimeRange(self.start, self.end)
+        if type(self.include_descendants) is not bool:
+            raise TypeError("include_descendants must be a bool.")
+        if self.include_descendants and self.invocation_id is None:
+            raise ValueError("Descendant usage requires invocation_id.")
         for key in ("invocation_id", "node_id", "session_id", "workflow_id", "workflow_revision_id", "provider_id", "requested_model"):
             value = getattr(self, key)
             if value is not None and (not isinstance(value, str) or not value.strip()):

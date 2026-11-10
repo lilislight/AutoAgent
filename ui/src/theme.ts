@@ -8,7 +8,7 @@ export function useTheme() {
   );
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#252a31" : "#e9edf2");
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#141414" : "#e0e0e0");
     try { localStorage.setItem("autoagent:theme", theme); }
     catch { /* The theme still works when browser storage is unavailable. */ }
   }, [theme]);

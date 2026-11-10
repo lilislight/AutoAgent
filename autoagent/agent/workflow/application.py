@@ -1,15 +1,18 @@
 """SDK-owned Workflow used exclusively by the Agents application."""
 
 from .builder import agent_workflow
+from .policy import ContextPolicy
 from .subagents import SubagentsConfig, SubagentTarget
 
 BUILTIN_AGENT_WORKFLOW_ID = "autoagent.agent"
 
 
-def builtin_agent_workflow():
+def builtin_agent_workflow(*, execution=True):
     """Construct the SDK chat Agent; project resources require explicit Host grants."""
     workflow = agent_workflow(
         workflow_id=BUILTIN_AGENT_WORKFLOW_ID,
+        context_policy=ContextPolicy(context_window=200_000),
+        execution=execution,
         user_events=True,
         include_ask_user=True,
         subagents=SubagentsConfig(enabled=True, targets={

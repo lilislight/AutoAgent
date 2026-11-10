@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 
 from autoagent.agent import (
-    AgentInput, AgentModelSettings, AgentSessionSettings, AgentSignalMessage,
+    AgentInput, AgentModelSettings, AgentSessionSettings, AgentSignalMessage, AgentResult,
     LLMMessage, LLMResponse, LLMStreamChunk, LLMToolCall, LLMToolResult,
     SubagentsConfig, SubagentTarget, TextContent, agent_workflow,
 )
@@ -72,7 +72,7 @@ async def main():
                 await asyncio.sleep(0.01)
             if result.status != "completed":
                 raise RuntimeError(result.error or result.status)
-            print(LLMResponse.model_validate_json(json.dumps(result.output["response"])).text)
+            print(AgentResult.model_validate_json(json.dumps(result.output)).text)
 
 
 if __name__ == "__main__":

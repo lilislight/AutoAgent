@@ -3,6 +3,8 @@ import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { agentClient } from './client';
 import { applyEvents, emptyConversation, resetTransient, type ConversationState } from './conversationState';
 import type { AgentEvent, AgentInvocation } from './types';
+import { eventRefresh } from './eventRefresh';
+import { retryAgentRead, agentReadRetryDelay } from './readFeedback';
 
 type Action = { type: 'events'; events: AgentEvent[] } | { type: 'reset' };
 function reducer(state: ConversationState, action: Action) { return action.type === 'reset' ? resetTransient(state) : applyEvents(state, action.events); }
@@ -17,7 +19,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
   const queries = useQueries({ queries: invocations.map(invocation => ({
     queryKey: ['agent-history', session, invocation.invocation_id],
     queryFn: ({ signal }: { signal: AbortSignal }) => agentClient.history(invocation.invocation_id, signal),
-    enabled: active, staleTime: 0, retry: 1, refetchOnWindowFocus: false,
+    enabled: active, staleTime: 0, retry: retryAgentRead, retryDelay: agentReadRetryDelay, refetchOnWindowFocus: false,
     refetchInterval: active && connection !== 'live' && invocation.invocation_id === latest ? 2000 : false,
   })) });
   const historyStamp = queries.map(item => item.dataUpdatedAt).join(':');
@@ -46,11 +48,10 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       if (!pending.length) return;
       const events = pending; pending = [];
       dispatch({ type: 'events', events });
-      if (events.some(event => event.persist || event.kind === 'agent.interaction')) {
-        void client.invalidateQueries({ queryKey: ['agent-execution'] });
-        void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
-        void client.invalidateQueries({ queryKey: ['agent-sessions'] });
-      }
+      const reads = eventRefresh(events);
+      if (reads.execution) void client.invalidateQueries({ queryKey: ['agent-execution'] }, { cancelRefetch: false });
+      if (reads.invocations) void client.invalidateQueries({ queryKey: ['agent-invocations', session] }, { cancelRefetch: false });
+      if (reads.directory) void client.invalidateQueries({ queryKey: ['agent-sessions'] }, { cancelRefetch: false });
     };
     const ready = () => {
       cancelAnimationFrame(frame); pending = []; frame = 0;
@@ -59,11 +60,15 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       // events crossing the live/history boundary without replaying deltas.
       void client.invalidateQueries({ queryKey: ['agent-history', session] });
       void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
+      void client.invalidateQueries({ queryKey: ['agent-queue', session] });
     };
     const receive = (message: MessageEvent<string>) => {
       try {
         const event = JSON.parse(message.data) as AgentEvent;
         if (event.session_id !== session || event.payload?.v !== 1) return;
+        // Hidden pages may stop animation frames entirely. Durable history is
+        // reconciled on return instead of retaining an unbounded delta backlog.
+        if (document.hidden) return;
         pending.push(event);
         if (!frame) frame = requestAnimationFrame(flush);
       } catch { setConnection('offline'); }
@@ -76,9 +81,20 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       retry = window.setTimeout(() => setEpoch(value => value + 1), 1500);
     });
     source.onerror = () => setConnection('reconnecting');
-    return () => { source.close(); clearTimeout(retry); cancelAnimationFrame(frame); };
+    const visible = () => {
+      cancelAnimationFrame(frame); frame = 0; pending = [];
+      if (!document.hidden) {
+        dispatch({ type: 'reset' });
+        void client.invalidateQueries({ queryKey: ['agent-history', session] });
+        void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
+        void client.invalidateQueries({ queryKey: ['agent-execution'] });
+        void client.invalidateQueries({ queryKey: ['agent-queue', session] });
+      }
+    };
+    document.addEventListener('visibilitychange', visible);
+    return () => { source.close(); clearTimeout(retry); cancelAnimationFrame(frame); document.removeEventListener('visibilitychange', visible); };
   }, [session, active, client, epoch]);
-  const refresh = useCallback(() => { setEpoch(value => value + 1); void client.invalidateQueries({ queryKey: ['agent-history', session] }); }, [client, session]);
+  const refresh = useCallback(() => { if (connection !== 'live') setEpoch(value => value + 1); void client.invalidateQueries({ queryKey: ['agent-history', session] }); }, [client, session, connection]);
   const loading = queries.some((item, index) => item.isLoading || item.data !== undefined && loaded.current.get(invocations[index].invocation_id) !== item.dataUpdatedAt);
   return { state, refresh, loading, error: queries.find(item => item.error)?.error };
 }

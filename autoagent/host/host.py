@@ -96,6 +96,8 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         self._user_events = UserEventHub()
         from .agent_context import HostAgentContext
         self.agent_context = HostAgentContext(self)
+        from autoagent.agent_app import AgentApplication
+        self.agent_app = AgentApplication(self)
 
     @classmethod
     def from_project(
@@ -190,6 +192,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             # Static checks precede creating databases or project resources.
             from autoagent import WorkflowCompiler
 
+            self.agent_app.validate_workflows(workflows)
             for workflow in workflows:
                 WorkflowCompiler().compile_or_raise(workflow)
             url = self.settings.resolved_database_url(self.root)
@@ -219,6 +222,8 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 self.environment,
                 usage_policy=self._usage_policy,
                 agent_context=self.agent_context,
+                applications={"agent": self.agent_app},
+                resource_scopes=(self.agent_app.runtime_scope,),
                 on_user_event=self._notice_user_event,
             )
             await self._runtime.prepare()
@@ -227,13 +232,22 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             await self._memory_monitor.ready()
             if self._state != "closing":
                 self._state = "ready"
-                await self.agent_context.messages.start()
+                await self.agent_app.start()
         except BaseException:
             try:
                 if self._memory_monitor is not None:
                     await self._memory_monitor.stop()
+                await self.agent_app.close()
+                if self._execution_operations is not None:
+                    await self._execution_operations.close()
                 if self._runtime is not None:
-                    await self._runtime.app.aclose(timeout=None)
+                    if self._runtime.residency is not None:
+                        await self._runtime.residency.stop()
+                    try:
+                        await self._runtime.app.aclose(timeout=None)
+                    finally:
+                        if self._runtime.residency is not None:
+                            await self._runtime.residency.finish()
             finally:
                 self._user_events.close()
                 try:
@@ -255,7 +269,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 except BaseException:  # noqa: BLE001 -- opening already released every resource
                     return
             if self._runtime is not None:
-                await self.agent_context.messages.close()
+                await self.agent_app.close()
                 await self._execution_operations.close()
                 await self._runtime.residency.stop()
                 try:

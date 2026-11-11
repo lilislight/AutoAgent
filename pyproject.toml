@@ -73,7 +73,7 @@ persistence = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.host", "autoagent.host.*", "autoagent.server", "autoagent.cli", "autoagent.cli.*", "autoagent.evaluation", "autoagent.evaluation.*"]
+include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.agent_app", "autoagent.agent_app.*", "autoagent.host", "autoagent.host.*", "autoagent.server", "autoagent.cli", "autoagent.cli.*", "autoagent.evaluation", "autoagent.evaluation.*"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]

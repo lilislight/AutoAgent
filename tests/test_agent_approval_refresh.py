@@ -24,12 +24,12 @@ class ApprovalRefreshContracts:
                              tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host)
             await host.pause(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(mode="bypass", model="new-model"))
+            await host.agent_context.configure(waiting.session_id, settings(mode="bypass", model="new-model").session_defaults())
             result = await host.recover(waiting.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
             self.assertFalse(result.waits)
             self.assertEqual(effects, ["hello"])
-            self.assertEqual(provider.requests[-1].model, "new-model")
+            self.assertEqual(provider.requests[-1].model, "model-a")
             with self.assertRaises(Exception):
                 await host.respond(waiting.invocation_id, waiting.waits[0].id,
                                    AgentApprovalResponse(decisions=()).model_dump(mode="json"))
@@ -44,7 +44,8 @@ class ApprovalRefreshContracts:
                                  tools=(self.publish(effects),)) as host:
                 waiting = await self.run_agent(host)
                 await host.pause(waiting.invocation_id)
-                await host.agent_context.configure(waiting.session_id, settings(mode=mode, access=access))
+                host.agent_context.set_defaults(settings(access=access))
+                await host.agent_context.configure(waiting.session_id, settings(mode=mode).session_defaults())
                 result = await host.recover(waiting.invocation_id)
                 self.assertEqual(result.status, "completed", result.error)
                 self.assertFalse(effects)
@@ -63,7 +64,7 @@ class ApprovalRefreshContracts:
             batch = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
             reply = AgentApprovalResponse(decisions=(batch.requests[0].respond(approved=False),), revision=batch.revision)
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
-            await host.agent_context.configure(waiting.session_id, settings(mode="bypass"))
+            await host.agent_context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
             result = await host.recover(waiting.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
             self.assertFalse(effects)
@@ -87,7 +88,7 @@ class ApprovalRefreshContracts:
             old_reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in original.requests),
                                               revision=original.revision)
             await host.pause(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(access=AgentAccess(
+            host.agent_context.set_defaults(settings(access=AgentAccess(
                 rules={"publish": "allow", "second": "deny", "third": "ask"})))
             resumed = await host.recover(waiting.invocation_id)
             self.assertEqual(resumed.status, "waiting", resumed.error)
@@ -120,7 +121,7 @@ class ApprovalRefreshContracts:
                     host.agent_context.resources.register_tool(self.publish(effects), version="2", replace=True, workflows={"agent"})
                 else:
                     host.agent_context.resources.unregister("tool", "publish")
-                await host.agent_context.configure(waiting.session_id, settings(mode="bypass"))
+                await host.agent_context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
                 result = await host.recover(waiting.invocation_id)
                 self.assertEqual(result.status, "completed", result.error)
                 self.assertFalse(effects)
@@ -136,13 +137,13 @@ class ApprovalRefreshContracts:
             waiting = await self.run_agent(host)
             await host.pause(waiting.invocation_id)
             await host.agent_context.configure(waiting.session_id,
-                settings(model="new-model", access=AgentAccess(default="ask")))
+                settings(model="new-model", access=AgentAccess(default="ask")).session_defaults())
             resumed = await host.recover(waiting.invocation_id)
             current = restore(AgentApprovalRequest, resumed.waits[0].request)
-            self.assertNotEqual(current.requests[0].id,
+            self.assertEqual(current.requests[0].id,
                                 restore(AgentApprovalRequest, waiting.waits[0].request).requests[0].id)
         provider = ScriptedProvider(answer())
-        async with self.host(provider, url=url, tools=(self.publish(effects),)) as host:
+        async with self.host(provider, url=url, defaults=settings(access=AgentAccess(default="ask")), tools=(self.publish(effects),)) as host:
             view = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
             self.assertEqual(view.snapshot_id, current.snapshot_id)
             reply = AgentApprovalResponse(decisions=(view.requests[0].respond(approved=True),), revision=view.revision)
@@ -150,7 +151,7 @@ class ApprovalRefreshContracts:
             result = await host.join(waiting.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(effects, ["hello"])
-            self.assertEqual(provider.requests[-1].model, "new-model")
+            self.assertEqual(provider.requests[-1].model, "model-a")
 
     async def test_external_reply_cannot_supply_policy_resolution(self):
         """Only Host may fill automatic decisions or inject Tool observations into a Wait reply."""

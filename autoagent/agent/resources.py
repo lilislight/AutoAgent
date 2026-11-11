@@ -205,7 +205,7 @@ class AgentResourceRegistry:
         self._update_access(kind, name, workflows=workflow_scope(workflows))
 
     def set_policy(self, kind, name, policy):
-        """Change the resource's live policy; Session settings remain stage-scoped."""
+        """Change the resource's live policy without replacing its executable."""
         if policy is not None and not callable(policy):
             raise TypeError("Resource policy must be callable.")
         self._update_access(kind, name, policy=policy)
@@ -269,10 +269,10 @@ class AgentResourceRegistry:
                 raise KeyError(f"Agent resource is unavailable: {kind}/{name}@{version or 'current'}.")
             return entry
 
-    def entries(self, kind):
+    def entries(self, kind, *, include_disabled=False):
         with self._lock:
             return tuple(entry for (category, name), entry in self._current.items()
-                if category == kind and (category, name) not in self._disabled)
+                if category == kind and (include_disabled or (category, name) not in self._disabled))
 
     def has(self, kind, name):
         with self._lock:

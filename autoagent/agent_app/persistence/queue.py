@@ -4,22 +4,23 @@ import time
 
 from sqlalchemy import CheckConstraint, Index, MetaData, Table, UniqueConstraint, func, insert, select, update
 
-from .models import ConflictError
-from .schema import B, c
+from autoagent.host.persistence.models import ConflictError
+from autoagent.host.persistence.schema import B, J, c
 
 metadata = MetaData()
-messages = Table("agent_message_queue", metadata,
+messages = Table("agent_app_message_queue", metadata,
     c("id", nullable=False, pk=True), c("session_id", nullable=False),
     c("position", B, False), c("message", nullable=False), c("state", nullable=False),
+    c("model", J),
     c("invocation_id"), c("previous_invocation_id"), c("continue_after_id"), c("blocked_on_id"), c("error"),
     c("created_at_us", B, False),
     UniqueConstraint("session_id", "position"),
     CheckConstraint("state IN ('queued','starting','started','sending','sent','cancelled','blocked')"))
-Index("agent_message_queue_pending", messages.c.session_id, messages.c.state, messages.c.position)
+Index("agent_app_message_queue_pending", messages.c.session_id, messages.c.state, messages.c.position)
 PENDING = ("queued", "starting", "sending", "blocked")
 
 
-class AgentQueueStorage:
+class ApplicationQueueStorage:
     def __init__(self, writer, queries):
         self.writer, self.queries = writer, queries
         self.ready = False
@@ -50,7 +51,7 @@ class AgentQueueStorage:
             return list((await conn.execute(select(messages.c.session_id).where(
                 messages.c.state.in_(PENDING)).distinct())).scalars())
 
-    async def add(self, sid, item_id, message):
+    async def add(self, sid, item_id, message, model=None):
         self.writer.check_open()
         if self.writer.read_only:
             raise PermissionError("A read-only Host cannot enqueue messages.")
@@ -60,7 +61,7 @@ class AgentQueueStorage:
                     await conn.run_sync(metadata.create_all)
                 previous = (await conn.execute(select(messages).where(messages.c.id == item_id))).mappings().first()
                 if previous:
-                    if previous["session_id"] != sid or previous["message"] != message:
+                    if previous["session_id"] != sid or previous["message"] != message or previous["model"] != model:
                         raise ConflictError("Message request ID was reused with different content.")
                     return dict(previous)
                 count = await conn.scalar(select(func.count()).select_from(messages).where(
@@ -68,7 +69,7 @@ class AgentQueueStorage:
                 if count >= 100:
                     raise ConflictError("This conversation already has 100 pending messages.")
                 position = (await conn.scalar(select(func.max(messages.c.position)).where(messages.c.session_id == sid)) or 0) + 1
-                row = dict(id=item_id, session_id=sid, message=message, position=position, state="queued",
+                row = dict(id=item_id, session_id=sid, message=message, model=model, position=position, state="queued",
                     invocation_id=None, previous_invocation_id=None, continue_after_id=None, blocked_on_id=None, error=None,
                     created_at_us=time.time_ns() // 1000)
                 await conn.execute(insert(messages).values(**row))

@@ -141,7 +141,7 @@ class SubagentContracts:
             return answer("child result")
         provider = RoutedProvider([response(call("spawn_agent", {"type": "worker", "task": "child task"})), query, done], child)
         async with self.host(provider) as host:
-            await host.agent_context.configure("session", settings(model="chosen-model"))
+            await host.agent_context.configure("session", settings(model="chosen-model").session_defaults())
             result = await self.run_agent(host, session_id="session")
             self.assertEqual(result.status, "completed", result.error)
             snapshot = await host.agent_context.get_snapshot(child_ids[0])

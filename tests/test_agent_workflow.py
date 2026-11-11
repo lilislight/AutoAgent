@@ -1,5 +1,6 @@
 """Complete Agent graph, Host settings and protected Tool effects."""
 
+import asyncio
 from contextlib import asynccontextmanager
 import inspect
 from pathlib import Path
@@ -8,7 +9,7 @@ import unittest
 
 from autoagent.agent import (
     ContextPolicy, always_compact, AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput,
-    AgentModelSettings, AgentResourceRegistry, AgentSessionSettings, LLM_CALL, LLMMessage, LLMSelection,
+    AgentModelSettings, AgentResourceRegistry, AgentHostSettings, AgentSessionSettings, LLM_CALL, LLMMessage, LLMSelection,
     LLMReasoning, LLMResponse, LLMStreamChunk, LLMToolCall, LLMToolResult,
     LLMUsage, MemorySkillSource, Skill, TextContent, Tool, ToolDecision, ToolSet, agent_workflow, llm_call_operator,
 )
@@ -20,7 +21,7 @@ from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 
 
 def settings(*, model="model-a", mode="policy", access=None, provider="offline", streaming=False):
-    return AgentSessionSettings(model=AgentModelSettings(provider=provider, model=model,
+    return AgentHostSettings(model=AgentModelSettings(provider=provider, model=model,
         streaming=streaming, max_output_tokens=512), approval_mode=mode,
         access=access or AgentAccess())
 
@@ -128,7 +129,7 @@ class AgentWorkflowContracts:
             return LLMSelection(provider, "resolver-selected")
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.set_defaults(AgentSessionSettings())
+            setup.agent_context.set_defaults(AgentHostSettings())
             operator = llm_call_operator(resolver=selection, id="application.model")
             setup.register_operator(operator, capability_id=LLM_CALL.id)
             async def resolver(capability, request):
@@ -211,10 +212,10 @@ class AgentWorkflowContracts:
             tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host, session_id="conversation")
             old = await host.agent_context.get_snapshot(waiting.invocation_id)
-            record = await host.agent_context.configure("conversation", settings(model="model-b", mode="bypass"), expected_version=0)
-            self.assertEqual(record.version, 1)
+            record = await host.agent_context.configure("conversation", settings(model="model-b").session_defaults(), expected_version=1)
+            self.assertEqual(record.version, 2)
             with self.assertRaises(ConflictError):
-                await host.agent_context.configure("conversation", settings(), expected_version=0)
+                await host.agent_context.configure("conversation", settings().session_defaults(), expected_version=0)
             request = restore(AgentApprovalRequest, waiting.waits[0].request)
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests))
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
@@ -240,11 +241,12 @@ class AgentWorkflowContracts:
                     host.agent_context.resources.register_tool(self.publish(effects), version="2", replace=True, workflows={"agent"})
                 else:
                     host.agent_context.resources.unregister("tool", "publish")
-                request = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
-                reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests),
-                    revision=request.revision)
-                await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
-                result = await host.join(waiting.invocation_id)
+                async with asyncio.timeout(10):
+                    while True:
+                        result = await host.join(waiting.invocation_id)
+                        if result.status == "completed":
+                            break
+                        await asyncio.sleep(.02)
                 self.assertEqual(result.status, "completed", result.error)
                 self.assertEqual(effects, [])
                 observed = next(item for item in provider.requests[-1].input if isinstance(item, LLMToolResult))
@@ -258,14 +260,15 @@ class AgentWorkflowContracts:
             defaults=settings(access=AgentAccess(rules={"publish": "ask"})), tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host)
             original = await host.agent_context.get_snapshot(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(model="model-b"))
-            # Simulate snapshot preparation followed by failed Runtime Event
-            # admission. An unaccepted stage must not become effective later.
+            await host.agent_context.configure(waiting.session_id, settings(model="model-b").session_defaults())
+            # Reopening an Invocation cannot create another settings stage
+            # or replace its original model binding.
             staged = await host.agent_context.activate(waiting.session_id, waiting.invocation_id,
                 reason="resume", activation_id="unaccepted-resume")
-            self.assertNotEqual(staged.snapshot_id, original.snapshot_id)
+            self.assertEqual(staged["model"]["model"], original.settings.model.model)
         provider = ScriptedProvider(answer(), answer())
-        async with self.host(provider, url=url, tools=(self.publish(effects),)) as host:
+        async with self.host(provider, url=url, defaults=settings(access=AgentAccess(rules={"publish": "ask"})), tools=(self.publish(effects),)) as host:
+            await host.agent_context.configure(waiting.session_id, settings(model="model-b").session_defaults())
             self.assertEqual((await host.agent_context.get_settings(waiting.session_id)).settings.model.model, "model-b")
             self.assertEqual((await host.agent_context.get_snapshot(waiting.invocation_id)).snapshot_id, original.snapshot_id)
             request = restore(AgentApprovalRequest, waiting.waits[0].request)
@@ -279,17 +282,17 @@ class AgentWorkflowContracts:
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(provider.requests[-1].model, "model-b")
 
-    async def test_explicit_pause_resume_adopts_latest_settings(self):
-        """A clean manual resume adopts settings before subsequent model or Tool dispatch."""
+    async def test_explicit_pause_resume_preserves_model_and_uses_live_approval(self):
+        """Manual resume keeps the Invocation model while applying the latest approval mode."""
         effects = []
         provider = ScriptedProvider(calls("publish"), answer())
         async with self.host(provider, defaults=settings(access=AgentAccess(rules={"publish": "ask"})),
             tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host)
             await host.pause(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(model="model-b", mode="bypass"))
+            await host.agent_context.configure(waiting.session_id, settings(model="model-b", mode="bypass").session_defaults())
             resumed = await host.recover(waiting.invocation_id)
-            self.assertEqual((await host.agent_context.get_snapshot(waiting.invocation_id)).epoch, 2)
+            self.assertEqual((await host.agent_context.get_snapshot(waiting.invocation_id)).epoch, 1)
             if resumed.waits:
                 request = restore(AgentApprovalRequest, resumed.waits[0].request)
                 reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests))
@@ -297,7 +300,7 @@ class AgentWorkflowContracts:
             result = await host.join(waiting.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(effects, ["hello"])
-            self.assertEqual(provider.requests[-1].model, "model-b")
+            self.assertEqual(provider.requests[-1].model, "model-a")
 
     async def test_compression_node_is_observable_and_preserves_original_conversation(self):
         """Compression changes the request projection while preserving canonical history for later turns."""

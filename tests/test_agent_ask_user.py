@@ -301,7 +301,7 @@ class AskUserContracts:
             defaults=settings(access=AgentAccess(rules={"ask_user": "ask"}))) as host:
             waiting = await self.run_agent(host)
             await host.pause(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(mode="bypass"))
+            await host.agent_context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
             result = await host.recover(waiting.invocation_id)
             self.assertEqual(result.status, "waiting", result.error)
             self.assertEqual(result.waits[0].request["kind"], "agent.ask_user")

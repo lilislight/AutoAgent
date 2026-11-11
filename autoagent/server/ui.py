@@ -47,7 +47,7 @@ class WorkflowUI(StaticFiles):
             if ui_path != "/" and mounted_root.endswith(ui_path):
                 parent_root = mounted_root[:-len(ui_path)]
             host = getattr(getattr(scope.get("app"), "state", None), "autoagent_host", None)
-            standalone = (await host.agent_context.workspace_catalog())["standalone"] if host is not None else False
+            standalone = (await host.agent_app.catalog())["standalone"] if host is not None else False
             config = json.dumps({
                 "apiPrefix": parent_root + self.settings.api_prefix,
                 "uiBase": mounted_root + "/",

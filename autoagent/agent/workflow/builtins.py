@@ -79,4 +79,4 @@ def workflow_catalog(service, snapshot, options=None):
         if set(resources) & set(catalog):
             raise ValueError("A registered Tool collides with an enabled Agent builtin.")
         catalog = {**catalog, **resources}
-    return catalog, skills
+    return service.finalize_catalog(snapshot, catalog, skills)

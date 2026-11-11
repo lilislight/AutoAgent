@@ -7,6 +7,7 @@ from pydantic import Field, JsonValue, model_validator
 from ..models import LLMItem, LLMRequest, LLMResponse, LLMToolCall, LLMToolResult, LLMToolDefinition
 from .history import Conversation, ContextView, HistoryRoute
 from ..models._base import Model, NonEmpty
+from ..context import AgentModelSelection, AgentHostSettings
 from ..tools import ToolApproval, ToolApprovalRequest
 from .subagents import SubagentsConfig
 from .events import AgentEventMessage
@@ -15,12 +16,14 @@ from .events import AgentEventMessage
 class AgentInput(Model):
     message: NonEmpty
     request_id: NonEmpty | None = None
+    model: AgentModelSelection | None = None
 
 
 class AgentWorkflowOptions(Model):
     workflow_id: NonEmpty = "agent"
     instructions: str = "You are a helpful assistant. Use the available tools when needed."
     llm_options: dict[str, JsonValue] = Field(default_factory=dict)
+    runtime: AgentHostSettings | None = None
     max_rounds: int | None = Field(default=20, ge=1)
     max_parallelism: int | None = Field(default=None, ge=1)
     include_ask_user: bool = False
@@ -133,7 +136,7 @@ class AgentApprovalResolution(Model):
     """Host-produced resolution for one member of the original durable batch."""
 
     request_id: NonEmpty
-    source: Literal["user", "policy"]
+    source: Literal["user", "policy", "system"]
     approval: ToolApproval | None = None
     result: LLMToolResult | None = None
 
@@ -165,7 +168,7 @@ class AgentApprovalRequest(Model):
 
 class AgentApprovalResponse(Model):
     decisions: tuple[ToolApproval, ...]
-    source: Literal["user", "policy"] = "user"
+    source: Literal["user", "policy", "system"] = "user"
     revision: NonEmpty | None = None
     resolutions: tuple[AgentApprovalResolution, ...] = ()
 

@@ -33,6 +33,7 @@ class _Prepared:
     context: ToolContext
     scopes: tuple[ToolSet, ...]
     policy_action: str | None = None
+    policy_scopes: tuple[ToolSet, ...] | None = None
 
 
 class _BoundTool:
@@ -93,13 +94,14 @@ class ToolSet:
 
     def __init__(self, tools: Iterable[ExecutableTool | Callable[..., object]] = (), *,
                  context: ToolContext | None = None, hooks: ToolHooks | None = None,
-                 policy: Callable | None = None, approval_mode="policy") -> None:
-        if approval_mode not in ("policy", "always_ask", "never_ask", "bypass"):
+                 policy: Callable | None = None, approval_mode="policy", replace_policies=False) -> None:
+        if approval_mode not in ("policy", "always_ask", "never_ask", "bypass", "auto_approve"):
             raise ValueError("Unknown approval mode.")
         self.approval_mode = approval_mode
         self.context = context
         self.hooks = hooks or ToolHooks()
         self.policy = policy
+        self.replace_policies = replace_policies
         if context is not None and not isinstance(context, ToolContext):
             raise TypeError("ToolSet context must be a ToolContext.")
         if not isinstance(self.hooks, ToolHooks):
@@ -180,6 +182,10 @@ class ToolSet:
             prepared = selected._owner._prepare(call, current)
             if isinstance(prepared, _Prepared):
                 prepared.scopes = (self, *prepared.scopes)
+                if self.replace_policies:
+                    prepared.policy_scopes = (self,)
+                elif prepared.policy_scopes is not None:
+                    prepared.policy_scopes = (self, *prepared.policy_scopes)
             return prepared
         if isinstance(selected, Tool):
             values = selected._prepare(call)
@@ -308,12 +314,12 @@ class ToolSet:
 
     def _check(self, call, prepared):
         decisions = [self._decision(self._sync_callback(scope.policy, call, prepared.context))
-                     for scope in prepared.scopes if scope.policy is not None]
+                     for scope in (prepared.policy_scopes if prepared.policy_scopes is not None else prepared.scopes) if scope.policy is not None]
         return self._bind(call, prepared, decisions)
 
     async def _acheck(self, call, prepared):
         decisions = []
-        for scope in prepared.scopes:
+        for scope in (prepared.policy_scopes if prepared.policy_scopes is not None else prepared.scopes):
             if scope.policy is not None:
                 decisions.append(self._decision(await self._callback(scope.policy, call, prepared.context)))
         return self._bind(call, prepared, decisions)

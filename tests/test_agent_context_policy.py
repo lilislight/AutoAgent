@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from autoagent.agent import (
-    AgentExecutionSnapshot, AgentInput, AgentModelSettings, AgentSessionSettings,
+    AgentExecutionSnapshot, AgentInput, AgentModelSettings, AgentHostSettings,
     AgentWorkflowOptions, CompactionInput, CompactionResult, ContextLimitExceeded,
     ContextPolicy, ContextPreparation, ContextView, Conversation, HistorySegment,
     LLMHistoryCompactor, LLMToolCall, LLMToolDefinition, LLMToolResult,
@@ -39,6 +39,9 @@ class Service:
     def catalog(self, snapshot):
         return {item.name: SimpleNamespace(version="1", resource_id="test/tool/" + item.name)
             for item in self.definitions}, ()
+
+    def finalize_catalog(self, snapshot, catalog, skills):
+        return catalog, skills
 
     def toolset(self, snapshot, *, catalog):
         return SimpleNamespace(definitions=self.definitions, context=None)

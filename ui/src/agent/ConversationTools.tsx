@@ -41,6 +41,6 @@ export function ConversationTools({ items, lifecycle }: { items: ConversationToo
   const status = priority.filter(label => labels.includes(label)).map(label => `${labels.filter(value => value === label).length} ${label.toLowerCase()}`).join(' · ');
   const summary = toolGroupSummary(tools);
   return <AgentDisclosure className="agent-tool-group" label={summary} tooltip={summary} icon={<AgentIcon name="wrench" />} status={status || undefined}>
-    <div className="agent-tool-list" role="region" aria-label="Tool calls">{items.map(item => <ToolRow key={item.id} tool={item.tool} interaction={item.interaction} lifecycle={lifecycle} />)}</div>
+    <div className="agent-tool-list" tabIndex={0} role="region" aria-label="Tool calls">{items.map(item => <ToolRow key={item.id} tool={item.tool} interaction={item.interaction} lifecycle={lifecycle} />)}</div>
   </AgentDisclosure>;
 }

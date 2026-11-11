@@ -218,15 +218,12 @@ class Project:
                 if any(existing.id == built.id for existing in workflows):
                     raise ProjectError(f"Duplicate Workflow id: {built.id}")
                 workflows.append(built)
-            from autoagent.agent import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
-            if any(value.id == BUILTIN_AGENT_WORKFLOW_ID for value in workflows):
-                raise ProjectError(f"Workflow id {BUILTIN_AGENT_WORKFLOW_ID!r} is reserved for the SDK Agent.")
+            from autoagent.agent_app import AgentApplication
             env = os.environ if environment is None else environment
-            enabled = env.get("AUTOAGENT_BUILTIN_AGENT_ENABLED", "true").strip().lower()
-            if enabled not in {"true", "false", "1", "0"}:
-                raise ProjectError("AUTOAGENT_BUILTIN_AGENT_ENABLED must be true, false, 1 or 0.")
-            if enabled in {"true", "1"}:
-                workflows.append(builtin_agent_workflow())
+            try:
+                workflows = AgentApplication.project_workflows(workflows, env)
+            except ValueError as error:
+                raise ProjectError(str(error)) from error
             lifespan = (
                 resolve_entrypoint(self.lifespan_entrypoint, self.root)
                 if self.lifespan_entrypoint

@@ -656,8 +656,7 @@ class HostFileContracts:
         """File tools appear only for an enabled Agent with an execution-capable Workspace."""
         provider = ScriptedProvider(answer(), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("bound", settings().model_copy(update={
-                "workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
+            await host.agent_context.configure("bound", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
             for session in ("bound", "unbound"):
                 ref = await host.execute("agent", AgentInput(message="hello"), session_id=session)
                 result = await host.join(ref)
@@ -665,23 +664,18 @@ class HostFileContracts:
         self.assertIn("edit_file", [value.name for value in provider.requests[0].tools])
         self.assertNotIn("edit_file", [value.name for value in provider.requests[1].tools])
 
-    async def test_operation_rules_persist_in_session_settings(self):
-        """Session parameter rules survive database round trips on both backends."""
-        async with self.host(ScriptedProvider(answer())) as host:
-            selected = settings().model_copy(update={"workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id),
-                "access": AgentAccess(operation_rules=(ToolOperationRule(action="file.read",
-                    attributes={"path": "*.secret"}, decision="ask"),))})
-            await host.agent_context.configure("one", selected)
-        async with self.host(ScriptedProvider(answer())) as host:
-            restored = await host.agent_context.get_settings("one")
-            self.assertEqual(restored.settings.access.operation_rules, selected.access.operation_rules)
+    async def test_session_preferences_reject_host_operation_rules(self):
+        """Parameter rules belong to shared resources or Host startup, never Session preferences."""
+        from pydantic import ValidationError
+        from autoagent.agent import AgentSessionSettings
+        with self.assertRaises(ValidationError):
+            AgentSessionSettings.model_validate_json('{"access":{"operation_rules":[]}}')
 
     async def test_files_can_be_disabled_per_workflow(self):
         """An explicit files=False build keeps a bound Workspace without file tools."""
         provider = ScriptedProvider(answer())
         async with self.host(provider, workflow=agent_workflow(files=False)) as host:
-            await host.agent_context.configure("one", settings().model_copy(update={
-                "workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
+            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
             result = await host.join(await host.execute("agent", AgentInput(message="hello"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
         self.assertNotIn("read_file", [value.name for value in provider.requests[0].tools])
@@ -692,8 +686,7 @@ class HostFileContracts:
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls",
             output=(call("read_file", path=".env"),)), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("one", settings().model_copy(update={
-                "workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
+            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
             ref = await host.execute("agent", AgentInput(message="read the env"), session_id="one")
             waiting = await host.join(ref)
             self.assertEqual(waiting.status, "waiting", waiting.error)
@@ -714,8 +707,7 @@ class HostFileContracts:
             create_parents=True).model_copy(update={"call_id": f"write-{index}"}) for index in range(3))
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls", output=proposals), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("one", settings().model_copy(update={
-                "workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
+            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
             result = await host.join(await host.execute("agent", AgentInput(message="create sibling files"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
             results = [item for item in provider.requests[-1].input if isinstance(item, LLMToolResult)]
@@ -732,8 +724,7 @@ class HostFileContracts:
             LLMResponse(model="offline", finish_reason="tool_calls", output=(call("edit_file", path="code.py",
                 edits=[{"old_text": "old = 1", "new_text": "new = 2"}]),)), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("one", settings().model_copy(update={
-                "workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
+            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
             result = await host.join(await host.execute("agent", AgentInput(message="edit code"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual((self.root / "code.py").read_text(), "new = 2\n")

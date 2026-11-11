@@ -545,6 +545,7 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
             ref=await host.execute(wf.id,{'text':'wait'},entry_node_id='wait')
             await host.join(ref)
             event=await self.event(host,ref,'node_occurrence.waiting')
+            await host._persistence.flush()
             write=host._persistence._writer.storage.write_transaction
             async def rejected(conn,entries):
                 await write(conn,entries)

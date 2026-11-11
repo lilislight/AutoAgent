@@ -13,8 +13,9 @@ from pathlib import Path
 import tempfile
 
 from autoagent.agent import (
+    AgentModelSelection,
     AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput, AgentResult,
-    AgentModelSettings, AgentSessionSettings, LLMMessage, LLMResponse,
+    AgentModelSettings, AgentHostSettings, AgentSessionSettings, LLMMessage, LLMResponse,
     LLMStreamChunk, LLMToolCall, LLMToolResult, TextContent, Tool,
     agent_workflow,
 )
@@ -57,11 +58,13 @@ async def main(*, approve=False):
         async with AutoAgentHost(workflows=[agent_workflow()], lifespan=lifespan,
             settings=HostSettings(database_url="sqlite+aiosqlite:///" + str(Path(directory) / "runtime.db")),
             environment={}) as host:
-            # Complete Session settings are persisted, while each Invocation
-            # adopts an immutable snapshot of them at its execution boundary.
-            await host.agent_context.configure("demo-session", AgentSessionSettings(
+            # Generation and resource policy are Host-owned. Sessions select
+            # only their model and approval mode.
+            host.agent_context.set_defaults(AgentHostSettings(
                 model=AgentModelSettings(provider="demo", model="demo-model", streaming=True),
-                approval_mode="policy", access=AgentAccess(rules={"publish": "ask"})))
+                access=AgentAccess(rules={"publish": "ask"})))
+            await host.agent_context.configure("demo-session", AgentSessionSettings(
+                model=AgentModelSelection(provider="demo", model="demo-model")))
             execution = await host.execute("agent", AgentInput(message="Publish a greeting."), session_id="demo-session")
             result = await host.join(execution)
             if result.waits:

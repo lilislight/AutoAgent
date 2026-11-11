@@ -1,0 +1,33 @@
+import { useEffect, useRef, useState } from 'react';
+import { BusyLabel } from '../../components/LoadingState';
+import { settingsApi } from './api';
+import { References, referenceMap, referenceRows } from './ProviderForm';
+import { FormActions, FormError, errorText } from './Controls';
+import type { ConfigRecord, ConnectionTest, ResourceConfig } from './types';
+import { defaultPolicy, selectedRemote, withRemoteSelection } from './types';
+
+export function ConnectionForm({ record, onSave, onCancel }: { record?: ConfigRecord; onSave: (config: ResourceConfig, record?: ConfigRecord) => Promise<void>; onCancel: () => void }) {
+  const [draft, setDraft] = useState<ResourceConfig>(() => record ? structuredClone(record.configuration) : { kind: 'mcp', name: '', enabled: true, permissions: defaultPolicy(), transport: { type: 'stdio', server_id: 'mcp', command: '', args: [] }, prefix: '', include: null, exclude: [] });
+  const [args, setArgs] = useState(JSON.stringify(draft.transport?.args ?? []));
+  const [environment, setEnvironment] = useState(() => referenceRows(draft.environment)), [headers, setHeaders] = useState(() => referenceRows(draft.headers));
+  const [busy, setBusy] = useState(false), [testing, setTesting] = useState(false), [test, setTest] = useState<ConnectionTest | null>(null), [error, setError] = useState<string | null>(null);
+  const operation = useRef<AbortController | null>(null);
+  useEffect(() => () => operation.current?.abort(), []);
+  const update = (values: Partial<ResourceConfig>) => { setDraft(current => ({ ...current, ...values })); setTest(null); };
+  const transport = (values: object) => update({ transport: { ...draft.transport!, ...values } });
+  const build = () => {
+    const values = draft.transport?.type === 'stdio' ? JSON.parse(args) : [];
+    if (!Array.isArray(values) || values.some(value => typeof value !== 'string')) throw new Error('Arguments must be a JSON array of strings.');
+    const connection = draft.transport!.type === 'stdio' ? { ...draft.transport!, args: values } : draft.transport!;
+    return { ...draft, transport: connection, environment: connection.type === 'stdio' ? referenceMap(environment) : {}, headers: connection.type !== 'stdio' ? referenceMap(headers) : {} };
+  };
+  const testConnection = async () => { setError(null); setTesting(true); operation.current = new AbortController(); try { setTest(await settingsApi.testMcp(build(), operation.current.signal)); } catch (error) { if (!operation.current.signal.aborted) setError(errorText(error)); } finally { setTesting(false); } };
+  return <form className="settings-form" onSubmit={async event => { event.preventDefault(); if (busy || testing) return; setBusy(true); setError(null); try { await onSave(build(), record); } catch (error) { setError(errorText(error)); } finally { setBusy(false); } }}><fieldset disabled={busy || testing}>
+    <div className="settings-field-grid"><label>Server name<input required value={draft.name} onChange={event => update({ name: event.target.value })} placeholder="My MCP server" /></label><label>Transport<select value={draft.transport?.type} onChange={event => update({ transport: event.target.value === 'stdio' ? { type: 'stdio', server_id: draft.transport?.server_id ?? 'mcp', command: '', args: [] } : { type: event.target.value as 'sse' | 'streamable_http', server_id: draft.transport?.server_id ?? 'mcp', url: '' } })}><option value="stdio">Local process · stdio</option><option value="streamable_http">Streamable HTTP</option><option value="sse">SSE</option></select></label></div>
+    {draft.transport?.type === 'stdio' ? <><label>Command<input required value={draft.transport.command ?? ''} onChange={event => transport({ command: event.target.value })} placeholder="uvx" /></label><label>Arguments · JSON array<textarea rows={2} value={args} onChange={event => { setArgs(event.target.value); setTest(null); }} placeholder={'["my-mcp-server"]'} spellCheck={false} /></label><label>Working directory<input value={draft.transport.cwd ?? ''} onChange={event => transport({ cwd: event.target.value || null })} placeholder="Project directory" /></label><References rows={environment} onChange={values => { setEnvironment(values); setTest(null); }} label="Environment" /></> : <><label>Server URL<input type="url" required value={draft.transport?.url ?? ''} onChange={event => transport({ url: event.target.value })} placeholder="https://example.com/mcp" /></label><References rows={headers} onChange={values => { setHeaders(values); setTest(null); }} label="Headers" /></>}
+    <label>Tool name prefix<input value={draft.prefix ?? ''} onChange={event => update({ prefix: event.target.value })} placeholder="Optional, for example docs_" /></label><p className="settings-help">Credentials are referenced by environment or credential-file variable names. Values are never saved in the application database. File references use AUTOAGENT_APP_SECRETS_FILE, or .autoagent/.env.credentials.</p>
+  </fieldset><div className="settings-connection-test"><button type="button" disabled={busy || testing || !draft.name.trim() || !(draft.transport?.command || draft.transport?.url)} onClick={event => { if (event.currentTarget.form?.reportValidity()) void testConnection(); }}><BusyLabel busy={testing} label="Connecting">Test connection & list tools</BusyLabel></button>{test ? <span role="status" className={test.connected ? 'settings-success' : 'settings-error'}>{test.connected ? `Connected · ${test.tools.length} tools` : test.error}</span> : null}</div>
+    {test?.connected ? <section className="settings-tested-tools"><div className="settings-subheading"><h4>Available tools</h4><label className="settings-check-label"><input type="checkbox" checked={draft.include == null} onChange={event => setDraft(value => ({ ...value, include: event.target.checked ? null : test.tools.filter(tool => selectedRemote(value, tool.name)).map(tool => tool.name), exclude: event.target.checked ? test.tools.filter(tool => !selectedRemote(value, tool.name)).map(tool => tool.name) : [] }))} />Include future tools automatically</label></div>{test.tools.map(tool => <label className="settings-remote-choice" key={tool.name}><input type="checkbox" checked={selectedRemote(draft, tool.name)} onChange={event => setDraft(value => (withRemoteSelection(value, tool.name, event.target.checked)))} /><span><strong>{tool.name}</strong><small>{tool.description}</small></span></label>)}</section> : null}
+    <FormError message={error} /><FormActions busy={busy} disabled={testing} onCancel={onCancel} label={record ? 'Save server' : 'Add server'} />
+  </form>;
+}

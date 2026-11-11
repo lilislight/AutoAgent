@@ -5,7 +5,7 @@ import logging
 from weakref import WeakValueDictionary
 
 from autoagent.core import RuntimeTransitionError
-from .models import HostNotFoundError, HostRunConflict
+from autoagent.host.models import HostNotFoundError, HostRunConflict
 
 
 class AgentMessageQueue:
@@ -23,7 +23,7 @@ class AgentMessageQueue:
         return lock
 
     async def storage(self, method, *args, **kwargs):
-        return await self.host._persistence.agent_queue_operation(method, *args, **kwargs)
+        return await self.host.agent_app.storage.queue(method, *args, **kwargs)
 
     async def start(self):
         self.wake.set()
@@ -91,7 +91,7 @@ class AgentMessageQueue:
             return
         await self.storage("change", sid, item["id"], ("queued",), state="starting", previous_invocation_id=iid, error=None)
         try:
-            ref = await self.service.start_conversation(sid, item["message"], request_id=item["id"])
+            ref = await self.service.start_conversation(sid, item["message"], request_id=item["id"], model=item["model"])
             # The accepted Invocation identity must be durable before retiring its submission.
             await self.host._persistence.flush()
             await self.storage("change", sid, item["id"], ("starting",), state="started", invocation_id=ref.invocation_id)
@@ -107,27 +107,45 @@ class AgentMessageQueue:
                 return  # Reconcile an ambiguous admission; never resubmit blindly.
             await self.storage("change", sid, item["id"], ("starting",), state="blocked", error=str(error))
 
-    async def submit(self, sid, message, request_id, workspace_id=None, *, send_to=None):
+    async def submit(self, sid, message, request_id, workspace_id=None, *, send_to=None, unbound=False, initial_settings=None, model=None):
+        if send_to is not None and model is not None:
+            raise ValueError("Messages to a running task cannot change its model.")
         if not message.strip() or not request_id or len(request_id) > 64 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in request_id):
             raise ValueError("A message and a unique request ID (up to 64 letters, digits, '_' or '-') are required.")
         async def operation():
             async with self.lock(sid):
-                await self.service.workspace_session(sid, allow_new=True)
+                existing = await self.service.workspace_session(sid, allow_new=True)
                 catalog = await self.service.workspace_catalog()
                 if catalog["agent"] is None:
-                    from .models import HostNotFoundError
+                    from autoagent.host.models import HostNotFoundError
                     raise HostNotFoundError("The SDK Agent is disabled for this project.")
-                record = await self.service.conversation_settings(sid, workspace_id)
-                await self.service.approvals._run(lambda: self.service._workspaces.validate(record.settings.workspace))
-                await self.host._persistence.agent_context_operation("initialize_settings", sid, record.settings)
+                record = await self.service.conversation_settings(sid, workspace_id, unbound=unbound)
                 previous = await self.storage("rows", sid, item_id=request_id)
+                if initial_settings is not None and not previous:
+                    from .models import ApplicationSessionSettings
+                    from autoagent.agent.context import restore
+                    from autoagent.host.persistence import ConflictError
+                    chosen = restore(ApplicationSessionSettings, initial_settings)
+                    if existing is not None or record.version:
+                        if chosen != record.settings:
+                            raise ConflictError("Conversation already started; update its settings explicitly.")
+                    else:
+                        record = record.model_copy(update={"settings": chosen})
+                await self.service.approvals._run(lambda: self.service._workspaces.validate(record.workspace))
+                await self.service.storage("initialize_settings", sid, record.settings, record.workspace, message)
+                from autoagent.agent import AgentModelSelection
+                from autoagent.agent.context import restore
+                selected = None if send_to is not None else (model if model is not None else record.settings.model)
+                selected = restore(AgentModelSelection, selected).model_dump(mode="json") if selected is not None else None
+                if previous and model is None and send_to is None:
+                    selected = previous[0]["model"]
                 if previous and previous[0]["state"] in ("started", "sent", "cancelled"):
-                    return await self.storage("add", sid, request_id, message)
+                    return await self.storage("add", sid, request_id, message, selected)
                 if send_to is not None:
                     latest = await self.latest(sid)
                     if not latest or latest["invocation_id"] != send_to:
                         raise HostRunConflict("queue_target_changed", "The current task changed; your message was not sent.")
-                item = await self.storage("add", sid, request_id, message)
+                item = await self.storage("add", sid, request_id, message, selected)
                 if send_to is not None:
                     if item["state"] in ("queued", "blocked"):
                         await self.storage("change", sid, request_id, (item["state"],), state="sending", invocation_id=send_to, error=None)

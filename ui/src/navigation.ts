@@ -85,7 +85,7 @@ export function readPageLocation(pathname: string, search: string, uiBase = '/',
     let session: string | null = null;
     try { session = encoded ? decodeURIComponent(encoded) : null; } catch { /* Invalid links open a fresh conversation. */ }
     return { view: 'agents', session, execution: session ? params.get('invocation') : null, workflow: null, revision: null, selection: null,
-      ...(params.get('workspace') ? { agentWorkspace: params.get('workspace')! } : {}) };
+      ...(params.get('workspace') ? { agentWorkspace: params.get('workspace')! } : params.get('unbound') === 'true' ? { agentWorkspace: null } : {}) };
   }
   const explicitDeveloper = path === 'workflows' || path.startsWith('workflows/');
   const result = readLocation(search || (defaultView === 'agents' && !explicitDeveloper ? '?view=agents' : ''));
@@ -100,6 +100,7 @@ export function writePageLocation(state: LocationState, uiBase = '/', defaultVie
     const params = new URLSearchParams();
     if (state.session && state.execution) params.set('invocation', state.execution);
     if (state.agentWorkspace) params.set('workspace', state.agentWorkspace);
+    else if (state.agentWorkspace === null) params.set('unbound', 'true');
     return path + (params.size ? '?' + params.toString() : '');
   }
   const query = writeLocation(state);

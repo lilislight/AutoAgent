@@ -76,7 +76,7 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
     policies = policies or AgentWorkflowPolicies()
     from .resources import AgentResources
     resources = AgentResources(tools, mcp, skills, files, execution)
-    identity = {"history_commits": 1, "final_inbox_check": 1, "agent_result": 2, "builtin_tool_results": 2,
+    identity = {"runtime_binding": 1, "history_commits": 1, "final_inbox_check": 1, "agent_result": 2, "builtin_tool_results": 2,
         "tool_routing": 2, "history_projection": PROJECTION_VERSION, "options": options.model_dump(mode="json"),
         "resources": resources.manifest, "wait_collection": 1, "user_event_contract": 1,
         "workspace_context": 1, "skill_tools": 2,
@@ -102,12 +102,16 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
     start.__autoagent_context_policy__ = context_policy
 
     @hook
-    def start_binding(context: OutputBindingContext) -> ContextPatch:
+    async def start_binding(context: OutputBindingContext) -> ContextPatch:
         value = restore(AgentInput, context.output)
         previous = conversation(context).finish_pending(interrupted=True)
         updated = previous.append(preparation.message("user", value.message))
+        binding = await current_agent_context().export_binding(context.self_handle.invocation_id)
+        operations = [ContextOperation.set("agent", {"rounds": 0})]
+        if binding is not None:
+            operations.append(ContextOperation.set("agent_runtime_binding", binding))
         return ContextPatch(session=(ContextOperation.set("agent_conversation", updated.model_dump(mode="json")),),
-            invocation=(ContextOperation.set("agent", {"rounds": 0}),))
+            invocation=tuple(operations))
 
     @hook
     def context_input(context: InputMappingContext) -> Conversation:

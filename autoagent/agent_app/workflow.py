@@ -1,14 +1,14 @@
-"""SDK-owned Workflow used exclusively by the Agents application."""
+"""Workflow assembly and identity owned by the Agent application."""
 
-from .builder import agent_workflow
-from .policy import ContextPolicy
-from .subagents import SubagentsConfig, SubagentTarget
+from autoagent.agent.workflow.builder import agent_workflow
+from autoagent.agent.workflow.policy import ContextPolicy
+from autoagent.agent.workflow.subagents import SubagentsConfig, SubagentTarget
 
 BUILTIN_AGENT_WORKFLOW_ID = "autoagent.agent"
 
 
 def builtin_agent_workflow(*, execution=True):
-    """Construct the SDK chat Agent; project resources require explicit Host grants."""
+    """Construct the product Agent; project resources require explicit grants."""
     workflow = agent_workflow(
         workflow_id=BUILTIN_AGENT_WORKFLOW_ID,
         context_policy=ContextPolicy(context_window=200_000),
@@ -25,8 +25,10 @@ def builtin_agent_workflow(*, execution=True):
     return workflow
 
 
-def is_builtin_agent(ir):
-    return ir.workflow_id == BUILTIN_AGENT_WORKFLOW_ID and any(
+def is_builtin_agent(workflow):
+    """Match both product identity and implementation on definitions or compiled IR."""
+    workflow_id = getattr(workflow, "workflow_id", None) or getattr(workflow, "id", None)
+    return workflow_id == BUILTIN_AGENT_WORKFLOW_ID and any(
         getattr(getattr(node.executable, "handler", None), "__autoagent_builtin_chat__", False)
-        for node in ir.nodes
+        for node in workflow.nodes
     )

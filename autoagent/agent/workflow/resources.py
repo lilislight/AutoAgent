@@ -34,7 +34,7 @@ def tool_identity(tool):
         return dict(bound=tool_identity(owner._tools[tool.definition.name]), policy=callable_identity(owner.policy),
             hooks=[callable_identity(getattr(owner.hooks, name)) for name in ("before", "after", "on_error")],
             allowed=sorted(owner.context.allowed_tools) if owner.context and owner.context.allowed_tools is not None else None,
-            approval_mode=owner.approval_mode)
+            approval_mode=owner.approval_mode, replace_policies=owner.replace_policies)
     return dict(definition=tool.definition.model_dump(mode="json"),
         implementation=callable_identity(getattr(tool, "_handler", tool.ainvoke)),
         operations=callable_identity(getattr(tool, "operation_resolver", None)))

@@ -112,6 +112,7 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
         return error
     tools = service.toolset(snapshot, binding=authorization_binding(task), catalog=catalog,
         observations=task.observed_versions)
+    permission_revision = service.resource_revision(snapshot)
     # Pin the checked executable. A final hook is the borrowing boundary:
     # changes during an async policy cannot silently replace that executable.
     from ..tools import ToolHooks
@@ -124,13 +125,19 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
         error = binding_error(service, snapshot, task)
         if error is not None:
             raise BindingChanged(error)
+        latest = await service.snapshot()
+        if permission_revision != service.resource_revision(latest):
+            raise BindingChanged(error_result(call, "tool_permissions_changed", "Tool permissions changed before execution; reevaluate this call."))
         current, _ = workflow_catalog(service, snapshot)
         if resource_permissions(current[call.name]) != plain(context.authorization.get("resource_permissions")):
             raise BindingChanged(error_result(call, "tool_permissions_changed", "Tool permissions changed before execution."))
     tools.hooks = ToolHooks(before=verify_binding)
     try:
         # A fresh Allow (including bypass) needs no previous approval token.
-        with tool_context(tools.context):
+        from contextlib import AsyncExitStack
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(service.borrow_tool(catalog[task.call.name].resource_id))
+            stack.enter_context(tool_context(tools.context))
             checked = await tools.apreflight(task.call)
             if checked.result is not None:
                 return checked.result

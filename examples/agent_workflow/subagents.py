@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 
 from autoagent.agent import (
-    AgentInput, AgentModelSettings, AgentSessionSettings, AgentSignalMessage, AgentResult,
+    AgentInput, AgentModelSettings, AgentHostSettings, AgentSignalMessage, AgentResult,
     LLMMessage, LLMResponse, LLMStreamChunk, LLMToolCall, LLMToolResult,
     SubagentsConfig, SubagentTarget, TextContent, agent_workflow,
 )
@@ -49,7 +49,7 @@ class OfflineProvider:
 @asynccontextmanager
 async def lifespan(setup):
     setup.agent_context.resources.register_provider("offline", OfflineProvider())
-    setup.agent_context.set_defaults(AgentSessionSettings(
+    setup.agent_context.set_defaults(AgentHostSettings(
         model=AgentModelSettings(provider="offline", model="demo-model")))
     yield
 

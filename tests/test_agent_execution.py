@@ -575,7 +575,7 @@ class HostExecutionContracts:
             yield host
 
     async def bind(self, host, session="one"):
-        await host.agent_context.configure(session, settings().model_copy(update={"workspace": WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id)}))
+        await host.agent_context.configure(session, settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
 
     async def test_workspace_and_build_control_tool_visibility(self):
         """Execution Tools appear only for bound, explicitly enabled builds."""

@@ -56,14 +56,14 @@ class QueueContracts:
         return release, step
 
     async def item(self, host, item_id):
-        return (await host._persistence.agent_queue_operation("rows", "chat", item_id=item_id))[0]
+        return (await host.agent_app.storage.queue("rows", "chat", item_id=item_id))[0]
 
     async def test_fifo_runs_without_a_browser_and_cancel_removes_only_pending_item(self):
         """The Host starts queued turns in order after completion without client polling."""
         release, first = self.gate()
         provider = ScriptedProvider(first, answer("Second"), answer("Third"))
         async with self.host(provider) as (host, client):
-            first = await host.agent_context.messages.submit("chat", "First", "one")
+            first = await host.agent_app.context.messages.submit("chat", "First", "one")
             for identity in ("two", "cancelled", "three"):
                 response = await client.post("/api/v2/agent/queue", json={"session_id": "chat", "message": identity, "request_id": identity})
                 self.assertEqual(response.status_code, 202, response.text)
@@ -78,7 +78,7 @@ class QueueContracts:
             last = await self.until(done)
             self.assertEqual((await host.join(last["invocation_id"])).status, "completed")
             self.assertEqual(len(provider.requests), 3)
-            self.assertEqual((await host.agent_context.messages.view("chat"))["items"], [])
+            self.assertEqual((await host.agent_app.context.messages.view("chat"))["items"], [])
 
     async def test_duplicate_submission_is_idempotent_and_changed_content_conflicts(self):
         """Network retries return the original Invocation and cannot reuse IDs for new text."""
@@ -87,7 +87,7 @@ class QueueContracts:
             body = dict(session_id="chat", message="Hello", request_id="same")
             first = (await client.post("/api/v2/agent/queue", json=body)).json()
             await host.join(first["invocation_id"])
-            next_item = await host.agent_context.messages.submit("chat", "Later task", "later")
+            next_item = await host.agent_app.context.messages.submit("chat", "Later task", "later")
             await host.join(next_item["invocation_id"])
             again = await client.post("/api/v2/agent/queue", json=body)
             self.assertEqual(again.json()["invocation_id"], first["invocation_id"])
@@ -100,10 +100,10 @@ class QueueContracts:
         provider = ScriptedProvider(response(call("ask_user", {"questions": [
             {"id": "answer", "type": "text", "text": "Which option should I use?"}]})))
         async with self.host(provider) as (host, _):
-            current = await host.agent_context.messages.submit("chat", "Ask me first", "one")
+            current = await host.agent_app.context.messages.submit("chat", "Ask me first", "one")
             self.assertEqual((await host.join(current["invocation_id"])).status, "waiting")
             for identity in ("two", "three"):
-                item = await host.agent_context.messages.submit("chat", "Next task", identity)
+                item = await host.agent_app.context.messages.submit("chat", "Next task", identity)
                 self.assertEqual(item["state"], "queued")
             self.assertEqual(len(provider.requests), 1)
 
@@ -112,16 +112,16 @@ class QueueContracts:
         release, first = self.gate()
         provider = ScriptedProvider(first, answer())
         async with self.host(provider) as (host, _):
-            current = await host.agent_context.messages.submit("chat", "First", "one")
-            await host.agent_context.messages.submit("chat", "Unique update", "update")
+            current = await host.agent_app.context.messages.submit("chat", "First", "one")
+            await host.agent_app.context.messages.submit("chat", "Unique update", "update")
             original = host.signal
             async def ambiguous(*args, **kwargs):
                 await original(*args, **kwargs)
                 raise ConnectionError("Receipt lost after admission")
             with patch.object(host, "signal", ambiguous):
-                item = await host.agent_context.messages.act("chat", "update", "send_now", current["invocation_id"])
+                item = await host.agent_app.context.messages.act("chat", "update", "send_now", current["invocation_id"])
             self.assertEqual(item["state"], "sending")
-            item = await host.agent_context.messages.act("chat", "update", "send_now", current["invocation_id"])
+            item = await host.agent_app.context.messages.act("chat", "update", "send_now", current["invocation_id"])
             self.assertEqual(item["state"], "sent")
             release.set()
             self.assertEqual((await host.join(current["invocation_id"])).status, "completed")
@@ -133,8 +133,8 @@ class QueueContracts:
         release, first = self.gate()
         provider = ScriptedProvider(first, answer("Updated"))
         async with self.host(provider) as (host, client):
-            current = await host.agent_context.messages.submit("chat", "First", "one")
-            await host.agent_context.messages.submit("chat", "Please focus on safety", "update")
+            current = await host.agent_app.context.messages.submit("chat", "First", "one")
+            await host.agent_app.context.messages.submit("chat", "Please focus on safety", "update")
             body = dict(session_id="chat", item_id="update", action="send_now", invocation_id=current["invocation_id"])
             for _ in range(2):
                 response = await client.post("/api/v2/agent/queue/actions", json=body)
@@ -156,8 +156,8 @@ class QueueContracts:
                 await asyncio.sleep(.01)
             raise RuntimeError("Deliberate failure")
         async with self.host(ScriptedProvider(failure, answer())) as (host, client):
-            current = await host.agent_context.messages.submit("chat", "First", "one")
-            await host.agent_context.messages.submit("chat", "Next", "two")
+            current = await host.agent_app.context.messages.submit("chat", "First", "one")
+            await host.agent_app.context.messages.submit("chat", "Next", "two")
             release.set()
             self.assertEqual((await host.join(current["invocation_id"])).status, "failed")
             async def blocked():
@@ -174,10 +174,10 @@ class QueueContracts:
     async def test_restart_reconciles_accepted_admission_without_duplicate_execution(self):
         """A crash between Invocation admission and queue confirmation does not resubmit it."""
         async with self.host(ScriptedProvider(answer())) as (host, _):
-            await host.agent_context.messages.close()
-            await host._persistence.agent_queue_operation("add", "chat", "one", "First")
-            await host._persistence.agent_queue_operation("change", "chat", "one", ("queued",), state="starting")
-            ref = await host.agent_context.start_conversation("chat", "First", request_id="one")
+            await host.agent_app.context.messages.close()
+            await host.agent_app.storage.queue("add", "chat", "one", "First")
+            await host.agent_app.storage.queue("change", "chat", "one", ("queued",), state="starting")
+            ref = await host.agent_app.context.start_conversation("chat", "First", request_id="one")
             await host.join(ref)
             await host._persistence.flush()
         provider = ScriptedProvider()

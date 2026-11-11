@@ -8,6 +8,13 @@ import { Sidebar } from '../src/components/Sidebar.js';
 
 const emptyAgent = { view: 'agents' as const, session: null, execution: null, workflow: null, revision: null, selection: null };
 
+test('an explicitly unbound draft survives URLs without falling back to the project workspace', () => {
+  const draft = { ...emptyAgent, agentWorkspace: null };
+  const url = new URL(writePageLocation(draft, '/proxy/'), 'http://test');
+  assert.equal(url.searchParams.get('unbound'), 'true');
+  assert.deepEqual(readPageLocation(url.pathname, url.search, '/proxy/'), draft);
+});
+
 test('Agent page paths preserve exact Session and child Invocation IDs under mounted UI roots', () => {
   const value = { ...emptyAgent, session: '聊天/session with spaces', execution: 'child/id' };
   const route = writePageLocation(value, '/proxy/tools/');

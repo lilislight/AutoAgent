@@ -1,10 +1,12 @@
 """Local LLM-facing historical state inspection, without executing project code."""
 
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 import io
 import json
 import os
+import sqlite3
+from urllib.parse import quote
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -57,7 +59,13 @@ class CliStateTests(ProjectFixture, TestCase):
     def test_summary_and_context_read_with_broken_project_are_read_only(self):
         """The CLI reports the exact historical position and Context without importing even broken source."""
         (self.root / (self.module + ".py")).write_text('raise AssertionError("Must not import")')
-        before = self.database.read_bytes()
+        def database_contents():
+            # WAL checkpoints can change the main file without changing any
+            # stored facts. Compare schema and data through a read-only reader.
+            url = 'file:' + quote(str(self.database), safe='/') + '?mode=ro'
+            with closing(sqlite3.connect(url, uri=True)) as connection:
+                return tuple(connection.iterdump())
+        before = database_contents()
         with patch("autoagent.host.host.Runtime", side_effect=AssertionError("No Runtime")):
             code, report, err = self.query()
             self.assertEqual(code, 0, (report, err))
@@ -73,7 +81,7 @@ class CliStateTests(ProjectFixture, TestCase):
             self.assertIsNone(report["data"]["value"])
             _, report, _ = self.query("--context", "invocation", "--path", "/missing")
             self.assertFalse(report["data"]["available"])
-        self.assertEqual(self.database.read_bytes(), before)
+        self.assertEqual(database_contents(), before)
 
     def test_output_is_full_json_and_invalid_positions_are_clear_errors(self):
         """Output files preserve the normal report and invalid sequence/path combinations fail explicitly."""

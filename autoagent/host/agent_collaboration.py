@@ -101,12 +101,12 @@ class AgentCollaboration:
             raise ToolBusinessError("Agent target Revision belongs to another Workflow.", code="agent_target_changed")
         # Fixed task input keeps the LLM-facing contract portable. The target
         # Workflow's entry contract still performs its own strict validation.
-        # Child execution inherits accepted settings, not the spawning Tool's
+        # Child execution inherits the bound model and Workspace, not the spawning Tool's
         # temporary dependencies, approval identity or nested restrictions.
         from autoagent.agent.tools.context import tool_context
         with tool_context(None):
             handle = await commands.execute(Spawn(workflow.workflow_revision_id, target.entry_node_id),
-                AgentInput(message=task), key="spawn")
+                AgentInput(message=task, model={"provider": snapshot.settings.model.provider, "model": snapshot.settings.model.model}), key="spawn")
         raw = await commands.execute(Status(), handle, key="spawn-status")
         raw = raw.target_only()
         receipt = self.observation(raw, "child")

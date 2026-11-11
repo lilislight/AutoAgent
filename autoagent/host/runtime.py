@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ class HostSetup:
     operators: list
     capability_resolvers: dict = field(default_factory=dict)
     agent_context: object = None
+    applications: dict = field(default_factory=dict)
 
     def register_operator(
         self, operator, *, capability_id, priority=0, enabled=True, default=False
@@ -69,7 +71,7 @@ class Runtime:
 
     def __init__(
         self, persistence, settings, workflows, operators, lifespan, environment, *, usage_policy=None, agent_context=None,
-        on_user_event=None,
+        on_user_event=None, applications=None, resource_scopes=(),
     ):
         self.settings = settings
         self.usage_policy = usage_policy
@@ -81,6 +83,8 @@ class Runtime:
         self.lifespan = lifespan
         self.agent_context = agent_context
         self.setup.agent_context = agent_context
+        self.setup.applications.update(applications or {})
+        self.resource_scopes = tuple(resource_scopes)
         self.journal = InMemoryUserEventJournal()
         self.definitions = {}
         self.revisions = {}
@@ -94,7 +98,6 @@ class Runtime:
         self.recovery_tasks = {}
         self.recovery_requests = {}
         self.needs_recovery = set()
-        self._refresh_agent_settings = set()
         self.repository = RuntimeRepository(sink=self)
         self.app = AutoAgentApp(
             max_operator_concurrency=settings.max_operator_concurrency,
@@ -127,6 +130,9 @@ class Runtime:
                 await stack.enter_async_context(agent_resources(self.setup))
                 if self.agent_context is not None:
                     await stack.enter_async_context(self.agent_context.resource_scope())
+                for scope in self.resource_scopes:
+                    await stack.enter_async_context(scope(self.setup))
+                if self.agent_context is not None:
                     self.agent_context.install_operators(self.setup)
                 yield
 
@@ -158,7 +164,9 @@ class Runtime:
                     elif isinstance(node.executable, Operator):
                         self._definition(node.executable)
         if self.agent_context is not None:
-            await self.agent_context.prepare_resources(closure)
+            for context in self.agent_context.contexts():
+                await context.prepare_resources({key: ir for key, ir in closure.items()
+                    if self.agent_context.for_definition(ir) is context})
         for registration in self.setup.operators:
             self._definition(registration.operator)
         # Persistence is complete before any definition becomes executable.
@@ -199,18 +207,16 @@ class Runtime:
 
     async def append(self, event):
         snapshot = None
+        context = self.agent_context
         if self.agent_context is not None and event.invocation_id is not None:
             if event.event_name == "invocation.started":
                 ir = self.workflow_irs.get(event.payload.workflow_revision_id)
                 if ir is not None and self.agent_context.options_for_workflow(ir) is not None:
-                    snapshot = await self.agent_context.activate(event.session_id, event.invocation_id,
-                        reason="start", activation_id=event.id, workflow_revision=ir.workflow_revision_id)
-            elif event.event_name in ("graph.resumed", "invocation.reopened") and event.invocation_id in self._refresh_agent_settings:
-                existing = await self.agent_context._get_snapshot(event.invocation_id)
-                if existing is not None:
-                    snapshot = await self.agent_context.activate(event.session_id, event.invocation_id,
-                        reason="resume" if event.event_name == "graph.resumed" else "recover",
-                        activation_id=event.id)
+                    context = self.agent_context.for_workflow(ir.workflow_revision_id)
+                    snapshot = await context.activate(event.session_id, event.invocation_id,
+                        reason="start", activation_id=event.id, workflow_revision=ir.workflow_revision_id,
+                        model=event.payload.input.get("model") if isinstance(event.payload.input, Mapping) else None,
+                        message=event.payload.input.get("message") if isinstance(event.payload.input, Mapping) else None)
         definition_id = None
         if event.event_name in ("operator_call.started", "capability.resolved"):
             operator_id = event.payload.operator_id
@@ -225,7 +231,9 @@ class Runtime:
             event, operator_definition_id=definition_id
         )
         if snapshot is not None:
-            self.agent_context.adopt(snapshot)
+            context.adopt(snapshot)
+        if self.agent_context is not None and event.event_name in {"node_occurrence.waiting", "invocation.waiting"}:
+            await self.agent_context.approvals.changed(event.session_id)
         if self.agent_context is not None and event.event_name == "invocation.cancelled":
             await self.agent_context.cancel_processes({event.invocation_id})
         if self.agent_context is not None and event.event_name == "child_invocation.planned":
@@ -423,18 +431,12 @@ class Runtime:
                     source = await asyncio.to_thread(RecoverySource.from_events,
                         (RuntimeEvent.from_record(record) for records in bundle['events'].values() for record in records))
                     del bundle
-                refresh = force and (status.control_state == "paused" or status.status in {"failed", "cancelled"})
-                if refresh:
-                    self._refresh_agent_settings.add(ref.invocation_id)
-                try:
-                    operation = self.app.arecover(ref, source=source, request_id=request_id, expected_version=expected_version)
-                    source = None
-                    result = await operation
-                    if self.agent_context is not None:
-                        result = await self.agent_context.approvals.reconcile(ref, result)
-                    return result
-                finally:
-                    self._refresh_agent_settings.discard(ref.invocation_id)
+                operation = self.app.arecover(ref, source=source, request_id=request_id, expected_version=expected_version)
+                source = None
+                result = await operation
+                if self.agent_context is not None:
+                    result = await self.agent_context.approvals.reconcile(ref, result)
+                return result
             # Install single-flight ownership before SQL reads or reconstruction
             # yield; a second request must not start another recovery plan.
             task = asyncio.create_task(recover())

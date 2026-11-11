@@ -9,7 +9,8 @@ from uuid import uuid4
 
 import httpx
 
-from autoagent.agent import AgentInput, BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow, ExecutionToolsConfig, CommandRule
+from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
+from autoagent.agent import AgentInput, ExecutionToolsConfig, CommandRule
 from autoagent.host import AutoAgentHost, HostSettings, ProjectError
 from autoagent.host.project import Project
 from autoagent.server import create_app
@@ -125,7 +126,7 @@ class BuiltinApplicationContracts:
         async with self.project(custom=True) as (host, client):
             custom = await host.execute('custom', AgentInput(message='Custom'))
             await host.join(custom)
-            sdk = await host.agent_context.start_conversation('sdk-only', 'SDK')
+            sdk = await host.agent_app.context.start_conversation('sdk-only', 'SDK')
             await host.join(sdk)
             for route, params in (
                 ('execution', {'invocation_id': custom.invocation_id}),

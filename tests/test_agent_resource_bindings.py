@@ -122,6 +122,14 @@ class ResourceBindingContracts:
 
     async def test_live_host_policy_and_revocation_resolve_pending_approval_without_effects(self):
         """A changed Host policy or withdrawn grant applies to an existing Wait before Tool execution."""
+        async def settled(host, invocation_id):
+            async with asyncio.timeout(10):
+                while True:
+                    result = await host.join(invocation_id)
+                    if result.status in {"completed", "failed", "cancelled"}:
+                        return result
+                    await asyncio.sleep(.02)
+
         for revoke in (False, True):
             effects = []
             def publish(text: str) -> str:
@@ -137,11 +145,7 @@ class ResourceBindingContracts:
                     host.agent_context.resources.set_workflows("tool", "publish", {"other"})
                 else:
                     host.agent_context.resources.set_policy("tool", "publish", lambda *args: ToolDecision(action="deny"))
-                current = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
-                self.assertFalse(current.requests)
-                await host.respond(waiting.invocation_id, waiting.waits[0].id,
-                    AgentApprovalResponse(decisions=(), revision=current.revision).model_dump(mode="json"))
-                result = await host.join(waiting.invocation_id)
+                result = await settled(host, waiting.invocation_id)
                 self.assertEqual(result.status, "completed", result.error)
                 self.assertFalse(effects)
                 self.assertTrue(results(provider.requests[-1])[0].is_error)
@@ -153,11 +157,7 @@ class ResourceBindingContracts:
             waiting = await self.run_agent(host)
             self.assertEqual(waiting.status, "waiting", waiting.error)
             host.agent_context.resources.set_policy("skill", "restricted", lambda *args: ToolDecision(action="deny"))
-            current = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
-            self.assertFalse(current.requests)
-            await host.respond(waiting.invocation_id, waiting.waits[0].id,
-                AgentApprovalResponse(decisions=(), revision=current.revision).model_dump(mode="json"))
-            self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")
+            self.assertEqual((await settled(host, waiting.invocation_id)).status, "completed")
             self.assertTrue(results(provider.requests[-1])[0].is_error)
             self.assertNotIn("Use restricted.", provider.requests[-1].model_dump_json())
 
@@ -203,7 +203,12 @@ class ResourceBindingContracts:
                 _, before = host.agent_context.catalog(snapshot)
                 (visible / "SKILL.md").write_text("---\nname: visible\ndescription: Visible helper\n---\nNew instructions.\n")
                 async with asyncio.timeout(10):
-                    while host.agent_context.catalog(snapshot)[1][0].snapshot_revision == before[0].snapshot_revision:
+                    while True:
+                        # A watcher can withdraw a source while an in-place file
+                        # write is incomplete. Wait for a complete new snapshot.
+                        current = host.agent_context.catalog(snapshot)[1]
+                        if current and current[0].snapshot_revision != before[0].snapshot_revision:
+                            break
                         await asyncio.sleep(0.02)
                 self.assertEqual((await self.run_agent(host)).status, "completed")
                 self.assertIn("New instructions", provider.requests[2].model_dump_json())

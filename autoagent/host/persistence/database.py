@@ -52,24 +52,17 @@ class DatabaseSink:
         self._checkpoint_guard = None
         self._datasets = TraceDatasets(self._queries, self.config, url)
         self._llm_calls = None
-        self._agent_context = None
-        self._agent_queue = None
+        self._extensions = {}
 
-    async def agent_queue_operation(self, method, *args, **kwargs):
-        from .agent_queue import AgentQueueStorage
+    async def extension_operation(self, factory, method, *args, **kwargs):
+        """Run an application-owned storage extension on the database's owning loop."""
         async def operation():
-            if self._agent_queue is None:
-                self._agent_queue = AgentQueueStorage(self._writer, self._queries)
-            return await getattr(self._agent_queue, method)(*args, **kwargs)
-        return await self._writer.run(operation)
-
-    async def agent_context_operation(self, method, *args, **kwargs):
-        """Serialize Host settings operations on the owned database loop."""
-        from .agent_context import AgentContextStorage
-        async def operation():
-            if self._agent_context is None:
-                self._agent_context = AgentContextStorage(self._writer, self._queries)
-            return await getattr(self._agent_context, method)(*args, **kwargs)
+            if factory not in self._extensions:
+                extension = factory(self._writer, self._queries)
+                self._extensions[factory] = extension
+                if callable(getattr(extension, "purge_history", None)):
+                    self._maintenance.extensions[factory] = extension
+            return await getattr(self._extensions[factory], method)(*args, **kwargs)
         return await self._writer.run(operation)
 
     @classmethod

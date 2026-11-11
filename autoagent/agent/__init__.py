@@ -36,6 +36,7 @@ from .providers import (
 )
 from .providers import __all__ as _provider_exports
 from .tools import (
+    PolicyCondition, PolicyRule, DeclarativeToolPolicy,
     ToolOperation, ToolOperationRule, ToolOperationPolicy, combine_decisions,
     ToolContext, ToolHooks, ToolDecision, ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolPreflight,
     ExecutableTool, Tool, ToolBusinessError, ToolDefinition, ToolError,
@@ -75,7 +76,7 @@ from .recording import LLMCallContext, LLMCallRecord, LLMCallRecorder, LLMUsageL
 from .usage import TimeRange, UsageWindow, WindowUsagePolicy, ProjectUsagePolicy, TokenUsageQuery, TokenUsageSummary
 from .cost import TokenPrice, CostEstimate, CostCalculator, LocalTokenPricing
 from .context import (
-    ApprovalMode, AgentAccess, AgentModelSettings, AgentSessionSettings,
+    ApprovalMode, AgentAccess, AgentModelSettings, AgentModelSelection, AgentHostSettings, AgentSessionSettings,
     AgentSettingsRecord, AgentExecutionSnapshot, AgentContextProvider,
     apply_approval_mode, agent_runtime_context, current_agent_context,
 )
@@ -86,7 +87,6 @@ from .resource_sources import MCPResourceSource, SkillDirectorySource
 from .workflow.events import *
 from .workflow.events import __all__ as _event_exports
 from .workflow import (
-    BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow,
     MCPSource, SkillDirectory,
     SubagentsConfig, SubagentTarget, AgentSignalMessage, AgentObservation,
     AskUserOption, AskUserQuestion, AskUserArguments, AskUserRequest, AskUserAnswer, AskUserResponse,
@@ -103,10 +103,9 @@ from .workflow import (
 
 __all__ = [
     *_execution_exports,
-    "BUILTIN_AGENT_WORKFLOW_ID", "builtin_agent_workflow",
     "SubagentsConfig", "SubagentTarget", "AgentSignalMessage", "AgentObservation",
     "AskUserOption", "AskUserQuestion", "AskUserArguments", "AskUserRequest", "AskUserAnswer", "AskUserResponse",
-    "ApprovalMode", "AgentAccess", "AgentModelSettings", "AgentSessionSettings",
+    "ApprovalMode", "AgentAccess", "AgentModelSettings", "AgentModelSelection", "AgentHostSettings", "AgentSessionSettings",
     "AgentSettingsRecord", "AgentExecutionSnapshot", "AgentContextProvider",
     "apply_approval_mode", "agent_runtime_context", "current_agent_context",
     "AgentResource", "AgentResourceRegistry", "MCPResourceSource", "SkillDirectorySource", "MCPSource", "SkillDirectory", "agent_workflow", "AgentInput",

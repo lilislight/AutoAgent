@@ -7,20 +7,18 @@ export interface QueuedMessage {
 export interface MessageQueue { items: QueuedMessage[]; invocation_id: string | null }
 export type AccessAction = 'allow' | 'ask' | 'deny';
 export interface SessionSettings {
-  model: { provider: string; model: string | null; streaming: boolean; max_output_tokens: number | null; temperature: number | null };
-  approval_mode: 'policy' | 'always_ask' | 'never_ask' | 'bypass';
-  access: { default: AccessAction; rules: Record<string, AccessAction>; allowed_tools: string[] | null; policy: string | null };
-  workspace: { workspace_id: string; working_directory: string } | null;
+  model: { provider: string; model: string | null };
+  approval_mode: 'always_ask' | 'policy' | 'auto_approve';
 }
 export interface AgentWorkspaceInfo { id: string; name: string; backend: string; path: string | null; is_project: boolean; available: boolean | null }
-export interface SettingsRecord { session_id: string; version: number; settings: SessionSettings }
+export interface SettingsRecord { session_id: string; version: number; settings: SessionSettings; workspace: { workspace_id: string; working_directory: string } | null; title: string | null; metadata_version: number }
 export interface WorkspaceAgent {
   revision_id: string; user_signal_endpoint: string;
   include_ask_user: boolean; subagents: boolean;
   context_policy: { context_window: number | null; compact_at_ratio: number; compact_at_tokens: number | null; target_ratio: number; target_tokens: number | null };
 }
-export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; defaults: SessionSettings; project_workspace_id: string }
-export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number }
+export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; provider_options?: { id: string; name: string; models: string[] }[]; defaults: SessionSettings; project_workspace_id: string }
+export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number; workspace_id?: string | null }
 export interface Page<T> { items: T[]; next_cursor: string | null }
 export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number | null; completed_at_us?: number | null; [key: string]: unknown }
 export interface PendingWait { invocation_id: string; wait_id: string; node_id?: string; occurrence_id: string }

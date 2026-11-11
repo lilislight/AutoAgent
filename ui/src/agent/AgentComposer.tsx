@@ -6,7 +6,7 @@ import { AgentIcon } from './AgentIcon.js';
 import type { ComposerAction } from './composerActions.js';
 import type { SessionSettings } from './types.js';
 
-const approvalLabels = { policy: 'Ask when needed', always_ask: 'Always ask', never_ask: 'Never ask', bypass: 'Bypass approval' };
+const approvalLabels = { policy: 'Default', always_ask: 'Always ask', auto_approve: 'Auto approve' };
 
 interface Props {
   controlsDisabled?: boolean; primary: ComposerAction; onControl: (action: 'pause' | 'recover') => void;
@@ -46,7 +46,6 @@ export function AgentComposer({ controlsDisabled = false, primary, onControl, se
         <Tooltip content="Available tools and skills"><button type="button" className="agent-icon-button" aria-label="Available tools and skills" disabled={controlsDisabled} onClick={() => onPanel('Tools')}><AgentIcon name="tools" /></button></Tooltip>
         <Tooltip content={model ?? 'Provider default'}><button type="button" className="agent-model-picker" disabled={controlsDisabled} onClick={() => onPanel('Settings')}><span>{model ?? 'Provider default'}</span><AgentIcon name="chevron" /></button></Tooltip>
         <button type="button" className="agent-approval-picker" disabled={controlsDisabled} onClick={() => onPanel('Settings')}><AgentIcon name="shield" />{controlsDisabled ? 'Approval mode' : approvalLabels[approval ?? 'policy']}</button>
-        <Tooltip content="Access permissions"><button type="button" className="agent-icon-button" aria-label="Access permissions" disabled={controlsDisabled} onClick={() => onPanel('Settings')}><AgentIcon name="access" /></button></Tooltip>
         {draft.trim() && onSendNow ? <Tooltip content="Send as a message to the current task without starting a new turn"><button type="button" className="agent-send-now" disabled={busy || !canSendNow} onClick={onSendNow}><AgentIcon name="message" />Send now</button></Tooltip> : null}
         <Tooltip content={primary.kind === 'pause' ? 'Pause after the current step completes' : primary.label}><button type={primary.kind === 'send' ? 'submit' : 'button'} className="agent-send" aria-label={primary.label} aria-busy={primary.disabled && primary.working || undefined} disabled={primary.disabled} onClick={primary.kind === 'pause' || primary.kind === 'recover' ? () => onControl(primary.kind as 'pause' | 'recover') : undefined}>
           {primary.working ? <LoadingIndicator label={primary.label} small decorative /> : <AgentIcon name={primary.kind === 'recover' ? 'play' : primary.kind === 'pause' || primary.kind === 'none' && running ? 'activity' : 'send'} />}

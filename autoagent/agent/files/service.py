@@ -168,6 +168,11 @@ class LocalFileService:
         return tuple(result)
 
     def evaluate(self, operation, context):
+        override = context.services.get("operation_policy")
+        if override is not None:
+            selected = override(operation, context)
+            if selected is not None:
+                return selected
         action = operation.action.removeprefix("file.")
         inside = operation.attributes["scope"] == "workspace"
         value = self.config.workspace_default if inside else self.config.external_default

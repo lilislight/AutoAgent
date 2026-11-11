@@ -272,6 +272,11 @@ class LocalExecutionService:
             attributes={"session_id": context.session_id, "root": str(self.root)}),)
 
     def evaluate(self, operation, context):
+        override = context.services.get("operation_policy")
+        if override is not None:
+            selected = override(operation, context)
+            if selected is not None:
+                return selected
         if operation.action.startswith("file."):
             return self.files.evaluate(operation, context)
         if self.policy is not None:

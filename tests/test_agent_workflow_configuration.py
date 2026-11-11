@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from autoagent.agent import (
+    AgentModelSelection,
     AgentInput, AgentNodePolicy, AgentResult, AgentWorkflowExtensions,
     AgentWorkflowOptions, AgentWorkflowPolicies, ContextPolicy, CompactionInput, CompactionResult,
     CompleteRoundInput, Conversation,
@@ -161,7 +162,7 @@ class AgentConfigurationContracts:
         """Workflow generation options override an unset Session model through the fixed builder."""
         provider = ScriptedProvider(answer())
         async with self.host(provider, llm_options={"model": "application-model", "max_output_tokens": 42}) as host:
-            await host.agent_context.configure("raw-request", AgentSessionSettings(model=AgentModelSettings(provider="offline")))
+            await host.agent_context.configure("raw-request", AgentSessionSettings(model=AgentModelSelection(provider="offline")))
             result = await self.run_agent(host, session_id="raw-request")
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual((provider.requests[0].model, provider.requests[0].max_output_tokens), ("application-model", 42))

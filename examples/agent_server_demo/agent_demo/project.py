@@ -4,10 +4,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
 
+from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
 from autoagent.agent import (
-    BUILTIN_AGENT_WORKFLOW_ID, CommandRule, ContextPolicy, ExecutionToolsConfig,
-    SubagentsConfig, SubagentTarget, Tool, ToolSet, ToolDecision, SkillDirectory,
-    agent_workflow, builtin_agent_workflow,
+    CommandRule, ContextPolicy, ExecutionToolsConfig, SubagentsConfig, SubagentTarget,
+    Tool, ToolSet, ToolDecision, SkillDirectory, agent_workflow,
 )
 from autoagent.host import workflow
 

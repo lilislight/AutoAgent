@@ -10,12 +10,14 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, HTTPException
 
-from autoagent.agent import (AgentInput, LLMStreamChunk, SubagentsConfig, SubagentTarget,
-                             Tool, agent_workflow, builtin_agent_workflow, BUILTIN_AGENT_WORKFLOW_ID,
-                             LocalTokenPricing, TokenPrice, LLMMessage)
+from autoagent.agent_app import builtin_agent_workflow, BUILTIN_AGENT_WORKFLOW_ID
+from autoagent.agent import (
+    AgentInput, LLMStreamChunk, SubagentsConfig, SubagentTarget, Tool, agent_workflow,
+    LocalTokenPricing, TokenPrice, LLMMessage,
+)
 from autoagent.host import AutoAgentHost, HostSettings
 from autoagent.server import ServerSettings, create_app
-from autoagent.server.agent import agent_router
+from autoagent.server.user_events import user_event_routes
 from autoagent.server.app import _query
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 from tests.test_agent_workflow import ScriptedProvider, answer, settings
@@ -31,6 +33,61 @@ def echo_note(text: str) -> str:
 
 
 class WorkspaceContracts:
+    async def test_unbound_draft_preview_and_first_message_keep_workspace_choice(self):
+        """A draft can select no Workspace, save its settings on first send, and then cannot rebind."""
+        provider = ScriptedProvider(answer(), answer())
+        async with self.host(provider) as host, self.client(host) as client:
+            preview = await client.get('/api/v2/agent/settings', params={'session_id': 'loose', 'unbound': 'true'})
+            self.assertEqual(preview.status_code, 200, preview.text)
+            chosen = preview.json()['settings']
+            self.assertIsNone(preview.json()['workspace'])
+            self.assertEqual((await host.agent_app.context.get_settings('loose')).version, 0)
+            catalog = (await client.get('/api/v2/agent/catalog')).json()
+            resources = await client.get('/api/v2/agent/resources', params={
+                'session_id': 'loose', 'unbound': 'true', 'revision_id': catalog['agent']['revision_id']})
+            self.assertEqual(resources.status_code, 200, resources.text)
+            self.assertNotIn('read_file', {tool['name'] for tool in resources.json()['tools']})
+            self.assertNotIn('execute_command', {tool['name'] for tool in resources.json()['tools']})
+            chosen['model'].update(model='draft-model')
+            sent = await client.post('/api/v2/agent/queue', json={'session_id': 'loose', 'message': 'General question',
+                'request_id': uuid4().hex, 'workspace_id': None, 'initial_settings': chosen})
+            self.assertEqual(sent.status_code, 202, sent.text)
+            result = await host.join(sent.json()['invocation_id'])
+            self.assertEqual(result.status, 'completed', result.error)
+            self.assertEqual(provider.requests[0].model, 'draft-model')
+            record = await host.agent_app.context.get_settings('loose')
+            self.assertIsNone(record.workspace)
+            self.assertEqual(record.settings.model.model, 'draft-model')
+            rebind = record.settings.model_dump(mode='json')
+            rebind['workspace'] = {'workspace_id': host.agent_context.project_workspace_id, 'working_directory': '.'}
+            denied = await client.put('/api/v2/agent/settings', json={
+                'session_id': 'loose', 'expected_version': record.version, 'settings': rebind})
+            self.assertEqual(denied.status_code, 422, denied.text)
+            denied = await client.get('/api/v2/agent/settings', params={
+                'session_id': 'loose', 'workspace_id': host.agent_context.project_workspace_id})
+            self.assertEqual(denied.status_code, 409, denied.text)
+
+    async def test_recent_lists_bound_and_unbound_chats_with_stable_workspace_metadata(self):
+        """The global Recent page includes every root chat while scoped pages retain their filters."""
+        async with self.host(ScriptedProvider(answer(), answer())) as host, self.client(host) as client:
+            loose = await client.post('/api/v2/agent/messages', json={
+                'session_id': 'loose', 'message': 'No workspace question', 'workspace_id': None})
+            self.assertEqual(loose.status_code, 202, loose.text)
+            await host.join(loose.json()['invocation_id'])
+            bound = await client.post('/api/v2/agent/messages', json={'session_id': 'bound', 'message': 'Project question'})
+            self.assertEqual(bound.status_code, 202, bound.text)
+            await host.join(bound.json()['invocation_id'])
+            await host._persistence.flush()
+            recent = (await client.get('/api/v2/agent/sessions')).json()['items']
+            self.assertEqual({row['session_id']: row['workspace_id'] for row in recent}, {
+                'loose': None, 'bound': host.agent_context.project_workspace_id})
+            self.assertEqual(recent[0]['session_id'], 'bound')
+            scoped = (await client.get('/api/v2/agent/sessions', params={
+                'workspace_id': host.agent_context.project_workspace_id})).json()['items']
+            self.assertEqual([row['session_id'] for row in scoped], ['bound'])
+            unbound = (await client.get('/api/v2/agent/sessions', params={'unbound': 'true'})).json()['items']
+            self.assertEqual([row['session_id'] for row in unbound], ['loose'])
+
     async def database_url(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -84,7 +141,7 @@ class WorkspaceContracts:
             self.assertEqual(execution.json()['snapshot']['settings']['model']['model'], 'chosen')
             desired['model']['model'] = 'later'
             await client.put('/api/v2/agent/settings', json=dict(body, expected_version=1))
-            self.assertEqual((await host.agent_context.get_snapshot(iid)).settings.model.model, 'chosen')
+            self.assertEqual((await host.agent_app.context.get_snapshot(iid)).settings.model.model, 'chosen')
             sessions = await client.get('/api/v2/agent/sessions')
             self.assertEqual(sessions.status_code, 200, sessions.text)
             self.assertEqual(sessions.json()['items'][0]['title'], 'Hello workspace')
@@ -178,8 +235,9 @@ class WorkspaceContracts:
         """Live overflow explicitly requests reconciliation and always frees the subscription slot."""
         async with self.host() as host:
             config = replace(ServerSettings(), user_event_max_subscribers=1, user_event_buffer=1)
-            router = agent_router(host, config, _query)
-            watch = next(route.endpoint for route in router.routes if route.path == '/user-events/watch')
+            endpoints = user_event_routes(host, config, _query)
+            router = endpoints.router
+            watch = endpoints.watch
             sid = str(uuid4())
             result = await watch(invocation_id=None, session_id=sid)
             stream = result.body_iterator
@@ -202,8 +260,9 @@ class WorkspaceContracts:
         """Router shutdown wakes idle SSE consumers while other Host subscriptions keep working."""
         async with self.host() as host:
             config = ServerSettings()
-            router = agent_router(host, config, _query)
-            watch = next(route.endpoint for route in router.routes if route.path == '/user-events/watch')
+            endpoints = user_event_routes(host, config, _query)
+            router = endpoints.router
+            watch = endpoints.watch
             app = FastAPI()
             async with host.subscribe_user_events(session_id='other') as external:
                 async with router.lifespan_context(app):

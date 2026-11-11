@@ -17,7 +17,7 @@ from .tools.operations import ToolOperationRule
 from .workspace import Workspace, WorkspaceBinding
 
 
-ApprovalMode = Literal["policy", "always_ask", "never_ask", "bypass"]
+ApprovalMode = Literal["policy", "always_ask", "never_ask", "bypass", "auto_approve"]
 ToolAction = Literal["allow", "ask", "deny"]
 
 
@@ -30,7 +30,7 @@ class AgentModelSettings(Model):
 
 
 class AgentAccess(Model):
-    """Session rules restrict, rather than replace, application Tool policies."""
+    """Host startup rules restrict, rather than replace, application Tool policies."""
 
     default: ToolAction = "allow"
     rules: dict[NonEmpty, ToolAction] = Field(default_factory=dict)
@@ -44,26 +44,51 @@ class AgentAccess(Model):
         return tuple(value) if isinstance(value, list) else value
 
 
-class AgentSessionSettings(Model):
+class AgentHostSettings(Model):
+    """Startup generation defaults and application-wide access boundaries."""
+
     model: AgentModelSettings = Field(default_factory=AgentModelSettings)
     approval_mode: ApprovalMode = "policy"
     access: AgentAccess = Field(default_factory=AgentAccess)
     workspace: WorkspaceBinding | None = None
+
+    def session_defaults(self):
+        return AgentSessionSettings(model=AgentModelSelection(provider=self.model.provider, model=self.model.model),
+            approval_mode=self.approval_mode)
+
+
+class AgentModelSelection(Model):
+    provider: NonEmpty = "default"
+    model: NonEmpty | None = None
+
+
+class AgentSessionSettings(Model):
+    """Optional explicit Session overrides; applications choose their storage."""
+
+    model: AgentModelSelection = Field(default_factory=AgentModelSelection)
+    approval_mode: ApprovalMode = "policy"
 
 
 class AgentSettingsRecord(Model):
     session_id: NonEmpty
     version: int = Field(ge=0)
     settings: AgentSessionSettings
+    workspace: WorkspaceBinding | None = None
 
 
 class AgentExecutionSnapshot(Model):
+    """Derived call context; only its model binding is immutable and durable.
+
+    Approval and access are read from live Session preferences and Host
+    defaults. This object is not a persisted Invocation settings snapshot.
+    """
+
     snapshot_id: NonEmpty
     session_id: NonEmpty
     invocation_id: NonEmpty
     epoch: int = Field(ge=1)
     settings_version: int = Field(ge=0)
-    settings: AgentSessionSettings
+    settings: AgentHostSettings
     bindings: dict[str, str] = Field(default_factory=dict)
     reason: Literal["start", "resume", "recover"]
     created_at_us: int = Field(ge=0)
@@ -71,7 +96,7 @@ class AgentExecutionSnapshot(Model):
 
 def apply_approval_mode(decision: ToolDecision, mode: ApprovalMode) -> ToolDecision:
     """Transform a combined policy decision, never overriding a Deny."""
-    if mode not in ("policy", "always_ask", "never_ask", "bypass"):
+    if mode not in ("policy", "always_ask", "never_ask", "bypass", "auto_approve"):
         raise ValueError(f"Unknown approval mode: {mode!r}.")
     if decision.action == "deny":
         return decision
@@ -113,6 +138,10 @@ class AgentContextProvider(Protocol):
     async def resolve_selection(self, request): ...
     def history_route(self, snapshot: AgentExecutionSnapshot, model: str | None): ...
     def catalog(self, snapshot: AgentExecutionSnapshot): ...
+    def finalize_catalog(self, snapshot: AgentExecutionSnapshot, catalog, skills): ...
+    def borrow_tool(self, resource_id: str): ...
+    async def export_binding(self, invocation_id: str): ...
+    def resource_revision(self, snapshot: AgentExecutionSnapshot): ...
     def toolset(self, snapshot: AgentExecutionSnapshot, *, binding=None, catalog=None): ...
     async def prepare_workspace(self, snapshot: AgentExecutionSnapshot): ...
     async def resolve_workspace(self, binding: WorkspaceBinding) -> Workspace: ...
@@ -135,13 +164,14 @@ def agent_runtime_context(context: AgentContextProvider):
 
 def current_agent_context() -> AgentContextProvider:
     try:
-        return _contexts[asyncio.get_running_loop()]
+        context = _contexts[asyncio.get_running_loop()]
+        return context.for_call() if hasattr(context, "for_call") else context
     except (KeyError, RuntimeError):
         raise RuntimeError("Agent Operators require an installed Agent runtime Context.") from None
 
 
 __all__ = [
-    "ApprovalMode", "AgentAccess", "AgentModelSettings", "AgentSessionSettings",
+    "ApprovalMode", "AgentAccess", "AgentModelSettings", "AgentModelSelection", "AgentHostSettings", "AgentSessionSettings",
     "AgentSettingsRecord", "AgentExecutionSnapshot", "AgentContextProvider",
     "apply_approval_mode", "agent_runtime_context", "current_agent_context",
 ]

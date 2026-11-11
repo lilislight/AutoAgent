@@ -10,8 +10,10 @@ from .toolset import ToolSet
 from .context import ToolContext, ToolHooks
 from .permissions import ToolDecision, ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolPreflight
 from .operations import ToolOperation, ToolOperationRule, ToolOperationPolicy, combine_decisions
+from .policy import PolicyCondition, PolicyRule, DeclarativeToolPolicy
 
 __all__ = [
+    "PolicyCondition", "PolicyRule", "DeclarativeToolPolicy",
     "ToolOperation", "ToolOperationRule", "ToolOperationPolicy", "combine_decisions",
     "ToolContext", "ToolHooks", "ToolDecision", "ToolApproval", "ToolApprovalRequest", "ToolApprovalRequired",
     "ToolPreflight",

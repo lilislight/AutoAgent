@@ -13,8 +13,9 @@ from uuid import uuid4
 
 import httpx
 
+from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID
 from autoagent.agent import (
-    AgentApprovalRequest, AgentApprovalResponse, BUILTIN_AGENT_WORKFLOW_ID, LLM_CALL, LLMMessage, LLMToolResult, llm_call_operator,
+    AgentApprovalRequest, AgentApprovalResponse, LLM_CALL, LLMMessage, LLMToolResult, llm_call_operator,
 )
 from autoagent.agent.context import restore
 from autoagent.host import AutoAgentHost, HostSettings
@@ -179,7 +180,7 @@ class ServerDemoContracts:
             self.assertEqual(waiting.status, "waiting", waiting.error)
             batch = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
             self.assertEqual(len(batch.requests), 1)
-            self.assertFalse(host.agent_context._workspaces.process_manager.records())
+            self.assertFalse(host.agent_app.context._workspaces.process_manager.records())
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in batch.requests),
                 revision=batch.revision)
             await self.action(client, waiting.invocation_id, waiting.waits[0], reply.model_dump(mode="json"))

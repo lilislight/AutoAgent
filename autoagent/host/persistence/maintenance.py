@@ -17,6 +17,7 @@ class Maintenance:
     def __init__(self, writer):
         self.writer = writer
         self.storage = writer.storage
+        self.extensions = {}
 
     async def run(self, operation, *args):
         async with self.writer.admission:
@@ -211,10 +212,8 @@ class Maintenance:
             from .llm_calls import llm_calls
 
             await conn.execute(delete(llm_calls).where(llm_calls.c.invocation_id.in_(ids)))
-        if await conn.run_sync(lambda sync: inspect(sync).has_table("agent_execution_settings")):
-            from .agent_context import execution_settings, session_settings
-            await conn.execute(delete(execution_settings).where(execution_settings.c.invocation_id.in_(ids)))
-            await conn.execute(delete(session_settings).where(session_settings.c.session_id.in_(sids)))
+        for extension in self.extensions.values():
+            await extension.purge_history(conn, ids, sids)
         for name in ("active_nodes", "active_waits"):
             table = meta.tables[name]
             await conn.execute(delete(table).where(table.c.invocation_id.in_(ids)))

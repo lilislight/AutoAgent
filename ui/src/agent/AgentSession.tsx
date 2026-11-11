@@ -15,19 +15,22 @@ import { effectiveSettings } from './settingsState';
 import { executionStatus } from './executionState';
 import { composerAction } from './composerActions';
 import { retryAgentRead, agentReadRetryDelay } from './readFeedback';
-import type { AgentCatalog, AgentInvocation, MessageQueue as QueueState, QueuedMessage, WorkspaceAgent } from './types';
+import type { AgentCatalog, AgentInvocation, AgentWorkspaceInfo, MessageQueue as QueueState, QueuedMessage, SettingsRecord, SessionSettings, WorkspaceAgent } from './types';
+import { WorkspacePicker } from './WorkspacePicker';
 
 const terminal = new Set(['completed', 'failed', 'cancelled']);
 interface Props {
   session: string; existing: boolean; title: string; catalog: AgentCatalog; agent: WorkspaceAgent;
   workspace: string | null;
+  workspaces?: AgentWorkspaceInfo[]; workspacesLoading: boolean; workspaceError?: Error | null;
+  onWorkspaceChange: (workspace: string | null) => void; onRetryWorkspaces: () => void;
   active: boolean; invocation: string | null; sidebar: boolean; onSidebar: () => void;
   panel: DetailsTab | null; onPanel: (panel: DetailsTab | null) => void;
   onAccepted: (iid: string | null) => void; onAgent: (agent: AgentInvocation) => void;
   onTrace: (iid: string, sid: string) => void; onRefreshDirectory: () => void;
 }
 
-export default function AgentSession({ session, existing, title, catalog, agent, workspace, active, invocation, sidebar, onSidebar, panel, onPanel, onAccepted, onAgent, onTrace, onRefreshDirectory }: Props) {
+export default function AgentSession({ session, existing, title, catalog, agent, workspace, workspaces, workspacesLoading, workspaceError, onWorkspaceChange, onRetryWorkspaces, active, invocation, sidebar, onSidebar, panel, onPanel, onAccepted, onAgent, onTrace, onRefreshDirectory }: Props) {
   const tab = panel ?? 'Agents';
   const details = panel !== null;
   const client = useQueryClient();
@@ -38,7 +41,8 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const requestedKnown = invocations.some(item => item.invocation_id === invocation);
   useEffect(() => { if (active && invocation && requestedKnown && latestId && latestId !== invocation) onAccepted(latestId); }, [active, invocation, requestedKnown, latestId, onAccepted]);
   const execution = useQuery({ queryKey: ['agent-execution', iid], queryFn: ({ signal }) => agentClient.execution(iid!, signal), enabled: active && !!iid, refetchInterval: query => active && iid && (!query.state.data || !terminal.has(query.state.data.current.status)) ? 2000 : false, retry: retryAgentRead, retryDelay: agentReadRetryDelay });
-  const settings = useQuery({ queryKey: ['agent-settings', session, workspace], queryFn: ({ signal }) => agentClient.settings(session, signal, workspace), enabled: active });
+  const settings = useQuery({ queryKey: ['agent-settings', session, workspace], queryFn: ({ signal }) => agentClient.settings(session, signal, workspace), enabled: active, staleTime: existing ? 0 : Infinity });
+  const saveDraftSettings = (value: SessionSettings) => client.setQueryData<SettingsRecord>(['agent-settings', session, workspace], previous => previous ? { ...previous, settings: value } : previous);
   // This catalog describes live capabilities; execution keeps its historical Revision.
   const revision = agent.revision_id;
   const resources = useQuery({ queryKey: ['agent-resources', revision, session, workspace], queryFn: ({ signal }) => agentClient.resources(revision!, session, signal, workspace), enabled: active && !!revision, refetchInterval: active ? 15000 : false, retry: false });
@@ -79,7 +83,8 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const canStart = !iid && (!existing || turns.isSuccess) || !!current && terminal.has(current.status) && !child;
   const snapshot = execution.data?.snapshot;
   const saved = effectiveSettings(settings.data, snapshot, child);
-  const changed = !!saved && !!snapshot && JSON.stringify(saved.settings) !== JSON.stringify(snapshot.settings);
+  const changed = !!saved && !!snapshot && (running || current?.status === 'paused') && (
+    saved.settings.model.provider !== snapshot.settings.model.provider || saved.settings.model.model !== snapshot.settings.model.model);
   useEffect(() => {
     if (!pendingControl || !controlOperation.data || controlOperation.data.status === 'running') return;
     if (controlOperation.data.status !== 'succeeded') setError(controlOperation.data.error?.message ?? 'Could not complete the execution control.');
@@ -111,7 +116,7 @@ export default function AgentSession({ session, existing, title, catalog, agent,
     operation.current?.abort(); operation.current = new AbortController(); setBusy(true); setError('');
     try {
       if (!submission.current || submission.current.text !== message) submission.current = { text: message, id: newId() };
-      const item = await agentClient.enqueue(session, message, submission.current.id, workspace, operation.current.signal, immediate && iid ? iid : undefined);
+      const item = await agentClient.enqueue(session, message, submission.current.id, workspace, operation.current.signal, immediate && iid ? iid : undefined, existing ? undefined : settings.data?.settings);
       updateQueue(item); submission.current = null;
       saveDraft(config.apiPrefix, draftKey, '');
       if (!existing || item.state === 'started') onAccepted(item.state === 'started' ? item.invocation_id : iid ?? null);
@@ -145,7 +150,7 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const suggest = useCallback((text: string) => { setDraft(text); inputRef.current?.focus(); }, []);
   return <div className="agent-session-workspace"><main className="agent-chat" aria-label="Agent conversation">
     <Conversation session={session} loadUsage={loadUsage} invocations={historyInvocations} execution={execution.data} active={active} state={conversation.state} loading={loadingHistory} error={conversation.error} onRetry={conversation.refresh} onSuggest={suggest} running={status === 'running' || status === 'pausing'} before={<>
-      {changed ? <div className="agent-setting-notice">New settings saved. The active execution keeps its current settings until the next start or explicit resume.</div> : null}
+      {changed ? <div className="agent-setting-notice">The selected model applies to new submissions. This turn keeps its current model.</div> : null}
       {turns.hasNextPage ? <button className="agent-load-older" disabled={turns.isFetchingNextPage} onClick={() => void turns.fetchNextPage()}><BusyLabel busy={turns.isFetchingNextPage} label="Loading older turns">Load older turns</BusyLabel></button> : null}
       {execution.error || turns.error ? <div className="agent-inline-error" role="alert">{execution.error?.message ?? turns.error?.message}<button onClick={refresh}>Refresh</button></div> : null}
     </>} after={<>
@@ -155,7 +160,8 @@ export default function AgentSession({ session, existing, title, catalog, agent,
     </>} footer={<div className="agent-composer-area"><MessageQueue items={queue.data?.items ?? []} pending={queuePending} canSendNow={canSignal && !child} onAction={(item, action) => void queueAction(item, action)} />
       {queue.error ? <p className="agent-error-text" role="alert">Could not refresh queued messages. <button onClick={() => void queue.refetch()}>Retry</button></p> : null}
       {error ? <p className="agent-error-text" role="alert">{error}</p> : null}{controlOperation.error && pendingControl ? <p className="agent-error-text" role="alert">Could not refresh execution status.<button type="button" onClick={() => void controlOperation.refetch()}>Retry</button></p> : null}
+        <WorkspacePicker value={workspace} items={workspaces} loading={workspacesLoading} error={workspaceError} onRetry={onRetryWorkspaces} locked={existing} disabled={busy || !settings.data} onChange={onWorkspaceChange} />
         <AgentComposer primary={primary} onControl={action => void control(action)} sidebar={sidebar} onSidebar={onSidebar} session={session} draft={draft} onDraft={setDraft} inputRef={inputRef} busy={busy} running={running || paused} disabled={busy || child} canSend={canSend} canSendNow={canSignal && !child} onSendNow={running ? () => void send(true) : undefined} model={saved?.settings.model.model} approval={saved?.settings.approval_mode} onSend={() => void send()} onPanel={onPanel} caption={caption} />
       </div>} />
-    </main>{details ? <Details tab={tab} setTab={onPanel} onClose={() => onPanel(null)} execution={execution.data} agent={agent} settings={saved} resources={resources.data} catalog={catalog} session={session} active={active} state={conversation.state} onAgent={onAgent} onSaved={refresh} executionError={execution.error} contextLoading={loadingHistory} executionLoading={execution.isLoading} resourcesLoading={resources.isLoading} settingsLoading={settings.isLoading} settingsError={settings.error} resourcesError={resources.error} onRetry={() => { void execution.refetch(); void settings.refetch(); void resources.refetch(); }} onTrace={() => iid && onTrace(iid, session)} /> : null}</div>;
+    </main>{details ? <Details tab={tab} setTab={onPanel} onClose={() => onPanel(null)} execution={execution.data} agent={agent} settings={saved} resources={resources.data} catalog={catalog} session={session} active={active} state={conversation.state} onAgent={onAgent} onSaved={refresh} onDraftSettings={existing ? undefined : saveDraftSettings} executionError={execution.error} contextLoading={loadingHistory} executionLoading={execution.isLoading} resourcesLoading={resources.isLoading} settingsLoading={settings.isLoading} settingsError={settings.error} resourcesError={resources.error} onRetry={() => { void execution.refetch(); void settings.refetch(); void resources.refetch(); }} onTrace={() => iid && onTrace(iid, session)} /> : null}</div>;
 }

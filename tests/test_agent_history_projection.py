@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import unittest
 
 from autoagent.agent import (
-    AgentInput, AgentModelSettings, AgentSessionSettings, AgentWorkflowOptions,
+    AgentSessionSettings, AgentModelSelection,
+    AgentInput, AgentModelSettings, AgentHostSettings, AgentWorkflowOptions,
     AssetSource, AudioContent, ChatCompletionsAdapter, ContextPolicy, ContextPreparation, Conversation, DataSource, ImageContent,
     FileContent, HistoryOrigin, HistoryProjectionError, HistoryRoute, LLMMessage,
     LLMNativeData, LLMProviderItem, LLMReasoning, LLMRequest, LLMStreamChunk,
@@ -171,7 +172,7 @@ class HistoryProjectionTests(unittest.TestCase):
 
     def test_route_fingerprint_changes_with_endpoint_or_adapter_without_retaining_secrets(self):
         """Restarting a default registration at another endpoint invalidates its old replay affinity."""
-        snapshot = SimpleNamespace(bindings={"provider": "1"}, settings=AgentSessionSettings(
+        snapshot = SimpleNamespace(bindings={"provider": "1"}, settings=AgentHostSettings(
             model=AgentModelSettings(provider="a", model="m")))
         routes = []
         for endpoint in ("http://one.example/v1", "http://two.example/v1"):
@@ -334,7 +335,7 @@ class HistorySwitchContracts:
                         setup.agent_context.resources.register_provider("a", chat)
                         setup.agent_context.resources.register_provider("b", responses)
                         setup.agent_context.resources.register_tool(lookup, workflows={"agent"})
-                        setup.agent_context.set_defaults(AgentSessionSettings(model=AgentModelSettings(
+                        setup.agent_context.set_defaults(AgentHostSettings(model=AgentModelSettings(
                             provider="a", model="model-a", streaming=streaming)))
                         yield
                     options = dict(workflows=[agent_workflow()], root=root, lifespan=lifespan,
@@ -346,7 +347,7 @@ class HistorySwitchContracts:
                     async with AutoAgentHost(**options) as host:
                         async def turn(provider, model):
                             await host.agent_context.configure(first.session_id, AgentSessionSettings(
-                                model=AgentModelSettings(provider=provider, model=model, streaming=streaming)))
+                                model=AgentModelSelection(provider=provider, model=model)))
                             result = await host.join(await host.execute("agent", AgentInput(message="continue"), session_id=first.session_id))
                             self.assertEqual(result.status, "completed", result.error)
                         await turn("a", "model-b")

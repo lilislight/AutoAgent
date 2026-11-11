@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import replace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -15,6 +15,29 @@ from autoagent.server import create_app
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 from tests.test_agent_subagents import SubagentContracts, RoutedProvider, call, response, results
 from tests.test_agent_workflow import answer, settings
+
+
+class ApprovalSchedulingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detached_reevaluation_has_fresh_scope_and_one_root_per_family(self):
+        """Notifications outlive their Operator scope and visit a shared Root only once."""
+        from types import SimpleNamespace
+        from autoagent.core.operators.execution import _sync_execution_scope, run_sync
+        from autoagent.host.agent_approvals import AgentApprovals
+        ref = SimpleNamespace(invocation_id='root-call')
+        runtime = SimpleNamespace(resident={'root':ref}, owners={'child-a':'root', 'child-b':'root'},
+            app=SimpleNamespace(astatus=AsyncMock(return_value='status')))
+        approvals = AgentApprovals(SimpleNamespace(host=SimpleNamespace(_runtime=runtime)))
+        async def evaluate(root, status, *, join):
+            self.assertIs(root, ref)
+            self.assertEqual(status, 'status')
+            self.assertFalse(join)
+            self.assertEqual(await run_sync(lambda: 42), 42)
+        approvals.reconcile = AsyncMock(side_effect=evaluate)
+        async with approvals.runtime_scope():
+            with _sync_execution_scope(lambda *_: self.fail('Borrowed the notifying Operator executor')):
+                await approvals.changed()
+            await asyncio.gather(*tuple(approvals.tasks))
+            approvals.reconcile.assert_awaited_once()
 
 
 class ChildApprovalContracts:
@@ -102,7 +125,7 @@ class ChildApprovalContracts:
             self.assertFalse(effects)
 
         resumed = RoutedProvider([], lambda request: answer("child finished after approval"))
-        async with self.host(resumed, url=url, tools=(Tool(publish),)) as host:
+        async with self.host(resumed, url=url, defaults=settings(access=AgentAccess(rules={"publish": "ask"})), tools=(Tool(publish),)) as host:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(host, ui=False)),
                                          base_url="http://test") as client:
                 params = dict(invocation_id=root.invocation_id, action="respond",
@@ -126,6 +149,29 @@ class ChildApprovalContracts:
                 snapshot = await host.agent_context.get_snapshot(old.invocation_id)
                 self.assertEqual(effects[0], ("saved", snapshot.session_id))
                 self.assertEqual(len(resumed.requests), 1)
+
+    async def test_child_mode_change_reevaluates_through_resident_root(self):
+        """Changing a waiting child's mode resumes its approval without a manual Root join."""
+        effects = []
+        def publish(text: str) -> str:
+            effects.append(text)
+            return text
+        provider = RoutedProvider([response(call('spawn_agent', {'type':'worker', 'task':'child task'})),
+            answer('root body done')], lambda request: answer('child done') if results(request)
+                else response(call('publish', {'text':'saved'})))
+        async with self.host(provider, defaults=settings(access=AgentAccess(rules={'publish':'ask'})),
+            tools=(Tool(publish),)) as host:
+            root = await host.execute('agent', AgentInput(message='root task'), session_id='parent')
+            _, wait = await self.approval_wait(host, root)
+            snapshot = await host.agent_context.get_snapshot(wait.request['invocation_id'])
+            self.assertNotEqual(snapshot.session_id, 'parent')
+            await host.agent_context.configure(snapshot.session_id,
+                snapshot.settings.session_defaults().model_copy(update={'approval_mode':'auto_approve'}))
+            async with asyncio.timeout(10):
+                while not effects:
+                    await asyncio.sleep(.02)
+            self.assertEqual(effects, ['saved'])
+            self.assertEqual((await host.join(root)).status, 'completed')
 
 
 class SQLiteChildApprovalTests(ChildApprovalContracts, unittest.IsolatedAsyncioTestCase):

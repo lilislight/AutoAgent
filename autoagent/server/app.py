@@ -129,8 +129,13 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
             await hub.close()
             hubs.discard(hub)
     router = APIRouter(prefix=settings.api_prefix, tags=["AutoAgent Workflows"], lifespan=watch_lifespan)
-    from .agent import agent_router
-    router.include_router(agent_router(host, settings, _query))
+    from .user_events import user_event_routes
+    user_events = user_event_routes(host, settings, _query)
+    router.include_router(user_events.router)
+    application = getattr(host, 'agent_app', None)
+    if application is not None:
+        from autoagent.agent_app.api import agent_router
+        router.include_router(agent_router(application, settings, _query, user_events=user_events))
 
     @router.get('/query-projections')
     async def query_projections():
